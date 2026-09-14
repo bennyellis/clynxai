@@ -1,0 +1,783 @@
+/* Per explicit instruction — https://www.dafont.com/made-tommy-soft.font.
+   "Free for personal use only" per the font's own license (bundled OTF
+   files, see src/renderer/src/assets/fonts) — fine for this app since it's
+   a personal tool, not something redistributed; a commercial license would
+   be needed from Pixelsurplus if that ever changes. Only the 4 weights
+   this app's own text actually uses (400/500/700/800, matching the
+   fontWeight values already used throughout) are bundled — the "Outline"
+   display variants and Thin/Light/Black weights from the family aren't
+   used anywhere here. */
+@font-face {
+  font-family: "Made Tommy Soft";
+  src: url("../assets/fonts/MadeTommySoft-Regular.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Made Tommy Soft";
+  src: url("../assets/fonts/MadeTommySoft-Medium.otf") format("opentype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Made Tommy Soft";
+  src: url("../assets/fonts/MadeTommySoft-Bold.otf") format("opentype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Made Tommy Soft";
+  src: url("../assets/fonts/MadeTommySoft-ExtraBold.otf") format("opentype");
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --bg: #0f0b1e;
+  --bg-elevated: #171129;
+  --bg-card: #1c1533;
+  --bg-card-hover: #241c40;
+  --border: rgba(168, 148, 255, 0.14);
+  --border-strong: rgba(168, 148, 255, 0.28);
+  --text: #f1edff;
+  --text-muted: #a79fc4;
+  --text-dim: #756e93;
+
+  --accent-1: #7c6cf6;
+  --accent-2: #a855f7;
+  --accent-3: #4f8ef7;
+  --gradient: linear-gradient(135deg, var(--accent-3), var(--accent-1) 55%, var(--accent-2));
+  --gradient-soft: linear-gradient(135deg, rgba(124, 108, 246, 0.16), rgba(168, 85, 247, 0.1));
+
+  --success: #34d399;
+  --success-bg: rgba(52, 211, 153, 0.12);
+  --danger: #f87171;
+  --danger-bg: rgba(248, 113, 113, 0.12);
+  --warn: #fbbf24;
+  --warn-bg: rgba(251, 191, 36, 0.12);
+
+  --radius: 12px;
+  --radius-lg: 18px;
+  --shadow-glow: 0 8px 30px rgba(124, 108, 246, 0.25);
+}
+
+/* Per explicit instruction — a light alternative to this app's original
+   (and, until now, only) dark appearance, toggled from the Config screen
+   and persisted as config.theme (a real setting, not a renderer-only
+   preference) — see App.tsx, which sets this data-theme attribute on the
+   root element from that config value. Every component already reads
+   colors exclusively through the var(--token) custom properties above
+   rather than hardcoded hex values, so overriding them here re-themes the
+   whole app without touching any component file. Accent/gradient/status
+   colors (--accent-*, --gradient*, --success/--danger/--warn and their
+   *-bg tints) are deliberately left unchanged — they're saturated enough
+   to read correctly against either background and keep the app's brand
+   identity consistent across both modes. */
+:root[data-theme="light"] {
+  --bg: #f5f3fb;
+  --bg-elevated: #ffffff;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f1edfb;
+  --border: rgba(124, 108, 246, 0.16);
+  --border-strong: rgba(124, 108, 246, 0.32);
+  --text: #1c1732;
+  --text-muted: #5c5678;
+  --text-dim: #8f89a6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg);
+  background-repeat: no-repeat;
+  background-image: radial-gradient(1200px 800px at center, rgba(124, 108, 246, 0.16), transparent 60%),
+    radial-gradient(1000px 700px at center, rgba(168, 85, 247, 0.12), transparent 55%);
+  background-position: 15% -10%, 100% 0%;
+  animation: ambientDrift 40s ease-in-out infinite alternate;
+  color: var(--text);
+  font-family: "Made Tommy Soft", -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  /* Per explicit instruction — "increase the size of the text too," later
+     dialed back down ("make everything in the app slightly smaller to fit
+     in one window" — the 1.1 bump was pushing some screens tall enough to
+     need their own scrollbar). Almost every piece of text in this app sets
+     its own explicit pixel font-size inline (dozens of components), so
+     bumping just this base value wouldn't actually reach most of it.
+     `zoom` scales the entire rendered page uniformly instead — text,
+     spacing, icons together — the same mechanism as a browser's own
+     page-zoom, safe to rely on here since this app only ever runs inside
+     Electron's bundled Chromium, not arbitrary browsers where `zoom`
+     support varies. */
+  zoom: 0.95;
+}
+
+@keyframes ambientDrift {
+  0% { background-position: 15% -10%, 100% 0%; }
+  100% { background-position: 25% 4%, 85% 18%; }
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+button {
+  font-family: inherit;
+  font-size: 15px;
+  cursor: pointer;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text);
+  padding: 12px 20px;
+  transition: all 0.15s ease;
+}
+button:hover:not(:disabled) {
+  background: var(--bg-card-hover);
+  border-color: var(--border-strong);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+button.primary {
+  background: var(--gradient);
+  border: none;
+  color: white;
+  font-weight: 600;
+  box-shadow: var(--shadow-glow);
+}
+button.primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+button.danger {
+  border-color: rgba(248, 113, 113, 0.35);
+  color: var(--danger);
+}
+button.success {
+  background: var(--success);
+  border: none;
+  color: #052e1e;
+  font-weight: 600;
+  box-shadow: 0 0 16px rgba(52, 211, 153, 0.35);
+}
+button.success:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+button.danger-solid {
+  background: var(--danger);
+  border: none;
+  color: #450a0a;
+  font-weight: 600;
+  box-shadow: 0 0 16px rgba(248, 113, 113, 0.35);
+}
+button.danger-solid:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+}
+button.ghost:hover {
+  background: var(--bg-card);
+}
+button.icon {
+  padding: 10px 14px;
+}
+
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: 15px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 11px 14px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent-1);
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-dim);
+}
+label {
+  font-size: 13.5px;
+  color: var(--text-muted);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+}
+.card:hover {
+  transform: translateY(-2px) scale(1.01);
+  border-color: var(--border-strong);
+  box-shadow: 0 14px 34px rgba(10, 6, 24, 0.35);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  border-radius: 999px;
+  animation: popIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.badge.deal {
+  background: var(--success-bg);
+  color: var(--success);
+}
+.badge.skip {
+  background: rgba(168, 148, 255, 0.1);
+  color: var(--text-muted);
+}
+.badge.warn {
+  background: rgba(251, 191, 36, 0.12);
+  color: var(--warn);
+}
+
+.pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Themed replacement for native window.confirm/prompt (see Modal.tsx) —
+   any future popup should use this component instead of the browser's own
+   dialogs, which look completely out of place against the rest of the app. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 8, 20, 0.65);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Above ImageLightbox's own z-index (1100) — a Modal (e.g. the image
+     feedback popup) opened from within an already-open lightbox needs to
+     land on top of it, not behind it. Was 1000, which made exactly that
+     popup render invisible-behind-the-lightbox: reported live as "it pops
+     up but not in front and is invisible." Modal is meant to always be the
+     topmost blocking dialog in the app, so this stays ahead of every other
+     z-index here, not just the lightbox's. */
+  z-index: 1200;
+  animation: fadeIn 0.15s ease both;
+}
+.modal-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5), var(--shadow-glow);
+  width: 380px;
+  max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  animation: popIn 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+a {
+  color: var(--accent-3);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.dot.on {
+  background: var(--success);
+  box-shadow: 0 0 8px var(--success);
+  animation: pulseGlow 1.8s ease-in-out infinite;
+}
+.dot.off {
+  background: var(--text-dim);
+}
+.dot.err {
+  background: var(--danger);
+  box-shadow: 0 0 8px var(--danger);
+}
+
+/* --- Motion system ------------------------------------------------------ */
+
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 0 6px var(--success); opacity: 1; }
+  50% { box-shadow: 0 0 14px var(--success); opacity: 0.75; }
+}
+
+/* Dashboard's own "Live" dot (see Dashboard.tsx's LiveFeedCard) — same
+   pulse shape as pulseGlow above, but keyed off currentColor instead of a
+   hardcoded --success, since this dot is red (recording/live, not
+   success) while idle uses --text-dim. Set color, not background-color,
+   on the element for this to pick up the right shade. */
+@keyframes liveDotPulse {
+  0%, 100% { box-shadow: 0 0 6px currentColor; opacity: 1; }
+  50% { box-shadow: 0 0 14px currentColor; opacity: 0.6; }
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes shimmer {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+/* Per explicit instruction — feedback for trying to tab away from Config
+   with unsaved changes: a small, fast shake (not a big dramatic one) on
+   the screen itself, over in 0.5s, so it reads as "no" without being
+   obnoxious about it. */
+@keyframes shakeSmallFast {
+  0%, 100% { transform: translateX(0); }
+  10% { transform: translateX(-6px); }
+  20% { transform: translateX(6px); }
+  30% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  50% { transform: translateX(-5px); }
+  60% { transform: translateX(5px); }
+  70% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+  90% { transform: translateX(-2px); }
+}
+.shake-deny {
+  animation: shakeSmallFast 0.5s ease-in-out;
+}
+
+/* Paired with the shake above — draws the eye straight to the actual fix
+   (Save) instead of leaving the user to figure out why the screen just
+   shook at them. Runs a little longer than the shake itself so it's still
+   visible after the shake finishes. */
+@keyframes saveHighlightPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 108, 246, 0.7); }
+  50% { box-shadow: 0 0 0 10px rgba(124, 108, 246, 0); }
+}
+.save-highlight {
+  animation: saveHighlightPulse 0.6s ease-out 2;
+}
+
+@keyframes blinkCursor {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+@keyframes bounceDot {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
+@keyframes popIn {
+  from { opacity: 0; transform: scale(0.75); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes ringPulse {
+  0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.45); }
+  100% { box-shadow: 0 0 0 10px rgba(52, 211, 153, 0); }
+}
+.flash-deal {
+  animation: fadeIn 0.25s ease both, ringPulse 1s ease-out;
+}
+
+/* Per explicit instruction — a listing blacklisted live in front of the
+   user gets a quick, satisfying "caught it" stamp: pops in slightly
+   oversized and tilted, holds, then fades — timed to roughly match the
+   photo fading out underneath it (see ListingCard.tsx). */
+@keyframes blacklistStamp {
+  0% { opacity: 0; transform: scale(0.6) rotate(-8deg); }
+  15% { opacity: 1; transform: scale(1.15) rotate(-4deg); }
+  25% { transform: scale(1) rotate(-6deg); }
+  70% { opacity: 1; transform: scale(1) rotate(-6deg); }
+  100% { opacity: 0; transform: scale(1.05) rotate(-6deg); }
+}
+
+.enter {
+  animation: fadeInUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.enter-fade {
+  animation: fadeIn 0.3s ease both;
+}
+
+/* Per explicit instruction — "light particle animations to each click" —
+   see ClickParticles.tsx, mounted once at the app root. Each particle is
+   rotated to its own angle (a plain inline transform, set in JS) then
+   flies outward along that rotated axis via the translate below — the
+   classic "rotate the coordinate system, then translate along one axis"
+   trick for radiating a ring of elements outward from one point without
+   computing sin/cos per particle. --particle-distance is set per-particle
+   inline for a little organic variance in how far each one travels. */
+.click-particle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: 50%;
+  box-shadow: 0 0 6px 1px currentColor;
+  animation: clickParticleFly 0.6s ease-out both;
+}
+@keyframes clickParticleFly {
+  0% { opacity: 1; transform: rotate(var(--r, 0deg)) translateX(0) scale(1); }
+  100% { opacity: 0; transform: rotate(var(--r, 0deg)) translateX(var(--particle-distance, 24px)) scale(0.4); }
+}
+
+/* Per explicit instruction — "add fun animations to Live." A diagonal
+   light sweep across the big current-listing photo while the AI is
+   actively on it, reusing the existing shimmer keyframe (background-
+   position) rather than a new one — reads as "actively scanning this,"
+   distinct from a static thumbnail. */
+.live-scan-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(115deg, transparent 35%, rgba(255, 255, 255, 0.22) 50%, transparent 65%);
+  background-size: 220% 100%;
+  animation: shimmer 2.2s linear infinite;
+  pointer-events: none;
+}
+
+/* The queue item sliding in from the right as it takes its place in line —
+   each item's own animation-delay (see Dashboard.tsx) staggers these into
+   a little cascade instead of all popping in at once. Only the slide is
+   animated here; each item's own fade-out-toward-the-bottom opacity is a
+   plain inline style (see Dashboard.tsx), since that final value differs
+   per item and a shared keyframe can't animate "to" a different end state
+   per element.
+*/
+@keyframes liveQueueIn {
+  from { transform: translateX(10px); }
+  to { transform: translateX(0); }
+}
+
+/* A soft, continuous breathing pulse for the "Switching locations..." /
+   "Moving to next product..." in-between note, so it reads as "still
+   alive and working," not a frozen label. */
+@keyframes liveActionPulse {
+  0%, 100% { opacity: 0.65; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.03); }
+}
+
+/* Per explicit instruction — Activity's log rows get a distinct animation
+   per EVENT TYPE when they first appear, not just the one generic fade
+   every level shared before. Each is a background flash that settles back
+   to transparent — deliberately brief (well under a second) since a busy
+   scan can add several rows a second and a lingering animation would start
+   overlapping the next one. */
+@keyframes logFlashSuccess {
+  0% { background: var(--success-bg); transform: translateX(-2px); }
+  100% { background: transparent; transform: translateX(0); }
+}
+@keyframes logFlashWarn {
+  0% { background: var(--warn-bg); }
+  100% { background: transparent; }
+}
+@keyframes logFlashError {
+  0% { background: var(--danger-bg); transform: translateX(0); }
+  10%, 30% { transform: translateX(-3px); }
+  20%, 40% { transform: translateX(3px); }
+  100% { background: transparent; transform: translateX(0); }
+}
+.log-row-deal {
+  animation: logFlashSuccess 1s ease-out both, fadeIn 0.3s ease both;
+}
+.log-row-greenFlag {
+  animation: logFlashWarn 1.1s ease-out both, fadeIn 0.3s ease both;
+}
+.log-row-error {
+  animation: logFlashError 0.5s ease-out both;
+}
+.log-row-warn {
+  animation: logFlashWarn 0.8s ease-out both, fadeIn 0.3s ease both;
+}
+
+/* Per explicit instruction — a spinning gear while the AI is actively
+   analyzing something (Activity.tsx pairs an "Analyzing..." line against
+   its own later "...done" line to know it's still in progress). Distinct
+   from iconGearSpin above (a one-shot hover burst) — this spins
+   continuously for as long as the row stays unresolved, same "something is
+   actually happening right now" purpose as the Activity nav icon's own
+   ambient pulse.
+   Row-clickable links (a listing or an in-app product) reuse LogRow's
+   existing hover affordance — see .log-row-link below. */
+@keyframes spinContinuous {
+  to { transform: rotate(360deg); }
+}
+.spinner-gear {
+  display: inline-flex;
+  animation: spinContinuous 0.9s linear infinite;
+  flex-shrink: 0;
+}
+
+.log-row-link {
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+}
+.log-row-link:hover {
+  background: var(--bg-card-hover, var(--bg-elevated));
+}
+.log-row-link:hover .log-row-link-hint {
+  opacity: 1;
+}
+.log-row-link-hint {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  flex-shrink: 0;
+}
+
+.glow-text {
+  background: var(--gradient);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 6s linear infinite;
+}
+
+.cursor-blink {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--accent-2);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: blinkCursor 0.9s step-end infinite;
+}
+
+.typing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.typing-dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: bounceDot 1.2s ease-in-out infinite;
+}
+.typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+
+button, .card, input, select, textarea, .pill, .badge {
+  transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+}
+button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+button:active:not(:disabled) {
+  transform: translateY(0) scale(0.97);
+}
+.card {
+  animation: fadeIn 0.25s ease both;
+}
+
+/* --- Extra "fun" motion — nav items, floating empty-states, tile zoom --- */
+
+@keyframes floaty {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+.floaty {
+  display: inline-block;
+  animation: floaty 3s ease-in-out infinite;
+}
+
+@keyframes wiggle {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-8deg); }
+  75% { transform: rotate(8deg); }
+}
+
+.nav-item {
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.nav-item.active {
+  transform: translateX(2px);
+}
+button.nav-item:hover:not(:disabled) {
+  /* Matches the generic button:hover:not(:disabled) lift above in
+     specificity (same selector shape) and comes later in the file, so this
+     nav-item-specific slide wins on the tie instead of silently losing to
+     the generic translateY lift. */
+  transform: translateX(4px);
+}
+.nav-item svg {
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.nav-item:hover svg {
+  transform: scale(1.15);
+}
+
+/* Per explicit instruction — "fun animations for all icons," made literal:
+   each sidebar icon animates the ONE sub-element that actually matches what
+   it depicts (a gear spins, a needle swings, a dot lights up, lines fade
+   in, a pulse line draws like a heart monitor) rather than the whole glyph
+   moving as one block. The generic scale-up above still applies to the
+   whole svg underneath these — a transform on a child element (the needle,
+   the dot, one line) never conflicts with a transform on its parent.
+   Every trigger below is keyed off `.nav-item:hover`, NOT the icon's own
+   `:hover` — verified live that the icon is only ~16px inside a much wider
+   button that also has to fit the text label, so an icon-only hover
+   selector only fired when the cursor happened to land on that exact
+   handful of pixels. Anchoring to the whole row is what actually makes
+   "hover over it" mean hovering the nav item, the way a user naturally
+   would. */
+@keyframes iconGearSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(180deg); }
+}
+.nav-item:hover .icon-gear {
+  animation: iconGearSpin 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Speedometer — per explicit instruction, this icon's RESTING appearance
+   (not just its hover state) always reads as "running hot": green, and
+   the needle+speed-lines group (see Sidebar.tsx) pinned straight up via a
+   static -45deg rotation rather than sitting at the SVG's own drawn
+   (up-right) angle. transform-box: view-box is what lets an SVG child
+   rotate around a specific SVG-space coordinate instead of its own tiny
+   bounding box — the arc it pivots inside stays fixed either way. */
+.icon-speedometer {
+  color: var(--success);
+}
+.icon-speedometer-needle-group {
+  transform-box: view-box;
+  transform-origin: 12px 12px;
+  transform: rotate(-45deg);
+}
+.icon-speedometer-speedlines {
+  stroke-width: 1.3;
+  opacity: 0.75;
+}
+/* Hover plays its own bigger, distinct sweep — all the way down to the
+   gauge's bottom (empty), up past vertical to the top (pinned/maxed), then
+   back down to a middle reading — instead of the small "kick and settle"
+   this used to do, which is now the icon's permanent resting pose above. */
+@keyframes iconNeedleSweepFull {
+  0% { transform: rotate(135deg); }
+  50% { transform: rotate(-45deg); }
+  100% { transform: rotate(0deg); }
+}
+.nav-item:hover .icon-speedometer-needle-group {
+  animation: iconNeedleSweepFull 1.1s ease-in-out;
+}
+
+/* Feed — the three lines fade in on their own, staggered top to bottom,
+   instead of the icon sliding around. */
+@keyframes iconLineFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.nav-item:hover .icon-feed-line-1 {
+  animation: iconLineFadeIn 0.22s ease-out both;
+}
+.nav-item:hover .icon-feed-line-2 {
+  animation: iconLineFadeIn 0.22s ease-out 0.08s both;
+}
+.nav-item:hover .icon-feed-line-3 {
+  animation: iconLineFadeIn 0.22s ease-out 0.16s both;
+}
+
+/* Database — just the "i"'s dot lights up (a brief glow), like flicking on
+   a light, rather than the whole bubble bouncing. */
+@keyframes iconDotLightUp {
+  0%, 100% { filter: drop-shadow(0 0 0 transparent); }
+  50% { filter: drop-shadow(0 0 2px currentColor) drop-shadow(0 0 5px currentColor); }
+}
+.nav-item:hover .icon-info-dot {
+  animation: iconDotLightUp 0.6s ease-in-out;
+}
+
+/* Activity's pulse-line icon — per explicit instruction, actually mimics a
+   heart monitor: the line "draws" itself left to right via a classic
+   stroke-dashoffset reveal (46 is this exact polyline's approximate total
+   length) rather than the icon just bouncing. Redraws once on hover, or on
+   a continuous loop — in the scanner's success color — the whole time
+   scanning is actually running (see Sidebar.tsx's is-live class), so the
+   icon doubles as a live "something's happening" indicator even before you
+   click into the page. */
+.icon-activity-line {
+  stroke-dasharray: 46;
+  stroke-dashoffset: 0;
+}
+@keyframes iconEkgDraw {
+  from { stroke-dashoffset: 46; }
+  to { stroke-dashoffset: 0; }
+}
+.nav-item:hover .icon-activity-line {
+  animation: iconEkgDraw 0.6s linear;
+}
+.icon-activity.is-live {
+  color: var(--success);
+}
+.icon-activity.is-live .icon-activity-line {
+  animation: iconEkgDraw 1.4s linear infinite;
+}
+
+.tile-image {
+  transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.card:hover .tile-image {
+  transform: scale(1.08);
+}
+
+.logo-badge:hover {
+  animation: wiggle 0.5s ease-in-out;
+}

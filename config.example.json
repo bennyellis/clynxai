@@ -1,0 +1,42 @@
+{
+  "_comment": "Copy this file to config.json and fill in the placeholders before running.",
+
+  "searchUrlTemplate": "REPLACE_ME",
+  "_searchUrlTemplate_help": "In your own logged-in browser: open Marketplace, set your location and radius exactly how you want the tool to search (e.g. radius set to max), run any keyword search, then copy the full resulting URL from the address bar and paste it here as-is. The tool only swaps out the 'query' part of this URL — everything else (location, radius, filters) is reused untouched, so whatever Facebook did for your location/radius stays correct. When you move your Facebook location to sweep a different area, recapture this URL the same way and update it here.",
+
+  "headless": false,
+  "pollIntervalMinutesMin": 4,
+  "pollIntervalMinutesMax": 9,
+  "dealThresholdPercent": 35,
+  "requireShippingMention": true,
+
+  "searches": [
+    { "query": "xbox series x", "maxPrice": 400 },
+    { "query": "nintendo switch 2", "maxPrice": 450 },
+    { "query": "nintendo switch oled", "maxPrice": 300 },
+    { "query": "iphone 13", "maxPrice": 350 },
+    { "query": "iphone 14", "maxPrice": 450 },
+    { "query": "iphone 15", "maxPrice": 600 },
+    { "query": "iphone 16", "maxPrice": 750 },
+    { "query": "iphone 17", "maxPrice": 950 }
+  ],
+
+  "_referencePrices_help": "These typicalResaleUsd numbers are PLACEHOLDERS, not real market data — I have no reliable way to know today's actual resale prices, and asking the AI to guess them would just be confident-sounding hallucination. Replace every value with what you actually see items sell for (eBay sold listings, StockX, your own sales history) before you trust the deal alerts. Update them periodically as prices drift.",
+  "referencePrices": [
+    { "item": "Xbox Series X 1TB", "typicalResaleUsd": 0, "matchKeywords": ["series x", "xbox series x"] },
+    { "item": "Xbox Series S", "typicalResaleUsd": 0, "matchKeywords": ["series s", "xbox series s"] },
+    { "item": "Nintendo Switch 2", "typicalResaleUsd": 0, "matchKeywords": ["switch 2"] },
+    { "item": "Nintendo Switch OLED", "typicalResaleUsd": 0, "matchKeywords": ["switch oled"] },
+    { "item": "Nintendo Switch Lite", "typicalResaleUsd": 0, "matchKeywords": ["switch lite"] },
+    { "item": "iPhone 13", "typicalResaleUsd": 0, "matchKeywords": ["iphone 13"] },
+    { "item": "iPhone 14", "typicalResaleUsd": 0, "matchKeywords": ["iphone 14"] },
+    { "item": "iPhone 15", "typicalResaleUsd": 0, "matchKeywords": ["iphone 15"] },
+    { "item": "iPhone 16", "typicalResaleUsd": 0, "matchKeywords": ["iphone 16"] },
+    { "item": "iPhone 17", "typicalResaleUsd": 0, "matchKeywords": ["iphone 17"] }
+  ],
+
+  "ntfy": {
+    "server": "https://ntfy.sh",
+    "topic": "REPLACE_ME_WITH_A_UNIQUE_RANDOM_TOPIC_NAME"
+  }
+}
