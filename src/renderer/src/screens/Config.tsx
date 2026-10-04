@@ -1,15 +1,17 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { Config as ConfigType } from "../lib/api.js";
+import type { Account, CloudStatus, Config as ConfigType } from "../lib/api.js";
 import { api } from "../lib/api.js";
 import { Modal } from "../components/Modal.js";
 import { setSoundEnabled } from "../lib/sound.js";
+import { notifyParticlesToggle } from "../lib/particles.js";
+import { applyThemeColors } from "../lib/colorScheme.js";
 
 // Per explicit instruction — the "State" location mode's own picker.
 // Alaska and Hawaii deliberately excluded — per explicit instruction,
 // ineligible (this app's whole model is nationwide mail-order resale, and
 // neither is practical to ship from/to the same way the contiguous states
 // are).
-const US_STATES = [
+export const US_STATES = [
   "Alabama", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", "Florida",
   "Georgia", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", "Maine",
   "Maryland", "Massachusetts", "Michigan", "Minnesota", "Mississippi", "Missouri", "Montana", "Nebraska",
@@ -21,6 +23,7 @@ const US_STATES = [
 export function ConfigScreen({
   onDirtyChange,
   shakeSignal,
+  onLoggedOut,
 }: {
   // Per explicit instruction — App.tsx needs to know whether it's safe to
   // switch away from this screen (see the Sidebar's onSelect wrapper),
@@ -34,6 +37,12 @@ export function ConfigScreen({
   // finished animating out yet (a plain boolean flipping true→true on a
   // second denied attempt wouldn't re-fire the effect below at all).
   shakeSignal?: number;
+  // Multi-user login migration — Config can't flip App.tsx's own
+  // authenticated state directly, so it reports a successful log-out
+  // upward instead (see the Cloud Sync section's own "Log out" button) —
+  // App.tsx is what actually decides to unmount everything and go back to
+  // LoginScreen.
+  onLoggedOut?: () => void;
 } = {}) {
   const [config, setConfig] = useState<ConfigType | null>(null);
   const [saving, setSaving] = useState(false);
@@ -66,21 +75,10 @@ export function ConfigScreen({
   configRef.current = config;
   savedSnapshotRef.current = savedSnapshot;
 
-  // Per explicit instruction — Config's "Search locations" dropdown. Local
-  // drafts (not staged into `config`/Save the way most fields here are) —
-  // this applies immediately through its own IPC round trip, same
-  // "instant, not batched" posture as setTheme/toggleSound above, since
-  // switching where the scanner looks is a real action (it drives a live
-  // browser to look things up), not just a settings value to save for
-  // later. Synced from the loaded config once, then left alone — the
-  // dropdown is what the user is actively choosing, not a live mirror of
-  // config.locationMode after that.
-  const [locationDraftMode, setLocationDraftMode] = useState<ConfigType["locationMode"]>("country");
-  const [stateDraft, setStateDraft] = useState("");
-  const [cityDraft, setCityDraft] = useState("");
-  const [locationBusy, setLocationBusy] = useState(false);
-  const [locationResult, setLocationResult] = useState<string | null>(null);
-  const syncedLocationDraftRef = useRef(false);
+  // Per explicit instruction — multiple Facebook accounts: adding one is
+  // its own quick round trip (labeled, then immediately editable — see
+  // AccountCard for the location picker/login/remove UI each one gets).
+  const [addingAccount, setAddingAccount] = useState(false);
   // Per explicit instruction — watchcount.com's anonymous usage cap
   // (20 lookups/day) is well below a logged-in account's (200/day), and
   // Google/Facebook sign-in specifically fails inside this app's
@@ -90,18 +88,21 @@ export function ConfigScreen({
   // there's no reliable "logged in now" signal to poll for the way
   // Facebook's isLoggedIn check has, so this can't show more than "opened."
   const [watchCountOpening, setWatchCountOpening] = useState(false);
+  const [tab, setTab] = useState<ConfigTab>("sources");
+  // eBay Browse API credentials live in .env, not Config — this is just a
+  // one-time read so the toggle below can tell the user whether flipping it
+  // on will actually do anything yet. No live polling (same posture as
+  // watchCountOpening above): adding/changing .env needs an app restart to
+  // take effect anyway (dotenv loads once at startup), so a fresher check
+  // here wouldn't reflect reality any better.
+  const [hasEbayCredentials, setHasEbayCredentials] = useState(true);
 
   useEffect(() => {
     api.getConfig().then((c) => {
       setConfig(c);
       setSavedSnapshot(JSON.stringify(c));
-      if (!syncedLocationDraftRef.current) {
-        syncedLocationDraftRef.current = true;
-        setLocationDraftMode(c.locationMode);
-        setStateDraft(c.selectedState ?? "");
-        setCityDraft(c.selectedCityOrZip ?? "");
-      }
     });
+    api.hasEbayCredentials().then(setHasEbayCredentials);
   }, []);
 
   useEffect(() => {
@@ -195,10 +196,37 @@ export function ConfigScreen({
   // Applied immediately (not just staged like every other field here) so
   // picking a theme previews live instead of only taking effect after
   // Save — matches App.tsx's own startup read of config.theme onto the
-  // same attribute.
+  // same attribute. Also reruns applyColorScheme with the NEW theme: the
+  // background tint it computes is theme-aware (a dark vs. a near-white
+  // base), and that inline style value doesn't update on its own just
+  // because data-theme changed — see colorScheme.ts's own comment on why
+  // this has to be inline rather than a [data-theme] CSS override.
   function setTheme(theme: ConfigType["theme"]) {
     update("theme", theme);
     document.documentElement.setAttribute("data-theme", theme);
+    applyThemeColors({ ...cfg, theme });
+  }
+
+  // Same "applies immediately, not just staged" posture as setTheme above —
+  // per explicit instruction ("instead of choosing colors, allow the user
+  // to use a color wheel to pick a primary and accent color"). See
+  // lib/colorScheme.ts for what actually gets derived from these two hex
+  // values (every accent-driven CSS custom property, plus the background
+  // tint).
+  function setPrimaryColor(hex: string) {
+    update("primaryColor", hex);
+    applyThemeColors({ ...cfg, primaryColor: hex });
+  }
+  function setAccentColor(hex: string) {
+    update("accentColor", hex);
+    applyThemeColors({ ...cfg, accentColor: hex });
+  }
+  // Same "applies immediately" posture — the rainbow starts fading the
+  // moment it's switched on, and switching it off snaps straight back to
+  // whatever two colors are picked underneath.
+  function setRainbow(enabled: boolean) {
+    update("rainbowEnabled", enabled);
+    applyThemeColors({ ...cfg, rainbowEnabled: enabled });
   }
 
   // Same "applies immediately, not just staged" posture as setTheme above —
@@ -206,6 +234,14 @@ export function ConfigScreen({
   function toggleSound(enabled: boolean) {
     update("soundEnabled", enabled);
     setSoundEnabled(enabled);
+  }
+
+  // Same "applies immediately, not just staged" posture as setTheme above —
+  // per explicit instruction, a "No particles" switch that turns off both
+  // the starfield background and the click-particle bursts in one toggle.
+  function toggleParticles(enabled: boolean) {
+    update("particlesEnabled", enabled);
+    notifyParticlesToggle(enabled);
   }
 
   async function openWatchCountLogin() {
@@ -227,20 +263,12 @@ export function ConfigScreen({
   // it once the round trip resolves. onConfigUpdated
   // (already wired above) picks up the new browseUrls/searchRadiusMiles
   // once it succeeds, same as any other chat/IPC-driven config change.
-  async function applyLocationMode() {
-    setLocationBusy(true);
-    setLocationResult(null);
+  async function addAccount() {
+    setAddingAccount(true);
     try {
-      const args =
-        locationDraftMode === "country"
-          ? ({ mode: "country" } as const)
-          : locationDraftMode === "state"
-            ? ({ mode: "state", state: stateDraft } as const)
-            : ({ mode: "city", cityOrZip: cityDraft } as const);
-      const res = await api.setLocationMode(args);
-      setLocationResult(res.message);
+      await api.addAccount(`Account ${cfg.accounts.length + 1}`);
     } finally {
-      setLocationBusy(false);
+      setAddingAccount(false);
     }
   }
 
@@ -327,237 +355,446 @@ export function ConfigScreen({
         </Modal>
       )}
 
-      <Section title="Facebook Marketplace">
-        <Field label="Search locations">
-          <select value={locationDraftMode} onChange={(e) => setLocationDraftMode(e.target.value as ConfigType["locationMode"])}>
-            <option value="country">Whole country</option>
-            <option value="state">State</option>
-            <option value="city">City/ZIP code</option>
-          </select>
-        </Field>
+      <TabBar active={tab} onChange={setTab} />
 
-        {locationDraftMode === "state" && (
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
-            <select value={stateDraft} onChange={(e) => setStateDraft(e.target.value)} style={{ minWidth: 180 }}>
-              <option value="">Choose a state…</option>
-              {US_STATES.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
+      {tab === "sources" && (
+        <>
+          <Section title="Facebook accounts" subtitle="Each account is its own Facebook login and browser, scanning its own location.">
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {cfg.accounts.map((account) => (
+                <AccountCard key={account.id} account={account} />
               ))}
-            </select>
-            <button type="button" className="primary" disabled={!stateDraft || locationBusy} onClick={applyLocationMode}>
-              {locationBusy ? "Looking up city…" : "Apply"}
+            </div>
+            <button type="button" className="primary" style={{ marginTop: 14, alignSelf: "flex-start" }} disabled={addingAccount} onClick={addAccount}>
+              {addingAccount ? "Adding..." : "+ Add account"}
             </button>
-          </div>
-        )}
+          </Section>
 
-        {locationDraftMode === "city" && (
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
-            <input
-              value={cityDraft}
-              onChange={(e) => setCityDraft(e.target.value)}
-              placeholder='e.g. "Austin, Texas" or a ZIP code'
-              style={{ minWidth: 200 }}
+          <Section title="Facebook Marketplace">
+            <CheckRow
+              title="Search Facebook Marketplace"
+              description={'Turn off and "Start Scanner" won\'t start any account.'}
+              checked={cfg.facebookEnabled !== false}
+              onChange={(v) => update("facebookEnabled", v)}
             />
-            <button type="button" className="primary" disabled={!cityDraft.trim() || locationBusy} onClick={applyLocationMode}>
-              {locationBusy ? "Looking it up…" : "Apply"}
-            </button>
-          </div>
-        )}
-
-        {locationDraftMode === "country" && (
-          <div style={{ marginTop: 8 }}>
-            <button type="button" className="primary" disabled={locationBusy} onClick={applyLocationMode}>
-              {locationBusy ? "Working…" : "Apply"}
-            </button>
-          </div>
-        )}
-
-        {locationBusy && (
-          <p style={{ fontSize: 14, color: "var(--text-dim)", margin: "8px 0 0" }}>
-            {locationDraftMode === "state"
-              ? "Asking the AI for this state's primary city, then looking it up on Facebook Marketplace..."
-              : "Looking this up on Facebook Marketplace..."}
-          </p>
-        )}
-        {locationResult && !locationBusy && (
-          <p style={{ fontSize: 14, color: "var(--text-muted)", margin: "8px 0 0" }}>{locationResult}</p>
-        )}
-
-        <p style={{ fontSize: 14, color: "var(--text-dim)", margin: "10px 0 0" }}>
-          How many listings to evaluate at one location before rotating to the next — {cfg.browseUrls.length} location
-          {cfg.browseUrls.length === 1 ? "" : "s"} configured right now
-          {cfg.locationMode === "country"
-            ? ", spread nationwide so the scanner keeps moving around the country instead of sitting in one city"
-            : cfg.locationMode === "state"
-              ? ` — ${cfg.selectedState}'s primary city (${cfg.searchRadiusMiles}-mile radius), skipping anything outside ${cfg.selectedState}`
-              : ` — just ${cfg.selectedCityOrZip} (${cfg.searchRadiusMiles}-mile radius)${cfg.selectedState ? `, skipping anything outside ${cfg.selectedState}` : ""}`}
-          .
-        </p>
-        <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-          <Field label="Listings per location before rotating">
-            <input
-              type="number"
-              min={1}
-              style={{ width: 100 }}
-              value={cfg.listingsPerLocation}
-              onChange={(e) => update("listingsPerLocation", Math.max(1, Number(e.target.value)))}
-            />
-          </Field>
-          <Field label="How recent a listing must be">
-            <select
-              value={cfg.maxListingAgeHours === null ? "any" : String(cfg.maxListingAgeHours)}
-              onChange={(e) => update("maxListingAgeHours", e.target.value === "any" ? null : Number(e.target.value))}
-            >
-              <option value="24">Last 24 hours</option>
-              <option value="168">Last 7 days</option>
-              <option value="720">Last 30 days</option>
-              <option value="any">Any time — no freshness filter</option>
-            </select>
-          </Field>
-          <Field label="Max price">
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ color: "var(--text-dim)" }}>$</span>
+            <SettingRow title="Listings per location" description="How many to scan before moving to the next place.">
               <input
                 type="number"
-                min={0}
-                step={1}
-                placeholder="No limit"
-                style={{ width: 110 }}
-                value={cfg.maxPriceUsd ?? ""}
-                onChange={(e) => update("maxPriceUsd", e.target.value === "" ? null : Math.max(0, Number(e.target.value)))}
+                min={1}
+                style={{ width: 90 }}
+                value={cfg.listingsPerLocation}
+                onChange={(e) => update("listingsPerLocation", Math.max(1, Number(e.target.value)))}
               />
-            </div>
-          </Field>
-        </div>
-        <p style={{ fontSize: 14, color: "var(--text-dim)", margin: "10px 0 0" }}>
-          Defaults to the last 24 hours, since this is built for a fast-moving business — broaden it if you'd rather
-          see more (older) listings than miss ones outside that window. Applied two ways: Facebook's own "Date
-          listed" filter is used on the search results page where possible (skips even opening a stale listing), and
-          it's enforced again after the fact regardless, so the window is always respected even if that live filter
-          click doesn't land. Max price is a hard ceiling on top of that — empty means no limit — checked before a
-          listing is ever opened, same as the freshness window.
-        </p>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 14 }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14, color: "var(--text-muted)", textTransform: "none", fontWeight: 400 }}>
-            <input
-              type="checkbox"
+            </SettingRow>
+            <SettingRow title="Listing age limit" description="Skip listings older than this.">
+              <select
+                value={cfg.maxListingAgeHours === null ? "any" : String(cfg.maxListingAgeHours)}
+                onChange={(e) => update("maxListingAgeHours", e.target.value === "any" ? null : Number(e.target.value))}
+              >
+                <option value="24">Last 24 hours</option>
+                <option value="168">Last 7 days</option>
+                <option value="720">Last 30 days</option>
+                <option value="any">Any time</option>
+              </select>
+            </SettingRow>
+            <CheckRow
+              title="Analyze photos"
+              description="Verifies deals, spots ineligible items and matches the Database."
               checked={cfg.photoAnalysis.enabled}
-              onChange={(e) => update("photoAnalysis", { enabled: e.target.checked })}
+              onChange={(v) => update("photoAnalysis", { enabled: v })}
             />
-            Automatically analyze photos (deal verification, ineligible-item detection, Database matching)
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14, color: "var(--text-muted)", textTransform: "none", fontWeight: 400 }}>
-            <input
-              type="checkbox"
+            <CheckRow
+              title="Auto-research new items"
+              description="Adds products it doesn't know yet to the Database."
               checked={cfg.autoResearchListings}
-              onChange={(e) => update("autoResearchListings", e.target.checked)}
+              onChange={(v) => update("autoResearchListings", v)}
             />
-            Automatically research listings (auto-create new Database entries for items it doesn't track yet — turn
-            off to only reinforce existing ones, and add new ones yourself via Research)
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14, color: "var(--text-muted)", textTransform: "none", fontWeight: 400 }}>
-            <input
-              type="checkbox"
+            <CheckRow
+              title="Research condition"
+              description={'Flags possible damage in photos with a yellow "?". Needs photo analysis on.'}
+              checked={cfg.researchCondition}
+              onChange={(v) => update("researchCondition", v)}
+            />
+            <CheckRow
+              title="Ignore Blacklist"
+              description="Temporarily stop skipping blacklisted listings, without clearing the list."
               checked={cfg.ignoreBlacklist}
-              onChange={(e) => update("ignoreBlacklist", e.target.checked)}
+              onChange={(v) => update("ignoreBlacklist", v)}
             />
-            Ignore Blacklist (temporarily stop auto-skipping listings that match a blacklisted term or image, without
-            clearing the list itself)
-          </label>
-        </div>
-      </Section>
+          </Section>
 
-      <Section title="Seller Risk">
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 15, marginBottom: 12 }}>
-          <input type="checkbox" checked={cfg.sellerRisk.enabled} onChange={(e) => update("sellerRisk", { ...cfg.sellerRisk, enabled: e.target.checked })} />
-          Screen sellers before opening a listing
-        </label>
-        <Field label="Minimum seller rating">
-          <StarRatingPicker
-            value={cfg.sellerRisk.minRating}
-            disabled={!cfg.sellerRisk.enabled}
-            onChange={(minRating) => update("sellerRisk", { ...cfg.sellerRisk, minRating })}
-          />
-        </Field>
-        <p style={{ fontSize: 14, color: "var(--text-dim)", margin: "10px 0 0" }}>
-          Click the left or right half of a star for half-point precision (e.g. 4.5). "Any rating" skips this check
-          entirely — a seller with no rating at all still passes.
-        </p>
-      </Section>
+          <Section title="eBay Marketplace">
+            <CheckRow
+              title="Search eBay"
+              description="Searches every Search For item and Watch by keyword. No login needed."
+              checked={cfg.ebay?.enabled ?? false}
+              onChange={(v) => update("ebay", { enabled: v })}
+            />
+            {!hasEbayCredentials && (
+              <p style={{ fontSize: 13.5, color: "var(--warn)", margin: "4px 0 0" }}>
+                No eBay API credentials found. Add EBAY_CLIENT_ID and EBAY_CLIENT_SECRET to .env (see .env.example) and
+                restart Clynx.
+              </p>
+            )}
+          </Section>
+        </>
+      )}
 
-      <Section title="eBay Sold Comps (WatchCount.com)">
-        <p style={{ fontSize: 14, color: "var(--text-dim)", margin: "0 0 10px" }}>
-          Every time a product gets researched, the assistant checks WatchCount's sold eBay listings for real comps
-          (sold price, time to sell) — see that product's own Database page for the results. Anonymous lookups are
-          capped at 20/day; a free WatchCount account raises that to 200/day.
-        </p>
-        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14.5, color: "var(--text)", cursor: "pointer" }}>
-          <input
-            type="checkbox"
-            checked={cfg.watchCountOncePerScan}
-            onChange={(e) => update("watchCountOncePerScan", e.target.checked)}
-          />
-          Only check each product once per scan
-        </label>
-        <p style={{ fontSize: 13.5, color: "var(--text-dim)", margin: "4px 0 10px" }}>
-          If the scanner matches the same product again later in the same scan (a Refresh, marking a listing
-          Interested, anything that re-triggers research), skip the WatchCount lookup instead of spending another one
-          of its limited daily lookups on data that hasn't had time to change. Resets every time the scanner starts.
-        </p>
-        <button type="button" className="primary" disabled={watchCountOpening} onClick={openWatchCountLogin}>
-          {watchCountOpening ? "Opening..." : "Log into WatchCount.com"}
-        </button>
-        <p style={{ fontSize: 13.5, color: "var(--text-dim)", margin: "10px 0 0" }}>
-          Opens a real WatchCount window on the same browser profile the lookups themselves use — log in there with
-          email + password, not Google/Facebook: those providers refuse to sign in inside an automated browser
-          window like this one (their own restriction, not WatchCount's), but a plain email + password account isn't
-          affected. This app never sees your password.
-        </p>
-      </Section>
+      {tab === "deals" && (
+        <>
+          <Section title="Seller risk">
+            <CheckRow
+              title="Screen sellers before opening a listing"
+              description="Skips sellers that fail the checks below."
+              checked={cfg.sellerRisk.enabled}
+              onChange={(v) => update("sellerRisk", { ...cfg.sellerRisk, enabled: v })}
+            />
+            <SettingRow title="Minimum seller rating" description={'Half stars allowed. "Any rating" skips this check, and sellers with no rating always pass.'}>
+              <StarRatingPicker
+                value={cfg.sellerRisk.minRating}
+                disabled={!cfg.sellerRisk.enabled}
+                onChange={(minRating) => update("sellerRisk", { ...cfg.sellerRisk, minRating })}
+              />
+            </SettingRow>
+          </Section>
 
-      <Section title="Appearance">
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className={cfg.theme === "dark" ? "primary" : ""} type="button" onClick={() => setTheme("dark")}>
-            🌙 Dark
-          </button>
-          <button className={cfg.theme === "light" ? "primary" : ""} type="button" onClick={() => setTheme("light")}>
-            ☀️ Light
-          </button>
-        </div>
-        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-          <button className={cfg.soundEnabled ? "primary" : ""} type="button" onClick={() => toggleSound(true)}>
-            🔊 Sound on
-          </button>
-          <button className={!cfg.soundEnabled ? "primary" : ""} type="button" onClick={() => toggleSound(false)}>
-            🔇 Sound off
-          </button>
-        </div>
-      </Section>
+          <Section title="eBay sold comps (WatchCount.com)" subtitle="Real sold prices and time-to-sell for every researched product.">
+            <CheckRow
+              title="Look up sold comps"
+              description="Free: 20 lookups/day anonymous, 200/day with a WatchCount account."
+              checked={cfg.watchCountEnabled}
+              onChange={(v) => update("watchCountEnabled", v)}
+            />
+            <CheckRow
+              title="Only once per product per scan"
+              description="Don't re-spend a lookup on the same product in the same scan."
+              checked={cfg.watchCountOncePerScan}
+              disabled={!cfg.watchCountEnabled}
+              onChange={(v) => update("watchCountOncePerScan", v)}
+            />
+            <SettingRow title="WatchCount login" description="Use email + password. Google and Facebook sign-in don't work in this window.">
+              <button type="button" className="primary" disabled={watchCountOpening} onClick={openWatchCountLogin}>
+                {watchCountOpening ? "Opening..." : "Log in"}
+              </button>
+            </SettingRow>
+          </Section>
+        </>
+      )}
 
-      <Section title="Push notifications (ntfy)">
-        <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-          <Field label="Server">
-            <input value={config.ntfy.server} onChange={(e) => update("ntfy", { ...config.ntfy, server: e.target.value })} />
-          </Field>
-          <Field label="Topic (private, hard to guess)">
-            <input value={config.ntfy.topic} onChange={(e) => update("ntfy", { ...config.ntfy, topic: e.target.value })} />
-          </Field>
-        </div>
-        <p style={{ fontSize: 14, color: "var(--text-dim)", margin: "8px 0 0" }}>
-          Install the ntfy app and subscribe to this exact topic name to get alerts on your phone.
-        </p>
-      </Section>
+      {tab === "appearance" && (
+        <Section title="Appearance">
+          <SettingRow title="Theme">
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className={cfg.theme === "dark" ? "primary" : ""} type="button" onClick={() => setTheme("dark")}>
+                🌙 Dark
+              </button>
+              <button className={cfg.theme === "light" ? "primary" : ""} type="button" onClick={() => setTheme("light")}>
+                ☀️ Light
+              </button>
+            </div>
+          </SettingRow>
+          <SettingRow title="Colors" description="Rainbow slowly fades the whole app through every color.">
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className={!cfg.rainbowEnabled ? "primary" : ""} type="button" onClick={() => setRainbow(false)}>
+                🎨 Custom
+              </button>
+              <button className={cfg.rainbowEnabled ? "primary" : ""} type="button" onClick={() => setRainbow(true)}>
+                🌈 Rainbow
+              </button>
+            </div>
+          </SettingRow>
+          {!cfg.rainbowEnabled && (
+            <>
+              <SettingRow title="Primary color">
+                <ColorPick value={cfg.primaryColor} onChange={setPrimaryColor} title="Pick the app's primary accent" />
+              </SettingRow>
+              <SettingRow title="Accent color">
+                <ColorPick value={cfg.accentColor} onChange={setAccentColor} title="Pick the app's secondary accent" />
+              </SettingRow>
+            </>
+          )}
+          <CheckRow title="Sound" description="Start/stop chimes, tab ticks and the deal alert." checked={cfg.soundEnabled} onChange={toggleSound} />
+          <CheckRow title="Particles" description="The cursor-reactive starfield and click bursts." checked={cfg.particlesEnabled} onChange={toggleParticles} />
+        </Section>
+      )}
+
+      {tab === "notifications" && (
+        <Section title="Push notifications (ntfy)" subtitle="Install the ntfy app and subscribe to your topic to get alerts on your phone.">
+          <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+            <Field label="Server">
+              <input value={cfg.ntfy.server} onChange={(e) => update("ntfy", { ...cfg.ntfy, server: e.target.value })} />
+            </Field>
+            <Field label="Topic (private, hard to guess)">
+              <input value={cfg.ntfy.topic} onChange={(e) => update("ntfy", { ...cfg.ntfy, topic: e.target.value })} />
+            </Field>
+          </div>
+        </Section>
+      )}
+
+      {tab === "account" && <CloudSyncSection onLoggedOut={onLoggedOut} />}
     </div>
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+// First UI change in the whole cloud migration — everything before this was
+// backend-only (see cloudClient.ts/watchSync.ts/feedbackSync.ts/
+// productSync.ts/listingIngestSync.ts), so the only way to tell cloud sync
+// was actually working was reading terminal logs or querying Postgres
+// directly. Started as a purely read-only status readout (poll main on an
+// interval, same pattern as Activity.tsx's own MetricsPanel) — the multi-
+// user login migration adds the one actual control it needed: logging out.
+// Cloud sync itself is no longer something to turn on/off from here at all
+// (see index.ts's bootstrapUserSession) — being logged in now IS what turns
+// it on, unconditionally, for whichever user is currently signed in.
+function CloudSyncSection({ onLoggedOut }: { onLoggedOut?: () => void }) {
+  const [status, setStatus] = useState<CloudStatus | null>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  async function logOut() {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await api.auth.logout();
+      onLoggedOut?.();
+    } finally {
+      setLoggingOut(false);
+    }
+  }
+
+  // Mirrors Activity.tsx's MetricsPanel poll-on-an-interval pattern exactly
+  // (immediate poll on mount, then setInterval, cleaned up on unmount) — the
+  // established "renderer polls main for live status" approach in this app,
+  // not a new one. A slower interval than MetricsPanel's 2s is enough here:
+  // the underlying data only changes on a heartbeat (60s) or sync tick
+  // (60-120s depending on the service), not per-listing.
+  useEffect(() => {
+    let cancelled = false;
+    function poll() {
+      api.cloud.getStatus().then((s) => {
+        if (!cancelled) setStatus(s);
+      });
+    }
+    poll();
+    const interval = setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  return (
+    <Section title="Cloud Sync">
+      <p style={{ fontSize: 13.5, color: "var(--text-dim)", margin: "0 0 12px" }}>
+        Watches, feedback, Database products and scanned listings sync to your Clynx account while you're logged in.
+      </p>
+      {!status ? (
+        <p style={{ fontSize: 13, color: "var(--text-dim)", margin: 0 }}>Loading...</p>
+      ) : !status.enabled ? (
+        <p style={{ fontSize: 14, color: "var(--text-muted)", margin: 0 }}>Cloud sync isn't active for this session yet.</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <CloudStatusRow
+              label="Authentication"
+              ok={status.authenticated}
+              detail={status.authenticated ? "Authenticated" : "Not authenticated"}
+            />
+            <CloudStatusRow
+              label="Heartbeat"
+              ok={!!status.heartbeat.lastAt && !status.heartbeat.lastError}
+              detail={
+                status.heartbeat.lastAt
+                  ? `Last sent ${timeAgo(status.heartbeat.lastAt)}${status.heartbeat.lastError ? ` — ${status.heartbeat.lastError}` : ""}`
+                  : status.heartbeat.lastError ?? "Never sent yet"
+              }
+            />
+          </div>
+          <div>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text-dim)", margin: "0 0 6px" }}>Background sync</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <SyncStatusRow label="Watches" status={status.sync.watches} />
+              <SyncStatusRow label="Feed feedback" status={status.sync.feedback} />
+              <SyncStatusRow label="Database products" status={status.sync.products} />
+              <SyncStatusRow label="Listing ingestion" status={status.sync.listings} />
+            </div>
+          </div>
+          <p style={{ fontSize: 12.5, color: "var(--text-dim)", margin: 0 }}>
+            Device ID: {status.deviceId ?? "not registered yet"} · {status.apiUrl ?? "no API URL configured"}
+          </p>
+        </div>
+      )}
+      <button
+        type="button"
+        className="danger"
+        disabled={loggingOut}
+        onClick={logOut}
+        style={{ alignSelf: "flex-start", marginTop: 14 }}
+      >
+        {loggingOut ? "Logging out..." : "Log out"}
+      </button>
+    </Section>
+  );
+}
+
+// A single-line status row with a colored dot — same `.dot` classes
+// Activity.tsx's own "narrating" pill and Sidebar's connection indicators
+// already use for on/off/error states, so this reads as a native part of
+// the app rather than a bolted-on widget.
+function CloudStatusRow({ label, ok, detail }: { label: string; ok: boolean; detail: string }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}>
+      <span className={`dot ${ok ? "on" : "off"}`} style={{ width: 7, height: 7, flexShrink: 0 }} />
+      <span style={{ color: "var(--text-muted)", minWidth: 110 }}>{label}</span>
+      <span style={{ color: ok ? "var(--text)" : "var(--text-dim)" }}>{detail}</span>
+    </div>
+  );
+}
+
+// One row per background sync service — a compact list, same shape as the
+// Accounts section's own per-account cards or Activity.tsx's per-account
+// discovery rate list: a label on the left, the live value on the right.
+// No lastAt at all yet (service enabled but its first tick, 15s after
+// startup, hasn't landed) reads as "off" rather than "error" — there's
+// nothing wrong yet, just nothing to report.
+function SyncStatusRow({ label, status }: { label: string; status: { lastAt: number | null; lastError: string | null } }) {
+  const state: "on" | "off" | "err" = status.lastError ? "err" : status.lastAt ? "on" : "off";
+  const detail = status.lastAt
+    ? `Last synced ${timeAgo(status.lastAt)}${status.lastError ? ` — ${status.lastError}` : ""}`
+    : status.lastError ?? "Not synced yet";
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}>
+      <span className={`dot ${state}`} style={{ width: 7, height: 7, flexShrink: 0 }} />
+      <span style={{ color: "var(--text-muted)", minWidth: 130 }}>{label}</span>
+      <span style={{ color: state === "err" ? "var(--danger)" : "var(--text)" }}>{detail}</span>
+    </div>
+  );
+}
+
+// Same minute-granularity relative-time helper as ListingCard.tsx's own
+// timeAgo (heartbeats/sync ticks here run 60-120s apart, so that precision
+// fits — unlike Watch.tsx's own timeAgoShort, built for a "last checked 42
+// sec ago" display that updates every few seconds). Kept as its own local
+// copy rather than importing ListingCard's, matching this codebase's
+// existing convention of a small private helper per file that needs one
+// (see ListingCard.tsx and Watch.tsx, neither of which exports theirs).
+function timeAgo(ts: number): string {
+  const diffMs = Date.now() - ts;
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+type ConfigTab = "sources" | "deals" | "appearance" | "notifications" | "account";
+
+const CONFIG_TABS: Array<{ id: ConfigTab; label: string }> = [
+  { id: "sources", label: "Sources" },
+  { id: "deals", label: "Deals" },
+  { id: "appearance", label: "Appearance" },
+  { id: "notifications", label: "Notifications" },
+  { id: "account", label: "Account" },
+];
+
+// Config used to be one very long page of stacked cards. Tabs keep each
+// group of related settings on its own short screen; everything still reads
+// and writes the same single config object, so switching tabs never loses
+// an unsaved edit.
+function TabBar({ active, onChange }: { active: ConfigTab; onChange: (tab: ConfigTab) => void }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: 6,
+        flexWrap: "wrap",
+        position: "sticky",
+        top: 0,
+        zIndex: 2,
+        padding: "6px 0",
+        background: "var(--bg)",
+        borderBottom: "1px solid var(--border)",
+      }}
+    >
+      {CONFIG_TABS.map((t) => (
+        <button key={t.id} type="button" className={active === t.id ? "primary" : "ghost"} onClick={() => onChange(t.id)}>
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
     <div className="card">
-      <div style={{ fontWeight: 700, marginBottom: 12 }}>{title}</div>
-      {children}
+      <div style={{ fontWeight: 700, fontSize: 16 }}>{title}</div>
+      {subtitle && <div style={{ fontSize: 13.5, color: "var(--text-dim)", marginTop: 3 }}>{subtitle}</div>}
+      <div style={{ display: "flex", flexDirection: "column", marginTop: 10 }}>{children}</div>
+    </div>
+  );
+}
+
+// One setting per row: name + a single short line of explanation on the
+// left, the control on the right, a hairline divider between rows.
+function SettingRow({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 20,
+        padding: "12px 0",
+        borderTop: "1px solid var(--border)",
+      }}
+    >
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ fontSize: 14.5, color: "var(--text)" }}>{title}</div>
+        {description && <div style={{ fontSize: 13, color: "var(--text-dim)", marginTop: 2, lineHeight: 1.4 }}>{description}</div>}
+      </div>
+      <div style={{ flexShrink: 0 }}>{children}</div>
+    </div>
+  );
+}
+
+function CheckRow({
+  title,
+  description,
+  checked,
+  disabled,
+  onChange,
+}: {
+  title: string;
+  description?: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <SettingRow title={title} description={description}>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        style={{ width: 18, height: 18, cursor: disabled ? "default" : "pointer" }}
+      />
+    </SettingRow>
+  );
+}
+
+function ColorPick({ value, onChange, title }: { value: string; onChange: (hex: string) => void; title: string }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <span style={{ fontSize: 13.5, color: "var(--text-dim)" }}>{value}</span>
+      <input
+        type="color"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={{ width: 46, height: 36, padding: 2, cursor: "pointer" }}
+        title={title}
+      />
     </div>
   );
 }
@@ -567,6 +804,170 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       <label>{label}</label>
       {children}
+    </div>
+  );
+}
+
+// Per explicit instruction — multiple Facebook accounts, each scanning its
+// own location concurrently. One of these per configured account, each
+// managing its OWN location-picker draft state independently (mirrors
+// exactly what the single-account version of this screen used to do with
+// its own locationDraftMode/stateDraft/cityDraft/etc. — just one
+// independent copy per account now instead of one shared copy). Mutations
+// (label/enabled/location) all go through their own IPC round trip and
+// broadcast config:updated, which the parent ConfigScreen already listens
+// for (see its onConfigUpdated effect) — no separate refresh plumbing
+// needed here, this component just re-renders with fresh props once that
+// lands.
+function AccountCard({ account }: { account: Account }) {
+  const [labelDraft, setLabelDraft] = useState(account.label);
+  const [locationDraftMode, setLocationDraftMode] = useState<Account["locationMode"]>(account.locationMode);
+  const [stateDraft, setStateDraft] = useState(account.selectedState ?? "");
+  const [cityDraft, setCityDraft] = useState(account.selectedCityOrZip ?? "");
+  const [locationBusy, setLocationBusy] = useState(false);
+  const [locationResult, setLocationResult] = useState<string | null>(null);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [showRemoveDialog, setShowRemoveDialog] = useState(false);
+
+  async function applyLocationMode() {
+    setLocationBusy(true);
+    setLocationResult(null);
+    try {
+      const args =
+        locationDraftMode === "country"
+          ? ({ accountId: account.id, mode: "country" } as const)
+          : locationDraftMode === "state"
+            ? ({ accountId: account.id, mode: "state", state: stateDraft } as const)
+            : ({ accountId: account.id, mode: "city", cityOrZip: cityDraft } as const);
+      const res = await api.setLocationMode(args);
+      setLocationResult(res.message);
+    } finally {
+      setLocationBusy(false);
+    }
+  }
+
+  async function saveLabel() {
+    const trimmed = labelDraft.trim();
+    if (!trimmed || trimmed === account.label) {
+      setLabelDraft(account.label);
+      return;
+    }
+    await api.updateAccount(account.id, { label: trimmed });
+  }
+
+  async function doRemove() {
+    setRemoving(true);
+    try {
+      await api.removeAccount(account.id);
+    } finally {
+      setRemoving(false);
+      setShowRemoveDialog(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ padding: 18, display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "space-between", flexWrap: "wrap" }}>
+        <input
+          value={labelDraft}
+          onChange={(e) => setLabelDraft(e.target.value)}
+          onBlur={saveLabel}
+          style={{ fontWeight: 700, fontSize: 16, maxWidth: 240 }}
+        />
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button
+            className={account.enabled ? "primary" : "ghost"}
+            type="button"
+            title={account.enabled ? "Included in \"Start all\" / chat-driven start" : "Skipped by \"Start all\" — still loggable/startable on its own"}
+            onClick={() => api.updateAccount(account.id, { enabled: !account.enabled })}
+          >
+            {account.enabled ? "Enabled" : "Disabled"}
+          </button>
+          <button type="button" disabled={loggingIn} onClick={() => { setLoggingIn(true); api.login(account.id).finally(() => setLoggingIn(false)); }}>
+            {loggingIn ? "Opening..." : "Log in"}
+          </button>
+          <button className="danger" type="button" onClick={() => setShowRemoveDialog(true)}>
+            Remove
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <select value={locationDraftMode} onChange={(e) => setLocationDraftMode(e.target.value as Account["locationMode"])}>
+          <option value="country">Whole country</option>
+          <option value="state">State</option>
+          <option value="city">City/ZIP code</option>
+        </select>
+        {locationDraftMode === "state" && (
+          <select value={stateDraft} onChange={(e) => setStateDraft(e.target.value)} style={{ minWidth: 180 }}>
+            <option value="">Choose a state…</option>
+            {US_STATES.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        )}
+        {locationDraftMode === "city" && (
+          <input
+            value={cityDraft}
+            onChange={(e) => setCityDraft(e.target.value)}
+            placeholder='e.g. "Austin, Texas" or a ZIP code'
+            style={{ minWidth: 200 }}
+          />
+        )}
+        <button
+          type="button"
+          className="primary"
+          disabled={locationBusy || (locationDraftMode === "state" && !stateDraft) || (locationDraftMode === "city" && !cityDraft.trim())}
+          onClick={applyLocationMode}
+        >
+          {locationBusy ? "Working…" : "Apply"}
+        </button>
+      </div>
+      {locationResult && !locationBusy && <p style={{ fontSize: 13.5, color: "var(--text-muted)", margin: 0 }}>{locationResult}</p>}
+
+      {/* Per explicit instruction — changing location mode now only saves
+          the choice; it no longer opens a browser to resolve it right away
+          (see index.ts's location:setMode). The actual lookup happens the
+          next time this account starts, so until then browseUrls/
+          searchRadiusMiles below still reflect whatever was PREVIOUSLY
+          resolved, not the newly-saved selection — this note is what keeps
+          that from reading as if the new choice already silently failed to
+          apply. */}
+      {!account.locationResolved ? (
+        <p style={{ fontSize: 13.5, color: "var(--warn)", margin: 0 }}>
+          Saved — {account.locationMode === "state" ? account.selectedState : account.selectedCityOrZip} will be looked
+          up on Facebook Marketplace the next time this account starts.
+        </p>
+      ) : (
+        <p style={{ fontSize: 13, color: "var(--text-dim)", margin: 0 }}>
+          {account.browseUrls.length} location{account.browseUrls.length === 1 ? "" : "s"} configured
+          {account.locationMode === "state"
+            ? ` — ${account.selectedState} (${account.searchRadiusMiles}-mile radius)`
+            : account.locationMode === "city"
+              ? ` — ${account.selectedCityOrZip} (${account.searchRadiusMiles}-mile radius)`
+              : ", spread nationwide"}
+        </p>
+      )}
+
+      {showRemoveDialog && (
+        <Modal title={`Remove "${account.label}"?`} onClose={() => setShowRemoveDialog(false)}>
+          <p style={{ margin: 0, fontSize: 15.5, lineHeight: 1.5 }}>
+            This stops its scanning and permanently deletes its saved Facebook login — you'd need to log in again from
+            scratch if you re-add it. Listings it already found stay in your Feed either way. This can't be undone.
+          </p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="icon" style={{ flex: 1 }} onClick={() => setShowRemoveDialog(false)}>
+              Cancel
+            </button>
+            <button className="danger-solid" style={{ flex: 1 }} disabled={removing} onClick={doRemove}>
+              {removing ? "Removing..." : "Remove"}
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

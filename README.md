@@ -1,4 +1,4 @@
-# Marketplace Scout
+# Clynx
 
 A desktop app that browses Facebook Marketplace within your set radius,
 actively searches for the specific things you've told it to find (your
@@ -257,3 +257,12 @@ showing up or titles/prices look wrong:
 - `npm run typecheck` — typecheck main+preload and renderer separately
 - `npm run pack` — build an unpacked Windows app (for testing)
 - `npm run dist` — build an installable Windows app
+
+## Clynx Cloud
+
+`cloud/` is a separate, standalone backend project — its own
+`package.json`/`tsconfig.json`, never bundled into the desktop build. It
+provides auth/devices, Watch cloud sync, listing ingestion + dedup, and an
+async job queue, all opt-in behind `Config.cloud.enabled` (default `false`)
+so the desktop app works exactly as it always has when cloud is off or
+unreachable. See [`cloud/README.md`](cloud/README.md) for setup.

@@ -1,0 +1,60 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: clynx-cloud-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: clynx
+      POSTGRES_PASSWORD: clynx_dev_password
+      POSTGRES_DB: clynx_cloud
+    ports:
+      - "5432:5432"
+    volumes:
+      - clynx_cloud_pg_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: clynx-cloud-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - clynx_cloud_redis_data:/data
+
+  api:
+    build: .
+    container_name: clynx-cloud-api
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+    env_file: .env
+    environment:
+      # Override the host-oriented values from .env — inside the compose
+      # network, Postgres/Redis are reached by service name, not localhost.
+      DATABASE_URL: postgres://clynx:clynx_dev_password@postgres:5432/clynx_cloud
+      REDIS_URL: redis://redis:6379
+      PORT: 8787
+    ports:
+      - "8787:8787"
+    # Migrations are idempotent (schema_migrations tracks what's applied),
+    # so running them on every container start is safe and means a fresh
+    # `docker compose up -d` always has an up-to-date schema.
+    command: sh -c "node dist/db/migrate.js && node dist/index.js"
+
+  worker:
+    build: .
+    container_name: clynx-cloud-worker
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://clynx:clynx_dev_password@postgres:5432/clynx_cloud
+      REDIS_URL: redis://redis:6379
+    command: node dist/worker.js
+
+volumes:
+  clynx_cloud_pg_data:
+  clynx_cloud_redis_data:

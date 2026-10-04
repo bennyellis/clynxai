@@ -1,10 +1,17 @@
 {
   "name": "marketplace-scout",
-  "productName": "Marketplace Scout",
+  "productName": "Clynx",
   "version": "0.2.0",
   "private": true,
   "description": "Desktop app that watches Facebook Marketplace searches, screens listings with AI against your reference prices, and alerts you to deals.",
   "main": "./out/main/index.js",
+  "build": {
+    "appId": "com.clynx.app",
+    "productName": "Clynx",
+    "win": {
+      "icon": "build/icon.ico"
+    }
+  },
   "scripts": {
     "postinstall": "playwright install chromium",
     "dev": "electron-vite dev",

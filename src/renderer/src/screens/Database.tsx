@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { BlacklistedImage, BlacklistTerm, ChatContext, ChatMessage, ProductImage, ProductProfile } from "../lib/api.js";
+import type { ActiveProductResearch, BlacklistedImage, BlacklistTerm, ChatContext, ChatMessage, ProductImage, ProductProfile } from "../lib/api.js";
 import { api } from "../lib/api.js";
 import { Modal } from "../components/Modal.js";
 import { useLightbox } from "../components/ImageLightbox.js";
 import { ThumbnailSizeSlider, useThumbnailSize } from "../components/ThumbnailSize.js";
-import { playTabSwitchSound } from "../lib/sound.js";
+import { WatchFormFlow } from "../components/WatchFormFlow.js";
 
 // Per explicit instruction — the Database screen is now three clearly
 // separated sections instead of one long scrolling page: Research (the
@@ -97,6 +97,67 @@ function buildFamilyTree(products: ProductProfile[]): FamilyNode[] {
   };
   sortTree(roots);
   return roots;
+}
+
+// Per explicit instruction — "for variants/special editions of products, in
+// the original Library listing, include these variants... clicked on and
+// reveal information like avg sales price, sales speed, and reference
+// photos, just like the original Library listing." Deliberately its OWN
+// word list, separate from scorer.ts's VARIANT_QUALIFIER_WORDS (which
+// excludes "slim" on purpose, per an earlier live correction — "a Slim
+// redesign runs similarly priced... not a different price tier," so a
+// plain "ps5" SEARCH should still catch Slim listings). That was about
+// whether a search should flag something as a match; this is about whether
+// two Database entries deserve their own separate tracked price/photos —
+// a genuinely different question, and the user's own example here
+// explicitly wants PS5/PS5 Slim/PS5 Pro treated as three distinct,
+// separately-browsable variants despite Slim's search-matching staying
+// broad. Not exported/shared with scorer.ts's list for that reason.
+const DATABASE_VARIANT_QUALIFIER_WORDS = new Set(["pro", "slim", "max", "plus", "mini", "lite", "se", "xl", "oled", "air"]);
+
+// Same filler-stripping as store.ts's productNameTokens (kept as its own
+// copy — this runs in the renderer, store.ts is main-process-only) minus
+// the variant words above, which get pulled out separately so two names
+// can be compared on "same base product" (ignoring filler) AND "same
+// variant tier" (the variant words alone) independently.
+const LIBRARY_NAME_STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "with", "for", "of", "new", "used", "edition",
+  "bundle", "set", "kit", "pack", "brand", "great", "condition", "like", "excellent", "good",
+]);
+
+function nameTokenSets(name: string): { base: Set<string>; variants: Set<string> } {
+  const words = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(" ")
+    .filter((w) => w && !LIBRARY_NAME_STOPWORDS.has(w));
+  const base = new Set<string>();
+  const variants = new Set<string>();
+  for (const w of words) (DATABASE_VARIANT_QUALIFIER_WORDS.has(w) ? variants : base).add(w);
+  return { base, variants };
+}
+
+function sameSet(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const v of a) if (!b.has(v)) return false;
+  return true;
+}
+
+// Two products are "variants of each other" when they're the SAME base
+// product (identical base tokens once variant words are pulled out) but
+// DIFFERENT tiers (different variant-word membership) — "PlayStation 5" vs
+// "PlayStation 5 Pro" qualifies; "PlayStation 5" vs "PlayStation 5" (itself)
+// or vs an unrelated "Xbox Series X" does not. Same category required too,
+// as a sanity bound against two unrelated products that happen to share a
+// generic base word.
+function findVariantSiblings(product: ProductProfile, allProducts: ProductProfile[]): ProductProfile[] {
+  const { base, variants } = nameTokenSets(product.name);
+  if (!base.size) return [];
+  return allProducts.filter((p) => {
+    if (p.id === product.id || p.category !== product.category) return false;
+    const other = nameTokenSets(p.name);
+    return sameSet(base, other.base) && !sameSet(variants, other.variants);
+  });
 }
 
 // Every product under a node, at any depth — what a folder tile's own
@@ -202,6 +263,22 @@ export function Database({
   const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
   const [showClearAllDialog, setShowClearAllDialog] = useState(false);
+  // Library's "Find photos" catch-up button — how many products still have
+  // fewer than 5 reference photos, plus live progress while it runs (see
+  // index.ts's runPhotoBackfill).
+  const [missingPhotos, setMissingPhotos] = useState(0);
+  const [photoBackfill, setPhotoBackfill] = useState<{ running: boolean; done: number; total: number }>({ running: false, done: 0, total: 0 });
+  useEffect(() => {
+    api.countProductsMissingPhotos().then(setMissingPhotos);
+    api.getPhotoBackfillStatus().then(setPhotoBackfill);
+    const off = api.onPhotoBackfillProgress((p) => {
+      setPhotoBackfill(p);
+      if (!p.running) api.countProductsMissingPhotos().then(setMissingPhotos);
+    });
+    return () => {
+      off();
+    };
+  }, []);
   // Per explicit instruction — the Library's own "+" button, for a product
   // the user already has their own photo/info for rather than something
   // the AI needs to research. The dialog only collects name/category —
@@ -459,7 +536,9 @@ export function Database({
     return (
       <ProductDetailPage
         product={selectedProduct}
+        allProducts={products}
         onBack={() => setSelectedProductId(null)}
+        onSelectProduct={(id) => setSelectedProductId(id)}
         onRefresh={() => refresh(selectedProduct.id)}
         onDelete={() => remove(selectedProduct.id)}
         onSaveEdit={(patch) => saveEdit(selectedProduct.id, patch)}
@@ -488,10 +567,7 @@ export function Database({
           <button
             key={t}
             className="ghost"
-            onClick={() => {
-              if (tab !== t) playTabSwitchSound();
-              setTab(t);
-            }}
+            onClick={() => setTab(t)}
             style={{
               padding: "13px 20px",
               borderRadius: "10px 10px 0 0",
@@ -510,8 +586,11 @@ export function Database({
       </div>
 
       {tab === "research" && (
-        <div style={{ flex: 1, minHeight: 0 }}>
-          <ChatPanel />
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", gap: 14 }}>
+          <ResearchStatusPanel />
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <ChatPanel />
+          </div>
         </div>
       )}
 
@@ -541,6 +620,17 @@ export function Database({
               <ThumbnailSizeSlider value={librarySize} onChange={setLibrarySize} min={90} max={280} step={10} />
             </div>
             <div style={{ display: "flex", gap: 8 }}>
+              {(missingPhotos > 0 || photoBackfill.running) && (
+                <button
+                  disabled={photoBackfill.running}
+                  title="Searches the web for stock photos of every product that has fewer than 5 reference photos, and uses the best one as its thumbnail if it doesn't have one yet. Runs in the background."
+                  onClick={() => api.backfillProductPhotos()}
+                >
+                  {photoBackfill.running
+                    ? `📸 Finding photos… ${photoBackfill.done}/${photoBackfill.total}`
+                    : `📸 Find photos for ${missingPhotos} product${missingPhotos === 1 ? "" : "s"}`}
+                </button>
+              )}
               <button className="primary" onClick={() => setShowAddProductDialog(true)}>
                 + Add product
               </button>
@@ -587,20 +677,6 @@ export function Database({
             })()
           ) : (
             <>
-              {grouped.length > 1 && (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                  <CategoryPill label={`All (${products.length})`} active={activeCategory === null} onClick={() => setActiveCategory(null)} />
-                  {grouped.map(({ category, items }) => (
-                    <CategoryPill
-                      key={category}
-                      label={`${category} (${items.length})`}
-                      active={activeCategory === category}
-                      onClick={() => setActiveCategory(activeCategory === category ? null : category)}
-                    />
-                  ))}
-                </div>
-              )}
-
               {searchQuery.trim() && searchedGroups.length === 0 && (
                 <div className="card" style={{ color: "var(--text-dim)" }}>
                   No products match "{searchQuery.trim()}".
@@ -648,7 +724,7 @@ export function Database({
                             key={category}
                             category={category}
                             count={items.length}
-                            previewImages={getCategoryPreviewImages(tree, ungrouped, groupThumbnails)}
+                            generatedThumbnailUrl={groupThumbnails[category.toLowerCase()] ?? null}
                             onOpen={() => setActiveCategory(category)}
                           />
                         ))}
@@ -789,12 +865,23 @@ export function Database({
 function BlacklistSection() {
   const [terms, setTerms] = useState<BlacklistTerm[]>([]);
   const [draft, setDraft] = useState("");
+  // Per explicit instruction — "when the AI blacklists listings, make sure
+  // it blacklists both the title and the image(s), report both in
+  // Blacklist": this section now also loads the image gallery (see
+  // BlacklistedImagesSection below, which already owned this data) purely
+  // to show each term's own linked photo(s) inline, right next to the term
+  // itself, instead of only in that separate gallery further down the page.
+  const [images, setImages] = useState<BlacklistedImage[]>([]);
+  const lightbox = useLightbox();
 
   useEffect(() => {
     api.listBlacklistTerms().then(setTerms);
-    const off = api.onBlacklistUpdated(setTerms);
+    const offTerms = api.onBlacklistUpdated(setTerms);
+    api.listBlacklistedImages().then(setImages);
+    const offImages = api.onBlacklistImagesUpdated(setImages);
     return () => {
-      off();
+      offTerms();
+      offImages();
     };
   }, []);
 
@@ -810,6 +897,17 @@ function BlacklistSection() {
     const updated = await api.removeBlacklistTerm(term);
     setTerms(updated);
   }
+
+  const imagesByTerm = useMemo(() => {
+    const map = new Map<string, BlacklistedImage[]>();
+    for (const img of images) {
+      if (!img.linkedTerm) continue;
+      const list = map.get(img.linkedTerm) ?? [];
+      list.push(img);
+      map.set(img.linkedTerm, list);
+    }
+    return map;
+  }, [images]);
 
   return (
     <div className="card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -837,25 +935,50 @@ function BlacklistSection() {
         </button>
       </form>
       {terms.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          {terms.map((t) => (
-            <span
-              key={t.term}
-              className="pill"
-              style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 4px 4px 10px" }}
-            >
-              {t.term}
-              {t.source === "ai" && <span title="Auto-added by the scanner">🤖</span>}
-              <button
-                className="icon ghost"
-                title="Remove"
-                onClick={() => remove(t.term)}
-                style={{ padding: "0 4px", fontSize: 14, lineHeight: 1, color: "var(--text-dim)" }}
-              >
-                ×
-              </button>
-            </span>
-          ))}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {terms.map((t) => {
+            const linkedImages = imagesByTerm.get(t.term) ?? [];
+            return (
+              <div key={t.term} style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                <span className="pill" style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 4px 4px 10px" }}>
+                  {t.term}
+                  {t.source === "ai" && <span title="Auto-added by the scanner">🤖</span>}
+                  <button
+                    className="icon ghost"
+                    title="Remove"
+                    onClick={() => remove(t.term)}
+                    style={{ padding: "0 4px", fontSize: 14, lineHeight: 1, color: "var(--text-dim)" }}
+                  >
+                    ×
+                  </button>
+                </span>
+                {/* The listing photo(s) that were blacklisted alongside this
+                    term (see store.ts's addBlacklistTerm) — same image data
+                    shown in the Blacklisted Images gallery below, just
+                    surfaced here too so the two halves of one AI decision
+                    (title + photo) read as one thing, not two separate
+                    lists the user has to cross-reference. */}
+                {linkedImages.map((img) => (
+                  <img
+                    key={img.id}
+                    src={img.imageData}
+                    alt=""
+                    title={img.sourceTitle ?? undefined}
+                    onClick={() => lightbox.open(img.imageData, { subjectName: t.term, kind: "blacklisted", imageId: img.id })}
+                    style={{
+                      width: 30,
+                      height: 30,
+                      objectFit: "cover",
+                      borderRadius: 6,
+                      border: "1px solid var(--border)",
+                      cursor: "zoom-in",
+                      flexShrink: 0,
+                    }}
+                  />
+                ))}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -995,28 +1118,6 @@ function BlacklistedImagesSection() {
       )}
       {lightbox.node}
     </div>
-  );
-}
-
-// Clickable category filter — same active/inactive treatment as the
-// Sidebar's nav buttons (gradient-soft fill + strong border when selected)
-// so it reads as consistent with the rest of the app rather than a one-off.
-function CategoryPill({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
-  return (
-    <button
-      className="ghost"
-      onClick={onClick}
-      style={{
-        padding: "6px 12px",
-        borderRadius: 999,
-        fontSize: 14,
-        background: active ? "var(--gradient-soft)" : "transparent",
-        border: `1px solid ${active ? "var(--border-strong)" : "var(--border)"}`,
-        color: active ? "var(--text)" : "var(--text-muted)",
-      }}
-    >
-      {label}
-    </button>
   );
 }
 
@@ -1204,42 +1305,32 @@ function FamilyTile({
 // category's full contents inline, one below the next, forcing a long
 // scroll just to see what's there. Now each category is ONE tile here
 // (click to drill into its own tree/ungrouped grid, same as a FamilyTile
-// drilling into a folder), with a genuine photo COLLAGE — up to 4 of its
-// own top-level families' representative images tiled together (e.g. a
-// "Video Games & Consoles" tile combining the Xbox/PlayStation/Nintendo/
-// Razer logos into one square) — rather than a single arbitrary photo, so
-// the tile itself hints at everything actually inside it.
-function familyRepresentativeImage(node: FamilyNode, groupThumbnails: Record<string, string>): string | null {
-  const items = collectAllItems(node);
-  const logo = items.find((p) => p.familyLogoUrl)?.familyLogoUrl ?? null;
-  return logo ?? groupThumbnails[node.path.toLowerCase()] ?? items.find((p) => p.imageUrl)?.imageUrl ?? null;
-}
+// drilling into a folder) — see CategoryTile's own doc comment below for
+// what that tile's thumbnail actually shows now.
 
-function getCategoryPreviewImages(tree: FamilyNode[], ungrouped: ProductProfile[], groupThumbnails: Record<string, string>): string[] {
-  const images: string[] = [];
-  for (const node of tree) {
-    if (images.length >= 4) break;
-    const img = familyRepresentativeImage(node, groupThumbnails);
-    if (img) images.push(img);
-  }
-  if (images.length < 4) {
-    for (const p of ungrouped) {
-      if (images.length >= 4) break;
-      if (p.imageUrl) images.push(p.imageUrl);
-    }
-  }
-  return images;
-}
-
+// Per explicit instruction — "in Library's home screen... instead of there
+// being 4 different photos smashed into one, generate an image of
+// '<category>' and include text on the image of what that category is."
+// FamilyTile (the folders you drill INTO) keeps its existing collage; this
+// is ONLY the top-level home-screen grid. generatedThumbnailUrl is null
+// until index.ts's ensureCategoryThumbnail finishes (it's fire-and-forget,
+// triggered the first time any product is ever assigned this category) —
+// shown as a plain placeholder meanwhile rather than blocking on it, same
+// "show something now, upgrade live once ready" pattern as every other
+// async thumbnail in this app. The category's own name is no longer
+// repeated as a caption below the image once it HAS a generated
+// thumbnail — it's already baked into the image itself (see
+// generateCategoryImage's fixed text-overlay position/font/size) — so
+// showing it twice would just be redundant.
 function CategoryTile({
   category,
   count,
-  previewImages,
+  generatedThumbnailUrl,
   onOpen,
 }: {
   category: string;
   count: number;
-  previewImages: string[];
+  generatedThumbnailUrl: string | null;
   onOpen: () => void;
 }) {
   return (
@@ -1260,7 +1351,30 @@ function CategoryTile({
       title={`Open ${category} (${count} item${count === 1 ? "" : "s"})`}
     >
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
-        <CollageImage images={previewImages} emptyIcon="🗂️" />
+        {generatedThumbnailUrl ? (
+          <img
+            src={generatedThumbnailUrl}
+            alt={category}
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+          />
+        ) : (
+          <div
+            style={{
+              width: "100%",
+              height: "100%",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+              fontSize: 34,
+              color: "var(--text-dim)",
+            }}
+          >
+            <span className="floaty">🗂️</span>
+            <span style={{ fontSize: 13, fontWeight: 700, textAlign: "center", padding: "0 10px" }}>{category}</span>
+          </div>
+        )}
         <div
           style={{
             position: "absolute",
@@ -1277,19 +1391,6 @@ function CategoryTile({
         >
           {count}
         </div>
-      </div>
-      <div
-        style={{
-          padding: "8px 10px",
-          fontSize: 14.5,
-          fontWeight: 700,
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          borderTop: "1px solid var(--border-strong)",
-        }}
-      >
-        🗂️ {category}
       </div>
     </div>
   );
@@ -1778,28 +1879,44 @@ function ProductTile({
 // compares an unmatched, possibly mistitled listing's photos against (see
 // vision.ts's referenceProducts), so a bigger, more curated library here
 // directly means fewer missed/misidentified listings going forward.
-function ProductImageGallery({ productId, productName }: { productId: string; productName: string }) {
-  const [images, setImages] = useState<ProductImage[]>([]);
+//
+// Per explicit instruction — "clean up the way Library pages look... make
+// sure that everything fits on one page": this used to be its own
+// always-expanded grid section further down the page (ProductImageGallery).
+// Pulled into a shared hook instead, so the SAME live list backs both the
+// new auto-cycling carousel thumbnail in the header (ReferencePhotoCarousel
+// below) and the "click to see more" full grid (ReferencePhotosModal below)
+// — adding/deleting in the modal shows up in the carousel immediately,
+// rather than each owning its own separate, possibly-stale copy.
+// refreshKey: pass the product's updatedAt so photos that land in the
+// background (stock photos found right after research finishes) show up
+// without having to close and reopen the page.
+function useProductImages(productId: string, refreshKey?: number) {
+  const [allImages, setAllImages] = useState<ProductImage[]>([]);
   const [adding, setAdding] = useState(false);
-  const [settingThumbnailId, setSettingThumbnailId] = useState<string | null>(null);
-  // Per explicit instruction — every photo in the app is clickable to zoom
-  // in, except Library's tile grid and Feed's listing cards; the zoomed
-  // view is also where the "ask about this image"/feedback panel lives.
-  const lightbox = useLightbox();
+
+  // Condition-awareness — the carousel/modal below are the "what does this
+  // normally look like" gallery; a poor-condition/damaged reference photo
+  // (see webResearch.ts's findPoorConditionProductImage) would be
+  // misleading mixed in there (the auto-cycling header thumbnail showing a
+  // beat-up unit as if it were representative), so it's split out here
+  // rather than filtered ad hoc at every consumer.
+  const images = useMemo(() => allImages.filter((img) => img.kind === "normal"), [allImages]);
+  const poorConditionImages = useMemo(() => allImages.filter((img) => img.kind === "poor_condition"), [allImages]);
 
   const refresh = React.useCallback(() => {
-    api.listProductImages(productId).then(setImages);
+    api.listProductImages(productId).then(setAllImages);
   }, [productId]);
 
   useEffect(() => {
     refresh();
-  }, [refresh]);
+  }, [refresh, refreshKey]);
 
   async function add() {
     setAdding(true);
     try {
       const added = await api.addProductImage(productId);
-      if (added) setImages((prev) => [added, ...prev]);
+      if (added) setAllImages((prev) => [added, ...prev]);
     } finally {
       setAdding(false);
     }
@@ -1807,28 +1924,153 @@ function ProductImageGallery({ productId, productName }: { productId: string; pr
 
   async function remove(imageId: string) {
     await api.deleteProductImage(imageId);
-    setImages((prev) => prev.filter((i) => i.id !== imageId));
+    setAllImages((prev) => prev.filter((i) => i.id !== imageId));
   }
 
-  // Per explicit instruction — "give the user the option to use the images
-  // from the reference photos while changing a listing's thumbnail." The
-  // product's own imageUrl updates via the products:updated broadcast this
-  // triggers (see index.ts), picked up by Database.tsx's own listener —
-  // nothing to do here beyond firing the request and showing a busy state.
-  async function useAsThumbnail(img: ProductImage) {
-    setSettingThumbnailId(img.id);
-    try {
-      await api.setThumbnailFromImage(productId, img.imageData);
-    } finally {
-      setSettingThumbnailId(null);
-    }
-  }
+  return { images, poorConditionImages, adding, add, remove, refresh };
+}
+
+// Per explicit instruction — "the thumbnail in the top left should cycle
+// through all the reference photos automatically with a 1s fade transition
+// between each image. When a user hovers their cursor over the thumbnail,
+// have it so it prompts the user with 'Click to see more images'." Falls
+// back to the product's own imageUrl (or the placeholder) when there are no
+// reference photos yet to cycle through, same as the old static thumbnail
+// did. The fade is a plain opacity dip-and-recover around the swap (0.5s
+// out, swap src, 0.5s back in) rather than a true two-layer crossfade —
+// simpler to keep correct, and still reads as "a 1s fade transition between
+// each image" per what was asked.
+function ReferencePhotoCarousel({
+  images,
+  fallbackImageUrl,
+  onClick,
+  size = 140,
+}: {
+  images: ProductImage[];
+  fallbackImageUrl: string | null;
+  onClick: () => void;
+  size?: number;
+}) {
+  const [index, setIndex] = useState(0);
+  const [visible, setVisible] = useState(true);
+  const [hovering, setHovering] = useState(false);
+
+  // Reset to the first photo whenever the underlying list changes identity
+  // (a different product's page, or this product's own list just refreshed)
+  // so a stale index never points past the end.
+  useEffect(() => {
+    setIndex(0);
+    setVisible(true);
+  }, [images]);
+
+  useEffect(() => {
+    if (images.length < 2) return;
+    const FADE_MS = 500;
+    const HOLD_MS = 3000;
+    let fadeTimeout: ReturnType<typeof setTimeout>;
+    const holdInterval = setInterval(() => {
+      setVisible(false);
+      fadeTimeout = setTimeout(() => {
+        setIndex((i) => (i + 1) % images.length);
+        setVisible(true);
+      }, FADE_MS);
+    }, HOLD_MS + FADE_MS);
+    return () => {
+      clearInterval(holdInterval);
+      clearTimeout(fadeTimeout);
+    };
+  }, [images]);
+
+  const src = images.length > 0 ? (images[index % images.length]?.imageData ?? null) : fallbackImageUrl;
 
   return (
-    <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <div style={{ fontWeight: 600, fontSize: 14, color: "var(--text)" }}>📸 Reference photos ({images.length})</div>
-        <button className="icon ghost" style={{ fontSize: 13 }} disabled={adding} onClick={add}>
+    <div
+      onMouseEnter={() => setHovering(true)}
+      onMouseLeave={() => setHovering(false)}
+      onClick={onClick}
+      style={{
+        position: "relative",
+        width: size,
+        height: size,
+        borderRadius: 12,
+        overflow: "hidden",
+        border: "1px solid var(--border)",
+        cursor: "pointer",
+        background: "var(--bg-elevated)",
+        flexShrink: 0,
+      }}
+    >
+      {src ? (
+        <img
+          src={src}
+          alt=""
+          style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", opacity: visible ? 1 : 0, transition: "opacity 0.5s ease" }}
+          onError={(e) => {
+            (e.currentTarget as HTMLElement).style.visibility = "hidden";
+          }}
+        />
+      ) : (
+        <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: Math.round(size * 0.26), color: "var(--text-dim)" }}>
+          <span className="floaty">📦</span>
+        </div>
+      )}
+      {hovering && images.length > 0 && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            background: "rgba(10,8,20,0.65)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            textAlign: "center",
+            fontSize: Math.max(12.5, Math.round(size * 0.075)),
+            fontWeight: 600,
+            color: "white",
+            padding: 8,
+          }}
+        >
+          Click to see more images
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The full reference-photo library, opened from clicking the carousel above
+// — same add/delete/zoom-to-lightbox functionality the old always-visible
+// grid had, just reached with a click instead of permanently taking up page
+// space. Per explicit instruction — "remove the stars": the old ⭐
+// "use as this product's thumbnail" button (and its api.setThumbnailFromImage
+// call) is gone; everything else here works exactly as before.
+function ReferencePhotosModal({
+  productId,
+  productName,
+  images,
+  adding,
+  onAdd,
+  onRemove,
+  onRefresh,
+  onClose,
+}: {
+  productId: string;
+  productName: string;
+  images: ProductImage[];
+  adding: boolean;
+  onAdd: () => void;
+  onRemove: (imageId: string) => void;
+  onRefresh: () => void;
+  onClose: () => void;
+}) {
+  // Per explicit instruction — every photo in the app is clickable to zoom
+  // in, except Library's tile grid and Feed's listing cards; the zoomed
+  // view is also where the "ask about this image"/feedback panel lives.
+  const lightbox = useLightbox();
+
+  return (
+    <Modal title={`📸 Reference photos (${images.length})`} onClose={onClose}>
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <button className="icon ghost" style={{ fontSize: 13 }} disabled={adding} onClick={onAdd}>
           {adding ? "Adding..." : "+ Add photo"}
         </button>
       </div>
@@ -1850,38 +2092,15 @@ function ProductImageGallery({ productId, productName }: { productId: string; pr
                     imageId: img.id,
                     productId,
                     sourceTitle: img.sourceTitle,
-                    onFeedbackApplied: refresh,
+                    onFeedbackApplied: onRefresh,
                   })
                 }
                 style={{ width: 64, height: 64, borderRadius: 8, objectFit: "cover", border: "1px solid var(--border)", cursor: "zoom-in" }}
               />
               <button
                 className="icon"
-                title="Use as this product's thumbnail"
-                disabled={settingThumbnailId === img.id}
-                onClick={() => useAsThumbnail(img)}
-                style={{
-                  position: "absolute",
-                  bottom: -7,
-                  left: -7,
-                  width: 22,
-                  height: 22,
-                  padding: 0,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  borderRadius: "50%",
-                  background: "rgba(20,18,28,0.72)",
-                  border: "1px solid rgba(255,255,255,0.25)",
-                  fontSize: 14,
-                }}
-              >
-                ⭐
-              </button>
-              <button
-                className="icon"
                 title="Delete this reference photo"
-                onClick={() => remove(img.id)}
+                onClick={() => onRemove(img.id)}
                 style={{
                   position: "absolute",
                   top: -7,
@@ -1905,7 +2124,7 @@ function ProductImageGallery({ productId, productName }: { productId: string; pr
         </div>
       )}
       {lightbox.node}
-    </div>
+    </Modal>
   );
 }
 
@@ -1914,14 +2133,25 @@ function ProductImageGallery({ productId, productName }: { productId: string; pr
 // so research can keep going without leaving this product's page.
 function ProductDetailPage({
   product,
+  allProducts,
   onBack,
+  onSelectProduct,
   onRefresh,
   onDelete,
   onSaveEdit,
   onPickThumbnail,
 }: {
   product: ProductProfile;
+  // Per explicit instruction — the "Variants" section below needs the
+  // whole Library to find this product's own siblings (see
+  // findVariantSiblings); Database() already holds this in state for the
+  // main grid, so it's just passed down rather than re-fetched here.
+  allProducts: ProductProfile[];
   onBack: () => void;
+  // Jumps this same detail page to a different product (a clicked
+  // variant) without leaving the page — reuses Database()'s own
+  // setSelectedProductId, same navigation "Back to Database" already uses.
+  onSelectProduct: (id: string) => void;
   onRefresh: () => void;
   onDelete: () => void;
   onSaveEdit: (
@@ -1950,10 +2180,6 @@ function ProductDetailPage({
   // gated behind the Save button, since it's a plain checkbox with nothing
   // to draft.
   const [desiredPriceDraft, setDesiredPriceDraft] = useState(product.desiredPriceUsd !== null ? String(product.desiredPriceUsd) : "");
-  // Collapsed by default — this log can get long fast (every relevant
-  // listing appends to it) and was taking up a lot of page space by
-  // default before this.
-  const [notesExpanded, setNotesExpanded] = useState(false);
   // Per explicit instruction — a manual "research eBay comps again" button
   // on this page. Busy state disables the button mid-request; message
   // shows the result inline (success or failure) until the next click.
@@ -1963,6 +2189,30 @@ function ProductDetailPage({
   // clearing busy/showing the message.
   const [ebayCompsBusy, setEbayCompsBusy] = useState(false);
   const [ebayCompsMessage, setEbayCompsMessage] = useState<string | null>(null);
+  // Per explicit instruction — "avg. Facebook Marketplace price... only
+  // available after the ai has come across the same product multiple
+  // times... place this right above eBay sold comps." A live aggregation
+  // (see api.getFacebookPriceStats/store.ts's getFacebookPriceStats), not
+  // a manually-triggered one like eBay comps — re-fetched whenever this
+  // page mounts for a given product or a new listing arrives anywhere in
+  // the app (a fresh listing might be the one that just crossed the
+  // multiple-sightings threshold for THIS product), rather than needing a
+  // "Research now" click.
+  const [fbPriceStats, setFbPriceStats] = useState<{ avgPriceUsd: number; sampleSize: number } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    function refresh() {
+      api.getFacebookPriceStats(product.id).then((stats) => {
+        if (!cancelled) setFbPriceStats(stats);
+      });
+    }
+    refresh();
+    const off = api.onListingsRefresh(refresh);
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, [product.id]);
 
   async function refreshEbayComps() {
     setEbayCompsBusy(true);
@@ -2004,10 +2254,40 @@ function ProductDetailPage({
   // product it's talking about without being told every message, and gets
   // access to add_product_watch_note, which only makes sense here.
   const { chat, draft, setDraft, send, scrollRef, textareaRef } = useDatabaseChat({ showGreeting: false, context: "product", productId: product.id });
-  // Per explicit instruction — every photo in the app is clickable to zoom
-  // in, except Library's tile grid and Feed's listing cards; this page's
-  // own main thumbnail isn't the Library grid, so it gets one.
-  const lightbox = useLightbox();
+  // Per explicit instruction — "the thumbnail in the top left should cycle
+  // through all the reference photos automatically... when the user clicks
+  // the thumbnail, it'll bring up all Reference Photos": one shared list
+  // (see useProductImages' own doc comment) backs both the header's
+  // auto-cycling ReferencePhotoCarousel and the ReferencePhotosModal it
+  // opens into.
+  const photos = useProductImages(product.id, product.updatedAt);
+  // Condition-awareness — the poor-condition gallery below is small enough
+  // (usually one photo, from the single findPoorConditionProductImage
+  // search per product) that it opens straight into the same zoomed
+  // lightbox every other photo in the app uses, rather than a whole
+  // separate grid-modal component like ReferencePhotosModal.
+  const poorConditionLightbox = useLightbox();
+  const [photosModalOpen, setPhotosModalOpen] = useState(false);
+  const [showWatchFlow, setShowWatchFlow] = useState(false);
+  // Per explicit instruction — a short excerpt of the AI's own research
+  // writeup shown right under the name now ("*brief AI description*" in the
+  // layout this was redesigned from) — the full writeup itself still isn't
+  // shown/editable here (see the fuller doc comment further down), this is
+  // just enough to identify the product at a glance without opening chat.
+  const briefDescription = useMemo(() => {
+    const trimmed = product.aiSummary.trim();
+    if (!trimmed) return "";
+    const firstSentence = trimmed.split(/(?<=[.!?])\s/)[0];
+    return firstSentence.length > 160 ? `${firstSentence.slice(0, 157)}…` : firstSentence;
+  }, [product.aiSummary]);
+  // Per explicit instruction — "for variants/special editions of products,
+  // in the original Library listing, include these variants." See
+  // findVariantSiblings' own doc comment above for what actually counts as
+  // a variant (same base product, different tier — PS5 vs PS5 Pro, not PS5
+  // vs an Xbox). Recomputed from the full products list on every render
+  // (cheap — a handful of token-set comparisons), so a brand-new variant
+  // researched elsewhere shows up here the moment products:updated adds it.
+  const variants = useMemo(() => findVariantSiblings(product, allProducts), [product, allProducts]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
@@ -2020,43 +2300,18 @@ function ProductDetailPage({
           bottom, instead of two separate boxes stacked on the page. */}
       <div className="card enter" style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, padding: 0, overflow: "hidden" }}>
         <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
-          <div style={{ display: "flex", gap: 18, padding: 18, borderBottom: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", gap: 18, padding: 16, borderBottom: "1px solid var(--border)" }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
-              {product.imageUrl ? (
-                <img
-                  src={product.imageUrl}
-                  alt=""
-                  onClick={() =>
-                    lightbox.open(product.imageUrl!, { subjectName: product.name, kind: "thumbnail", productId: product.id })
-                  }
-                  style={{ width: 160, height: 160, borderRadius: 12, objectFit: "cover", border: "1px solid var(--border)", cursor: "zoom-in" }}
-                  onError={(e) => {
-                    (e.currentTarget as HTMLElement).style.visibility = "hidden";
-                  }}
-                />
-              ) : (
-                <div
-                  style={{
-                    width: 160,
-                    height: 160,
-                    borderRadius: 12,
-                    border: "1px solid var(--border)",
-                    background: "var(--bg-elevated)",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontSize: 40,
-                    color: "var(--text-dim)",
-                  }}
-                >
-                  <span className="floaty">📦</span>
-                </div>
-              )}
-              <button className="icon ghost" style={{ fontSize: 13 }} onClick={onPickThumbnail}>
+              {/* Per explicit instruction — "make the thumbnail in the top
+                  left much larger to compensate" (for the observedNotes/
+                  lookoutNotes sections removed from below, freeing up the
+                  vertical room this now uses). */}
+              <ReferencePhotoCarousel images={photos.images} fallbackImageUrl={product.imageUrl} onClick={() => setPhotosModalOpen(true)} size={400} />
+              <button className="icon ghost" style={{ fontSize: 11.5 }} onClick={onPickThumbnail}>
                 Change thumbnail
               </button>
               <label
-                style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--text-muted)" }}
+                style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "var(--text-muted)" }}
                 title="When checked, Refresh/research will never replace this photo"
               >
                 <input
@@ -2066,9 +2321,34 @@ function ProductDetailPage({
                 />
                 Keep thumbnail
               </label>
+              {photos.poorConditionImages.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                  <div style={{ fontSize: 11, color: "var(--text-dim)" }}>Poor-condition reference</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {photos.poorConditionImages.map((img) => (
+                      <img
+                        key={img.id}
+                        src={img.imageData}
+                        alt=""
+                        onClick={() =>
+                          poorConditionLightbox.open(img.imageData, {
+                            subjectName: product.name,
+                            kind: "reference",
+                            imageId: img.id,
+                            productId: product.id,
+                            sourceTitle: img.sourceTitle,
+                            onFeedbackApplied: photos.refresh,
+                          })
+                        }
+                        style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover", border: "1px solid var(--warn)", cursor: "zoom-in" }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
                 {editing ? (
                   <input
@@ -2091,6 +2371,22 @@ function ProductDetailPage({
                     </>
                   ) : (
                     <>
+                      {/* Per explicit instruction — "on individual Database
+                          product pages, add a 👁 Watch action. Clicking it
+                          should open/create a Watch already linked to that
+                          product. Prefill relevant information where
+                          appropriate... but do NOT silently impose
+                          conditions the user didn't choose." Identity is
+                          already certain (this exact product), so
+                          WatchFormFlow skips straight to its conditions
+                          step — only maxPriceUsd is prefilled, from this
+                          product's own "what YOU consider worth paying"
+                          field, which is exactly what that field is for;
+                          profit/discount/age/location stay blank until the
+                          user actually sets them. */}
+                      <button className="icon" onClick={() => setShowWatchFlow(true)}>
+                        👁 Watch
+                      </button>
                       <button className="icon" disabled={product.loading} onClick={onRefresh}>
                         {product.loading ? "Researching..." : "Refresh"}
                       </button>
@@ -2105,6 +2401,24 @@ function ProductDetailPage({
                 </div>
               </div>
 
+              {/* Per explicit instruction — a "brief AI description" under
+                  the name (the new compact layout's own header). The AI's
+                  own FULL research writeup (aiSummary) still isn't shown or
+                  editable in its entirety here — this is only its first
+                  sentence, just enough to identify the product at a glance.
+                  observedNotes/lookoutNotes (the "Learned from real listings"/
+                  "Watching for" sections that used to render right below
+                  this) are deliberately no longer shown at all now — per
+                  explicit instruction, "these are for the ai only for its
+                  own learning purposes." The underlying fields are untouched
+                  (still written by the scanner, still fed into future
+                  scoring prompts — see store.ts's appendProductWatchNote and
+                  chat.ts's buildProductSystemPrompt) — only this page's
+                  display of them was removed. */}
+              {briefDescription && !product.loading && (
+                <div style={{ fontSize: 13, color: "var(--text-muted)", lineHeight: 1.4 }}>{briefDescription}</div>
+              )}
+
               {product.loading ? (
                 <div className="pill" style={{ alignSelf: "flex-start", display: "flex", alignItems: "center", gap: 6 }}>
                   <span className="typing-dots">
@@ -2114,56 +2428,163 @@ function ProductDetailPage({
                   </span>
                   researching product...
                 </div>
-              ) : (
-                <>
-                  {/* Per explicit instruction — the AI's own big research
-                      writeup (aiSummary) is no longer shown or editable
-                      here at all: it's the AI's own working knowledge about
-                      the product (identification details, common
-                      scams/problems, etc.), not something that belongs in
-                      the user's own view of their Database. What stays
-                      below is real, deal-relevant signal instead — actual
-                      observations from listings the scanner has seen. */}
-                  {product.observedNotes && (
-                    <div className="card enter-fade" style={{ padding: 10, background: "var(--bg-elevated)", fontSize: 14 }}>
-                      <button
-                        className="icon ghost"
-                        onClick={() => setNotesExpanded((v) => !v)}
-                        style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600, color: "var(--text)", padding: 0 }}
-                      >
-                        <span style={{ transform: notesExpanded ? "rotate(90deg)" : "none", transition: "transform 0.15s ease", display: "inline-block" }}>
-                          ▸
-                        </span>
-                        👁 Learned from real listings while scanning
-                      </button>
-                      {notesExpanded && (
-                        <div style={{ color: "var(--text-muted)", whiteSpace: "pre-wrap", lineHeight: 1.5, marginTop: 8 }}>
-                          {product.observedNotes.split("\n---\n").join("\n")}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {product.lookoutNotes && (
-                    <div className="card enter-fade" style={{ padding: 10, background: "var(--bg-elevated)", fontSize: 14 }}>
-                      <div style={{ fontWeight: 600, marginBottom: 4, color: "var(--text)" }}>🔎 Watching for, in real listings</div>
-                      <div style={{ color: "var(--text-muted)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
-                        {product.lookoutNotes.split("\n---\n").join("\n")}
-                      </div>
-                    </div>
-                  )}
-                  {!product.observedNotes && !product.lookoutNotes && (
-                    <div style={{ fontSize: 14, color: "var(--text-dim)" }}>Nothing to show yet.</div>
-                  )}
-                </>
-              )}
+              ) : null}
             </div>
           </div>
 
-          <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>
-            <div style={{ fontWeight: 600, fontSize: 14, color: "var(--text)", marginBottom: 8 }}>💰 Desired price to pay</div>
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
-              <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 14, color: "var(--text-muted)" }}>
-                Desired price to pay ($)
+          {variants.length > 0 && (
+            <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>
+              <div style={{ fontWeight: 600, fontSize: 14, color: "var(--text)", marginBottom: 8 }}>
+                🧩 Variants ({variants.length})
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                {variants.map((v) => (
+                  <button
+                    key={v.id}
+                    className="card"
+                    onClick={() => onSelectProduct(v.id)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      padding: 8,
+                      width: 220,
+                      textAlign: "left",
+                      cursor: "pointer",
+                      background: "var(--bg-elevated)",
+                    }}
+                  >
+                    <div style={{ width: 48, height: 48, borderRadius: 8, overflow: "hidden", flexShrink: 0, background: "var(--bg)" }}>
+                      {v.imageUrl ? (
+                        <img src={v.imageUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                      ) : (
+                        <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>
+                          📦
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div
+                        style={{
+                          fontSize: 13.5,
+                          fontWeight: 700,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {v.name}
+                      </div>
+                      <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                        {v.ebayAvgSoldPriceUsd !== null ? (
+                          <>
+                            ${v.ebayAvgSoldPriceUsd.toFixed(0)}
+                            {v.ebayAvgRunTimeDays !== null &&
+                              ` · ${v.ebayAvgRunTimeDays < 1 ? `${(v.ebayAvgRunTimeDays * 24).toFixed(1)}h` : `${v.ebayAvgRunTimeDays.toFixed(1)}d`}`}
+                          </>
+                        ) : (
+                          "No comps yet"
+                        )}
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <p style={{ fontSize: 12, color: "var(--text-dim)", margin: "8px 0 0" }}>
+                Click a variant to see its own avg. sale price, sell speed, and reference photos.
+              </p>
+            </div>
+          )}
+
+          {fbPriceStats && (
+            <div style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)" }}>
+              <div style={{ fontSize: 14, color: "var(--text)" }}>
+                🛒 Avg. Facebook Marketplace Price:{" "}
+                <strong>${fbPriceStats.avgPriceUsd.toFixed(0)}</strong>
+                <span style={{ color: "var(--text-dim)" }}>
+                  {" "}
+                  • Based on {fbPriceStats.sampleSize} real listing{fbPriceStats.sampleSize === 1 ? "" : "s"}
+                </span>
+              </div>
+            </div>
+          )}
+
+          <div style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+              <div style={{ fontSize: 14, color: "var(--text)" }}>
+                {product.ebayCompsCheckedAt !== null && product.ebayAvgSoldPriceUsd !== null && product.ebayCompsSampleSize ? (
+                  <>
+                    📊 Avg. eBay Sales Price: <strong>${product.ebayAvgSoldPriceUsd.toFixed(0)}</strong>
+                    {product.ebayAvgShippingUsd !== null && (
+                      <span style={{ color: "var(--text-dim)" }}>
+                        {" "}
+                        {product.ebayAvgShippingUsd === 0 ? "+ free shipping" : `+ $${product.ebayAvgShippingUsd.toFixed(2)} shipping`}
+                      </span>
+                    )}
+                    <span style={{ color: "var(--text-dim)" }}>
+                      {" "}
+                      • Based on {product.ebayCompsSampleSize} sold comp{product.ebayCompsSampleSize === 1 ? "" : "s"}
+                      {product.ebayAvgRunTimeDays !== null &&
+                        ` • sells in ${product.ebayAvgRunTimeDays < 1 ? `${(product.ebayAvgRunTimeDays * 24).toFixed(1)}h` : `${product.ebayAvgRunTimeDays.toFixed(1)}d`}`}
+                    </span>
+                  </>
+                ) : (
+                  <span style={{ fontWeight: 600 }}>📊 eBay sold comps (watchcount.com)</span>
+                )}
+              </div>
+              <button className="icon" style={{ fontSize: 12.5 }} disabled={ebayCompsBusy} onClick={refreshEbayComps}>
+                {ebayCompsBusy ? "Researching…" : product.ebayCompsCheckedAt !== null ? "Research again" : "Research now"}
+              </button>
+            </div>
+            <p style={{ fontSize: 11, color: "var(--text-dim)", margin: "3px 0 0" }}>
+              *This data is collected from Watchcount.com
+              {product.ebayCompsCheckedAt !== null &&
+                ` — checked ${new Date(product.ebayCompsCheckedAt).toLocaleDateString()}, recomputed automatically whenever research runs again`}
+            </p>
+            {ebayCompsMessage && <p style={{ fontSize: 12.5, color: "var(--text-muted)", margin: "6px 0 0" }}>{ebayCompsMessage}</p>}
+            {product.ebayCompsCheckedAt === null
+              ? !ebayCompsMessage && (
+                  <p style={{ fontSize: 12.5, color: "var(--text-dim)", margin: "4px 0 0" }}>
+                    Not checked yet — click "Research now" to search WatchCount.com for this product's sold eBay comps.
+                  </p>
+                )
+              : (product.ebayAvgSoldPriceUsd === null || !product.ebayCompsSampleSize) && (
+                  <p style={{ fontSize: 12.5, color: "var(--text-dim)", margin: "4px 0 0" }}>
+                    Checked eBay's sold listings but didn't find any comps confidently matching this exact product (special
+                    editions/different bundles get filtered out, not counted).
+                  </p>
+                )}
+            {/* Per explicit instruction — "sells fairly quickly (<7 days
+                ideally), that's a great sign." Deliberately just this one
+                factual signal (not also comparing against a specific
+                Facebook listing's price, which this general product page
+                has no single one of) — the fuller "underpriced AND sells
+                fast" call already happens per-listing via the app's normal
+                deal scoring. */}
+            {product.ebayAvgRunTimeDays !== null && product.ebayAvgRunTimeDays < 7 && (
+              <div
+                style={{
+                  marginTop: 8,
+                  padding: "6px 10px",
+                  borderRadius: 8,
+                  background: "var(--success-bg)",
+                  color: "var(--success)",
+                  fontSize: 12.5,
+                  fontWeight: 600,
+                }}
+              >
+                🔥 Sells in under a week on eBay — good resale velocity for this one.
+              </div>
+            )}
+          </div>
+
+          {/* Per explicit instruction — reordered to match the redesigned
+              layout: price limit now comes AFTER the two comp/price
+              sections above, right before the chat, instead of before them. */}
+          <div style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)" }}>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, color: "var(--text-muted)" }}>
+                💰 Set price limit ($)
                 <input
                   type="number"
                   min="0"
@@ -2171,130 +2592,37 @@ function ProductDetailPage({
                   placeholder="e.g. 150"
                   value={desiredPriceDraft}
                   onChange={(e) => setDesiredPriceDraft(e.target.value)}
-                  style={{ width: 130 }}
+                  style={{ width: 110 }}
                 />
               </label>
               <button className="icon" onClick={saveResaleInfo}>
                 Save
               </button>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  fontSize: 12.5,
+                  color: product.desiredPriceUsd === null ? "var(--text-dim)" : "var(--text)",
+                  cursor: product.desiredPriceUsd === null ? "not-allowed" : "pointer",
+                }}
+                title="Skip any listing recognized as this product priced any higher, no matter how good the discount looks"
+              >
+                <input
+                  type="checkbox"
+                  checked={product.hardCapAtDesiredPrice}
+                  disabled={product.desiredPriceUsd === null}
+                  onChange={(e) => toggleHardCap(e.target.checked)}
+                />
+                Hard cap
+              </label>
             </div>
-            <p style={{ fontSize: 13, color: "var(--text-dim)", margin: "8px 0 0" }}>
-              What YOU consider worth paying for this specific product — trains the AI toward it, and (with the hard
-              cap below) can enforce it directly. The average sale price and typical time to sell now come from real
-              eBay comps automatically (see below), not a manual entry.
+            <p style={{ fontSize: 11.5, color: "var(--text-dim)", margin: "4px 0 0" }}>
+              What YOU consider worth paying for this specific product — trains the AI toward it, and (with Hard cap)
+              can enforce it directly.
             </p>
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                fontSize: 14.5,
-                marginTop: 10,
-                color: product.desiredPriceUsd === null ? "var(--text-dim)" : "var(--text)",
-                cursor: product.desiredPriceUsd === null ? "not-allowed" : "pointer",
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={product.hardCapAtDesiredPrice}
-                disabled={product.desiredPriceUsd === null}
-                onChange={(e) => toggleHardCap(e.target.checked)}
-              />
-              Hard cap at desired price — skip any listing recognized as this product priced any higher, no matter how good the discount looks
-            </label>
-            {product.desiredPriceUsd === null && (
-              <p style={{ fontSize: 13, color: "var(--text-dim)", margin: "4px 0 0" }}>Set and save a desired price above to enable this.</p>
-            )}
           </div>
-
-          <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
-              <div style={{ fontWeight: 600, fontSize: 14, color: "var(--text)" }}>📊 eBay sold comps (watchcount.com)</div>
-              <button className="icon" disabled={ebayCompsBusy} onClick={refreshEbayComps}>
-                {ebayCompsBusy ? "Researching…" : product.ebayCompsCheckedAt !== null ? "Research again" : "Research now"}
-              </button>
-            </div>
-            {ebayCompsMessage && (
-              <p style={{ fontSize: 13.5, color: "var(--text-muted)", margin: "0 0 10px" }}>{ebayCompsMessage}</p>
-            )}
-            {product.ebayCompsCheckedAt === null ? (
-              !ebayCompsMessage && (
-                <p style={{ fontSize: 14, color: "var(--text-dim)", margin: 0 }}>
-                  Not checked yet — click "Research now" to search WatchCount.com for this product's sold eBay comps.
-                </p>
-              )
-            ) : (
-              <>
-              {product.ebayAvgSoldPriceUsd === null || !product.ebayCompsSampleSize ? (
-                <p style={{ fontSize: 14, color: "var(--text-dim)", margin: 0 }}>
-                  Checked eBay's sold listings but didn't find any comps confidently matching this exact product (special
-                  editions/different bundles get filtered out, not counted).
-                </p>
-              ) : (
-                <>
-                  <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-                    <div>
-                      <div style={{ fontSize: 13, color: "var(--text-muted)" }}>Avg. sold price</div>
-                      <div style={{ fontSize: 21, fontWeight: 700 }}>
-                        ${product.ebayAvgSoldPriceUsd.toFixed(0)}
-                        {product.ebayAvgShippingUsd !== null && (
-                          <span style={{ fontSize: 14, fontWeight: 500, color: "var(--text-muted)" }}>
-                            {" "}
-                            {product.ebayAvgShippingUsd === 0 ? "+ free shipping" : `+ $${product.ebayAvgShippingUsd.toFixed(2)} shipping`}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    {product.ebayAvgRunTimeDays !== null && (
-                      <div>
-                        <div style={{ fontSize: 13, color: "var(--text-muted)" }}>Avg. time to sell</div>
-                        <div style={{ fontSize: 21, fontWeight: 700 }}>
-                          {product.ebayAvgRunTimeDays < 1
-                            ? `${(product.ebayAvgRunTimeDays * 24).toFixed(1)}h`
-                            : `${product.ebayAvgRunTimeDays.toFixed(1)}d`}
-                        </div>
-                      </div>
-                    )}
-                    <div>
-                      <div style={{ fontSize: 13, color: "var(--text-muted)" }}>Based on</div>
-                      <div style={{ fontSize: 21, fontWeight: 700 }}>
-                        {product.ebayCompsSampleSize} comp{product.ebayCompsSampleSize === 1 ? "" : "s"}
-                      </div>
-                    </div>
-                  </div>
-                  {/* Per explicit instruction — "sells fairly quickly (<7 days
-                      ideally), that's a great sign." Deliberately just this one
-                      factual signal (not also comparing against a specific
-                      Facebook listing's price, which this general product page
-                      has no single one of) — the fuller "underpriced AND sells
-                      fast" call already happens per-listing via the app's
-                      normal deal scoring. */}
-                  {product.ebayAvgRunTimeDays !== null && product.ebayAvgRunTimeDays < 7 && (
-                    <div
-                      style={{
-                        marginTop: 10,
-                        padding: "8px 10px",
-                        borderRadius: 8,
-                        background: "var(--success-bg)",
-                        color: "var(--success)",
-                        fontSize: 14,
-                        fontWeight: 600,
-                      }}
-                    >
-                      🔥 Sells in under a week on eBay — good resale velocity for this one.
-                    </div>
-                  )}
-                </>
-              )}
-              <p style={{ fontSize: 13, color: "var(--text-dim)", margin: "8px 0 0" }}>
-                Checked {new Date(product.ebayCompsCheckedAt).toLocaleDateString()} — recomputed automatically whenever this
-                product's research runs again.
-              </p>
-              </>
-            )}
-          </div>
-
-          <ProductImageGallery productId={product.id} productName={product.name} />
 
           {chat.map((entry) => (
             <ChatRow key={entry.id} entry={entry} />
@@ -2309,7 +2637,30 @@ function ProductDetailPage({
           placeholder={`e.g. 'be on the lookout for games' or 'refresh the research on this'`}
         />
       </div>
-      {lightbox.node}
+      {photosModalOpen && (
+        <ReferencePhotosModal
+          productId={product.id}
+          productName={product.name}
+          images={photos.images}
+          adding={photos.adding}
+          onAdd={photos.add}
+          onRemove={photos.remove}
+          onRefresh={photos.refresh}
+          onClose={() => setPhotosModalOpen(false)}
+        />
+      )}
+      {showWatchFlow && (
+        <WatchFormFlow
+          initial={{
+            searchPhrase: product.name,
+            linkedProductId: product.id,
+            linkedProductName: product.name,
+            maxPriceUsd: product.desiredPriceUsd,
+          }}
+          onClose={() => setShowWatchFlow(false)}
+          onSaved={() => setShowWatchFlow(false)}
+        />
+      )}
     </div>
   );
 }
@@ -2424,6 +2775,71 @@ function ChatComposer({
         Send
       </button>
     </form>
+  );
+}
+
+function useResearchStatus(): ActiveProductResearch[] {
+  const [active, setActive] = useState<ActiveProductResearch[]>([]);
+  useEffect(() => {
+    api.getResearchStatus().then(setActive);
+    const off = api.onResearchStatus(setActive);
+    return () => {
+      off();
+    };
+  }, []);
+  return active;
+}
+
+// Per explicit instruction — the Research tab should show what the AI is
+// CURRENTLY researching, live, and "relay its emotional feedback instead
+// of its hyper-analysis": the full aiSummary write-up still lands on the
+// product's own Library page once research finishes, same as always — this
+// is the same short, human, first-person reaction Dashboard's Live panel
+// already shows for photo analysis (see vision.ts's expertTake), just
+// applied here to product research instead. A whole panel of bubbles
+// rather than a single one, since research_product genuinely runs for
+// several products at once — a user-requested lookup racing an
+// auto-discovered sibling, or a handful of siblings discovered together
+// (see index.ts's activeResearch/discoverAndCreateSiblingProducts) —
+// rather than assuming there's only ever one thing to show. Renders
+// nothing at all once nothing's actively being researched.
+function ResearchStatusPanel() {
+  const active = useResearchStatus();
+  if (!active.length) return null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {active.map((entry) => (
+        <div key={entry.id} className="card enter" style={{ padding: "24px 28px", display: "flex", flexDirection: "column", gap: 10 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: 13,
+              fontWeight: 700,
+              textTransform: "uppercase",
+              letterSpacing: 0.5,
+              color: "var(--text-dim)",
+            }}
+          >
+            <span className="spinner-gear">⚙️</span>
+            Researching {entry.name}
+          </div>
+          <div style={{ fontSize: 20, lineHeight: 1.55, color: "var(--text)" }}>
+            {entry.reaction ?? (
+              <>
+                Digging in
+                <span className="typing-dots" style={{ marginLeft: 4 }}>
+                  <span />
+                  <span />
+                  <span />
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 

@@ -1,0 +1,12 @@
+-- Phase 9 — subscriptions/entitlements FOUNDATION. Adds a `plan` column to
+-- users so a centralized entitlements service (cloud/src/entitlements/) can
+-- compute per-plan limits from one place instead of scattering
+-- `if (user.plan === "pro")` checks throughout the app later.
+--
+-- Deliberately narrow: no payment processing exists yet, so there is
+-- nothing to populate a separate subscriptions table with — every user
+-- simply defaults to 'free' until a future billing integration sets
+-- otherwise (via a future migration/route, not this one). Nothing in the
+-- app enforces plan limits yet; see cloud/src/entitlements/plans.ts and
+-- GET /me/entitlements in cloud/src/entitlements/routes.ts.
+ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'free';

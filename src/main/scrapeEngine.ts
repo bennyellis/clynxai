@@ -1,10 +1,11 @@
 import { powerSaveBlocker } from "electron";
 import type { BrowserContext, Page } from "playwright";
 import { openPersistentContext, isLoggedIn, politeDelay } from "./browser.js";
-import { browseListings, searchMarketplace, fetchListingDetail, diagnoseEmptyPage, verifyOrSetRadius } from "./scraper.js";
+import { browseListings, searchMarketplace, fetchListingDetail, diagnoseEmptyPage, verifyOrSetRadius, readCurrentLocationLabel } from "./scraper.js";
 import {
   scoreListing,
   getSearchTerms,
+  getSearchQuery,
   isRelevantToSearchItems,
   matchSearchItem,
   findGreenFlagCandidate,
@@ -12,18 +13,20 @@ import {
   detectConditionImpact,
 } from "./scorer.js";
 import { evaluateSellerRisk } from "./sellerRisk.js";
-import { sendDealAlert } from "./notify.js";
-import { analyzeListingPhotos, classifyThumbnailImage, type PhotoAnalysisResult } from "./vision.js";
+import { sendDealAlert, sendWatchMatchAlert } from "./notify.js";
+import { watchAsSearchItem, passesWatchPriceGate, deriveWatchReferencePrice, evaluateWatchConditions } from "./watchMatching.js";
+import { analyzeListingPhotos, classifyThumbnailImage, matchesReferenceProduct, type PhotoAnalysisResult } from "./vision.js";
 import { downloadImageAsDataUri } from "./webResearch.js";
-import { discoverLocations as discoverLocationsViaBrowser, type LocationDiscoveryResult } from "./locationDiscovery.js";
+import { discoverLocation, discoverLocations as discoverLocationsViaBrowser, type LocationDiscoveryResult } from "./locationDiscovery.js";
 import { searchSoldComps, type EbayComp } from "./watchcount.js";
 import { listingStateMatches } from "./usStates.js";
 import { Store } from "./store.js";
+import { timed, timedSync, recordEvent, recordStage, setGauge } from "./metrics.js";
 import type {
   BlacklistedImage,
   BlacklistTerm,
-  Config,
   DealTier,
+  EngineConfig,
   ExtractionResult,
   ListingDetail,
   ListingPreview,
@@ -31,8 +34,11 @@ import type {
   ListingSummary,
   LogLine,
   ProductProfile,
+  ScoredListing,
   ScrapeStatus,
   SearchItem,
+  SellerRiskResult,
+  Watch,
 } from "./types.js";
 import type { NarrationContext } from "./chat.js";
 
@@ -134,54 +140,11 @@ export function isLikelyUnshippable(title: string): boolean {
   return findUnshippableMatch(title) !== null;
 }
 
-// Best-effort parse of Facebook's relative "Listed X ago" phrasing (see
-// scraper.ts's extractListingAge) into an approximate age in hours.
-// Deliberately rough — "3 weeks ago" doesn't carry more precision than
-// that anyway — and returns null for anything not recognized rather than
-// guessing, since isListingTooOld treats "can't tell" as "don't skip":
-// silently discarding a listing just because its exact phrasing wasn't
-// recognized would be worse than occasionally evaluating a stale one.
-export function estimateListingAgeHours(ageText: string): number | null {
-  const text = ageText.trim().toLowerCase();
-  if (/^just now$/.test(text)) return 0;
-  if (/^today$/.test(text)) return 1;
-  if (/^yesterday$/.test(text)) return 30; // "not today" — treated as past the 24h window
-  const match = text.match(/^(\d+)\s*(minute|min|hour|hr|day|week|month|year)s?\b/);
-  if (!match) return null;
-  const n = parseInt(match[1], 10);
-  const hoursPerUnit: Record<string, number> = {
-    minute: 1 / 60,
-    min: 1 / 60,
-    hour: 1,
-    hr: 1,
-    day: 24,
-    week: 24 * 7,
-    month: 24 * 30,
-    year: 24 * 365,
-  };
-  return n * hoursPerUnit[match[2]];
-}
-
-// This is a fast-moving mail-order reselling operation by default — a
-// listing that's been sitting for days is far less likely to still be
-// available or worth the time, so anything confidently older than maxHours
-// gets skipped before it ever reaches seller-risk checks or an AI call.
-// Only skips when the age was actually parsed; an unrecognized/missing age
-// string never skips (see estimateListingAgeHours). Per explicit
-// instruction, this is now the user's own Config choice (maxListingAgeHours
-// — this is what actually GUARANTEES the configured window regardless of
-// whether Facebook's own "Date listed" filter click succeeded, see
-// scraper.ts's applyDateListedFilter) rather than a fixed 24h assumption;
-// null means no cap at all — every listing counts as fresh enough.
-export function isListingTooOld(ageText: string | null, maxHours: number | null = 24): boolean {
-  if (!ageText || maxHours === null) return false;
-  const hours = estimateListingAgeHours(ageText);
-  // >= not > : Facebook's "1 day ago" phrasing covers anywhere up to ~47h
-  // (it rounds down to whole days), so treating exactly-maxHours as still
-  // fresh would let some genuinely stale listings through right at the
-  // boundary that matters most.
-  return hours !== null && hours >= maxHours;
-}
+// Moved to listingAge.ts (pure, no Playwright/Electron deps — needed by
+// ebayEngine.ts too) — re-exported here so every existing import site in
+// this file (and elsewhere) keeps working unchanged.
+export { estimateListingAgeHours, isListingTooOld } from "./listingAge.js";
+import { estimateListingAgeHours, isListingTooOld } from "./listingAge.js";
 
 // Best-effort human-readable label for a browseUrl, so location-rotation
 // messages say "Phoenix, AZ" instead of a bare index number or an opaque
@@ -252,12 +215,13 @@ export function describeLocationUrl(url: string): string {
   }
 }
 
-// Fisher-Yates — a fresh random permutation of [0..n) every call. Used to
-// randomize which order locations get visited in each cycle, instead of
-// the same fixed 0,1,2,...,n-1 sequence every time: a long, exhaustive
-// list of URLs hit in the exact same order forever is itself a
-// recognizable automation pattern, and it also means an interrupted cycle
-// always favors the same early locations over ones later in the list.
+// Fisher-Yates — a fresh random permutation of [0..n) every call. Used so
+// a cycle's random-city rotation visits every location exactly once, in a
+// freshly randomized order each cycle, rather than either the same fixed
+// sequence every time OR independent random draws that can redraw the same
+// city more than once in a row (verified live: "it kept rebounding to
+// Richmond... without looking for anything" — see runCycle's own comment
+// on its visitOrder).
 function shuffledIndices(n: number): number[] {
   const arr = Array.from({ length: n }, (_, i) => i);
   for (let i = arr.length - 1; i > 0; i--) {
@@ -276,7 +240,14 @@ function toPreview(listing: ListingSummary): ListingPreview {
 
 export interface ScrapeEngineOptions {
   profileDir: string;
-  getConfig: () => Config;
+  // Per explicit instruction — multiple Facebook accounts: this engine
+  // instance belongs to exactly ONE account, so what it reads is that
+  // account's own location fields merged onto the shared Config (see
+  // types.ts's EngineConfig and index.ts's createEngineForAccount) —
+  // everything below this line reads exactly like it always has, just
+  // sourced from a synthesized object instead of the single global Config
+  // a one-account setup used to have.
+  getConfig: () => EngineConfig;
   store: Store;
   onLog: (line: LogLine) => void;
   onListing: (record: ListingRecord) => void;
@@ -288,6 +259,17 @@ export interface ScrapeEngineOptions {
   // research_product tool, or the Feed's Research button), so this only
   // ever fires for something the user already asked to track.
   onProductUpdated: (product: ProductProfile) => void;
+  // Per explicit instruction, live: "finding these sorts of tiny little
+  // differences [colors, D-pad shape across generations] can make all the
+  // difference" — fired whenever a real, confirmed listing photo gets
+  // added to an EXISTING product's Reference Photos gallery here (see
+  // evaluateListing below), so index.ts can run a fresh cross-photo
+  // comparison (vision.ts's analyzeReferencePhotoDifferences) — a newly
+  // added photo could be exactly the one that reveals a difference the
+  // rest of the gallery didn't show. Optional since index.ts is the only
+  // caller with the store access + fire-and-forget dedup this needs;
+  // scrapeEngine.ts itself doesn't hold either.
+  onReferencePhotoAdded?: (productId: string) => void;
   // Fired for a live AI one-liner — a reaction to a deal, or a recap after
   // finishing a batch. Best-effort: narration failures are swallowed by
   // the caller so an OpenAI hiccup never breaks scraping.
@@ -317,6 +299,15 @@ export interface ScrapeEngineOptions {
   // research is never allowed to overwrite; null means no listing photo was
   // available, so the normal generic web-image search is the only source.
   onNewProductFound: (name: string, imageDataUri: string | null, sourceListingTitle: string) => void;
+  // Per explicit instruction — Watch's own persistent-monitoring alert,
+  // fired once store.recordWatchMatch has actually written a NEW row (its
+  // own UNIQUE(watch_id, listing_id) + INSERT OR IGNORE already guarantees
+  // this never double-fires for the same watch+listing pair — see
+  // evaluateListing/runPostScoringPipeline below for the two points a
+  // match can be recorded from). Optional for the same reason
+  // onReferencePhotoAdded is — index.ts is the only caller with the
+  // renderer-broadcast + ntfy access this needs.
+  onWatchMatch?: (watch: Watch, match: { listingId: string }) => void;
 }
 
 interface ListingEvalResult {
@@ -329,6 +320,18 @@ interface ListingEvalResult {
   estimatedValueRange: string | null;
   reasoning: string;
   notable: boolean; // worth mentioning in a batch recap even though not a deal
+  // Per explicit instruction — diagnosed live: "to maintain the original
+  // search, it has to enter a product found under that search and then go
+  // BACK to the previous page where the original searched term and filters
+  // are stored." True only once evaluateListing has actually navigated the
+  // shared page to the listing's own detail URL (see fetchListingDetail's
+  // call site below) — every earlier instant-skip (price, blacklist,
+  // shippability, ...) never touches the page at all, so going back after
+  // one of those would wrongly navigate past the search-results page
+  // instead of preserving it. The active-search loops in runCycle/
+  // searchForItemNow use this to decide whether page.goBack() is actually
+  // needed before moving to the next candidate.
+  visitedDetailPage: boolean;
 }
 
 const NOT_COUNTED: ListingEvalResult = {
@@ -341,6 +344,7 @@ const NOT_COUNTED: ListingEvalResult = {
   estimatedValueRange: null,
   reasoning: "",
   notable: false,
+  visitedDetailPage: false,
 };
 
 export class ScrapeEngine {
@@ -402,6 +406,40 @@ export class ScrapeEngine {
   markEbayCompsResearched(productId: string): void {
     this.ebayResearchedProductIds.add(productId);
   }
+  // Per explicit instruction — decouple runPhotoAnalysis from the critical
+  // scan loop: a small bounded-concurrency background queue for the
+  // vision-dependent tail of evaluateListing (see runPostScoringPipeline).
+  // evaluateListing enqueues a job and returns a PROVISIONAL result
+  // immediately instead of awaiting the vision call inline, so runCycle's
+  // loop can move on to the next listing right away; the job runs the
+  // EXACT SAME decision logic that used to run synchronously here once
+  // vision actually completes, re-saving the record so Feed/Activity pick
+  // up the final result the moment it's ready. Concurrency defaults to 1 —
+  // matching today's behavior where only one vision call was ever in
+  // flight at a time (it was awaited inline) — so this changes ONLY
+  // whether it blocks the scan loop, not how many OpenAI vision calls run
+  // at once; bump VISION_WORKER_COUNT if you want real parallelism later.
+  private visionJobs: Array<() => Promise<void>> = [];
+  private visionWorkersActive = 0;
+  private static readonly VISION_WORKER_COUNT = 1;
+
+  private enqueueVisionJob(job: () => Promise<void>): void {
+    this.visionJobs.push(job);
+    setGauge("vision_queue_depth", this.visionJobs.length);
+    this.pumpVisionQueue();
+  }
+
+  private pumpVisionQueue(): void {
+    while (this.visionWorkersActive < ScrapeEngine.VISION_WORKER_COUNT && this.visionJobs.length > 0) {
+      const next = this.visionJobs.shift()!;
+      setGauge("vision_queue_depth", this.visionJobs.length);
+      this.visionWorkersActive++;
+      next().finally(() => {
+        this.visionWorkersActive--;
+        this.pumpVisionQueue();
+      });
+    }
+  }
   private status: ScrapeStatus = {
     running: false,
     loggedIn: null,
@@ -424,6 +462,38 @@ export class ScrapeEngine {
   // searchForItemNow (a chat-triggered search between cycles) reuses as a
   // reasonable default.
   private locationIndex = 0;
+  // Per explicit instruction, diagnosed live: the image-vs-reference-photo
+  // check (see evaluateListing's greenFlagCandidate computation) was
+  // reported as "not rotating locations again" — it's a REAL vision call,
+  // and running it unbounded for every listing whose title didn't already
+  // match reintroduced exactly the "vision blocking discovery" problem the
+  // earlier queue-based decoupling of photo analysis was built to solve,
+  // just in a new spot. This caps how many of those calls one location
+  // visit will make; reset at the start of each per-visit block in
+  // runCycle. Once exhausted, a listing whose title doesn't match just
+  // falls through to the ordinary instant-skip, same as before this
+  // feature existed — the cap trades "catch every possible image match" for
+  // "never stall rotation," which is the right side of that tradeoff here.
+  private imageMatchAttemptsThisLocation = 0;
+  private static readonly MAX_IMAGE_MATCH_ATTEMPTS_PER_LOCATION = 5;
+  // Found during Phase 3 review, not part of the original spec: changeLocation
+  // (scraper.ts) only touches Facebook's own Radius dropdown when given an
+  // EXPLICIT number — undefined leaves it at whatever this account's browser
+  // session last happened to have set, from completely unrelated activity.
+  // Every other caller (resolveAccountLocationIfNeeded's city/state/country
+  // modes) always passes a real number for exactly this reason. A Watch's
+  // own searchRadiusMiles is legitimately null when the user leaves it blank
+  // (per spec, every condition but the search phrase is optional) — this is
+  // what runWatchCheck falls back to in that case, matching the existing
+  // city-mode account default, rather than inheriting arbitrary leftover state.
+  private static readonly DEFAULT_WATCH_RADIUS_MILES = 20;
+  // Per explicit redefinition of the search order — set once the scan has
+  // done its one-time per-scan setup (a plain radius check, no dedicated
+  // "starting city" anchor — a Richmond-specific version of this existed
+  // briefly and was removed per direct feedback that it was itself a
+  // source of bugs; see runCycle); reset in start()/triggerOnce() so a
+  // fresh scan always redoes it, but never set again mid-scan.
+  private scanSetupDone = false;
   // Which Search For item currently gets the dedicated active search, and
   // how many listings have been evaluated for it since the last switch —
   // both used only when config.rotateSearchItems is on (2+ Search For
@@ -682,7 +752,19 @@ export class ScrapeEngine {
   // priorityRequested + withPage() pattern as searchForItemNow, so this
   // jumps the line instead of racing an in-progress cycle for the shared
   // page.
-  async discoverLocations(cities: string[], targetRadiusMiles?: number): Promise<LocationDiscoveryResult[]> {
+  // `onEachResult`, added per explicit instruction ("why does it need to
+  // keep searching for [locations], it's already there") — lets a caller
+  // (see index.ts's resolveAccountLocationIfNeeded) persist each city's
+  // outcome to disk the MOMENT it happens, not just once this whole method
+  // returns. A 48-city country-mode pass takes a genuine 12-15 minutes
+  // (paced to stay under Facebook's own throttling) — closing the app
+  // partway through used to lose every bit of that, since nothing was ever
+  // saved until the entire batch finished.
+  async discoverLocations(
+    cities: string[],
+    targetRadiusMiles?: number,
+    onEachResult?: (result: LocationDiscoveryResult) => void
+  ): Promise<LocationDiscoveryResult[]> {
     this.priorityRequested = true;
     return this.withPage(async () => {
       this.priorityRequested = false;
@@ -691,7 +773,9 @@ export class ScrapeEngine {
       this.setStatus({ loggedIn });
       if (!loggedIn) {
         this.log("error", "Not logged into Facebook. Log in from the Dashboard first.");
-        return cities.map((city) => ({ city, url: null, resolvedState: null, error: "Not logged in" }));
+        const results = cities.map((city) => ({ city, url: null, resolvedState: null, resolvedLocationLabel: null, error: "Not logged in" }));
+        results.forEach((r) => onEachResult?.(r));
+        return results;
       }
 
       this.log("info", `Discovering ${cities.length} location${cities.length === 1 ? "" : "s"}...`);
@@ -701,6 +785,7 @@ export class ScrapeEngine {
         (result) => {
           if (result.url) this.log("info", `Found location for ${result.city}: ${result.url}`);
           else this.log("warn", `Could not resolve ${result.city}: ${result.error}`);
+          onEachResult?.(result);
         },
         targetRadiusMiles
       );
@@ -778,7 +863,21 @@ export class ScrapeEngine {
     // listing's page, so analyzeListingPhotos can stay alert for a video
     // frame/thumbnail slipping through into imageUrls (see its own
     // hasVideo opt).
-    hasVideo: boolean
+    hasVideo: boolean,
+    // Per explicit instruction — the user-CONFIRMED Database product for
+    // whichever Search For item this listing matched (see
+    // SearchItem.linkedProductId), when there is one. Preferred over the
+    // fuzzy name-based findMatchingProduct(claimedItem) lookup below, since
+    // it's an explicit link the user actually confirmed via a popup rather
+    // than a same-session guess at which Database entry "claimedItem"
+    // probably refers to.
+    linkedProductId: string | null = null,
+    // Condition-awareness — gates flaw detection entirely (see
+    // analyzeListingPhotos's own detectFlaws opt). Only one call site below
+    // has one on hand (evaluateListing's runPostScoringPipeline, which
+    // already reads config.searchItems right above it), so this is just
+    // threaded straight through, not optional.
+    config: EngineConfig
   ): Promise<PhotoAnalysisResult> {
     // Read fresh from the DB every time, not cached anywhere — this is what
     // makes a watch-for note added on a product's page (see chat.ts's
@@ -819,8 +918,23 @@ export class ScrapeEngine {
     // knowledge of what "claimedItem" looks like — this is what lets it
     // reliably say an Xbox Series X and a PS5 don't look alike, or that a
     // photo showing just a controller isn't a full console.
-    const claimedProduct = claimedItem ? this.opts.store.findMatchingProduct(claimedItem) : null;
-    const claimedItemReferenceImages = claimedProduct ? this.opts.store.listProductImages(claimedProduct.id).slice(0, 2).map((img) => img.imageData) : [];
+    const claimedProduct = linkedProductId
+      ? this.opts.store.getProductById(linkedProductId)
+      : claimedItem
+        ? this.opts.store.findMatchingProduct(claimedItem)
+        : null;
+    // Condition-awareness — a poor-condition/damaged reference photo would
+    // be misleading "ground truth" for a matchesClaim identity comparison
+    // (the whole point is confirming this IS the claimed product, not
+    // whether it looks equally beat-up), so only normal reference photos
+    // are ever offered here.
+    const claimedItemReferenceImages = claimedProduct
+      ? this.opts.store
+          .listProductImages(claimedProduct.id)
+          .filter((img) => img.kind === "normal")
+          .slice(0, 2)
+          .map((img) => img.imageData)
+      : [];
     this.log("info", `Analyzing ${imageUrls.length} photo(s) for "${title}"...`);
     const result = await analyzeListingPhotos(imageUrls, { title, description, price }, 8, {
       claimedItem,
@@ -828,12 +942,17 @@ export class ScrapeEngine {
       referenceProducts,
       claimedItemReferenceImages,
       hasVideo,
+      detectFlaws: config.researchCondition,
+      // Read fresh per listing, same posture as watchFor above — not
+      // cached, so a just-submitted confirm/deny is reflected on the very
+      // next listing evaluated, not just after a restart.
+      flawFeedbackExamples: config.researchCondition ? this.opts.store.getFlawFeedbackExamples() : [],
     });
     if (result.error || !result.summary) {
       this.log("warn", `Photo analysis unavailable for "${title}": ${result.error ?? "no summary returned"}`);
       return result;
     }
-    this.opts.store.updatePhotoAnalysis(id, result.summary);
+    this.opts.store.updatePhotoAnalysis(id, result.summary, result.flaws);
     const record = this.opts.store.getById(id);
     if (record) this.opts.onListing(record);
     this.log("info", `Photo analysis for "${title}" done.${result.hasValuableBundle ? ` Bundle spotted: ${result.bundleDescription}` : ""}`);
@@ -860,7 +979,16 @@ export class ScrapeEngine {
   // shows up in Feed with a clear reason instead of just vanishing. Not
   // counted toward the per-location rotation budget, since this was a
   // near-instant skip, not a genuine evaluation.
-  private recordInstantSkip(listing: ListingSummary, reasoning: string): ListingEvalResult {
+  // cheapFilterStartedAt, when provided, means this skip came from the
+  // synchronous pre-detail-page filter chain in evaluateListing (price
+  // sanity, blacklist, shippability, relevance) — the "cheap_filters" stage
+  // per explicit instruction to measure it. Omitted for the ONE
+  // recordInstantSkip call site that isn't part of that chain (the
+  // thumbnail-classification skip, which is timed separately as its own
+  // "thumbnail_classification" stage instead, since it's a real vision
+  // call, not a cheap check).
+  private recordInstantSkip(listing: ListingSummary, reasoning: string, cheapFilterStartedAt?: number): ListingEvalResult {
+    if (cheapFilterStartedAt !== undefined) recordStage("cheap_filters", Date.now() - cheapFilterStartedAt, true);
     this.opts.store.saveScored({
       listing: {
         ...listing,
@@ -886,13 +1014,92 @@ export class ScrapeEngine {
     return NOT_COUNTED;
   }
 
+  // Per explicit instruction — checks each already price-qualified Watch
+  // candidate's FULL conditions (profit/discount/age — see
+  // watchMatching.ts's evaluateWatchConditions) against the given `scored`
+  // snapshot and records+alerts on any that are satisfied. Called from TWO
+  // points (see evaluateListing and runPostScoringPipeline below) since a
+  // listing's scored.referencePriceUsd/discountPercent can still change
+  // after vision runs (bundle re-pricing, green-flag photo confirmation) —
+  // store.recordWatchMatch's own UNIQUE(watch_id, listing_id) + INSERT OR
+  // IGNORE is what makes calling this twice for the same watch+listing
+  // safe (the second call is a silent no-op, returns null, no duplicate
+  // alert). config.id/config.label are the CURRENT account's own fields —
+  // EngineConfig is Config intersected with one Account, and Account is
+  // where id/label come from.
+  private async recordWatchMatchesIfAny(
+    watches: Watch[],
+    scored: ScoredListing,
+    config: EngineConfig,
+    discoveryMode: "passive" | "active"
+  ): Promise<void> {
+    if (watches.length === 0 || scored.listing.price === null) return;
+    const price = scored.listing.price;
+    const listingAgeHours = scored.listing.listingAge ? estimateListingAgeHours(scored.listing.listingAge) : null;
+    for (const watch of watches) {
+      const referencePrice = deriveWatchReferencePrice(watch, this.opts.store);
+      const result = evaluateWatchConditions(watch, price, referencePrice, listingAgeHours);
+      if (!result.satisfied) continue;
+      const match = this.opts.store.recordWatchMatch({
+        watchId: watch.id,
+        listingId: scored.listing.id,
+        foundByAccountId: config.id,
+        foundByAccountLabel: config.label,
+        discoveryMode,
+        priceAtMatch: price,
+        discountPercentAtMatch: result.discountPercent,
+        profitUsdAtMatch: result.profitUsd,
+      });
+      if (!match) continue; // already recorded via the other evaluation point — not a new match, no duplicate alert
+      this.log("deal", `WATCH MATCH: "${watch.name}" — ${scored.listing.title} — $${price}`, scored.listing.url);
+      // Same posture as the existing sendDealAlert call site below: a failed
+      // push is logged, not thrown, and markWatchMatchNotified is skipped so
+      // it isn't silently lost — the match row itself is already durable.
+      try {
+        await sendWatchMatchAlert(config, watch, scored, { discoveryMode, discountPercentAtMatch: result.discountPercent, profitUsdAtMatch: result.profitUsd }, referencePrice);
+        this.opts.store.markWatchMatchNotified(match.id);
+      } catch (err) {
+        this.log("error", `Watch notification failed: ${(err as Error).message}`, scored.listing.url);
+      }
+      this.opts.onWatchMatch?.(watch, { listingId: scored.listing.id });
+    }
+  }
+
   // Evaluates one listing end to end (detail fetch, seller risk, scoring,
   // persistence, notification, deal narration). The returned "counted"
   // flag is what drives the "switch location after N listings" counter;
   // the rest feeds the end-of-batch recap narration.
-  private async evaluateListing(page: Page, listing: ListingSummary, config: Config): Promise<ListingEvalResult> {
-    if (this.opts.store.hasSeen(listing.id)) return NOT_COUNTED;
+  // discoveryMode defaults to "passive" so every EXISTING call site (the
+  // normal runCycle loops, searchForItemNow) is unaffected — only
+  // runWatchCheck (the active scheduler, see watchScheduler.ts) passes
+  // "active" explicitly, so a match found this way is correctly attributed
+  // in watch_matches.discovery_mode instead of being misrecorded as passive.
+  private async evaluateListing(
+    page: Page,
+    listing: ListingSummary,
+    config: EngineConfig,
+    discoveryMode: "passive" | "active" = "passive"
+  ): Promise<ListingEvalResult> {
+    recordEvent("evaluated", config.id);
+    // Per explicit instruction — the in-memory-cache-first dedup check (see
+    // store.ts's hasSeenCached/seenCache), benchmarked directly against the
+    // plain DB lookup via the db_dedup_lookup/dedup_cache_check stages.
+    if (this.opts.store.hasSeenCached(listing.id)) {
+      recordEvent("duplicate", config.id);
+      return NOT_COUNTED;
+    }
+    recordEvent("unique", config.id);
     if (listing.price === null) return NOT_COUNTED;
+
+    // Per explicit instruction — instrumenting the pipeline to measure
+    // where time actually goes: everything from here through the general-
+    // deal relevance check below is the synchronous, no-network "cheap
+    // filter" stage (see recordInstantSkip's cheapFilterStartedAt param and
+    // metrics.ts). The one exception living in this same visual block —
+    // the >$2000 unshippable branch's own downloadImageAsDataUri call — is
+    // a rare path that isn't purely synchronous either, called out
+    // explicitly in the benchmark report rather than pretending it's free.
+    const cheapFilterStart = Date.now();
 
     // Per explicit instruction — "State"/"City" location modes should skip
     // anything that reads as a DIFFERENT state than the one being searched
@@ -911,7 +1118,8 @@ export class ScrapeEngine {
         );
         return this.recordInstantSkip(
           listing,
-          `Skipped without opening the listing — its location ("${listing.locationText}") looks like it's outside ${config.selectedState}, and you're only searching there.`
+          `Skipped without opening the listing — its location ("${listing.locationText}") looks like it's outside ${config.selectedState}, and you're only searching there.`,
+          cheapFilterStart
         );
       }
     }
@@ -920,7 +1128,8 @@ export class ScrapeEngine {
       this.log("info", `skip (placeholder-looking price): ${listing.title} — $${listing.price}`, listing.url);
       return this.recordInstantSkip(
         listing,
-        `Skipped without opening the listing — $${listing.price} looks like a placeholder price, not a real one.`
+        `Skipped without opening the listing — $${listing.price} looks like a placeholder price, not a real one.`,
+        cheapFilterStart
       );
     }
 
@@ -928,29 +1137,8 @@ export class ScrapeEngine {
       this.log("info", `skip (non-round price): ${listing.title} — $${listing.price}`, listing.url);
       return this.recordInstantSkip(
         listing,
-        `Skipped without opening the listing — $${listing.price} doesn't end in 0 or 5, probably scam bait or unnoteworthy.`
-      );
-    }
-
-    // Per explicit instruction — a global ceiling the user sets directly,
-    // on top of (not instead of) the checks above. The one and only "max
-    // I'll pay" signal — also reused as the deal-scoring budget ceiling for
-    // a matched Search For item, see evaluateSearchItemPricing's call site
-    // below. null (the default) means no cap at all.
-    if (config.maxPriceUsd !== null && listing.price > config.maxPriceUsd) {
-      this.log("info", `skip (over max price): ${listing.title} — $${listing.price} > $${config.maxPriceUsd} cap`, listing.url);
-      return this.recordInstantSkip(
-        listing,
-        `Skipped without opening the listing — $${listing.price} is above your $${config.maxPriceUsd} max price.`
-      );
-    }
-
-    // The floor counterpart, same posture — null means no floor.
-    if (config.minPriceUsd !== null && listing.price < config.minPriceUsd) {
-      this.log("info", `skip (under min price): ${listing.title} — $${listing.price} < $${config.minPriceUsd} floor`, listing.url);
-      return this.recordInstantSkip(
-        listing,
-        `Skipped without opening the listing — $${listing.price} is below your $${config.minPriceUsd} min price.`
+        `Skipped without opening the listing — $${listing.price} doesn't end in 0 or 5, probably scam bait or unnoteworthy.`,
+        cheapFilterStart
       );
     }
 
@@ -986,7 +1174,8 @@ export class ScrapeEngine {
       }
       return this.recordInstantSkip(
         listing,
-        `Skipped without opening the listing — "${listing.title}" looks like a bulky/local-pickup-only category (vehicle, furniture, appliance, real estate, etc.), not something a mail-order reseller can buy.`
+        `Skipped without opening the listing — "${listing.title}" looks like a bulky/local-pickup-only category (vehicle, furniture, appliance, real estate, etc.), not something a mail-order reseller can buy.`,
+        cheapFilterStart
       );
     }
 
@@ -1004,7 +1193,7 @@ export class ScrapeEngine {
     const blacklistMatch = config.ignoreBlacklist ? null : this.opts.store.isBlacklisted(listing.title);
     if (blacklistMatch) {
       this.log("info", `skip (blacklisted: "${blacklistMatch}"): ${listing.title}`, listing.url);
-      return this.recordInstantSkip(listing, `Skipped without opening the listing — title matches blacklisted term "${blacklistMatch}".`);
+      return this.recordInstantSkip(listing, `Skipped without opening the listing — title matches blacklisted term "${blacklistMatch}".`, cheapFilterStart);
     }
 
     // Per explicit instruction — a "green flag": the title doesn't cleanly
@@ -1018,14 +1207,142 @@ export class ScrapeEngine {
     // silently skipped just because its title never earns a real match —
     // see the vision-confirmation block after photo analysis runs, further
     // down, for what actually happens with this.
-    const greenFlagCandidate = matchSearchItem(listing.title, config.searchItems)
-      ? null
-      : findGreenFlagCandidate(listing.title, config.searchItems);
+    const strictTextMatch = matchSearchItem(listing.title, config.searchItems);
+    let greenFlagCandidate: SearchItem | null = strictTextMatch ? null : findGreenFlagCandidate(listing.title, config.searchItems);
     if (greenFlagCandidate) {
       this.log(
         "info",
         `green flag: "${listing.title}" mentions "${greenFlagCandidate.item}" but doesn't fully match — opening it for a closer look.`,
         listing.url
+      );
+    } else if (!strictTextMatch && listing.thumbnailUrl) {
+      // Per explicit instruction — "prioritize the listing's title over the
+      // first image... but at the same time, someone could list a 'gaming
+      // console' and the first image the AI sees is a bona fide Xbox
+      // Series X, and this time it'd be the AI's image recognition ability
+      // to look any further into that listing": an OR against the
+      // title-based checks above, not an AND — only tried when the title
+      // alone found NOTHING (a real strict match already short-circuits
+      // this, and a text-based green flag already took the branch above),
+      // and only for a search item the user has explicitly confirmed a
+      // Database reference photo for (see SearchItem.linkedProductId — set
+      // via the "is this what you're searching for?" popup). A generic
+      // title with an unrelated photo still correctly finds nothing here;
+      // this only ever ADDS candidates a title-only search would have
+      // missed, never removes any a title match already found.
+      //
+      // Verified live miss: this is a REAL vision call, and running it for
+      // EVERY title-less listing (every search result Facebook returns
+      // that doesn't happen to say the exact tracked words) reintroduced
+      // the exact "vision blocking discovery" problem the earlier
+      // queue-based decoupling of full photo analysis was built to solve —
+      // reported live as "not rotating locations again," since a location
+      // with a lot of non-matching results could rack up dozens of these
+      // sequential calls before the cycle ever got to move on. Capped per
+      // location visit (reset in runCycle) — once exhausted, a title-less
+      // listing just falls through to the ordinary instant-skip, same as
+      // before this feature existed, rather than stalling rotation to keep
+      // trying.
+      if (this.imageMatchAttemptsThisLocation < ScrapeEngine.MAX_IMAGE_MATCH_ATTEMPTS_PER_LOCATION) {
+        for (const ref of config.searchItems) {
+          if (!ref.linkedProductId) continue;
+          const referenceImages = this.opts.store.listProductImages(ref.linkedProductId).slice(0, 3).map((img) => img.imageData);
+          if (!referenceImages.length) continue;
+          const thumbnailDataUri = await downloadImageAsDataUri(listing.thumbnailUrl);
+          if (!thumbnailDataUri) break; // couldn't even download the thumbnail — no point trying more reference sets against it
+          this.imageMatchAttemptsThisLocation++;
+          const result = await matchesReferenceProduct(thumbnailDataUri, ref.item, referenceImages);
+          if (result.matches) {
+            greenFlagCandidate = ref;
+            this.log(
+              "info",
+              `image match: "${listing.title}" — thumbnail looks like "${ref.item}" (${result.reason ?? "the title didn't match, but the photo looks right"}) — opening it for a closer look.`,
+              listing.url
+            );
+            break;
+          }
+          if (this.imageMatchAttemptsThisLocation >= ScrapeEngine.MAX_IMAGE_MATCH_ATTEMPTS_PER_LOCATION) break;
+        }
+      }
+    }
+
+    // Per explicit instruction — Watch: "keep an eye out for this over
+    // time." Passive candidate matching reuses the EXACT SAME text-match
+    // functions the SearchItem flow above just used (matchSearchItem/
+    // findGreenFlagCandidate), just against each active Watch's own
+    // synthetic SearchItem shape (see watchMatching.ts's watchAsSearchItem)
+    // — checked per-watch, not as one array, since (unlike SearchItem,
+    // which only ever wants the single BEST match) a listing can genuinely
+    // satisfy several different Watches at once. Deliberately does NOT
+    // extend the image-match vision fallback above to Watches — that's a
+    // real, capped-but-shared OpenAI cost already spent on SearchItems;
+    // keeping Watch's own passive candidate detection text-only is the
+    // conservative "avoid unnecessary OpenAI calls" call for this phase.
+    // globallyPaused/enabled are checked here (not once per cycle) so a
+    // pause/resume or a per-watch pause takes effect on the very next
+    // listing, same responsiveness posture as every other config read in
+    // this function.
+    const activeWatches: Watch[] = config.watch.globallyPaused ? [] : this.opts.store.listWatches().filter((w) => w.enabled);
+    const matchingWatches = activeWatches.filter((w) => {
+      const asItems = [watchAsSearchItem(w)];
+      return matchSearchItem(listing.title, asItems) !== null || findGreenFlagCandidate(listing.title, asItems) !== null;
+    });
+    for (const w of matchingWatches) this.opts.store.recordWatchCandidateSeen(w.id);
+    // Cheap price pre-check, same posture as the SearchItem price gate
+    // right below — a Watch outside its own min/max range is never worth
+    // carrying through the rest of this pipeline, but (unlike the
+    // SearchItem gate) doesn't skip the LISTING outright on its own; see
+    // priceQualifiedWatches' own use just below, which can rescue a
+    // listing the SearchItem gate would otherwise have dropped. Captured
+    // into a local first — listing.price is already narrowed non-null by
+    // this point (the null-price bail at the very top of this function),
+    // but that narrowing doesn't carry into a closure's own property
+    // access, only into a plain local variable.
+    const listingPrice = listing.price;
+    const priceQualifiedWatches = matchingWatches.filter((w) => passesWatchPriceGate(w, listingPrice));
+
+    // Per explicit instruction — price range is now set PER-PRODUCT (on the
+    // matched SearchItem itself), not a single global ceiling/floor
+    // checked against every listing regardless of what it's for — see
+    // types.ts's SearchItem doc comment. Only enforceable once we know
+    // which item (if any) this listing actually is: strictTextMatch/
+    // greenFlagCandidate are both fully resolved by this point (including
+    // the image-match sub-branch above), so this runs here instead of
+    // earlier alongside the other cheap synchronous filters. A listing that
+    // doesn't match any tracked item at all has no per-item range to check
+    // against, so it's simply not gated on price here — general-deal
+    // judgment (further down) still applies to it as normal.
+    //
+    // Per explicit instruction — widened for Watch: a listing outside a
+    // matched SearchItem's own price range used to be skipped outright
+    // here, before a completely separate Watch (its own phrase, its own
+    // price range) ever got a look. `priceQualifiedWatches.length === 0`
+    // is what rescues that case — the SearchItem's own price mismatch is
+    // still enforced exactly as before whenever there's no price-qualified
+    // Watch to save the listing.
+    const priceCandidate = strictTextMatch ?? greenFlagCandidate;
+    if (priceCandidate?.maxPriceUsd != null && listing.price > priceCandidate.maxPriceUsd && priceQualifiedWatches.length === 0) {
+      this.log(
+        "info",
+        `skip (over "${priceCandidate.item}"'s max price): ${listing.title} — $${listing.price} > $${priceCandidate.maxPriceUsd} cap`,
+        listing.url
+      );
+      return this.recordInstantSkip(
+        listing,
+        `Skipped without opening the listing — $${listing.price} is above the $${priceCandidate.maxPriceUsd} max price you set for "${priceCandidate.item}".`,
+        cheapFilterStart
+      );
+    }
+    if (priceCandidate?.minPriceUsd != null && listing.price < priceCandidate.minPriceUsd && priceQualifiedWatches.length === 0) {
+      this.log(
+        "info",
+        `skip (under "${priceCandidate.item}"'s min price): ${listing.title} — $${listing.price} < $${priceCandidate.minPriceUsd} floor`,
+        listing.url
+      );
+      return this.recordInstantSkip(
+        listing,
+        `Skipped without opening the listing — $${listing.price} is below the $${priceCandidate.minPriceUsd} min price you set for "${priceCandidate.item}".`,
+        cheapFilterStart
       );
     }
 
@@ -1046,16 +1363,30 @@ export class ScrapeEngine {
     // like "iPhone 13" or "free kittens" for a Nintendo Switch search. A
     // green flag is exempted — it's specifically about a tracked item, just
     // possibly mistitled, not "other stuff that looks good."
+    //
+    // Per explicit instruction — widened for Watch: a Watch has no
+    // Search-For entry to be "relevant" to, so without the
+    // priceQualifiedWatches escape hatch here, a listing matching ONLY a
+    // Watch (no overlapping SearchItem) would be silently abandoned before
+    // ever reaching seller-risk/scoring/Watch-condition-evaluation — even
+    // though the whole point of Watch is to keep working independent of
+    // whatever the Search For list or general-deal setting happen to be.
+    // Deliberately priceQualifiedWatches (already past that watch's own
+    // price gate), not the broader matchingWatches — a Watch that's a text
+    // candidate but already outside its own price range has no reason to
+    // spend a detail-page load either.
     if (
       !config.generalDeal.enabled &&
       config.searchItems.length > 0 &&
       !isRelevantToSearchItems(listing.title, config.searchItems) &&
-      !greenFlagCandidate
+      !greenFlagCandidate &&
+      priceQualifiedWatches.length === 0
     ) {
       this.log("info", `skip (not one of your focused Search For items): ${listing.title}`, listing.url);
       return this.recordInstantSkip(
         listing,
-        `Skipped without opening the listing — general deal detection is off and this doesn't match anything on your Search For list.`
+        `Skipped without opening the listing — general deal detection is off and this doesn't match anything on your Search For list.`,
+        cheapFilterStart
       );
     }
 
@@ -1075,6 +1406,13 @@ export class ScrapeEngine {
     // gallery (under the same Blacklist tab as the term list above), so a
     // user asking to bypass "the Blacklist" reasonably means both halves of
     // it, not just the term-matching one.
+    // Everything above this line was the synchronous cheap-filter chain and
+    // it fell all the way through without an early exit — record that
+    // "passed" case too, not just the skip paths above (each already timed
+    // via recordInstantSkip), so the cheap_filters average reflects every
+    // invocation, not just the ones that got rejected.
+    recordStage("cheap_filters", Date.now() - cheapFilterStart, true);
+
     if (config.photoAnalysis.enabled && !config.ignoreBlacklist && listing.thumbnailUrl) {
       const thumbnailDataUri = await downloadImageAsDataUri(listing.thumbnailUrl);
       if (thumbnailDataUri) {
@@ -1082,7 +1420,7 @@ export class ScrapeEngine {
           .listBlacklistedImages()
           .slice(0, 6)
           .map((img) => ({ imageDataUri: img.imageData, category: img.category }));
-        const imageCheck = await classifyThumbnailImage(thumbnailDataUri, listing.title, referenceImages);
+        const imageCheck = await timed("thumbnail_classification", () => classifyThumbnailImage(thumbnailDataUri, listing.title, referenceImages));
         if (imageCheck.ineligible) {
           this.log(
             "info",
@@ -1111,7 +1449,16 @@ export class ScrapeEngine {
       detail = await fetchListingDetail(page, listing);
     } catch (err) {
       this.log("error", `Failed to load detail for ${listing.url}: ${(err as Error).message}`, listing.url);
-      return NOT_COUNTED;
+      // page.goto(listing.url) is the very first line inside
+      // fetchListingDetail — a failure here could mean that never even ran,
+      // or that it succeeded and a later extraction step threw, so the page
+      // may or may not actually be sitting on the listing's detail page.
+      // Reporting visitedDetailPage true either way is the safe direction:
+      // the caller's page.goBack() is wrapped in its own no-op catch, so a
+      // spurious goBack when nothing needs undoing is harmless, but
+      // skipping a genuinely-needed one would leave the page stranded off
+      // the search results.
+      return { ...NOT_COUNTED, visitedDetailPage: true };
     }
 
     // Fast-moving mail-order business — a listing sitting for over a day is
@@ -1123,7 +1470,28 @@ export class ScrapeEngine {
     // (AI scoring, eBay comps, seller-risk) it's actually saving. Counted
     // toward the rotation budget (same as the seller-risk-fail path below)
     // since a real page visit happened, not a near-instant title check.
-    if (isListingTooOld(detail.listingAge, config.maxListingAgeHours)) {
+    //
+    // Per explicit instruction — a real fix, not just a new check: this one
+    // GLOBAL ceiling used to run unconditionally, which would silently kill
+    // a listing before a Watch wanting a LOOSER freshness window than the
+    // global config ever got a chance to apply its own. Rescued the same
+    // way as the two gates above — via a per-listing check, not a blanket
+    // widening of the ceiling for every listing regardless of whether it
+    // even matches that watch (which would also loosen the GLOBAL
+    // freshness preference for ordinary SearchItem/general-deal scoring on
+    // listings that don't match any watch at all — a real leak, not just a
+    // hypothetical one, since nothing downstream of this gate re-checks
+    // freshness for those pathways). Only a watch that's both
+    // price-qualified AND whose own maxListingAgeMinutes genuinely covers
+    // THIS listing's real age can rescue it; each watch still enforces its
+    // own bound individually via evaluateWatchConditions further down
+    // regardless of what rescued it here.
+    const listingAgeHours = detail.listingAge ? estimateListingAgeHours(detail.listingAge) : null;
+    const ageQualifiedRescueWatches = priceQualifiedWatches.filter((w) => {
+      if (w.maxListingAgeMinutes === null) return true; // no age condition on this watch = no ceiling from it
+      return listingAgeHours !== null && listingAgeHours < w.maxListingAgeMinutes / 60;
+    });
+    if (isListingTooOld(detail.listingAge, config.maxListingAgeHours) && ageQualifiedRescueWatches.length === 0) {
       this.log("info", `skip (too old — ${detail.listingAge}): ${listing.title}`, listing.url);
       this.opts.store.saveScored({
         listing: detail,
@@ -1144,7 +1512,7 @@ export class ScrapeEngine {
       const staleRecord = this.opts.store.listRecent(1, 0)[0];
       if (staleRecord) this.opts.onListing(staleRecord);
       await this.sleep(600, 1500); // trimmed from 1000-2500ms, see the sleep() call above
-      return { ...NOT_COUNTED, counted: true, title: listing.title, price: listing.price, reasoning: `too old — ${detail.listingAge}`, notable: false };
+      return { ...NOT_COUNTED, counted: true, visitedDetailPage: true, title: listing.title, price: listing.price, reasoning: `too old — ${detail.listingAge}`, notable: false };
     }
 
     // Per explicit instruction — reported live with a screenshot: a
@@ -1184,7 +1552,7 @@ export class ScrapeEngine {
       const shippingRecord = this.opts.store.listRecent(1, 0)[0];
       if (shippingRecord) this.opts.onListing(shippingRecord);
       await this.sleep(600, 1500);
-      return { ...NOT_COUNTED, counted: true, title: listing.title, price: listing.price, reasoning: reason, notable: false };
+      return { ...NOT_COUNTED, counted: true, visitedDetailPage: true, title: listing.title, price: listing.price, reasoning: reason, notable: false };
     }
 
     const sellerRisk = evaluateSellerRisk(detail.seller, config.sellerRisk);
@@ -1215,6 +1583,7 @@ export class ScrapeEngine {
       return {
         ...NOT_COUNTED,
         counted: true,
+        visitedDetailPage: true,
         title: listing.title,
         price: listing.price,
         reasoning: `seller risk: ${sellerRisk.reasons.join("; ")}`,
@@ -1232,15 +1601,25 @@ export class ScrapeEngine {
     const feedbackExamples = this.opts.store.getFeedbackExamples();
     let scored;
     try {
-      scored = await scoreListing(detail, config, dismissedCategories, feedbackExamples);
+      scored = await timed("scoring_ai", () => scoreListing(detail, config, dismissedCategories, feedbackExamples));
     } catch (err) {
       this.log("error", `Scoring failed for "${listing.title}": ${(err as Error).message}`, listing.url);
-      return { ...NOT_COUNTED, counted: true };
+      return { ...NOT_COUNTED, counted: true, visitedDetailPage: true };
     }
 
     this.opts.store.saveScored(scored, sellerRisk);
     const record = this.opts.store.listRecent(1, 0)[0];
     if (record) this.opts.onListing(record);
+
+    // Per explicit instruction — Watch condition evaluation runs
+    // independently of scored.isDeal: a watch's own bar (e.g. "price ≤
+    // $300") is a different, separately-configured threshold than the
+    // general deal-scoring bar, and gating on isDeal would silently drop
+    // matches the user explicitly asked for. This is the FIRST of two
+    // evaluation points (see runPostScoringPipeline for the deferred
+    // re-check after vision) — covers the common case of a match that's
+    // already fully determined by text/price alone.
+    await this.recordWatchMatchesIfAny(priceQualifiedWatches, scored, config, discoveryMode);
 
     // Per explicit instruction: when the general-deal AI itself recognizes
     // a listing as categorically unrelated to reselling (real estate, a
@@ -1269,6 +1648,111 @@ export class ScrapeEngine {
       }
     }
 
+    // Per explicit instruction — decouple photo/vision analysis from the
+    // critical scan loop so a multi-second AI call never blocks discovery
+    // of the NEXT listing. Everything from photo analysis through the deal
+    // notification below (previously all synchronous here) now runs as a
+    // background job — see runPostScoringPipeline, an unmodified lift of
+    // the exact code that used to be right here, and enqueueVisionJob's own
+    // doc comment for the bounded-concurrency queue it runs on. When there
+    // are no photos to analyze (or the feature is off), there's nothing to
+    // defer — running the job inline is IDENTICAL to what this function
+    // already did in that case, so behavior there is unchanged.
+    // listing.price is already guaranteed non-null (see the early return
+    // above) — the cast is only needed because TS doesn't carry that
+    // narrowing through a closure captured for later/deferred invocation.
+    const nonNullPricedListing = listing as ListingSummary & { price: number };
+    const runPipeline = () =>
+      this.runPostScoringPipeline(
+        nonNullPricedListing,
+        detail,
+        config,
+        scored,
+        sellerRisk,
+        greenFlagCandidate,
+        dismissedCategories,
+        priceQualifiedWatches,
+        discoveryMode
+      );
+    if (config.photoAnalysis.enabled && detail.imageUrls.length > 0) {
+      recordEvent("vision_enqueued");
+      this.enqueueVisionJob(() =>
+        runPipeline().catch((err) => this.log("error", `Background photo analysis failed for "${listing.title}": ${(err as Error).message}`, listing.url))
+      );
+    } else {
+      await runPipeline();
+    }
+
+    // Per explicit instruction ("can it be a little faster?") — trimmed
+    // from 2000-5000ms. Kept nonzero and still randomized on purpose: this
+    // is what keeps listing-to-listing navigation from looking like a
+    // metronome to Facebook, it's just a shorter gap now. Stays HERE
+    // (synchronous, not inside the deferred pipeline) since it paces
+    // Marketplace navigation itself, not vision analysis — unaffected by
+    // the decoupling above.
+    await politeDelay(1500, 4000);
+    // The PROVISIONAL result, reflecting `scored` exactly as scoreListing
+    // computed it — precisely what this function already returned in every
+    // case where photo analysis was off or there were no photos. When
+    // vision IS queued, this is deliberately provisional: the batch recap
+    // narration and per-location rotation counting that read this result
+    // use the PRE-vision numbers, and won't reflect a LATER photo-driven
+    // change (a green-flag confirmation, a bundle-value bump, a mismatch
+    // override) — the actual listing record in Feed/Activity still gets
+    // that update the moment the background job finishes (via saveScored +
+    // onListing inside runPostScoringPipeline), and a deal notification
+    // still fires correctly at that point too. Only the immediate-return
+    // summary and batch narration are ever "stale" by the vision queue's
+    // own latency, which is exactly the tradeoff asked for.
+    return {
+      counted: true,
+      visitedDetailPage: true,
+      isDeal: scored.isDeal,
+      title: listing.title,
+      price: listing.price,
+      dealTier: scored.dealTier,
+      discountPercent: scored.discountPercent,
+      estimatedValueRange: scored.estimatedValueRange,
+      reasoning: scored.extraction.reasoning,
+      notable: scored.extraction.matchedItem !== null,
+    };
+  }
+
+  // Per explicit instruction — the vision-dependent tail of evaluateListing,
+  // extracted verbatim (no logic changes) so it can run either inline
+  // (today's behavior, when there's nothing to defer) or as a queued
+  // background job (see enqueueVisionJob) without duplicating this
+  // decision chain. Every side effect (saveScored, onListing,
+  // onBlacklistUpdated, onProductUpdated, onNewProductFound, sendDealAlert,
+  // onNarrate) happens internally exactly as before — this has no return
+  // value because the CALLER's own immediate/provisional result no longer
+  // depends on what happens in here, per explicit instruction that a
+  // listing should show a provisional result while vision is pending and
+  // get updated once it completes.
+  private async runPostScoringPipeline(
+    // Narrowed to a non-null price — evaluateListing already returned early
+    // for a null price long before this is ever called, but that narrowing
+    // doesn't carry across a function boundary on its own, so it's encoded
+    // in the parameter type instead (this function's own contract, not a
+    // runtime check) rather than re-asserting it here.
+    listing: ListingSummary & { price: number },
+    detail: ListingDetail,
+    config: EngineConfig,
+    scored: ScoredListing,
+    sellerRisk: SellerRiskResult,
+    greenFlagCandidate: SearchItem | null,
+    dismissedCategories: string[],
+    // Per explicit instruction — the SAME price-qualified watches
+    // evaluateListing already computed once; passed down rather than
+    // recomputed since the listing's own price never changes between the
+    // two evaluation points, only scored's own pricing fields (via vision)
+    // do — see this function's own deferred recordWatchMatchesIfAny call
+    // below.
+    priceQualifiedWatches: Watch[],
+    // Threaded down from evaluateListing's own param — see its doc comment
+    // for why this defaults to "passive" everywhere except runWatchCheck.
+    discoveryMode: "passive" | "active"
+  ): Promise<void> {
     // Photos are the real identification mechanism now, ahead of anything
     // text-based — a listing's title/category can be vague or wrong, but
     // what's actually IN the photos isn't. Runs early and for every
@@ -1283,26 +1767,39 @@ export class ScrapeEngine {
       // this is also what makes runPhotoAnalysis pull that item's own real
       // reference photos (if the Database has any) for the comparison.
       const claimedItem = scored.extraction.matchedItem || greenFlagCandidate?.item || listing.title;
-      // Per explicit instruction — "when the AI is conducting research on
-      // the product's images, have it switch to 'Researching photos...'":
-      // Dashboard's Live panel swaps its "Currently viewing" label for this
-      // while analyzingPhotos is true (see LivePanel in Dashboard.tsx), then
-      // shows the AI's own expertTake underneath once it resolves — a
-      // human, first-person reaction (see vision.ts's analyzeListingPhotos)
-      // instead of the raw analytical summary, per "bring the app more to
-      // life."
-      this.setStatus({ analyzingPhotos: true, currentReaction: null });
-      photoResult = await this.runPhotoAnalysis(
-        listing.id,
-        listing.title,
-        detail.description,
-        listing.price,
-        detail.imageUrls,
-        scored.extraction.matchedItem,
-        claimedItem,
-        detail.hasVideo
+      // Per explicit instruction — prefer the user-CONFIRMED Database
+      // product (see SearchItem.linkedProductId, set via the "is this what
+      // you're searching for?" popup) for the claimedItem reference photos
+      // below, over the fuzzy name-based findMatchingProduct lookup
+      // runPhotoAnalysis would otherwise fall back to.
+      const matchedSearchItem = scored.extraction.matchedItem
+        ? (config.searchItems.find((s) => s.item === scored.extraction.matchedItem) ?? null)
+        : greenFlagCandidate;
+      // Per explicit instruction — this used to also flip Dashboard's Live
+      // panel to "Researching photos..." (analyzingPhotos/currentReaction)
+      // while this ran. That status is tied to whatever listing is
+      // CURRENTLY being shown in Live, which by the time a QUEUED vision
+      // job like this one actually runs is very likely a different,
+      // unrelated listing the loop has since moved on to — showing it here
+      // would attach the wrong reaction to the wrong card, so this no
+      // longer touches it. vision_queue_depth/vision_jobs_sec/average
+      // vision latency (see metrics.ts, surfaced in Activity) are the
+      // replacement signal for "is vision busy right now."
+      photoResult = await timed("vision_analysis", () =>
+        this.runPhotoAnalysis(
+          listing.id,
+          listing.title,
+          detail.description,
+          listing.price,
+          detail.imageUrls,
+          scored.extraction.matchedItem,
+          claimedItem,
+          detail.hasVideo,
+          matchedSearchItem?.linkedProductId ?? null,
+          config
+        )
       );
-      this.setStatus({ analyzingPhotos: false, currentReaction: photoResult?.expertTake ?? null });
+      recordEvent("vision_completed");
     }
 
     // Per explicit instruction — "if the ai comes across a listing with a
@@ -1338,7 +1835,7 @@ export class ScrapeEngine {
     // confirmation counts as a real matchedItem for both of those too.
     if (greenFlagCandidate && !scored.extraction.matchedItem && photoResult?.matchesClaim === true) {
       const conditionImpact = detectConditionImpact(`${listing.title} ${detail.description}`);
-      const pricing = evaluateSearchItemPricing(greenFlagCandidate, listing.price, conditionImpact, config.dealThresholdPercent, config.maxPriceUsd);
+      const pricing = evaluateSearchItemPricing(greenFlagCandidate, listing.price, conditionImpact, config.dealThresholdPercent, greenFlagCandidate.maxPriceUsd);
       this.log(
         "info",
         `Green flag confirmed: "${listing.title}" is actually a "${greenFlagCandidate.item}" — photos match, ${
@@ -1372,12 +1869,33 @@ export class ScrapeEngine {
     // full console's reference price for something that was never a
     // console. matchesClaim === false means the vision model looked at the
     // photos against what this listing claims to be and found something
-    // meaningfully different/lesser — that overrides isDeal outright,
-    // regardless of how good the price looked against the wrong reference.
-    if (scored.isDeal && photoResult?.matchesClaim === false) {
+    // meaningfully different/lesser.
+    //
+    // Per explicit instruction — reported live: searching "xbox series x"
+    // was surfacing actual VIDEO GAMES (a game's title routinely reads
+    // "Call of Duty ... Xbox Series X" — the platform name, not the
+    // console, but that satisfies matchSearchItem's plain text check just
+    // fine). This used to only override isDeal, leaving matchedItem/the
+    // reasoning still claiming it WAS the tracked console — so a mismatched
+    // game still showed up in Feed labeled and counted as an "xbox series
+    // x" match, just not flagged as a deal. Broadened from "only when it
+    // looked like a deal" to ANY confirmed matchedItem: a confident visual
+    // mismatch means this listing isn't the tracked item at all, which
+    // should be true regardless of whether the (wrong) reference price
+    // happened to make it look like a deal.
+    // Condition-awareness — captured BEFORE matchedItem gets nulled below,
+    // so the researchSubjects loop further down can make the correction
+    // explicit (product notes / log line) rather than leaving it as an
+    // implicit side effect of that loop already reinforcing/creating
+    // whatever vision's own identifiedProducts named. claimedAs is only
+    // ever read once matchesClaim is confirmed false, so it's always the
+    // real pre-mismatch value here, never the already-nulled one.
+    let mismatchCorrection: { claimedAs: string; reason: string | null } | null = null;
+    if (scored.extraction.matchedItem && photoResult?.matchesClaim === false) {
+      mismatchCorrection = { claimedAs: scored.extraction.matchedItem, reason: photoResult.mismatchReason };
       this.log(
         "warn",
-        `Photo/title mismatch for "${listing.title}": claimed to be the matched item but photos show ${photoResult.mismatchReason ?? "something different"} — overriding to skip.`,
+        `Photo/title mismatch for "${listing.title}": claimed to be "${scored.extraction.matchedItem}" but photos show ${photoResult.mismatchReason ?? "something different"} — no longer counting this as a match.`,
         listing.url
       );
       scored = {
@@ -1386,7 +1904,8 @@ export class ScrapeEngine {
         dealTier: null,
         extraction: {
           ...scored.extraction,
-          reasoning: `Looked like a deal on price alone, but the photos show ${photoResult.mismatchReason ?? "something different from what this listing claims to be"} — skipping rather than risk a bad match.`,
+          matchedItem: null,
+          reasoning: `Looked like it might be "${scored.extraction.matchedItem}" by title alone, but the photos show ${photoResult.mismatchReason ?? "something different from what this listing claims to be"} — not counting it as a match.`,
         },
       };
       this.opts.store.saveScored(scored, sellerRisk);
@@ -1554,11 +2073,25 @@ export class ScrapeEngine {
     for (const subject of researchSubjects) {
       const subjectImageDataUri = photoResult?.productPhotos[subject] ?? (await fallbackImage());
       const existingProduct = this.opts.store.findMatchingProduct(subject);
+      // Condition-awareness — most of this correction mechanism already
+      // existed (this loop already reinforces/creates whatever vision
+      // itself believes the photos show, via findMatchingProduct's fuzzy
+      // matching, regardless of what the listing claimed) — this just
+      // makes it EXPLICIT rather than an implicit side effect, so a
+      // product's own accumulated notes reflect WHY it was corrected, not
+      // just a bare reinforcement. visionSubjects[0] is vision's own
+      // primary/focal identification — the one subject actually worth
+      // calling "the corrected identity" when there's more than one.
+      const correctionNote =
+        mismatchCorrection && subject === visionSubjects[0]
+          ? `Originally listed/matched as "${mismatchCorrection.claimedAs}" — photos indicate this is actually "${subject}"${mismatchCorrection.reason ? `: ${mismatchCorrection.reason}` : ""}.`
+          : null;
       if (existingProduct) {
         const noteParts = [
           listing.price !== null ? `$${listing.price}` : null,
           scored.extraction.matchedItem ? scored.extraction.extractedAttributes || null : null,
           scored.extraction.conditionImpact !== "unknown" ? `condition impact: ${scored.extraction.conditionImpact}` : null,
+          correctionNote,
         ].filter((p): p is string => !!p);
         if (noteParts.length) {
           const updatedProduct = this.opts.store.recordProductObservation(subject, noteParts.join(" — "));
@@ -1566,17 +2099,31 @@ export class ScrapeEngine {
         }
         if (subjectImageDataUri) {
           this.opts.store.addProductImage(existingProduct.id, subjectImageDataUri, listing.title);
+          this.opts.onReferencePhotoAdded?.(existingProduct.id);
         }
       } else if (specificSubjects.has(subject) && config.autoResearchListings) {
         this.log(
           "info",
-          `New item of interest: "${subject}" isn't tracked yet — adding it to the Database.`,
+          `New item of interest: "${subject}" isn't tracked yet — adding it to the Database.${correctionNote ? ` ${correctionNote}` : ""}`,
           undefined,
           subject
         );
         this.opts.onNewProductFound(subject, subjectImageDataUri, listing.title);
       }
     }
+
+    // Per explicit instruction — the SECOND, deferred Watch evaluation
+    // point: some listings only become deal-shaped AFTER vision runs
+    // (bundle-value re-pricing, green-flag photo confirmation, the
+    // mismatch override above all can change scored's own pricing fields)
+    // — this re-checks the exact same price-qualified watches against
+    // whatever scored's FINAL state is by this point. store.recordWatchMatch's
+    // own UNIQUE(watch_id, listing_id) + INSERT OR IGNORE makes this safe
+    // to call even when the first (immediate) evaluation point already
+    // recorded the same watch+listing — a genuine no-op there, not a
+    // duplicate alert. Deliberately independent of scored.isDeal, same as
+    // the first evaluation point.
+    await this.recordWatchMatchesIfAny(priceQualifiedWatches, scored, config, discoveryMode);
 
     if (scored.isDeal) {
       const tierLabel = scored.dealTier === "search" ? "DEAL" : "POSSIBLE DEAL (unverified pricing)";
@@ -1624,19 +2171,6 @@ export class ScrapeEngine {
     } else {
       this.log("info", `skip: ${listing.title} — ${scored.extraction.reasoning || "no match / not a deal"}`, listing.url);
     }
-
-    await politeDelay(1500, 4000);
-    return {
-      counted: true,
-      isDeal: scored.isDeal,
-      title: listing.title,
-      price: listing.price,
-      dealTier: scored.dealTier,
-      discountPercent: scored.discountPercent,
-      estimatedValueRange: scored.estimatedValueRange,
-      reasoning: scored.extraction.reasoning,
-      notable: scored.extraction.matchedItem !== null,
-    };
   }
 
   // Verified live miss, reported as "it keeps failing to search up that
@@ -1675,47 +2209,29 @@ export class ScrapeEngine {
 
       if (this.status.loggedIn !== true) {
         const loggedIn = await isLoggedIn(page);
-        this.setStatus({ loggedIn });
         if (!loggedIn) {
-          this.log("error", "Not logged into Facebook yet — a browser window should be open; log in there. This cycle will skip and retry next time.");
+          // Per explicit instruction, diagnosed live: this used to only ever
+          // reach the Activity log — the Dashboard Live panel's fallback
+          // text just said "Between cycles — sleeping a bit before the next
+          // pass" regardless of WHY nothing happened, so a scanner silently
+          // retrying this same failed login check every cycle, forever,
+          // looked identical to normal idle time between passes. Setting
+          // lastError surfaces this through the existing per-account error
+          // banner on Dashboard (see accountsWithErrors) and the Live
+          // panel's own loggedIn-aware fallback text — both already existed
+          // for a thrown exception, just never wired up for this specific,
+          // much more common case. Cleared automatically the moment a real
+          // cycle actually starts (see runCycle's own lastError: null reset).
+          const message = "Not logged into Facebook yet — a browser window should be open; log in there. This cycle will skip and retry next time.";
+          this.setStatus({ loggedIn, lastError: message });
+          this.log("error", message);
           return;
         }
+        this.setStatus({ loggedIn });
       }
 
       await this.runCycle(page, config);
     });
-  }
-
-  // Best-effort, not a hard gate on scanning — navigates straight to
-  // Richmond, VA and looks for "Richmond" somewhere in the page's own
-  // visible text as confirmation it actually landed there (not just that
-  // the navigation itself succeeded, which wouldn't catch Facebook quietly
-  // substituting a different account-level location). Logs either way, so
-  // a silent drift is something the user can actually see in Activity
-  // instead of just wondering later why results looked off. Can't verify
-  // this against a live Facebook session from here (see the note at the
-  // top of scraper.ts) — if Facebook's own location indicator ever renders
-  // differently than assumed, this will under- or over-report, not
-  // something to treat as a guarantee.
-  private async verifyStartingLocation(page: Page, richmondUrl: string): Promise<void> {
-    try {
-      await page.goto(richmondUrl, { waitUntil: "domcontentloaded" });
-      await page.waitForTimeout(1500);
-      const mainText = await page.evaluate(() => {
-        const main = document.querySelector('[role="main"]') as HTMLElement | null;
-        return (main ?? document.body)?.innerText ?? "";
-      });
-      if (/richmond/i.test(mainText)) {
-        this.log("info", "📍 Start-of-cycle check: confirmed on Richmond, VA.");
-      } else {
-        this.log(
-          "warn",
-          "Start-of-cycle check: navigated to Richmond, VA but couldn't confirm it on the page — Facebook may be showing a different location (possible drift from browsing Marketplace elsewhere on this account, e.g. your phone). Continuing anyway."
-        );
-      }
-    } catch (err) {
-      this.log("warn", `Start-of-cycle Richmond check failed: ${(err as Error).message} — continuing anyway.`);
-    }
   }
 
   // Checked once per cycle (not inside every individual search — see
@@ -1723,7 +2239,7 @@ export class ScrapeEngine {
   // this mid-search), against whatever config.searchRadiusMiles currently
   // is — "state" location mode sets this to 40, everything else defaults
   // to 100 (see types.ts's Config.searchRadiusMiles).
-  private async verifyRadiusOnPage(page: Page, config: Config): Promise<void> {
+  private async verifyRadiusOnPage(page: Page, config: EngineConfig): Promise<void> {
     try {
       await verifyOrSetRadius(page, config.searchRadiusMiles, (reason, level) => this.log(level ?? "warn", reason));
     } catch (err) {
@@ -1736,58 +2252,61 @@ export class ScrapeEngine {
   // call of its own), so the whole cycle, including the browser-open/login
   // steps that precede this, can never race a chat-triggered
   // searchForItemNow() for the same Facebook page.
-  private async runCycle(page: Page, config: Config): Promise<void> {
+  private async runCycle(page: Page, config: EngineConfig): Promise<void> {
     this.setStatus({ lastCycleStartedAt: Date.now(), lastError: null, listingsThisCycle: 0, currentSearch: "browsing" });
-
-    // Per explicit instruction — every cycle deliberately opens at
-    // Richmond, VA first and confirms it actually landed there, logged to
-    // Activity either way, before any real scanning happens. Reason given:
-    // the user sometimes browses Facebook Marketplace from their phone on
-    // this SAME account while the scanner is running, and unlike the
-    // radius setting (stored per-browser-profile — see browser.ts's own
-    // note on that), Facebook's "last browsed location" appears to be
-    // tracked at the account level, so a phone session elsewhere could
-    // silently drift what location this automated browser actually lands
-    // on even when navigating straight to a specific city's URL. Skipped
-    // if a stop/priority request is already pending — same "don't do extra
-    // work we're about to abandon anyway" posture as every other
-    // checkpoint in this cycle.
-    if (!this.stopRequested && !this.priorityRequested) {
-      // Per explicit instruction — the radius check needs to run every
-      // cycle regardless of location mode (see Config's "Search
-      // locations" setting), but Richmond specifically is only ever part
-      // of the rotation in "country" mode — "state"/"city" mode replace
-      // browseUrls entirely with something that may not include it at
-      // all. Reuses the SAME page load for both checks when Richmond
-      // applies (no reason to navigate twice); falls back to just the
-      // first configured location, purely to have a Marketplace page open
-      // to check radius on, when it doesn't.
-      const richmondUrl = config.browseUrls.find((u) => /\/marketplace\/richmond(?:[/?]|$)/i.test(u));
-      if (richmondUrl) {
-        await this.verifyStartingLocation(page, richmondUrl);
-        await this.verifyRadiusOnPage(page, config);
-      } else if (config.browseUrls.length > 0) {
-        try {
-          await page.goto(config.browseUrls[0], { waitUntil: "domcontentloaded" });
-          await page.waitForTimeout(1200);
-          await this.verifyRadiusOnPage(page, config);
-        } catch (err) {
-          this.log("warn", `Start-of-cycle radius check failed: ${(err as Error).message} — continuing anyway.`);
-        }
-      }
-    }
 
     const perLocation = Math.max(1, config.listingsPerLocation);
     const locationCount = config.browseUrls.length;
-    // With one location there's nothing to rotate to, so visit it once and
-    // evaluate everything found (matches the original single-location
-    // behavior). With more than one, visit every location exactly once per
-    // cycle — bounded, predictable cycle length — but in a freshly
-    // shuffled random order each cycle rather than the same fixed sequence
-    // every time (see shuffledIndices), so which city gets hit first/last
-    // varies and a cycle that gets interrupted partway doesn't always
-    // favor the same handful of locations.
-    const visitsThisCycle = locationCount <= 1 ? 1 : locationCount;
+
+    // Per explicit redefinition of the search order — every fresh scan
+    // does its one-time per-scan setup before ever picking a location to
+    // actually search from (scanSetupDone is only ever reset in
+    // start()/triggerOnce()).
+    //
+    // Per explicit instruction — reversing an earlier explicit instruction:
+    // the Richmond-specific "starter city" anchor is REMOVED entirely, per
+    // direct feedback that it was itself a source of bugs ("not rotating
+    // locations at all... clearly checking to see if it's in richmond is
+    // causing it to bug"). Every multi-location mode now does the exact
+    // same thing here, regardless of locationMode — a plain, once-per-scan
+    // radius check (Facebook stores this as a sticky per-profile
+    // preference independent of which city is current, so checking it once
+    // at the very start of a scan is exactly as effective as checking it at
+    // a specific anchor city first) using whichever browse URL happens to
+    // be first, then goes STRAIGHT into the random-city rotation below — no
+    // special navigation, no dedicated "starting city" lookup. A
+    // single-location account (city/ZIP mode, or a state that only
+    // resolved one city) has nowhere else to set up FROM, so it skips this
+    // whole block and radius-checks its own one location inside the
+    // per-visit branch below instead.
+    if (locationCount > 1 && !this.scanSetupDone && !this.stopRequested && !this.priorityRequested) {
+      try {
+        await page.goto(config.browseUrls[0], { waitUntil: "domcontentloaded" });
+        await page.waitForTimeout(1200);
+        await this.verifyRadiusOnPage(page, config);
+      } catch (err) {
+        this.log("warn", `Couldn't verify the search radius before starting: ${(err as Error).message} — continuing anyway.`);
+      }
+      this.scanSetupDone = true;
+    }
+
+    // Verified live miss: an earlier version of this made a cycle cover
+    // exactly ONE random location, meaning "rotate to a new city after
+    // hitting the per-location limit" only actually happened once every
+    // multi-minute poll-interval sleep (see loop()) — the sleep was always
+    // meant as the cooldown between full sweeps, not a wait between every
+    // single city. Restored to visiting `locationCount` locations per
+    // cycle (same visit COUNT as the original design).
+    //
+    // Verified live miss #2: picking each of those independently at random
+    // (with replacement) could — and did — draw the same city twice in a
+    // row, including immediately re-drawing the just-anchored Richmond
+    // right after a completely different city, reported live as "it kept
+    // rebounding to Richmond... without looking for anything." A shuffle
+    // (a random PERMUTATION — every city exactly once per cycle, in random
+    // order) is still "a random city" at each step, just without that
+    // wasteful immediate-repeat possibility.
+    const visitsThisCycle = locationCount > 1 ? locationCount : 1;
     const visitOrder = locationCount > 1 ? shuffledIndices(locationCount) : [this.locationIndex % Math.max(locationCount, 1)];
 
     for (let visit = 0; visit < visitsThisCycle; visit++) {
@@ -1799,6 +2318,7 @@ export class ScrapeEngine {
       this.locationIndex = visitOrder[visit];
       const url = config.browseUrls[this.locationIndex];
       const locationLabel = describeLocationUrl(url);
+      this.imageMatchAttemptsThisLocation = 0;
       // Per explicit instruction — Dashboard's Live panel shows this
       // in-between moment explicitly ("Switching locations...") instead of
       // just going blank between one listing and the next.
@@ -1806,9 +2326,87 @@ export class ScrapeEngine {
 
       // The alert itself — fires the moment the scanner moves to a new
       // location, not folded into the "found N listings" line after the
-      // fact, so it's clearly its own event in Activity.
+      // fact, so it's clearly its own event in Activity. This navigates
+      // there and confirms arrival ("log and check to see if in new
+      // location") before anything searches/browses. Per explicit
+      // instruction, diagnosed live from a screen recording ("right when
+      // you start searching, it'll refresh the page a whole bunch of times
+      // and do nothing") — the FIRST active search right after this used to
+      // ALSO navigate to the same URL again itself (see searchMarketplace's
+      // own alreadyOnCorrectPage param), stacking with this block's own up-
+      // to-3 retries into several back-to-back reloads before anything was
+      // ever typed. justConfirmedLocation below tells that first call it can
+      // skip its own redundant re-navigation — every OTHER navigate-to-a-
+      // URL call still does its own fresh navigate (browseListings, a
+      // second/third active search item at this same location, the
+      // URL-fallback path), on purpose (see scraper.ts) — verified live that
+      // skipping that as a "don't refresh needlessly" optimization let a
+      // stale, silently-drifted page (see
+      // this account's own Facebook-side default location reasserting
+      // itself client-side without changing the URL) go unnoticed all the
+      // way to typing the search query, even though this check right here
+      // had genuinely confirmed the correct city a moment earlier. A second
+      // real navigation immediately before searching is what actually
+      // closes that gap.
+      // No radius re-check here — that's a sticky per-profile Facebook
+      // setting verified once already this scan (see the once-per-scan
+      // setup block above), not per city. A single-location account has
+      // nowhere new to go, so it skips straight to its one location's own
+      // radius check instead (unchanged from before this feature).
+      // Per explicit instruction — set true only once the goto below
+      // actually SUCCEEDS (not if the try block throws), and only consumed
+      // by the FIRST searchMarketplace call at this location (see its own
+      // use further down) — any second/third active-search item, or the
+      // general browse pass, still needs its own real navigation, since by
+      // then the page has moved on to whatever the first search left it on.
+      let justConfirmedLocation = false;
       if (locationCount > 1) {
-        this.log("info", `📍 Switched to location ${visit + 1}/${visitsThisCycle}: ${locationLabel}`);
+        this.log("info", `📍 Chose a new location to search: ${locationLabel}`);
+        // Per explicit instruction — "have it switch locations, THEN enter
+        // the user's search parameters": verified live that a single
+        // 1000ms pause + one read wasn't always enough for Facebook's own
+        // heavy client-side app to finish re-rendering the new location
+        // before the active search below started typing — especially with
+        // several accounts running at once competing for the same
+        // machine's resources, the page could still be showing the
+        // PREVIOUS location (reported live as "still defaulting to
+        // Richmond") by the time the old code moved on. This now actually
+        // checks the arrived label against the expected city name (not
+        // just "is there a label at all") and retries the navigation a
+        // couple of times if it doesn't match, instead of trusting one
+        // goto + one read to have worked.
+        const expectedCityName = locationLabel.split(",")[0]?.trim().toLowerCase() || null;
+        let arrivedLabel: string | null = null;
+        let confirmed = false;
+        try {
+          for (let attempt = 0; attempt < 3 && !confirmed; attempt++) {
+            await page.goto(url, { waitUntil: "domcontentloaded" });
+            await page.waitForTimeout(1200);
+            arrivedLabel = await readCurrentLocationLabel(page);
+            confirmed = !!arrivedLabel && (!expectedCityName || arrivedLabel.toLowerCase().includes(expectedCityName));
+          }
+          justConfirmedLocation = true;
+          if (confirmed && arrivedLabel) {
+            this.log("info", `Confirmed now browsing ${arrivedLabel}.`);
+          } else if (arrivedLabel) {
+            this.log(
+              "warn",
+              `Switched to ${locationLabel}, but the page still reads "${arrivedLabel}" after retrying — searching there anyway since Facebook may just be labeling it differently.`
+            );
+          } else {
+            this.log("warn", `Switched to ${locationLabel}, but couldn't confirm the location from the page — continuing anyway.`);
+          }
+        } catch (err) {
+          this.log("warn", `Failed to navigate to ${locationLabel}: ${(err as Error).message} — continuing anyway.`);
+        }
+      } else if (!this.stopRequested && !this.priorityRequested) {
+        try {
+          await page.goto(url, { waitUntil: "domcontentloaded" });
+          await page.waitForTimeout(1200);
+          await this.verifyRadiusOnPage(page, config);
+        } catch (err) {
+          this.log("warn", `Start-of-cycle radius check failed: ${(err as Error).message} — continuing anyway.`);
+        }
       }
 
       let totalEvaluatedHere = 0;
@@ -1878,7 +2476,7 @@ export class ScrapeEngine {
         // location changed) — only THEN, once the count actually hits the
         // configured threshold, does it rotate to "Nintendo Switch."
         const activeItem = searchableItems[this.activeSearchItemIndex % searchableItems.length];
-        const query = getSearchTerms(activeItem)[0];
+        const query = getSearchQuery(activeItem);
         this.log("info", `Actively searching for "${activeItem.item}" (query: "${query}")...`);
         const searchConfig = this.opts.getConfig();
         let searchResults: ListingSummary[] = [];
@@ -1890,24 +2488,61 @@ export class ScrapeEngine {
             8,
             (reason, level) => this.log(level ?? "warn", reason),
             searchConfig.maxListingAgeHours,
-            searchConfig.minPriceUsd,
-            searchConfig.maxPriceUsd
+            activeItem.minPriceUsd,
+            activeItem.maxPriceUsd,
+            justConfirmedLocation
           );
         } catch (err) {
           this.log("error", `Active search failed for "${activeItem.item}": ${(err as Error).message}`);
+        } finally {
+          justConfirmedLocation = false;
         }
+        // Root-caused live from a real run: Facebook mixes a "Today's
+        // picks"/recommendation section into the SAME results page once
+        // genuine query matches run out, using the exact same
+        // /marketplace/item/ link shape extractListingsFromCurrentPage
+        // looks for — so a dedicated search's own results can end up with
+        // totally unrelated listings tacked onto the end (an AirPort
+        // Extreme, a storage container rental, art prints, showed up after
+        // several minutes of correct Xbox Series X matches). Unlike the
+        // general-browse path below, this loop never pre-filtered its own
+        // searchResults before evaluating them — it fell to evaluateListing's
+        // own per-listing relevance check to reject each one individually,
+        // ONE AT A TIME, which still means setStatus shows every single one
+        // as "currently viewing" before it gets skipped — reads exactly like
+        // "it's not searching for what I asked" even though nothing was
+        // ever wrongly counted as a match. Pre-filtering here, the same way
+        // the general-browse path already does, keeps every genuinely
+        // unrelated result out of view (and out of this loop) entirely.
+        const candidateResults = searchResults.filter(
+          (l) => isRelevantToSearchItems(l.title, config.searchItems) || findGreenFlagCandidate(l.title, config.searchItems) !== null
+        );
         let evaluatedForItem = 0;
-        for (const listing of searchResults) {
+        for (const listing of candidateResults) {
           if (this.stopRequested || this.priorityRequested) break;
           if (locationCount > 1 && evaluatedForItem >= perLocation) break;
-          const idx = searchResults.indexOf(listing);
+          const idx = candidateResults.indexOf(listing);
           this.setStatus({
             currentListing: toPreview(listing),
             currentActionNote: null,
             currentReaction: null,
-            upcomingListings: searchResults.slice(idx + 1, idx + 6).map(toPreview),
+            upcomingListings: candidateResults.slice(idx + 1, idx + 6).map(toPreview),
           });
           const result = await this.evaluateListing(page, listing, this.opts.getConfig());
+          // Per explicit instruction, diagnosed live: "to maintain the
+          // original search, it has to enter a product found under that
+          // search and then go BACK to the previous page where the original
+          // searched term and filters are stored." evaluateListing navigates
+          // the shared page straight to the listing's own detail URL — this
+          // returns to the search-results page (query + Date Listed/Price
+          // Range filters intact) before the next candidate, instead of
+          // leaving the page stranded on whatever detail page was last
+          // visited. Only when a detail page was actually visited (see
+          // visitedDetailPage's own doc comment) — an instant-skip never
+          // touched the page, so there'd be nothing to go back FROM.
+          if (result.visitedDetailPage) {
+            await page.goBack({ waitUntil: "domcontentloaded" }).catch(() => {});
+          }
           if (result.counted) {
             evaluatedForItem++;
             totalEvaluatedHere++;
@@ -1937,7 +2572,7 @@ export class ScrapeEngine {
       } else if (!generalSearchMode) {
         for (const item of searchableItems) {
           if (this.stopRequested || this.priorityRequested) break;
-          const query = getSearchTerms(item)[0];
+          const query = getSearchQuery(item);
           this.log("info", `Actively searching for "${item.item}" (query: "${query}")...`);
           const searchConfig = this.opts.getConfig();
           let searchResults;
@@ -1949,25 +2584,45 @@ export class ScrapeEngine {
               8,
               (reason, level) => this.log(level ?? "warn", reason),
               searchConfig.maxListingAgeHours,
-              searchConfig.minPriceUsd,
-              searchConfig.maxPriceUsd
+              item.minPriceUsd,
+              item.maxPriceUsd,
+              justConfirmedLocation
             );
           } catch (err) {
             this.log("error", `Active search failed for "${item.item}": ${(err as Error).message}`);
             continue;
+          } finally {
+            // Only ever valid for the FIRST item searched at this location
+            // (see justConfirmedLocation's own doc comment above) — every
+            // item after it needs its own real navigation regardless of
+            // whether this one succeeded or threw.
+            justConfirmedLocation = false;
           }
+          // See the rotate-mode branch's own candidateResults comment above
+          // for why this pre-filter exists — same fix, same reason, applied
+          // to this loop's own separate searchMarketplace call.
+          const candidateResults = searchResults.filter(
+            (l) => isRelevantToSearchItems(l.title, config.searchItems) || findGreenFlagCandidate(l.title, config.searchItems) !== null
+          );
           let evaluatedForItem = 0;
-          for (const listing of searchResults) {
+          for (const listing of candidateResults) {
             if (this.stopRequested || this.priorityRequested) break;
             if (locationCount > 1 && evaluatedForItem >= perLocation) break;
-            const idx = searchResults.indexOf(listing);
+            const idx = candidateResults.indexOf(listing);
             this.setStatus({
               currentListing: toPreview(listing),
               currentActionNote: null,
               currentReaction: null,
-              upcomingListings: searchResults.slice(idx + 1, idx + 6).map(toPreview),
+              upcomingListings: candidateResults.slice(idx + 1, idx + 6).map(toPreview),
             });
             const result = await this.evaluateListing(page, listing, this.opts.getConfig());
+            // See the same goBack() in the rotate-mode loop above — returns
+            // to the search-results page (query + filters intact) before the
+            // next candidate, instead of leaving the shared page stranded on
+            // whatever detail page was last visited.
+            if (result.visitedDetailPage) {
+              await page.goBack({ waitUntil: "domcontentloaded" }).catch(() => {});
+            }
             if (result.counted) {
               evaluatedForItem++;
               totalEvaluatedHere++;
@@ -1985,64 +2640,94 @@ export class ScrapeEngine {
 
       if (this.stopRequested || this.priorityRequested) continue;
 
-      let listings;
-      try {
-        listings = await browseListings(page, url);
-      } catch (err) {
-        this.log("error", `Browse failed for ${locationLabel}: ${(err as Error).message}`);
-        continue;
-      }
-      this.log(
-        "info",
-        locationCount > 1 ? `${locationLabel} — found ${listings.length} listings` : `Browsed feed — found ${listings.length} listings`
-      );
-      if (listings.length === 0) {
-        // Almost never means "genuinely nothing to find" — surface what
-        // was actually on the page so this can be diagnosed from the
-        // Dashboard instead of a silent, uninformative zero.
-        const diagnosis = await diagnoseEmptyPage(page).catch((err) => `(diagnosis failed: ${err.message})`);
-        this.log("warn", `Empty browse — page state was: ${diagnosis}`);
-      }
+      // Per explicit instruction — "it is REQUIRED to follow the same
+      // search path... it doesn't search for that product, it just starts
+      // searching random things and backs out": when there's at least one
+      // active Search For item and general (unverified) deal detection is
+      // off, stay fully focused on the dedicated search — skip the
+      // general-feed browse pass ENTIRELY here, not just relevance-filter
+      // it (which still opened green-flag candidates' detail pages for
+      // anything loosely sharing a word with a tracked item — exactly the
+      // "random things" this was reported as). generalDeal.enabled is the
+      // deliberate opt-in for "also flag other good deals you happen to
+      // see" alongside a specific search; with it off, nothing outside the
+      // active search ever gets a detail-page visit at this location.
+      //
+      // Bug fix — reported live: "I had three items searched in queue but
+      // now the scanner isn't evaluating listings." Root cause: this
+      // condition assumed "an active Search For item + general deal off"
+      // always meant a DEDICATED search already ran above (the rotate or
+      // sequential-per-item branch), but with 2+ items and "Rotate search
+      // terms" unchecked (generalSearchMode — see above), NEITHER of those
+      // branches runs at all; the general browse below is what's actually
+      // SUPPOSED to do the searching for that mode (its own candidateListings
+      // relevance-filter, right below, already existed for exactly this —
+      // it was just unreachable). Without `|| generalSearchMode` here, that
+      // combination fell straight to the "else if" skip-log branch further
+      // down and evaluated zero listings, forever, at every location.
+      const shouldGeneralBrowse = config.generalDeal.enabled || searchableItems.length === 0 || generalSearchMode;
 
-      // Per explicit instruction — in generalSearchMode there's no
-      // dedicated search to lean on (see above), so the general browse
-      // itself has to do the filtering: only listings that already look
-      // relevant to something on the Search For list (or loosely mention
-      // one, like the green-flag check elsewhere in this file) are
-      // "of interest" — everything else is skipped WITHOUT spending an
-      // evaluation on it. If NONE of this location's listings qualify, the
-      // location changes on the very next loop iteration instead of
-      // grinding through a full perLocation's worth of unrelated listings
-      // first — deliberately ignoring that cap as a floor, only a ceiling.
-      let candidateListings = listings;
-      if (generalSearchMode) {
-        candidateListings = listings.filter(
-          (l) => isRelevantToSearchItems(l.title, config.searchItems) || findGreenFlagCandidate(l.title, config.searchItems) !== null
-        );
-        if (listings.length > 0 && candidateListings.length === 0) {
-          this.log("info", `Nothing here matched your Search For list — moving to the next location.`);
-        }
-      }
+      if (shouldGeneralBrowse) {
+        try {
+          const listings = await browseListings(page, url);
+          this.log(
+            "info",
+            locationCount > 1 ? `${locationLabel} — found ${listings.length} listings` : `Browsed feed — found ${listings.length} listings`
+          );
+          if (listings.length === 0) {
+            // Almost never means "genuinely nothing to find" — surface what
+            // was actually on the page so this can be diagnosed from the
+            // Dashboard instead of a silent, uninformative zero.
+            const diagnosis = await diagnoseEmptyPage(page).catch((err) => `(diagnosis failed: ${err.message})`);
+            this.log("warn", `Empty browse — page state was: ${diagnosis}`);
+          }
 
-      let generalEvaluated = 0;
-      for (const listing of candidateListings) {
-        if (this.stopRequested || this.priorityRequested) break;
-        if (locationCount > 1 && generalEvaluated >= perLocation) break;
-        const idx = candidateListings.indexOf(listing);
-        this.setStatus({
-          currentListing: toPreview(listing),
-          currentActionNote: null,
-          currentReaction: null,
-          upcomingListings: candidateListings.slice(idx + 1, idx + 6).map(toPreview),
-        });
-        const result = await this.evaluateListing(page, listing, this.opts.getConfig());
-        if (result.counted) {
-          generalEvaluated++;
-          totalEvaluatedHere++;
-          this.setStatus({ listingsThisCycle: this.status.listingsThisCycle + 1 });
-          if (result.isDeal) batchDeals.push({ title: result.title, price: result.price });
-          else if (result.notable) batchSkips.push({ title: result.title, reason: result.reasoning });
+          // Per explicit instruction — in generalSearchMode there's no
+          // dedicated search to lean on (see above), so the general browse
+          // itself has to do the filtering: only listings that already look
+          // relevant to something on the Search For list (or loosely mention
+          // one, like the green-flag check elsewhere in this file) are
+          // "of interest" — everything else is skipped WITHOUT spending an
+          // evaluation on it. If NONE of this location's listings qualify,
+          // the location changes on the very next loop iteration instead of
+          // grinding through a full perLocation's worth of unrelated
+          // listings first — deliberately ignoring that cap as a floor,
+          // only a ceiling.
+          let candidateListings = listings;
+          if (generalSearchMode) {
+            candidateListings = listings.filter(
+              (l) => isRelevantToSearchItems(l.title, config.searchItems) || findGreenFlagCandidate(l.title, config.searchItems) !== null
+            );
+            if (listings.length > 0 && candidateListings.length === 0) {
+              this.log("info", `Nothing here matched your Search For list — moving to the next location.`);
+            }
+          }
+
+          let generalEvaluated = 0;
+          for (const listing of candidateListings) {
+            if (this.stopRequested || this.priorityRequested) break;
+            if (locationCount > 1 && generalEvaluated >= perLocation) break;
+            const idx = candidateListings.indexOf(listing);
+            this.setStatus({
+              currentListing: toPreview(listing),
+              currentActionNote: null,
+              currentReaction: null,
+              upcomingListings: candidateListings.slice(idx + 1, idx + 6).map(toPreview),
+            });
+            const result = await this.evaluateListing(page, listing, this.opts.getConfig());
+            if (result.counted) {
+              generalEvaluated++;
+              totalEvaluatedHere++;
+              this.setStatus({ listingsThisCycle: this.status.listingsThisCycle + 1 });
+              if (result.isDeal) batchDeals.push({ title: result.title, price: result.price });
+              else if (result.notable) batchSkips.push({ title: result.title, reason: result.reasoning });
+            }
+          }
+        } catch (err) {
+          this.log("error", `Browse failed for ${locationLabel}: ${(err as Error).message}`);
         }
+      } else if (locationCount > 1) {
+        this.log("info", `Staying focused on your Search For list — skipping the general feed here.`);
       }
 
       if (totalEvaluatedHere > 0) {
@@ -2121,7 +2806,7 @@ export class ScrapeEngine {
           return { evaluated: 0, error: "No browse location configured." };
         }
 
-        const query = getSearchTerms(item)[0] ?? item.item;
+        const query = getSearchQuery(item);
         // One location coming back empty doesn't mean the item isn't out
         // there — it's a nationwide search by design (see browseUrls), and a
         // request the user directly asked for shouldn't just give up after
@@ -2161,8 +2846,8 @@ export class ScrapeEngine {
               8,
               (reason, level) => this.log(level ?? "warn", reason),
               config.maxListingAgeHours,
-              config.minPriceUsd,
-              config.maxPriceUsd
+              item.minPriceUsd,
+              item.maxPriceUsd
             );
           } catch (err) {
             lastError = (err as Error).message;
@@ -2182,6 +2867,12 @@ export class ScrapeEngine {
               upcomingListings: results.slice(idx + 1, idx + 6).map(toPreview),
             });
             const result = await this.evaluateListing(page, listing, config);
+            // Same reasoning as runCycle's active-search loops — return to
+            // the search-results page (query + filters intact) before the
+            // next candidate rather than leaving the page on a detail view.
+            if (result.visitedDetailPage) {
+              await page.goBack({ waitUntil: "domcontentloaded" }).catch(() => {});
+            }
             if (result.counted) {
               evaluated++;
               this.setStatus({ listingsThisCycle: this.status.listingsThisCycle + 1 });
@@ -2216,10 +2907,134 @@ export class ScrapeEngine {
     });
   }
 
+  // The active scheduler's (watchScheduler.ts) counterpart to
+  // searchForItemNow above — proactively searches for ONE watch instead of
+  // waiting for it to turn up passively. Can't just reuse searchForItemNow
+  // itself: that method is hardwired to rotate the ACCOUNT's own
+  // config.browseUrls, which is exactly what a Watch's own independent
+  // location (per explicit instruction — "a Watch needs its own desired
+  // location rather than blindly inheriting whatever location the Scanner
+  // currently happens to be using") must NOT do.
+  //
+  // Deliberately does NOT check this.stopRequested anywhere in this method,
+  // unlike searchForItemNow's own loop — found and fixed during
+  // implementation, not part of the original spec: stopRequested only means
+  // "the CONTINUOUS scan loop should stop," but stop() sets it true
+  // PERMANENTLY (only start()/triggerOnce() ever reset it back to false —
+  // see stop() above). Checking it here would silently turn every active
+  // Watch check into a no-op for any account whose Scanner had EVER been
+  // manually stopped, directly breaking "Scanner OFF + Watch ON must work."
+  // discoverLocations() above already establishes this exact precedent for
+  // a one-off priority action — no stopRequested checks anywhere in it either.
+  async runWatchCheck(watch: Watch): Promise<{ evaluated: number; error?: string }> {
+    // V1 scope decision (per the approved plan's own §3/§4 — "state/
+    // nationwide as stretch goals if straightforward," not required):
+    // resolved_location_url/label are single columns, not a city list, so
+    // only a specific city/ZIP watch has one concrete place to actively
+    // search. A state/country-mode watch still gets full passive-path
+    // coverage (Phase 2, location-unenforced there already) — it just
+    // never gets an active, radius-precise check of its own. The scheduler
+    // (watchScheduler.ts) is what defers these rather than calling in here
+    // at all; this check is just a defensive backstop.
+    if (watch.locationMode !== "city") {
+      return {
+        evaluated: 0,
+        error: "Active checking currently only supports a specific city/ZIP watch location — state/nationwide watches still get full passive-path coverage.",
+      };
+    }
+    const cityOrZip = (watch.selectedCityOrZip ?? "").trim();
+    if (!cityOrZip) return { evaluated: 0, error: "No city/ZIP set for this watch." };
+
+    this.priorityRequested = true;
+    return this.withPage(async () => {
+      this.priorityRequested = false;
+      this.setStatus({ currentSearch: `watch: "${watch.name}"` });
+      try {
+        const config = this.opts.getConfig();
+        const page = await this.ensureBrowser();
+
+        if (this.status.loggedIn !== true) {
+          const loggedIn = await isLoggedIn(page);
+          this.setStatus({ loggedIn });
+          if (!loggedIn) {
+            this.log("warn", `Watch "${watch.name}": skipped active check, not logged into Facebook yet.`);
+            return { evaluated: 0, error: "Not logged into Facebook." };
+          }
+        }
+
+        // Resolved once, cached — never re-driven on a routine check (see
+        // types.ts's Watch.resolvedLocationUrl doc comment). store.
+        // updateWatch already nulls this cache out on a genuine location
+        // edit, so "not cached" here means either a brand-new watch or an
+        // edit since the last successful resolution — both correctly
+        // trigger exactly one fresh resolve.
+        let locationUrl = watch.resolvedLocationUrl;
+        let locationLabel = watch.resolvedLocationLabel;
+        if (!locationUrl) {
+          this.log("info", `Watch "${watch.name}": resolving location "${cityOrZip}"...`);
+          const result = await discoverLocation(page, cityOrZip, watch.searchRadiusMiles ?? ScrapeEngine.DEFAULT_WATCH_RADIUS_MILES);
+          if (!result.url) {
+            this.log("warn", `Watch "${watch.name}": couldn't resolve "${cityOrZip}" (${result.error ?? "no matching suggestion"}) — will retry on the next scheduled check.`);
+            return { evaluated: 0, error: result.error ?? "Could not resolve location." };
+          }
+          locationUrl = result.url;
+          locationLabel = result.resolvedLocationLabel;
+          this.opts.store.setWatchResolvedLocation(watch.id, { url: result.url, label: result.resolvedLocationLabel, checkedAt: Date.now() });
+        }
+
+        const query = getSearchQuery(watchAsSearchItem(watch));
+        // Minutes -> hours, same unit searchMarketplace's own param expects;
+        // falls back to the account's general freshness setting when this
+        // watch has no age condition of its own.
+        const maxAgeHours = watch.maxListingAgeMinutes !== null ? watch.maxListingAgeMinutes / 60 : config.maxListingAgeHours;
+        this.setStatus({ currentActionNote: `Actively checking Watch "${watch.name}"...` });
+        this.log("info", `Watch "${watch.name}": active check at ${locationLabel ?? cityOrZip} (query: "${query}")...`);
+
+        let results: ListingSummary[];
+        try {
+          results = await searchMarketplace(page, locationUrl, query, 8, (reason, level) => this.log(level ?? "warn", reason), maxAgeHours, watch.minPriceUsd, watch.maxPriceUsd);
+        } catch (err) {
+          const message = (err as Error).message;
+          this.log("error", `Watch "${watch.name}": active check failed at ${locationLabel ?? cityOrZip} — ${message}`);
+          return { evaluated: 0, error: message };
+        }
+
+        let evaluated = 0;
+        for (const listing of results) {
+          const idx = results.indexOf(listing);
+          this.setStatus({
+            currentListing: toPreview(listing),
+            currentActionNote: null,
+            currentReaction: null,
+            upcomingListings: results.slice(idx + 1, idx + 6).map(toPreview),
+          });
+          const result = await this.evaluateListing(page, listing, config, "active");
+          if (result.visitedDetailPage) {
+            await page.goBack({ waitUntil: "domcontentloaded" }).catch(() => {});
+          }
+          if (result.counted) evaluated++;
+        }
+
+        this.log("info", `Watch "${watch.name}": active check done — ${results.length} listing(s) found, ${evaluated} evaluated.`);
+        return { evaluated };
+      } finally {
+        this.setStatus({
+          currentSearch: null,
+          currentListing: null,
+          currentActionNote: null,
+          currentReaction: null,
+          analyzingPhotos: false,
+          upcomingListings: [],
+        });
+      }
+    });
+  }
+
   start(): void {
     if (this.running) return;
     this.running = true;
     this.stopRequested = false;
+    this.scanSetupDone = false;
     this.setStatus({ running: true });
     // Fresh scan, fresh watchcount allowance — see watchCountOncePerScan.
     this.ebayResearchedProductIds.clear();
@@ -2243,6 +3058,7 @@ export class ScrapeEngine {
   // stop check.
   async triggerOnce(): Promise<void> {
     this.stopRequested = false;
+    this.scanSetupDone = false;
     await this.runOnce();
   }
 

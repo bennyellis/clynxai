@@ -1,15 +1,20 @@
 import "dotenv/config";
 import { app, BrowserWindow, ipcMain, shell, Menu, dialog } from "electron";
 import path from "node:path";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, cpSync } from "node:fs";
 import { Store } from "./store.js";
 import { ScrapeEngine } from "./scrapeEngine.js";
-import { loadConfig, saveConfig, DEFAULT_CONFIG, DEFAULT_BROWSE_URLS } from "./config.js";
+import { WatchScheduler } from "./watchScheduler.js";
+import { EbayEngine } from "./ebayEngine.js";
+import { hasEbayCredentials } from "./ebayClient.js";
+import { initOpenAIProxy } from "./openai.js";
+import { loadConfig, saveConfig, DEFAULT_CONFIG, DEFAULT_BROWSE_URLS, DEFAULT_COUNTRY_CITIES } from "./config.js";
 import {
   streamChat,
   streamNarration,
   allowedToolNames,
   discoverSiblingProducts,
+  discoverProductVariants,
   type ChatMessage,
   type ChatContext,
   type ChatAttachment,
@@ -17,20 +22,77 @@ import {
   type ToolCall,
 } from "./chat.js";
 import { randomUUID } from "node:crypto";
-import { lookupProduct } from "./products.js";
-import { downloadImageAsDataUri, findBrandLogoImage, findGroupImage, buildImageCollage } from "./webResearch.js";
-import { answerImageQuestion, reconsiderImageFeedback } from "./vision.js";
-import { lookupPrimaryCityInState } from "./locationDiscovery.js";
+import { lookupProduct, expandSearchKeywords } from "./products.js";
+import { downloadImageAsDataUri, findBrandLogoImage, findGroupImage, findProductImage, findPoorConditionProductImage, findReferencePhotos, buildImageCollage, generateCategoryImage } from "./webResearch.js";
+import {
+  answerImageQuestion,
+  reconsiderImageFeedback,
+  analyzeReferencePhotoDifferences,
+  auditReferencePhotoGallery,
+} from "./vision.js";
+import { lookupTopCitiesInState } from "./locationDiscovery.js";
 import { analyzeEbayComps, deriveWatchCountQuery } from "./watchcount.js";
-import type { Config, FeedbackVerdict, LogLine, ProductProfile } from "./types.js";
+import { timed, getMetricsSnapshot, resetMetrics } from "./metrics.js";
+import { CloudClient } from "./cloudClient.js";
+import { WatchSyncService } from "./watchSync.js";
+import { ListingIngestSyncService } from "./listingIngestSync.js";
+import { FeedbackSyncService } from "./feedbackSync.js";
+import { ProductSyncService } from "./productSync.js";
+import type { Account, ActiveProductResearch, CloudStatus, Config, EngineConfig, FeedbackVerdict, LogLine, ProductProfile, ScrapeStatus, SearchItem, Watch } from "./types.js";
+import { rmSync } from "node:fs";
 
 Menu.setApplicationMenu(null);
 
 const baseDir = app.isPackaged ? app.getPath("userData") : app.getAppPath();
-const CONFIG_PATH = path.join(baseDir, "config.json");
-const PROFILE_DIR = path.join(baseDir, "browser-profile");
-const DB_PATH = path.join(baseDir, "data", "scout.db");
+// Multi-user login migration — every one of these three used to be a fixed
+// module-scope constant computed straight off baseDir. They're now `let`,
+// pointed at a PER-USER subfolder (see configurePathsForUser below) the
+// moment someone actually logs in — nothing reads them before that. The
+// legacy flat-layout constants right below are what a real pre-multi-user
+// install already has sitting at these old top-level locations; migrateLegacyDataIfNeeded
+// copies (never moves/deletes) them into the first user who ever logs in on
+// this install's own new per-user folder, so a real existing install's
+// Facebook login/search history/etc. is never lost.
+let CONFIG_PATH = path.join(baseDir, "config.json");
+let PROFILES_ROOT = path.join(baseDir, "browser-profiles");
+let DB_PATH = path.join(baseDir, "data", "scout.db");
+const LEGACY_CONFIG_PATH = path.join(baseDir, "config.json");
+const LEGACY_PROFILES_ROOT = path.join(baseDir, "browser-profiles");
+const LEGACY_DB_PATH = path.join(baseDir, "data", "scout.db");
+const DATA_ROOT = path.join(baseDir, "data");
+const USERS_ROOT = path.join(DATA_ROOT, "users");
 const ENV_PATH = path.join(baseDir, ".env");
+// Batch 2 Fix A — see cloudClient.ts's readSession/writeSession. Same
+// directory as .env/config.json, same "userData in a packaged build, app
+// dir in dev" posture as everything else on baseDir. Deliberately install-
+// level, not per-user — this is what lets a relaunch figure out WHICH user
+// was logged in (see cloudClient.ts's restoreSession) before any per-user
+// folder has even been picked.
+const CLOUD_SESSION_PATH = path.join(baseDir, "cloud-session.json");
+// Multi-user login migration — the cloud server URL has to be known BEFORE
+// any user is logged in (it's the Server URL field the LoginScreen shows,
+// pre-filled from here), so it lives in its own tiny install-level file
+// rather than in any per-user config.json. Read synchronously at module
+// load — same "cheap, local, never blocks startup" posture as config.json
+// always had.
+const APP_SETTINGS_PATH = path.join(baseDir, "app-settings.json");
+const DEFAULT_CLOUD_API_URL = "http://localhost:8787";
+interface AppSettings {
+  cloudApiUrl: string;
+}
+function loadAppSettings(): AppSettings {
+  try {
+    if (!existsSync(APP_SETTINGS_PATH)) return { cloudApiUrl: DEFAULT_CLOUD_API_URL };
+    const raw = JSON.parse(readFileSync(APP_SETTINGS_PATH, "utf-8"));
+    return { cloudApiUrl: typeof raw?.cloudApiUrl === "string" && raw.cloudApiUrl.trim() ? raw.cloudApiUrl : DEFAULT_CLOUD_API_URL };
+  } catch {
+    return { cloudApiUrl: DEFAULT_CLOUD_API_URL };
+  }
+}
+function saveAppSettings(settings: AppSettings): void {
+  writeFileSync(APP_SETTINGS_PATH, JSON.stringify(settings, null, 2), "utf-8");
+}
+let appSettings: AppSettings = loadAppSettings();
 
 function saveEnvKey(varName: string, key: string): void {
   const trimmed = key.trim();
@@ -43,15 +105,83 @@ function saveEnvKey(varName: string, key: string): void {
   process.env[varName] = trimmed;
 }
 
-let config: Config = loadConfig(CONFIG_PATH);
-// loadConfig already resets the chat-driven AI settings (Search For list,
-// custom instructions, general-deal toggle) in memory — write that back to
-// disk immediately so config.json matches what's actually running from the
-// moment of launch, instead of drifting stale until some unrelated save.
-saveConfig(CONFIG_PATH, config);
-const store = new Store(DB_PATH);
+// Multi-user login migration — no implicit local user anymore: `config`
+// starts out as a safe, inert default (never written to disk on its own)
+// and only becomes a real, loaded-from-disk Config once bootstrapUserSession
+// (see below) runs after a successful login. Every one of the ~120 IPC
+// handlers further down this file still just reads/writes this same module
+// `config` variable exactly as before — the only thing that changed is WHEN
+// it first gets a real value.
+let config: Config = { ...DEFAULT_CONFIG };
+
+// Clynx Cloud Phase 1 — see cloudClient.ts. getConfig always reads the
+// live `config` variable (reassigned throughout this file on save), not a
+// stale snapshot from whenever the client was constructed. Constructed once,
+// unconditionally, at true module scope — unlike everything else below,
+// this ISN'T per-user: it's what index.ts uses to authenticate a user in
+// the first place (see the auth:login/auth:register/auth:getSession/
+// auth:logout handlers), so it has to exist before any user is known.
+const cloudClient = new CloudClient(() => config, CLOUD_SESSION_PATH);
+// Clynx Cloud — shared-key migration. See openai.ts's own doc comment: this
+// is what lets every OpenAI call site in the app (chat.ts, vision.ts,
+// scorer.ts, ...) fall back to proxying through Clynx Cloud's /ai/* routes
+// when no local OPENAI_API_KEY is configured, instead of each needing its
+// own key on this machine.
+initOpenAIProxy(cloudClient);
+
+// Multi-user login migration — store and all 4 background sync services
+// used to be constructed once, unconditionally, at module scope. They're
+// now per-user: `store` opens a DIFFERENT user's own scout.db depending on
+// who's logged in, and the sync services hold a direct reference to
+// whichever `store` was current when THEY were constructed (see
+// WatchSyncService et al.'s own constructors) — so all 5 have to be
+// (re)created together, inside bootstrapUserSession, every time a user logs
+// in. Declared here with definite-assignment (`!`) rather than
+// `| undefined` so none of the ~120 existing handlers further down this
+// file that already read `store.xxx(...)` directly need to change — they're
+// only ever invoked once the renderer is past the LoginScreen, by which
+// point bootstrapUserSession has always already run.
+let store!: Store;
+let watchSyncService!: WatchSyncService;
+let listingIngestSyncService!: ListingIngestSyncService;
+let feedbackSyncService!: FeedbackSyncService;
+let productSyncService!: ProductSyncService;
+// Guards the shutdown paths (stopUserSession, window-all-closed/before-quit,
+// auth:logout) against running before any user has ever actually logged in
+// (e.g. the app is closed straight from the LoginScreen) — store/the sync
+// services/watchScheduler above are only ever actually constructed once this
+// is true.
+let hasActiveUserSession = false;
+// Set at the end of a successful bootstrapUserSession; read by auth:getSession
+// once already-bootstrapped, and used to scope this install's per-user data
+// folders (see configurePathsForUser).
+let currentUserId: string | null = null;
+let cloudHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
 let mainWindow: BrowserWindow | null = null;
+
+// Bug fix (verified live crash: "TypeError: Object has been destroyed" at
+// a mainWindow?.webContents.send call, which killed the ENTIRE main
+// process — Node has no more handlers left once an exception is thrown
+// from INSIDE the process-level uncaughtException/unhandledRejection
+// handlers below, which is exactly what happened: one ordinary send threw
+// this, got caught by uncaughtException, whose own error-reporting line
+// was the SAME unsafe pattern and threw the SAME error again, this time
+// with nothing left to catch it). `mainWindow?.` only guards against
+// null/undefined — a BrowserWindow that's been closed is neither; it's a
+// non-null reference to a destroyed native object, and touching
+// .webContents on one throws synchronously. Every renderer-bound push in
+// this file goes through this instead of calling send directly, so a
+// closed/closing window (a real possibility any time a fire-and-forget
+// background task — product research, a scan cycle — finishes after the
+// user has already closed the app) degrades to "that update just doesn't
+// go anywhere" instead of taking the whole process down with it.
+function sendToRenderer(channel: string, ...args: unknown[]): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, ...args);
+  }
+}
+
 // Per explicit instruction — closing the window with unsaved Config edits
 // needs a real chance to save first, not just quietly discard them. The
 // renderer (Config.tsx) is the only place that actually knows whether
@@ -70,6 +200,48 @@ function recordLog(line: LogLine) {
   if (recentLogs.length > 200) recentLogs.shift();
 }
 
+// Per explicit instruction — multiple Facebook accounts scanning
+// concurrently, one ScrapeEngine per account (see createEngineForAccount
+// below), keyed by Account.id. Populated once at startup and kept in sync
+// with config.accounts by syncEnginesWithAccounts (accounts:add/remove).
+const engines = new Map<string, ScrapeEngine>();
+// Per-account restart bookkeeping — was two module-level booleans when
+// there was only ever one engine; now keyed by account id so restarting
+// one account's engine (a location change) never touches another's.
+const restartGuards = new Map<string, { inFlight: boolean; queued: boolean }>();
+
+function ensureEngineFor(accountId: string): ScrapeEngine {
+  const existing = engines.get(accountId);
+  if (existing) return existing;
+  const created = createEngineForAccount(accountId);
+  engines.set(accountId, created);
+  return created;
+}
+
+// Shared/cross-account concerns (WatchCount/eBay comps research — see
+// runProductLookup and fetchAndStoreEbayComps) need SOME one browser
+// context to open a tab in, but aren't really "about" any particular
+// account. Confirmed with the user: accounts differ only by location/
+// login, so there's no principled way to pick one over another — this
+// just always uses the first configured account, matching exactly how a
+// single-account setup already behaves (there's only ever one to pick).
+function getPrimaryEngine(): ScrapeEngine {
+  return ensureEngineFor(config.accounts[0].id);
+}
+
+// Per explicit instruction — an immediate one-off search (Database's "Search
+// now" button, Dashboard's "Search for Products" box) fans out across every
+// account that's currently actually usable (a real browser session already
+// open — logged in or at least started), rather than picking just one.
+// Accounts that aren't running/logged in yet are silently skipped — nothing
+// to search from there.
+function searchForItemOnActiveAccounts(item: SearchItem): void {
+  for (const account of config.accounts) {
+    const eng = engines.get(account.id);
+    if (eng?.hasOpenBrowser()) eng.searchForItemNow(item).catch(() => {});
+  }
+}
+
 // Per explicit instruction — "when the user changes something in the
 // filters or adds a new product to search for, stop the scan and restart
 // it. this can prevent bugs." scrapeEngine.ts already re-fetches config
@@ -78,42 +250,55 @@ function recordLog(line: LogLine) {
 // stop-then-start guarantees a completely clean cycle (fresh browser
 // navigation, no lingering in-flight assumptions from before the change),
 // which is a stronger guarantee against staleness than the surgical
-// approach alone. Deliberately does NOTHING if the scanner isn't currently
-// running — a filter/search-item change shouldn't start it on its own,
-// that's still a separate, deliberate action (see add_search_item below,
-// which already does its own explicit start-if-idle and calls this only
-// for the "was already running" case).
-let engineRestartInFlight = false;
-let engineRestartQueued = false;
-function restartEngineIfRunning(reason: string): void {
-  if (!engine.getStatus().running) return;
-  if (engineRestartInFlight) {
-    // Another restart (e.g. for an earlier item in the same "Search for
-    // Products" batch) is already tearing down/relaunching the browser —
-    // queue one more pass after it finishes instead of racing a second
-    // stop() against the same in-flight context close. The queued pass
-    // still picks up whatever the LATEST config is by the time it runs
-    // (engine.start()/getConfig() always reads current state), so nothing
-    // from this request is lost, it just doesn't get its own separate
-    // restart cycle.
-    engineRestartQueued = true;
+// approach alone. Deliberately does NOTHING if that account's scanner
+// isn't currently running — a filter/search-item change shouldn't start it
+// on its own, that's still a separate, deliberate action (see
+// add_search_item below, which already does its own explicit
+// start-if-idle and calls this only for the "was already running" case).
+function restartEngineIfRunning(accountId: string, reason: string): void {
+  const eng = engines.get(accountId);
+  if (!eng || !eng.getStatus().running) return;
+  let guard = restartGuards.get(accountId);
+  if (!guard) {
+    guard = { inFlight: false, queued: false };
+    restartGuards.set(accountId, guard);
+  }
+  if (guard.inFlight) {
+    // Another restart for this SAME account (e.g. for an earlier item in
+    // the same "Search for Products" batch) is already tearing down/
+    // relaunching its browser — queue one more pass after it finishes
+    // instead of racing a second stop() against the same in-flight
+    // context close. The queued pass still picks up whatever the LATEST
+    // config is by the time it runs (start()/getConfig() always reads
+    // current state), so nothing from this request is lost, it just
+    // doesn't get its own separate restart cycle.
+    guard.queued = true;
     return;
   }
-  engineRestartInFlight = true;
+  guard.inFlight = true;
   (async () => {
     do {
-      engineRestartQueued = false;
+      guard!.queued = false;
       const line: LogLine = { ts: Date.now(), level: "info", message: `Restarting the scanner to apply ${reason}...` };
       recordLog(line);
-      mainWindow?.webContents.send("engine:log", line);
-      await engine.stop();
-      engine.start();
-    } while (engineRestartQueued);
+      sendToRenderer("engine:log", line);
+      await eng.stop();
+      eng.start();
+    } while (guard!.queued);
   })()
-    .catch((err) => console.error(`[engine-restart] failed to restart after ${reason}: ${(err as Error).message}`))
+    .catch((err) => console.error(`[engine-restart] failed to restart account ${accountId} after ${reason}: ${(err as Error).message}`))
     .finally(() => {
-      engineRestartInFlight = false;
+      guard!.inFlight = false;
     });
+}
+
+// A SHARED-field change (Search For list, price filters, deal threshold,
+// etc. — anything NOT specific to one account's own location) restarts
+// EVERY currently-running account's engine, same semantics as the old
+// single-engine restart just fanned out across however many accounts are
+// configured.
+function restartAllEnginesIfRunning(reason: string): void {
+  for (const account of config.accounts) restartEngineIfRunning(account.id, reason);
 }
 
 // Per explicit instruction ("the scanner doesn't stop randomly") — without
@@ -132,12 +317,12 @@ process.on("unhandledRejection", (reason) => {
   const message = reason instanceof Error ? reason.message : String(reason);
   const line: LogLine = { ts: Date.now(), level: "error", message: `Unhandled error (recovered, scanner should keep running): ${message}` };
   recordLog(line);
-  mainWindow?.webContents.send("engine:log", line);
+  sendToRenderer("engine:log", line);
 });
 process.on("uncaughtException", (err) => {
   const line: LogLine = { ts: Date.now(), level: "error", message: `Unexpected error (recovered, scanner should keep running): ${err.message}` };
   recordLog(line);
-  mainWindow?.webContents.send("engine:log", line);
+  sendToRenderer("engine:log", line);
 });
 
 // Full admin access from the Dashboard chat — change any setting, manage
@@ -166,6 +351,195 @@ function describeSearchOutcome(item: string, result: { evaluated: number; error?
   return `Found and checked ${result.evaluated} listing${result.evaluated === 1 ? "" : "s"} for "${item}" — see the feed below.`;
 }
 
+// Per explicit instruction — multiple Facebook accounts: this sets ONE
+// account's location (accountId), not the whole app's — every caller
+// writes into that one entry in config.accounts instead of the old flat
+// Config fields, and only restarts/discovers via THAT account's own
+// engine. Top-level (not nested in app.whenReady) so both the IPC handler
+// below and executeChatTool's start_scanner branch (a plain module-level
+// function, defined below) can reach it.
+function updateAccountLocation(accountId: string, patch: Partial<Account>): void {
+  config = { ...config, accounts: config.accounts.map((a) => (a.id === accountId ? { ...a, ...patch } : a)) };
+  saveConfig(CONFIG_PATH, config);
+  sendToRenderer("config:updated", config);
+  restartEngineIfRunning(accountId, "your location settings");
+}
+
+// Per explicit instruction — the actual browser work that used to run
+// synchronously inside location:setMode (look up the state's primary city,
+// drive Facebook's "Change location" dialog, resolve a real browseUrl) is
+// now deferred to whenever this account's engine is about to start (see the
+// engine:start handler and executeChatTool's start_scanner branch below,
+// the only two ways an engine actually starts). A no-op the moment
+// locationResolved is already true — the common case on every start after
+// the first one following a location change — so this doesn't add delay to
+// a normal Start once the location is settled. Top-level for the same
+// reason as updateAccountLocation above.
+async function resolveAccountLocationIfNeeded(accountId: string): Promise<{ ok: boolean; message: string | null }> {
+  const account = config.accounts.find((a) => a.id === accountId);
+  if (!account || account.locationResolved) return { ok: true, message: null };
+
+  const eng = ensureEngineFor(accountId);
+
+  if (account.locationMode === "city") {
+    const cityOrZip = (account.selectedCityOrZip ?? "").trim();
+    if (!cityOrZip) return { ok: false, message: "No city/ZIP saved for this account." };
+    // Per explicit instruction — a specific city/ZIP search should only
+    // ever cover 20 miles around that exact spot, set live in the SAME
+    // "Change location" dialog visit (and the same Apply click) that
+    // resolves the location itself, not left to drift until the next scan
+    // cycle's own verifyOrSetRadius check corrects it.
+    const CITY_MODE_RADIUS_MILES = 20;
+    const [result] = await eng.discoverLocations([cityOrZip], CITY_MODE_RADIUS_MILES);
+    if (!result.url) {
+      return {
+        ok: false,
+        message: `Couldn't find "${cityOrZip}" on Facebook Marketplace (${result.error ?? "no matching suggestion"}) — try typing it exactly as you would into Facebook's own location search, e.g. "Sacramento, California" (full state name, not an abbreviation). Check Config to fix it.`,
+      };
+    }
+    // Per explicit instruction — a specific city/ZIP search should also
+    // skip any listing that resolves to a different state entirely (a
+    // wide-enough radius near a state line can still pull in out-of-state
+    // listings). A ZIP code alone doesn't say what state it's in, so this
+    // trusts Facebook's OWN confirmation of the location it actually
+    // applied (see scraper.ts's changeLocation), not the raw text the user
+    // typed in.
+    updateAccountLocation(accountId, {
+      selectedState: result.resolvedState,
+      searchRadiusMiles: CITY_MODE_RADIUS_MILES,
+      browseUrls: [result.url],
+      locationResolved: true,
+    });
+    return { ok: true, message: `Resolved location: now searching only ${cityOrZip}, within ${CITY_MODE_RADIUS_MILES} miles.` };
+  }
+
+  if (account.locationMode === "state") {
+    const state = (account.selectedState ?? "").trim();
+    if (!state) return { ok: false, message: "No state saved for this account." };
+    // Per explicit instruction — "make sure when in a state... the search
+    // algorithm follows the same path [as country mode]... it rotates the
+    // top 10 cities": resolves the state's top cities (not just one), so
+    // runCycle's existing random-pick-and-rotate logic (see scrapeEngine.ts
+    // — it already works for ANY browseUrls.length, nationwide or not) has
+    // real redundancy within the state instead of a single point of
+    // failure. Individual cities that fail to resolve are just left out —
+    // ScrapeEngine.discoverLocations already logs each one's success/
+    // failure to Activity as it goes — only a TOTAL failure (zero resolved)
+    // is treated as an error here.
+    const STATE_MODE_RADIUS_MILES = 40;
+    const STATE_MODE_CITY_COUNT = 10;
+    let cities: string[];
+    try {
+      cities = await lookupTopCitiesInState(state, STATE_MODE_CITY_COUNT);
+    } catch (err) {
+      return { ok: false, message: `Couldn't look up cities for ${state}: ${(err as Error).message}. Check Config to retry.` };
+    }
+    const results = await eng.discoverLocations(cities, STATE_MODE_RADIUS_MILES);
+    const browseUrls = results.flatMap((r) => (r.url ? [r.url] : []));
+    if (!browseUrls.length) {
+      return {
+        ok: false,
+        message: `Looked up ${cities.length} ${state} cit${cities.length === 1 ? "y" : "ies"} but couldn't resolve any of them on Facebook Marketplace — check Activity for details, or Config to retry.`,
+      };
+    }
+    updateAccountLocation(accountId, {
+      searchRadiusMiles: STATE_MODE_RADIUS_MILES,
+      browseUrls,
+      locationResolved: true,
+    });
+    return {
+      ok: true,
+      message: `Resolved location: now rotating ${browseUrls.length}/${cities.length} ${state} cities, within ${STATE_MODE_RADIUS_MILES} miles — anything found outside ${state} is skipped.`,
+    };
+  }
+
+  // Root-caused live with 4 concurrent accounts: "country" mode used to be
+  // locationResolved: true unconditionally (see DEFAULT_CONFIG/loadConfig's
+  // OLD comments) and just navigated straight to a static list of GUESSED
+  // city-slug URLs (config.ts's DEFAULT_BROWSE_URLS), never actually
+  // confirmed against Facebook's own "Change location" dialog the way
+  // state/city mode above already were. Every evaluated listing across all
+  // 4 accounts was clustering near Richmond, VA regardless of which of the
+  // 48 "rotated" URLs was current — Facebook was silently falling back to
+  // each account's own default location for slugs it didn't actually honor,
+  // exactly the failure mode DEFAULT_BROWSE_URLS's own comment predicted.
+  // This now resolves the SAME nationwide spread through the SAME
+  // dialog-driven, Facebook-CONFIRMED mechanism state mode already used
+  // above — real URLs captured from page.url() after Facebook itself
+  // applied the change, not guesses.
+  // Per explicit instruction — "for whole country, change the search
+  // radius from 100 miles to 500 miles." Facebook's own radius dropdown
+  // may or may not actually offer a 500-mile preset (never verified live)
+  // — setRadiusInDialog already degrades gracefully if it can't find/select
+  // an exact match (logs a warning via onFallback and leaves whatever
+  // radius was already set, rather than failing the whole search), so
+  // nothing breaks either way; check Activity after restarting to confirm
+  // it actually took.
+  const COUNTRY_MODE_RADIUS_MILES = 500;
+  // Root-caused live: "why does it need to keep searching for [locations],
+  // it's already there" — a 48-city pass, paced to stay under Facebook's
+  // own throttling, is a genuine 12-15 minute one-time cost, and closing
+  // the app (or losing the account mid-run for any other reason) used to
+  // throw ALL of that away — browseUrls/locationResolved only ever got
+  // written once, after the full 48 cities had been attempted. See
+  // Account.countryCityProgress's own doc comment: every city's outcome
+  // now persists the moment it happens (via the onEachResult callback
+  // below), and only cities missing here or previously null (failed, worth
+  // another try) get attempted at all — a genuinely already-resolved city
+  // is never re-driven through the dialog again.
+  const priorProgress = account.countryCityProgress ?? {};
+  const citiesToTry = DEFAULT_COUNTRY_CITIES.filter((city) => !priorProgress[city]);
+  const progress: Record<string, string | null> = { ...priorProgress };
+  if (citiesToTry.length) {
+    await eng.discoverLocations(citiesToTry, COUNTRY_MODE_RADIUS_MILES, (result) => {
+      progress[result.city] = result.url;
+      // Persisted directly (not via updateAccountLocation) so this doesn't
+      // also broadcast config:updated / attempt a restart on every single
+      // one of up to 48 results — those only matter once, at the very end,
+      // once there's an actual browseUrls list worth announcing.
+      config = { ...config, accounts: config.accounts.map((a) => (a.id === accountId ? { ...a, countryCityProgress: { ...progress } } : a)) };
+      saveConfig(CONFIG_PATH, config);
+    });
+  }
+  const countryBrowseUrls = DEFAULT_COUNTRY_CITIES.flatMap((city) => (progress[city] ? [progress[city] as string] : []));
+  if (!countryBrowseUrls.length) {
+    return {
+      ok: false,
+      message: `Tried to resolve ${DEFAULT_COUNTRY_CITIES.length} nationwide cities but couldn't confirm any of them on Facebook Marketplace — check Activity for details, or Config to retry.`,
+    };
+  }
+  updateAccountLocation(accountId, {
+    searchRadiusMiles: COUNTRY_MODE_RADIUS_MILES,
+    browseUrls: countryBrowseUrls,
+    locationResolved: true,
+    countryCityProgress: progress,
+  });
+  return {
+    ok: true,
+    message: `Resolved location: now rotating ${countryBrowseUrls.length}/${DEFAULT_COUNTRY_CITIES.length} nationwide cities, within ${COUNTRY_MODE_RADIUS_MILES} miles.`,
+  };
+}
+
+// Same case-insensitive-exact-then-substring leniency remove_search_item's
+// plain string match doesn't bother with (Search For items are usually
+// referred to verbatim) — a Watch's name is user-chosen free text, so "the
+// xbox one" should still find a Watch actually named "Xbox Series X".
+function findWatchByName(name: string): Watch | null {
+  const target = name.trim().toLowerCase();
+  if (!target) return null;
+  const all = store.listWatches();
+  // Bidirectional substring check — found during review: a plain
+  // w.name.includes(target) alone misses the (plausible) case where the
+  // model refers to a short-named watch ("Xbox") by a longer, more
+  // elaborate phrase ("the Xbox Series X watch") than what's actually
+  // stored, since target is then LONGER than the name it should match.
+  return (
+    all.find((w) => w.name.toLowerCase() === target) ??
+    all.find((w) => w.name.toLowerCase().includes(target) || target.includes(w.name.toLowerCase())) ??
+    null
+  );
+}
+
 // onSearchUpdate lets add_search_item report back a second time, after its
 // fire-and-forget searchForItemNow actually finishes — the tool's own
 // return value only covers the instant confirmation ("Searching..."), which
@@ -191,8 +565,43 @@ async function executeChatTool(
     if (!item || !matchKeywords.length) {
       return "Failed: need both an item name and at least one match keyword.";
     }
-    const newItem = { item, matchKeywords, typicalResaleUsd };
+    // Per explicit instruction — "if the ai already has prior knowledge on
+    // the thing you are searching for, have it bring up an image from
+    // Database... prompting the user with a popup": set only by
+    // search:addProducts below, when the user confirmed Dashboard's popup
+    // that a specific Database product IS what they're searching for — the
+    // AI itself never sets this via chat, there's no popup in that flow.
+    const linkedProductId = typeof call.args.linkedProductId === "string" ? call.args.linkedProductId : null;
+    // Per explicit instruction — price range is per-product now, set once
+    // at add time (Dashboard's own "Set a price range for ___?" prompt, or
+    // the chat assistant's own minPriceUsd/maxPriceUsd args here) rather
+    // than a single global Min/Max Price knob shared by everything on the
+    // Search For list — see types.ts's SearchItem doc comment.
+    const minPriceUsd = typeof call.args.minPriceUsd === "number" ? call.args.minPriceUsd : null;
+    const maxPriceUsd = typeof call.args.maxPriceUsd === "number" ? call.args.maxPriceUsd : null;
+    const newItem = { item, matchKeywords, typicalResaleUsd, linkedProductId, minPriceUsd, maxPriceUsd };
     config = { ...config, searchItems: [...config.searchItems, newItem] };
+    // Bug fix (verified live: "I see it finding good listings at times but
+    // it really fails to stay on track long term") — this used to rely on
+    // the AI itself remembering to separately call
+    // set_general_deal_detection(false) per its own system-prompt
+    // guidance, which is exactly the kind of thing a model can forget to
+    // do across a long, varied conversation. search:addProducts (the
+    // Dashboard's own search box) already does this deterministically in
+    // its own handler rather than trusting the model — add_search_item
+    // (by far the more common path, since "search for X" in chat is how
+    // most Search For items actually get added) never did, so general
+    // (unverified) deal detection stayed on by default, and the passive
+    // general-browse pass that runs after every dedicated search (see
+    // scrapeEngine.ts's runCycle) kept flagging unrelated listings via the
+    // general pathway — reads as "wandering off the tracked item" the
+    // longer a session runs, since more and more of what shows up has
+    // nothing to do with what was actually asked for. Same fix, same
+    // place it belongs: guaranteed by the handler, not by hoping the model
+    // remembers a second tool call.
+    if (config.generalDeal.enabled) {
+      config = { ...config, generalDeal: { ...config.generalDeal, enabled: false } };
+    }
     saveConfig(CONFIG_PATH, config);
     // Verified live miss — this was the actual root cause of "it doesn't
     // display the product that was searched for": every OTHER
@@ -201,43 +610,37 @@ async function executeChatTool(
     // picks up the change immediately, but this one never did — the new
     // item was genuinely saved and used by the scanner, it just never told
     // the UI, so it looked like adding a product silently did nothing.
-    mainWindow?.webContents.send("config:updated", config);
+    sendToRenderer("config:updated", config);
+    const priceRangeSuffix =
+      minPriceUsd != null && maxPriceUsd != null
+        ? ` [$${minPriceUsd}-$${maxPriceUsd}]`
+        : minPriceUsd != null
+          ? ` [$${minPriceUsd}+]`
+          : maxPriceUsd != null
+            ? ` [up to $${maxPriceUsd}]`
+            : "";
     const line: LogLine = {
       ts: Date.now(),
       level: "info",
-      message: `Chat added to Search For: "${item}"${typicalResaleUsd > 0 ? ` (~$${typicalResaleUsd})` : " (no price set yet)"}`,
+      message: `Chat added to Search For: "${item}"${priceRangeSuffix}${typicalResaleUsd > 0 ? ` (~$${typicalResaleUsd})` : " (no price set yet)"}`,
     };
     recordLog(line);
-    mainWindow?.webContents.send("engine:log", line);
-    // Per explicit instruction — asking the assistant to search for
-    // something shouldn't require a separate trip to click "Start Scanner"
-    // too, so this still starts the scanner fresh if it wasn't already
-    // running — and when it wasn't, the one-off searchForItemNow right
-    // below still fires for an immediate look rather than waiting for the
-    // fresh cycle's own first pass to reach it.
-    //
-    // If the scanner WAS already running, per further explicit instruction
-    // ("stop the scan and restart it" on a filter/search-item change — see
-    // restartEngineIfRunning) this now does a full restart INSTEAD of the
-    // one-off search, not alongside it — running both at once would race
-    // restartEngineIfRunning's own engine.stop() (which tears down the
-    // shared browser context) against searchForItemNow trying to use that
-    // same context, risking a spurious "page closed"-type error for no
-    // real benefit once the restart's own fresh cycle already covers
-    // finding this item shortly anyway.
-    if (!engine.getStatus().running) {
-      engine.start();
-      engine
-        .searchForItemNow(newItem)
-        .then((result) => onSearchUpdate?.(describeSearchOutcome(item, result)))
-        .catch((err) => onSearchUpdate?.(`Search for "${item}" hit an unexpected error: ${(err as Error).message}`));
-    } else {
-      restartEngineIfRunning("your updated Search For list");
-      onSearchUpdate?.(`Restarting the scanner so it picks up "${item}" from a clean cycle — check Activity for progress.`);
-    }
+    sendToRenderer("engine:log", line);
+    // Per explicit instruction — reversing an earlier explicit instruction
+    // ("asking the assistant to search for something shouldn't require a
+    // separate trip to click Start Scanner too"): adding a product should
+    // ONLY save it to the Search For list, never start, restart, or run an
+    // immediate one-off search on any account — "that's what the Start
+    // scanning button is for." This used to auto-start an idle account
+    // (with an immediate searchForItemNow look) and restart an already-
+    // running one so it'd pick the new item up sooner; both are gone now.
+    // An account that's already scanning picks this up naturally on its
+    // own next cycle (getConfig() reads config.searchItems fresh every
+    // time) — no restart needed for that to happen, just not as
+    // immediately.
     return typicalResaleUsd > 0
-      ? `Added "${item}" to your Search For list with a reference price of $${typicalResaleUsd} — searching for it on Facebook Marketplace now.`
-      : `Added "${item}" to your Search For list, but with no reference resale price set yet, so I can't tell you're getting a genuine deal on it. Searching for it now anyway so you can see what's out there.`;
+      ? `Added "${item}" to your Search For list with a reference price of $${typicalResaleUsd}. Start the scanner (or wait for its next cycle, if it's already running) to actually search for it.`
+      : `Added "${item}" to your Search For list, but with no reference resale price set yet, so I can't tell you're getting a genuine deal on it. Start the scanner (or wait for its next cycle) to search for it.`;
   }
 
   if (call.name === "add_custom_instruction") {
@@ -247,7 +650,7 @@ async function executeChatTool(
     saveConfig(CONFIG_PATH, config);
     const line: LogLine = { ts: Date.now(), level: "info", message: `Chat added custom instruction: "${instruction}"` };
     recordLog(line);
-    mainWindow?.webContents.send("engine:log", line);
+    sendToRenderer("engine:log", line);
     return `Added to custom instructions: "${instruction}"`;
   }
 
@@ -261,13 +664,26 @@ async function executeChatTool(
     const existing = store.findMatchingProduct(product);
     if (existing) {
       store.setProductLoading(existing.id, true);
-      mainWindow?.webContents.send("products:updated", store.getProductById(existing.id));
-      runProductLookup(existing.id, existing.name);
-      return `Already have a Database profile for "${existing.name}" — refreshing it with a fresh web search now, check the Database tab in a moment.`;
+      sendToRenderer("products:updated", store.getProductById(existing.id));
+      // Bug fix (verified live): this used to re-research existing.name —
+      // the entry's own, more GENERIC stored name — discarding whatever
+      // more specific wording the user actually typed. Asking to research
+      // "New Nintendo 3DS XL - Galaxy Edition" against an existing generic
+      // "Nintendo 3DS XL" entry silently re-ran a plain "Nintendo 3DS XL"
+      // search, so the AI never even saw "Galaxy Edition" and obviously
+      // couldn't say anything about it. findMatchingProduct is deliberately
+      // permissive (see isSimilarProductName) so a more specific variant
+      // still folds into the SAME family entry rather than spawning a
+      // near-duplicate — but folding into the same entry should never mean
+      // throwing away the extra specificity the user asked about; `product`
+      // (the user's actual query) is what has to actually get researched,
+      // existing.id is just where the result gets saved.
+      runProductLookup(existing.id, product);
+      return `Already have a Database profile for "${existing.name}" — refreshing it with a fresh web search for "${product}" now, check the Database tab in a moment.`;
     }
     const id = randomUUID();
     store.addProductStub(id, product);
-    mainWindow?.webContents.send("products:updated", store.getProductById(id));
+    sendToRenderer("products:updated", store.getProductById(id));
     runProductLookup(id, product);
     return `Added "${product}" to the Database and researching it now — variant/identifying details will show up on the Database tab in a moment.`;
   }
@@ -278,7 +694,7 @@ async function executeChatTool(
     if (!note) return "Failed: no note text given.";
     const updated = store.appendProductWatchNote(currentProductId, note);
     if (!updated) return "Failed: that product no longer exists.";
-    mainWindow?.webContents.send("products:updated", updated);
+    sendToRenderer("products:updated", updated);
     // Makes the connection to live scanning visible on the Dashboard too,
     // not just a silent DB write — per explicit instruction, this should
     // "transfer live to the Dashboard, especially if it's already
@@ -293,7 +709,7 @@ async function executeChatTool(
       productName: updated.name,
     };
     recordLog(line);
-    mainWindow?.webContents.send("engine:log", line);
+    sendToRenderer("engine:log", line);
     return `Noted — I'll watch for that in "${updated.name}" listings going forward.`;
   }
 
@@ -312,11 +728,11 @@ async function executeChatTool(
       contextProduct?.imageUrl ? { imageData: contextProduct.imageUrl, sourceTitle: contextProduct.name } : null
     );
     if (!added) return "Failed: couldn't add that term.";
-    mainWindow?.webContents.send("blacklist:updated", store.listBlacklistTerms());
-    if (contextProduct?.imageUrl) mainWindow?.webContents.send("blacklistImages:updated", store.listBlacklistedImages());
+    sendToRenderer("blacklist:updated", store.listBlacklistTerms());
+    if (contextProduct?.imageUrl) sendToRenderer("blacklistImages:updated", store.listBlacklistedImages());
     const line: LogLine = { ts: Date.now(), level: "info", message: `Chat blacklisted "${added.term}" — matching listings will be skipped automatically.` };
     recordLog(line);
-    mainWindow?.webContents.send("engine:log", line);
+    sendToRenderer("engine:log", line);
     return `Blacklisted "${added.term}" — matching listings will be skipped automatically from now on.`;
   }
 
@@ -324,7 +740,7 @@ async function executeChatTool(
     const term = String(call.args.term ?? "").trim();
     if (!term) return "Failed: no term given.";
     store.removeBlacklistTerm(term);
-    mainWindow?.webContents.send("blacklist:updated", store.listBlacklistTerms());
+    sendToRenderer("blacklist:updated", store.listBlacklistTerms());
     return `Removed "${term}" from the blacklist.`;
   }
 
@@ -340,7 +756,7 @@ async function executeChatTool(
         : "Chat turned general (unverified) deal detection off — focusing only on the Search For list.",
     };
     recordLog(line);
-    mainWindow?.webContents.send("engine:log", line);
+    sendToRenderer("engine:log", line);
     return enabled
       ? "General deal detection is back on — I'll flag other things that look like good deals too, not just your Search For list."
       : "General deal detection is off — I'll only flag things on your Search For list now, nothing else.";
@@ -353,11 +769,11 @@ async function executeChatTool(
     config = { ...config, searchItems: config.searchItems.filter((s) => s.item.trim().toLowerCase() !== item) };
     if (config.searchItems.length === before) return `Couldn't find "${item}" on your Search For list — nothing removed.`;
     saveConfig(CONFIG_PATH, config);
-    mainWindow?.webContents.send("config:updated", config);
+    sendToRenderer("config:updated", config);
     const line: LogLine = { ts: Date.now(), level: "info", message: `Chat removed from Search For: "${item}"` };
     recordLog(line);
-    mainWindow?.webContents.send("engine:log", line);
-    restartEngineIfRunning("your updated Search For list");
+    sendToRenderer("engine:log", line);
+    restartAllEnginesIfRunning("your updated Search For list");
     return `Removed "${item}" from your Search For list.`;
   }
 
@@ -419,14 +835,6 @@ async function executeChatTool(
       patch.maxListingAgeHours = a.maxListingAgeHours as number | null;
       changed.push("freshness window");
     }
-    if (isNullableNumber("maxPriceUsd")) {
-      patch.maxPriceUsd = a.maxPriceUsd as number | null;
-      changed.push("max price");
-    }
-    if (isNullableNumber("minPriceUsd")) {
-      patch.minPriceUsd = a.minPriceUsd as number | null;
-      changed.push("min price");
-    }
     if (typeof a.ignoreBlacklist === "boolean") {
       patch.ignoreBlacklist = a.ignoreBlacklist;
       changed.push("ignore-blacklist");
@@ -454,17 +862,44 @@ async function executeChatTool(
     // of that bug was theme not even being a field this tool could set at
     // all (fixed above), the other half was that even a successful config
     // change here never told the renderer anything changed.
-    mainWindow?.webContents.send("config:updated", config);
+    sendToRenderer("config:updated", config);
     const line: LogLine = { ts: Date.now(), level: "info", message: `Chat updated settings: ${changed.join(", ")}` };
     recordLog(line);
-    mainWindow?.webContents.send("engine:log", line);
+    sendToRenderer("engine:log", line);
     return `Updated: ${changed.join(", ")}.`;
   }
 
   if (call.name === "start_scanner") {
-    if (engine.getStatus().running) return "The scanner is already running.";
-    engine.start();
-    return "Scanner started.";
+    if (config.facebookEnabled === false) return "Facebook Marketplace is turned off in Config — turn \"Search Facebook Marketplace\" back on there first.";
+    // Multi-account: starts every ENABLED account that isn't already
+    // running (an account added but not yet logged in still gets an
+    // engine — see ensureEngineFor — but "start all" only touches ones the
+    // user has actually enabled).
+    const toStart = config.accounts.filter((a) => a.enabled && !ensureEngineFor(a.id).getStatus().running);
+    if (!toStart.length) return "The scanner is already running.";
+    // Per explicit instruction — resolve any pending location change (see
+    // resolveAccountLocationIfNeeded) before actually starting each one; a
+    // no-op for an account whose location is already resolved.
+    const failures: string[] = [];
+    for (const account of toStart) {
+      const resolved = await resolveAccountLocationIfNeeded(account.id);
+      if (resolved.message) {
+        const line: LogLine = { ts: Date.now(), level: resolved.ok ? "info" : "error", message: resolved.message };
+        recordLog(line);
+        sendToRenderer("engine:log", line);
+      }
+      if (!resolved.ok) {
+        failures.push(account.label);
+        continue;
+      }
+      ensureEngineFor(account.id).start();
+    }
+    const started = toStart.filter((a) => !failures.includes(a.label));
+    if (!started.length) return `Failed: couldn't resolve the location for ${failures.join(", ")} — check Config.`;
+    const suffix = failures.length ? ` (couldn't start ${failures.join(", ")} — check Config)` : "";
+    return started.length === config.accounts.filter((a) => a.enabled).length
+      ? `Scanner started.${suffix}`
+      : `Started ${started.length} account(s): ${started.map((a) => a.label).join(", ")}.${suffix}`;
   }
 
   if (call.name === "stop_scanner") {
@@ -472,12 +907,15 @@ async function executeChatTool(
     // — running is only ever true during the continuous scan loop, but a
     // browser can also be open from login() or a chat-triggered search,
     // neither of which sets it. "Stop" should always close whatever's
-    // actually open, not just decline when the specific loop isn't going.
-    const wasRunning = engine.getStatus().running;
-    const hadBrowser = engine.hasOpenBrowser();
-    if (!wasRunning && !hadBrowser) return "Nothing to stop — the scanner isn't running and no browser window is open.";
-    await engine.stop();
-    return wasRunning ? "Scanner stopped, browser closed." : "Browser closed.";
+    // actually open, not just decline when nothing's actively looping.
+    // Multi-account: stops EVERY account's engine, not just one.
+    const toStop = config.accounts.filter((a) => {
+      const eng = engines.get(a.id);
+      return eng && (eng.getStatus().running || eng.hasOpenBrowser());
+    });
+    if (!toStop.length) return "Nothing to stop — the scanner isn't running and no browser window is open.";
+    await Promise.all(toStop.map((a) => engines.get(a.id)!.stop()));
+    return `Stopped ${toStop.length} account(s), browser${toStop.length === 1 ? "" : "s"} closed.`;
   }
 
   if (call.name === "clear_feed") {
@@ -485,9 +923,119 @@ async function executeChatTool(
     store.clearAllListings();
     const line: LogLine = { ts: Date.now(), level: "info", message: "Chat cleared the Feed." };
     recordLog(line);
-    mainWindow?.webContents.send("engine:log", line);
-    mainWindow?.webContents.send("listings:refresh");
+    sendToRenderer("engine:log", line);
+    sendToRenderer("listings:refresh");
     return countBefore ? "Feed cleared — every listing has been permanently deleted." : "Feed was already empty.";
+  }
+
+  if (call.name === "create_watch") {
+    const searchPhrase = String(call.args.searchPhrase ?? "").trim();
+    if (!searchPhrase) return "Failed: no search phrase given.";
+    // Found during review: the very first version of this handler called
+    // expandSearchKeywords(searchPhrase) here — a real, separate OpenAI
+    // round-trip, mirroring the watch:create IPC handler above (the UI
+    // form's path, which has no LLM of its own and genuinely needs it).
+    // But the chat model IS already an LLM in this exact same turn — this
+    // tool asks it for matchKeywords directly instead, same as
+    // add_search_item's own schema right above, so a chat-created Watch
+    // costs zero extra AI calls, not a second one for something the model
+    // could already generate for free.
+    const matchKeywords = Array.isArray(call.args.matchKeywords)
+      ? (call.args.matchKeywords as unknown[]).map((k) => String(k).trim().toLowerCase()).filter(Boolean)
+      : [];
+    if (!matchKeywords.length) return "Failed: need at least one match keyword.";
+    const name = String(call.args.name ?? "").trim() || searchPhrase;
+    const locationMode = call.args.locationMode === "state" || call.args.locationMode === "country" ? call.args.locationMode : "city";
+    const selectedCityOrZip = typeof call.args.selectedCityOrZip === "string" ? call.args.selectedCityOrZip.trim() || null : null;
+    const selectedState = typeof call.args.selectedState === "string" ? call.args.selectedState.trim() || null : null;
+    // city/state modes need a real place to resolve — country mode needs
+    // nothing extra (same as an Account's own country mode). Caught here
+    // rather than left to fail silently later when the scheduler/resolution
+    // finds nothing to search.
+    if (locationMode === "city" && !selectedCityOrZip) {
+      return "Failed: a city/ZIP Watch needs a specific location — ask the user which city or ZIP to watch, then try again.";
+    }
+    if (locationMode === "state" && !selectedState) {
+      return "Failed: a state Watch needs a state — ask the user which state to watch, then try again.";
+    }
+    const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
+    const watch = store.createWatch({
+      name,
+      searchPhrase,
+      matchKeywords,
+      linkedProductId: null,
+      minPriceUsd: num(call.args.minPriceUsd),
+      maxPriceUsd: num(call.args.maxPriceUsd),
+      minProfitUsd: num(call.args.minProfitUsd),
+      minDiscountPercent: num(call.args.minDiscountPercent),
+      maxListingAgeMinutes: num(call.args.maxListingAgeMinutes),
+      locationMode,
+      selectedState,
+      selectedCityOrZip,
+      searchRadiusMiles: num(call.args.searchRadiusMiles),
+    });
+    sendToRenderer("watches:updated", store.listWatches());
+    const line: LogLine = { ts: Date.now(), level: "info", message: `Watch created via chat: "${watch.name}"` };
+    recordLog(line);
+    sendToRenderer("engine:log", line);
+    // Same warning WatchFormFlow.tsx already shows inline when creating one
+    // through the UI (see its own profit/discount + !linkedProductId check)
+    // — chat bypasses that form entirely, so without this the chat path is
+    // the one way to create an always-unsatisfiable profit/discount
+    // condition with no indication anything's wrong.
+    const pricingCaveat =
+      (watch.minProfitUsd !== null || watch.minDiscountPercent !== null) && !watch.linkedProductId
+        ? " Heads up: the profit/discount condition needs a linked Database product with known pricing to ever be judged — without one, it won't trigger. Link one from the Watch screen if you want that condition to actually work."
+        : "";
+    return `Created Watch "${watch.name}" for "${searchPhrase}" — it'll keep looking even with the scanner stopped, and you can review or edit it anytime on the Watch screen (eye icon in the sidebar).${pricingCaveat}`;
+  }
+
+  if (call.name === "pause_watch") {
+    const watch = findWatchByName(String(call.args.name ?? ""));
+    if (!watch) return `Failed: couldn't find a Watch named "${call.args.name}".`;
+    store.setWatchEnabled(watch.id, false);
+    sendToRenderer("watches:updated", store.listWatches());
+    // Same "chat did this, the user should see it in Activity" posture as
+    // every other chat tool here (add_search_item, set_general_deal_detection,
+    // ...) — not mirrored by the UI's own pause toggle (watch:setEnabled),
+    // which doesn't log, since a click is already visible to whoever made it.
+    const line: LogLine = { ts: Date.now(), level: "info", message: `Watch paused via chat: "${watch.name}"` };
+    recordLog(line);
+    sendToRenderer("engine:log", line);
+    return `Paused Watch "${watch.name}" — it won't check or alert until you resume it.`;
+  }
+
+  if (call.name === "resume_watch") {
+    const watch = findWatchByName(String(call.args.name ?? ""));
+    if (!watch) return `Failed: couldn't find a Watch named "${call.args.name}".`;
+    store.setWatchEnabled(watch.id, true);
+    sendToRenderer("watches:updated", store.listWatches());
+    const line: LogLine = { ts: Date.now(), level: "info", message: `Watch resumed via chat: "${watch.name}"` };
+    recordLog(line);
+    sendToRenderer("engine:log", line);
+    return `Resumed Watch "${watch.name}".`;
+  }
+
+  if (call.name === "delete_watch") {
+    const watch = findWatchByName(String(call.args.name ?? ""));
+    if (!watch) return `Failed: couldn't find a Watch named "${call.args.name}".`;
+    store.deleteWatch(watch.id);
+    sendToRenderer("watches:updated", store.listWatches());
+    const line: LogLine = { ts: Date.now(), level: "info", message: `Watch deleted via chat: "${watch.name}"` };
+    recordLog(line);
+    sendToRenderer("engine:log", line);
+    return `Deleted Watch "${watch.name}" and its match history.`;
+  }
+
+  if (call.name === "list_watch_matches") {
+    const watch = findWatchByName(String(call.args.name ?? ""));
+    if (!watch) return `Failed: couldn't find a Watch named "${call.args.name}".`;
+    const matches = store.listWatchMatches(watch.id);
+    if (!matches.length) return `"${watch.name}" hasn't found any matches yet — ${watch.listingsSeenCount} listing(s) checked against it so far.`;
+    const lines = matches
+      .slice(0, 5)
+      .map(({ match, listing }) => `- "${listing.title}" $${listing.price ?? "?"} — ${new Date(match.matchedAt).toLocaleString()} (${match.discoveryMode})`);
+    return `"${watch.name}" has ${matches.length} match${matches.length === 1 ? "" : "es"} total. Most recent:\n${lines.join("\n")}`;
   }
 
   return "Unknown tool.";
@@ -502,13 +1050,13 @@ async function narrate(ctx: NarrationContext): Promise<void> {
   if (!process.env.OPENAI_API_KEY || !mainWindow) return;
   const requestId = randomUUID();
   try {
-    mainWindow.webContents.send("ai:narrationStart", { requestId, kind: ctx.kind });
+    sendToRenderer("ai:narrationStart", { requestId, kind: ctx.kind });
     const full = await streamNarration(ctx, (delta) => {
-      mainWindow?.webContents.send("ai:narrationChunk", { requestId, delta });
+      sendToRenderer("ai:narrationChunk", { requestId, delta });
     });
-    mainWindow.webContents.send("ai:narrationDone", { requestId, full });
+    sendToRenderer("ai:narrationDone", { requestId, full });
   } catch {
-    mainWindow.webContents.send("ai:narrationError", { requestId });
+    sendToRenderer("ai:narrationError", { requestId });
   }
 }
 
@@ -544,12 +1092,165 @@ function ensureGroupThumbnail(segments: string[]): void {
       const imageData = await findGroupImage(query);
       if (imageData) {
         store.setGroupThumbnail(path, imageData);
-        mainWindow?.webContents.send("groupThumbnails:updated", { path, imageData });
+        sendToRenderer("groupThumbnails:updated", { path, imageData });
       }
     } catch (err) {
       console.error(`[group-thumbnail] failed for "${path}": ${(err as Error).message}`);
     } finally {
       groupThumbnailsInFlight.delete(key);
+    }
+  })();
+}
+
+// Per explicit instruction — Library's home-screen CATEGORY tiles (see
+// generateCategoryImage's own doc comment for the full reasoning). Reuses
+// the exact same store.ts group_thumbnails table/IPC broadcast as
+// ensureGroupThumbnail above — a plain category name never collides with a
+// real family path there, since a path always has a " > " in it (checked
+// via segments.length below) while a category name never does. Same
+// in-flight dedup / fetch-once-cache-forever / fire-and-forget shape too.
+const categoryThumbnailsInFlight = new Set<string>();
+function ensureCategoryThumbnail(category: string): void {
+  const key = category.toLowerCase();
+  if (categoryThumbnailsInFlight.has(key) || store.getGroupThumbnail(category)) return;
+  categoryThumbnailsInFlight.add(key);
+  (async () => {
+    try {
+      const imageData = await generateCategoryImage(category);
+      if (imageData) {
+        store.setGroupThumbnail(category, imageData);
+        sendToRenderer("groupThumbnails:updated", { path: category, imageData });
+      }
+    } catch (err) {
+      console.error(`[category-thumbnail] failed for "${category}": ${(err as Error).message}`);
+    } finally {
+      categoryThumbnailsInFlight.delete(key);
+    }
+  })();
+}
+
+// Per explicit instruction, live: "I've posted multiple reference photos
+// for 'Wireless Xbox Controller'... different colors... the D pad...
+// finding these sorts of tiny little differences can make all the
+// difference." Runs a fresh comparison across a product's WHOLE reference
+// gallery (see vision.ts's analyzeReferencePhotoDifferences) every time a
+// new confirmed photo gets added — a newly-added photo could be exactly
+// the one that reveals a difference the earlier set didn't show. Capped to
+// the most recent 8 images (bounded cost/prompt size regardless of how
+// many total exist) and deduped against concurrent calls for the SAME
+// product, same fire-and-forget shape as ensureGroupThumbnail/
+// ensureCategoryThumbnail above. Writes into lookoutNotes (store.ts's
+// appendProductWatchNote) — the SAME "Watching for, in real listings"
+// section a manual correction note already lands in, since this is
+// exactly that kind of actionable, checkable detail, just AI-noticed from
+// comparing photos instead of user-typed.
+const photoDifferenceAnalysisInFlight = new Set<string>();
+function ensurePhotoDifferenceAnalysis(productId: string): void {
+  if (photoDifferenceAnalysisInFlight.has(productId)) return;
+  photoDifferenceAnalysisInFlight.add(productId);
+  (async () => {
+    try {
+      const product = store.getProductById(productId);
+      if (!product) return;
+      const images = store.listProductImages(productId).map((img) => img.imageData);
+      if (images.length < 2) return;
+      const result = await analyzeReferencePhotoDifferences(product.name, images.slice(-8));
+      if (result.summary) {
+        const updated = store.appendProductWatchNote(productId, result.summary);
+        if (updated) sendToRenderer("products:updated", updated);
+      } else if (result.error) {
+        console.error(`[photo-differences] failed for "${product.name}": ${result.error}`);
+      }
+      // Every time a photo lands and this difference pass runs anyway is
+      // also the natural moment to re-check whether the gallery has crossed
+      // the 10-photo threshold for the self-correcting audit below.
+      ensurePhotoGalleryAudit(productId);
+    } catch (err) {
+      console.error(`[photo-differences] failed for product ${productId}: ${(err as Error).message}`);
+    } finally {
+      photoDifferenceAnalysisInFlight.delete(productId);
+    }
+  })();
+}
+
+// Per explicit instruction, live: "once there reaches 10 reference photos
+// for a specific product, the ai should have a good understanding of what
+// that product looks like and what it doesn't look like... the ai should be
+// able to automatically sort through reference photos across all Library
+// listings and be able to make corrections on its own. Of course, the user
+// can still manually correct if needed." Reuses the exact same corrective
+// moves as the user-triggered images:feedback handler below (move a
+// misfiled photo to whatever product it actually shows, or drop it if
+// there's no existing match) — the only difference is WHO decided the photo
+// was wrong: the user typing feedback there, the whole gallery's own
+// consensus here (see vision.ts's auditReferencePhotoGallery). Only acts on
+// findings the model itself marks "confident" — an unattended background
+// pass has no one to double-check it, so an unsure flag is left alone
+// rather than risking a wrongful move/delete of a legitimately-filed photo;
+// the user's own manual correction path (the lightbox's "?" feedback box)
+// is still there to catch anything this leaves behind.
+const photoGalleryAuditInFlight = new Set<string>();
+function ensurePhotoGalleryAudit(productId: string): void {
+  if (photoGalleryAuditInFlight.has(productId)) return;
+  photoGalleryAuditInFlight.add(productId);
+  (async () => {
+    try {
+      const product = store.getProductById(productId);
+      if (!product) return;
+      // store.MAX_IMAGES_PER_PRODUCT already caps a gallery at 20, so the
+      // whole thing is always affordable to send in one vision call — no
+      // slicing needed here the way the 8-photo difference-analysis above
+      // has to bound itself.
+      const images = store.listProductImages(productId);
+      if (images.length < 10) return;
+      const knownProducts = store
+        .listProducts()
+        .map((p) => p.name)
+        .filter((n) => n.toLowerCase() !== product.name.toLowerCase());
+      const result = await auditReferencePhotoGallery(
+        product.name,
+        images.map((img) => img.imageData),
+        knownProducts
+      );
+      if (result.error) {
+        console.error(`[photo-audit] failed for "${product.name}": ${result.error}`);
+        return;
+      }
+      let changed = false;
+      for (const finding of result.findings) {
+        if (!finding.confident) continue;
+        if (finding.actualSubject.toLowerCase() === product.name.toLowerCase()) continue;
+        const image = images[finding.photoIndex - 1];
+        if (!image) continue;
+        store.deleteProductImage(image.id);
+        store.appendProductWatchNote(
+          productId,
+          `Correction: auto-removed a reference photo that actually showed "${finding.actualSubject}"${
+            finding.reason ? ` — ${finding.reason}` : ""
+          }.`
+        );
+        changed = true;
+        // No else-branch spinning up a brand-new product for an unmatched
+        // subject here on purpose — an unattended background pass
+        // shouldn't create whole new Database entries on its own; if there
+        // is an existing match it gets the photo, otherwise the photo is
+        // just removed from where it clearly didn't belong (turning a
+        // stray photo into a new product is still the manual feedback
+        // path's job, same as it always has been).
+        const target = store.findMatchingProduct(finding.actualSubject);
+        if (target) {
+          store.addProductImage(target.id, image.imageData, image.sourceTitle);
+          sendToRenderer("products:updated", store.getProductById(target.id));
+        }
+      }
+      if (changed) {
+        const updated = store.getProductById(productId);
+        if (updated) sendToRenderer("products:updated", updated);
+      }
+    } catch (err) {
+      console.error(`[photo-audit] failed for product ${productId}: ${(err as Error).message}`);
+    } finally {
+      photoGalleryAuditInFlight.delete(productId);
     }
   })();
 }
@@ -570,16 +1271,147 @@ function ensureGroupThumbnail(segments: string[]): void {
 // itself falls back to that name when there's no such photo to go on.
 async function fetchAndStoreEbayComps(
   id: string,
-  fallbackName: string
+  fallbackName: string,
+  // Condition-awareness — "the exact keywords to the original listing it
+  // came from" is only meaningful when there's a genuinely LIVE listing on
+  // hand, not just whichever reference photo happened to be saved first
+  // (which could be from a much earlier scan, possibly a different real
+  // listing entirely). Only the two call sites that actually have a live
+  // listing in scope (a fresh auto-created product, and the "mark
+  // interested" new-product path) pass this; every other call site keeps
+  // today's exact oldest-reference-photo fallback behavior unchanged.
+  currentListing?: { title: string; imageDataUri?: string | null }
 ): Promise<{ avgSoldPriceUsd: number | null; avgRunTimeDays: number | null; avgShippingUsd: number | null; sampleSize: number }> {
-  const images = [...store.listProductImages(id)].sort((a, b) => a.createdAt - b.createdAt);
-  const original = images.find((img) => img.sourceTitle);
-  const query = await deriveWatchCountQuery(fallbackName, original?.sourceTitle ?? null, original?.imageData ?? null);
-  const comps = await engine.fetchEbayComps(query);
+  let sourceTitle: string | null;
+  let imageDataUri: string | null;
+  if (currentListing) {
+    sourceTitle = currentListing.title;
+    imageDataUri = currentListing.imageDataUri ?? null;
+  } else {
+    const images = [...store.listProductImages(id)].sort((a, b) => a.createdAt - b.createdAt);
+    const original = images.find((img) => img.sourceTitle);
+    sourceTitle = original?.sourceTitle ?? null;
+    imageDataUri = original?.imageData ?? null;
+  }
+  const query = await deriveWatchCountQuery(fallbackName, sourceTitle, imageDataUri);
+  const comps = await timed("ebay_lookup", () => getPrimaryEngine().fetchEbayComps(query));
   const analysis = await analyzeEbayComps(query, comps);
   store.updateProductEbayComps(id, analysis);
-  engine.markEbayCompsResearched(id);
+  getPrimaryEngine().markEbayCompsResearched(id);
   return analysis;
+}
+
+// Per explicit instruction — the Database Research tab shows what's
+// CURRENTLY being researched, live, "relay its emotional feedback instead
+// of its hyper-analysis." A Map (not a single "current" value) because
+// runProductLookup genuinely runs concurrently for more than one product at
+// once — a user-requested lookup racing an auto-discovered sibling, or two
+// siblings discovered together — and every caller (the chat tool, the
+// scanner auto-adding a new product, the Refresh button, sibling discovery)
+// funnels through this same function, so tracking it here covers all of
+// them without duplicating this at each call site.
+const activeResearch = new Map<string, ActiveProductResearch>();
+function broadcastResearchStatus(): void {
+  sendToRenderer("research:status", Array.from(activeResearch.values()));
+}
+
+// Per explicit instruction — "have Clynx find stock photos of that product
+// and download a whole bunch of reference photos... so it'll already be
+// familiar with it when it comes across it again on Facebook or eBay."
+// Tops a product's reference gallery up to REFERENCE_PHOTO_TARGET verified
+// photos (see webResearch.ts's findReferencePhotos for where they come from
+// and how they're checked), and — for a brand-new product, or one that still
+// has no thumbnail — makes the best of them the Database thumbnail instead
+// of the empty box / the one raw listing photo that happened to trigger it.
+// Fire-and-forget from runProductLookup: it takes a few seconds, and
+// shouldn't hold up the rest of that product's research. Deduped per
+// product so two near-simultaneous research passes can't double-fill.
+const REFERENCE_PHOTO_TARGET = 10;
+const referencePhotoFillInFlight = new Set<string>();
+async function fillReferencePhotos(id: string, name: string, replaceThumbnail: boolean): Promise<void> {
+  if (referencePhotoFillInFlight.has(id)) return;
+  referencePhotoFillInFlight.add(id);
+  try {
+    const existing = store.listProductImages(id).filter((img) => img.kind === "normal");
+    const needed = REFERENCE_PHOTO_TARGET - existing.length;
+    let added = 0;
+    let bestPhoto: string | null = null;
+    if (needed > 0) {
+      const found = await findReferencePhotos(name, { want: needed, existingImages: existing.map((img) => img.imageData) });
+      for (const photo of found.photos) {
+        store.addProductImage(id, photo.imageData, photo.label);
+        added++;
+      }
+      bestPhoto = found.photos[0]?.imageData ?? null;
+    }
+    const current = store.getProductById(id);
+    if (!current) return;
+    // Re-read AFTER the slow search: the user may have picked their own
+    // thumbnail in the meantime, which always wins.
+    if (!current.keepThumbnail) {
+      if (bestPhoto && (replaceThumbnail || !current.imageUrl)) {
+        store.editProductProfile(id, { imageUrl: bestPhoto });
+      } else if (!current.imageUrl && existing[0]) {
+        store.editProductProfile(id, { imageUrl: existing[0].imageData });
+      }
+    }
+    if (added > 0) {
+      store.touchProduct(id);
+      ensurePhotoDifferenceAnalysis(id);
+    }
+    const updated = store.getProductById(id);
+    if (updated) sendToRenderer("products:updated", updated);
+  } catch (err) {
+    console.error(`[referencePhotos] fill failed for "${name}": ${(err as Error).message}`);
+  } finally {
+    referencePhotoFillInFlight.delete(id);
+  }
+}
+
+// Per explicit instruction — products researched before this existed (or
+// while the old DuckDuckGo-based photo search was being bot-blocked) are
+// stuck with an empty box and no reference photos. This is the manual,
+// one-click catch-up: runs fillReferencePhotos over every product that has
+// fewer than REFERENCE_PHOTO_BACKFILL_BELOW photos, two products at a time
+// (each one fans out into its own handful of parallel downloads, so more
+// would just trip image hosts' rate limits), reporting progress to the
+// Database screen. Deliberately a button, not automatic: it's ~15 vision
+// checks per product, which is cheap but not free across a big library.
+const REFERENCE_PHOTO_BACKFILL_BELOW = 5;
+const PHOTO_BACKFILL_CONCURRENCY = 2;
+let photoBackfill: { done: number; total: number } | null = null;
+function productsNeedingPhotos(): ProductProfile[] {
+  const counts = store.countNormalImagesByProduct();
+  return store.listProducts().filter((p) => (counts.get(p.id) ?? 0) < REFERENCE_PHOTO_BACKFILL_BELOW);
+}
+function broadcastPhotoBackfill(): void {
+  sendToRenderer("products:photoBackfillProgress", {
+    running: photoBackfill !== null,
+    done: photoBackfill?.done ?? 0,
+    total: photoBackfill?.total ?? 0,
+  });
+}
+async function runPhotoBackfill(): Promise<number> {
+  if (photoBackfill) return photoBackfill.total;
+  const startStore = store;
+  const queue = productsNeedingPhotos();
+  if (!queue.length) return 0;
+  photoBackfill = { done: 0, total: queue.length };
+  broadcastPhotoBackfill();
+  let next = 0;
+  const worker = async () => {
+    while (next < queue.length && store === startStore) {
+      const product = queue[next++];
+      await fillReferencePhotos(product.id, product.name, false);
+      if (photoBackfill) photoBackfill.done++;
+      broadcastPhotoBackfill();
+    }
+  };
+  void Promise.all(Array.from({ length: PHOTO_BACKFILL_CONCURRENCY }, worker)).finally(() => {
+    photoBackfill = null;
+    broadcastPhotoBackfill();
+  });
+  return queue.length;
 }
 
 // Runs in the background — the IPC handler that triggers this returns the
@@ -604,7 +1436,10 @@ async function runProductLookup(
   // probably land in the same place anyway, but "definitely the same
   // folder" beats "probably" for something created specifically to belong
   // there.
-  opts: { skipSiblingDiscovery?: boolean; forcedFamily?: string } = {}
+  // Condition-awareness — see fetchAndStoreEbayComps' own currentListing
+  // param. Only set by call sites that genuinely have a live, current
+  // listing in scope; everything else keeps today's behavior.
+  opts: { skipSiblingDiscovery?: boolean; forcedFamily?: string; triggeringListing?: { title: string; imageDataUri?: string | null } } = {}
 ): Promise<void> {
   // A user-picked thumbnail (see products:pickThumbnail) is deliberate —
   // research finding (or not finding) a photo of its own should never
@@ -619,8 +1454,19 @@ async function runProductLookup(
   // checking for siblings) from a Refresh of something already tracked
   // (already checked once, don't do it again every refresh).
   const hadFamilyBefore = before?.family != null;
+  activeResearch.set(id, { id, name, reaction: null });
+  broadcastResearchStatus();
   try {
     const result = await lookupProduct(name);
+    // Reaction is available as soon as the main research call resolves —
+    // broadcast it right away rather than waiting for the remaining steps
+    // below (eBay comps, sibling discovery) to also finish, so the
+    // Research tab shows it as soon as it genuinely exists.
+    const inFlight = activeResearch.get(id);
+    if (inFlight) {
+      inFlight.reaction = result.reaction;
+      broadcastResearchStatus();
+    }
 
     // Per explicit instruction: when the family the AI just assigned is
     // itself a real, recognizable brand (Nintendo, Nike, Xbox, ...) rather
@@ -662,6 +1508,16 @@ async function runProductLookup(
         ensureGroupThumbnail(familySegments.slice(0, len));
       }
     }
+    // Per explicit instruction — Library's own home-screen category tiles
+    // (the top-level "Video Games & Consoles"/"Electronics"/etc. grid, NOT
+    // the folder tiles you drill INTO — those keep their existing collage)
+    // get a dedicated AI-generated photo with a consistent text label
+    // instead (see webResearch.ts's generateCategoryImage). Same
+    // fetch-once-cache-forever/fire-and-forget shape as ensureGroupThumbnail
+    // right above — category is a small, fixed list (Database.tsx's
+    // CATEGORY_ORDER), so this naturally converges to covering all of them
+    // the first time each one is ever actually assigned to a product.
+    ensureCategoryThumbnail(result.category);
 
     // Per explicit instruction: once the AI has confidently named an exact,
     // real product (which is the only way a product gets auto-created at
@@ -695,6 +1551,26 @@ async function runProductLookup(
       imageUrl,
     });
 
+    // Stock photos + a reference gallery (see fillReferencePhotos). A brand-
+    // new product (no family yet) gets its stock photo as the thumbnail; an
+    // existing one only gets one if it has none.
+    void fillReferencePhotos(id, name, !keepThumbnail && !hadFamilyBefore);
+
+    // Condition-awareness — a second, independently-failable research step
+    // right alongside the eBay-comps one below, same isolated try/catch
+    // posture: a failure here (no image found, a dead search) shouldn't
+    // undo the research that already succeeded above. Gated on the same
+    // Config toggle that gates flaw detection on live listing photos (one
+    // switch for both halves, per explicit instruction).
+    if (config.researchCondition) {
+      try {
+        const poorConditionImage = await findPoorConditionProductImage(name);
+        if (poorConditionImage) store.addProductImage(id, poorConditionImage, null, "poor_condition");
+      } catch (err) {
+        console.error(`[webResearch] poor-condition reference photo search failed for "${name}": ${(err as Error).message}`);
+      }
+    }
+
     // Per explicit instruction — "we can look at eBay listings" for real
     // sold-comp data, run as its own step after the summary/image research
     // above (see watchcount.ts): search watchcount.com's sold listings for
@@ -714,17 +1590,26 @@ async function runProductLookup(
     // lookups on data that hasn't had time to change. Gated on the engine's
     // own per-scan tracking (see ScrapeEngine.hasResearchedEbayComps),
     // which resets every time a fresh scan actually starts.
-    if (config.watchCountOncePerScan && engine.hasResearchedEbayComps(id)) {
+    // Per explicit instruction — a Config-level master on/off for this
+    // automatic step, checked before the existing once-per-scan throttle
+    // (see watchCountEnabled's own doc comment in types.ts). Silent when
+    // off — this fires on every product research pass, so a log line every
+    // time would just be noise for someone who's deliberately turned the
+    // whole feature off, unlike the once-per-scan skip below which is
+    // worth surfacing since it's a within-scan exception to normal behavior.
+    if (!config.watchCountEnabled) {
+      // no-op — WatchCount lookups are turned off in Config
+    } else if (config.watchCountOncePerScan && getPrimaryEngine().hasResearchedEbayComps(id)) {
       const line: LogLine = {
         ts: Date.now(),
         level: "info",
         message: `Skipped eBay comps for "${name}" — already checked once this scan.`,
       };
       recordLog(line);
-      mainWindow?.webContents.send("engine:log", line);
+      sendToRenderer("engine:log", line);
     } else {
       try {
-        await fetchAndStoreEbayComps(id, name);
+        await fetchAndStoreEbayComps(id, name, opts.triggeringListing);
       } catch (err) {
         console.error(`[watchcount] eBay comps research failed for "${name}": ${(err as Error).message}`);
       }
@@ -744,6 +1629,22 @@ async function runProductLookup(
         );
       }
     }
+
+    // Per explicit instruction, live: "when the ai is researching a
+    // product, have it research other variants of that product... iphone
+    // 13... mini, plus, pro, pro max... toyota camry LE, XLE, CE, SE...
+    // apply this logic to anything that may have specific models." Unlike
+    // the Games-sibling check just above (one narrow case, gated on a
+    // specific family-path shape), this runs for EVERY first-time research
+    // regardless of category/family — the model itself decides whether
+    // named variants genuinely exist (see chat.ts's discoverProductVariants),
+    // not this code guessing from category. Fire-and-forget, same reasoning
+    // as the sibling discovery above.
+    if (!opts.skipSiblingDiscovery && !hadFamilyBefore && config.autoResearchListings) {
+      discoverAndCreateProductVariants(name, result.category, resolvedFamily).catch((err) =>
+        console.error(`[variants] discovery failed for "${name}": ${(err as Error).message}`)
+      );
+    }
   } catch (err) {
     store.updateProductProfile(id, {
       aiSummary: `(Research failed: ${(err as Error).message})`,
@@ -753,8 +1654,10 @@ async function runProductLookup(
       imageUrl: before?.imageUrl ?? null,
     });
   }
+  activeResearch.delete(id);
+  broadcastResearchStatus();
   const updated = store.getProductById(id);
-  if (updated) mainWindow?.webContents.send("products:updated", updated);
+  if (updated) sendToRenderer("products:updated", updated);
 }
 
 // Per explicit instruction: the first time a product lands in a
@@ -794,59 +1697,390 @@ async function discoverAndCreateSiblingProducts(brand: string, generation: strin
     if (store.findMatchingProduct(title)) continue;
     const id = randomUUID();
     store.addProductStub(id, title);
-    mainWindow?.webContents.send("products:updated", store.getProductById(id));
+    sendToRenderer("products:updated", store.getProductById(id));
     await runProductLookup(id, title, { skipSiblingDiscovery: true, forcedFamily: familyPath });
   }
 }
 
-const engine = new ScrapeEngine({
-  profileDir: PROFILE_DIR,
-  getConfig: () => config,
-  store,
-  onLog: (line) => {
-    recordLog(line);
-    mainWindow?.webContents.send("engine:log", line);
-  },
-  onListing: (record) => mainWindow?.webContents.send("engine:listing", record),
-  onProductUpdated: (product) => mainWindow?.webContents.send("products:updated", product),
-  onStatus: (status) => mainWindow?.webContents.send("engine:status", status),
-  onNarrate: narrate,
-  onBlacklistUpdated: (terms) => mainWindow?.webContents.send("blacklist:updated", terms),
-  onBlacklistImagesUpdated: (images) => mainWindow?.webContents.send("blacklistImages:updated", images),
-  // Per explicit instruction — same create-stub + background web research
-  // pattern as the manual Research button/research_product chat tool (see
-  // listings:research below), just triggered by the scanner itself finding
-  // something specific it doesn't track yet, instead of the user asking for
-  // it directly. imageDataUri is a REAL photo from the actual listing that
-  // triggered this — shown immediately as a placeholder thumbnail (so the
-  // tile isn't blank while research runs) AND saved into the Reference
-  // Photos gallery as real backing evidence, but per explicit instruction
-  // NOT kept as the permanent thumbnail — runProductLookup's web image
-  // search now gets to replace it with a clean, representative product
-  // photo once research finishes, since this is always a confidently-named
-  // exact product to begin with (that's the only way a product gets
-  // auto-created at all — see specificSubjects in scrapeEngine.ts).
-  onNewProductFound: (name, imageDataUri, sourceTitle) => {
+// Per explicit instruction, live: "when the ai is researching a product,
+// have it research other variants of that product... apply this logic to
+// anything that may have specific models." General counterpart to
+// discoverAndCreateSiblingProducts above — same shape (ask the model, skip
+// anything already tracked, full research pass per new variant, never lets
+// a variant discover ITS own variants), but runs for any first-time
+// research at all, not just a "Games" sub-family. familyPath may be null
+// (plenty of products have no family) — a discovered variant still gets
+// forcedFamily set to it when present, so it lands in the same folder as
+// the product that led to finding it, matching Database.tsx's own
+// "Variants" section (findVariantSiblings), which links same-category,
+// same-base-name products regardless of family.
+const VARIANT_DISCOVERY_COUNT = 5;
+
+async function discoverAndCreateProductVariants(productName: string, category: string, familyPath: string | null): Promise<void> {
+  const alreadyTracked = store.listProducts().map((p) => p.name);
+  const variantNames = await discoverProductVariants({ productName, category, alreadyTracked, count: VARIANT_DISCOVERY_COUNT });
+  if (!variantNames.length) return;
+
+  for (const title of variantNames) {
+    // Skip anything already tracked ANYWHERE in the Database — relies on
+    // isSimilarProductName's own variant-aware check (store.ts) correctly
+    // keeping "iPhone 13" and "iPhone 13 Pro" as distinct, non-matching
+    // names, so a genuine variant here is never mistaken for a duplicate of
+    // the base product that triggered this.
+    if (store.findMatchingProduct(title)) continue;
     const id = randomUUID();
-    store.addProductStub(id, name);
-    if (imageDataUri) {
-      store.editProductProfile(id, { imageUrl: imageDataUri });
-      store.addProductImage(id, imageDataUri, sourceTitle);
+    store.addProductStub(id, title);
+    sendToRenderer("products:updated", store.getProductById(id));
+    await runProductLookup(id, title, { skipSiblingDiscovery: true, forcedFamily: familyPath ?? undefined });
+  }
+}
+
+// Per explicit instruction — multiple Facebook accounts: the live status
+// map every running account's engine reports into, broadcast as a whole
+// (mirrors the activeResearch/research:status pattern built for concurrent
+// product research) rather than one flat ScrapeStatus like a single-engine
+// setup had. Keyed by account id; Dashboard renders one row/Live panel per
+// entry.
+const engineStatusMap = new Map<string, ScrapeStatus>();
+function broadcastEngineStatusMap(): void {
+  sendToRenderer("engine:statusMap", Object.fromEntries(engineStatusMap));
+}
+
+// One ScrapeEngine per Facebook account — own persistent Playwright
+// profile (own login), own location, all sharing the SAME store/mainWindow
+// for everything that's meant to stay global (the product database, the
+// blacklist, the Feed). onLog/onListing are the only callbacks that differ
+// per account (tagging the account's own identity onto what they emit);
+// everything else below is the exact same function reference every
+// account's engine gets, unchanged from the single-engine version of this.
+function createEngineForAccount(accountId: string): ScrapeEngine {
+  function currentAccount(): Account {
+    return config.accounts.find((a) => a.id === accountId) ?? config.accounts[0];
+  }
+
+  const eng = new ScrapeEngine({
+    profileDir: path.join(PROFILES_ROOT, accountId),
+    getConfig: (): EngineConfig => ({ ...config, ...currentAccount() }),
+    store,
+    onLog: (line) => {
+      const account = currentAccount();
+      const tagged: LogLine = { ...line, accountId, accountLabel: account.label };
+      recordLog(tagged);
+      sendToRenderer("engine:log", tagged);
+    },
+    onListing: (record) => {
+      // hasSeen() in scrapeEngine.ts guarantees only the FIRST account to
+      // ever encounter a given listing id reaches saveScored/onListing at
+      // all — every later account re-scanning the same real listing bails
+      // out before either runs — so this only ever attaches attribution
+      // once, to whichever account actually found it. The foundByAccountId
+      // guard is a belt-and-suspenders safety net against attributing an
+      // enrichment re-save (eBay comps, photo analysis) to the wrong
+      // account if that assumption is ever wrong.
+      if (!record.foundByAccountId) {
+        const account = currentAccount();
+        store.setListingFoundBy(record.id, accountId, account.label);
+        record = { ...record, foundByAccountId: accountId, foundByAccountLabel: account.label };
+      }
+      sendToRenderer("engine:listing", record);
+    },
+    onProductUpdated: (product) => sendToRenderer("products:updated", product),
+    onReferencePhotoAdded: (productId) => ensurePhotoDifferenceAnalysis(productId),
+    onStatus: (status) => {
+      engineStatusMap.set(accountId, status);
+      broadcastEngineStatusMap();
+    },
+    onNarrate: narrate,
+    onBlacklistUpdated: (terms) => sendToRenderer("blacklist:updated", terms),
+    onBlacklistImagesUpdated: (images) => sendToRenderer("blacklistImages:updated", images),
+    // The alert itself (sendWatchMatchAlert) and store.recordWatchMatch/
+    // markWatchMatchNotified already happened inside scrapeEngine.ts's own
+    // recordWatchMatchesIfAny, mirroring exactly how sendDealAlert is called
+    // directly from there rather than round-tripping through this file. This
+    // callback's only remaining job is pushing the renderer fresh state —
+    // same "broadcast the full current list" posture as broadcastWatches()
+    // below (not reused directly: that helper is scoped inside
+    // app.whenReady, while engines are created at module scope) — so the
+    // Watch screen's live match count and the Sidebar's unseen-match pulse
+    // update without the user needing to manually refresh.
+    onWatchMatch: () => sendToRenderer("watches:updated", store.listWatches()),
+    // Per explicit instruction — same create-stub + background web research
+    // pattern as the manual Research button/research_product chat tool (see
+    // listings:research below), just triggered by the scanner itself finding
+    // something specific it doesn't track yet, instead of the user asking for
+    // it directly. imageDataUri is a REAL photo from the actual listing that
+    // triggered this — shown immediately as a placeholder thumbnail (so the
+    // tile isn't blank while research runs) AND saved into the Reference
+    // Photos gallery as real backing evidence, but per explicit instruction
+    // NOT kept as the permanent thumbnail — runProductLookup's web image
+    // search now gets to replace it with a clean, representative product
+    // photo once research finishes, since this is always a confidently-named
+    // exact product to begin with (that's the only way a product gets
+    // auto-created at all — see specificSubjects in scrapeEngine.ts).
+    onNewProductFound: (name, imageDataUri, sourceTitle) => {
+      const id = randomUUID();
+      store.addProductStub(id, name);
+      if (imageDataUri) {
+        store.editProductProfile(id, { imageUrl: imageDataUri });
+        store.addProductImage(id, imageDataUri, sourceTitle);
+        ensurePhotoDifferenceAnalysis(id);
+      }
+      sendToRenderer("products:updated", store.getProductById(id));
+      // Condition-awareness — sourceTitle here IS the live listing that
+      // just triggered this auto-create (see scrapeEngine.ts's own
+      // onNewProductFound(subject, subjectImageDataUri, listing.title)
+      // call), so WatchCount's own query can derive from it directly
+      // instead of falling back to whichever reference photo gets saved
+      // first (which, right after addProductImage above, would actually
+      // BE this exact same listing anyway — but passing it explicitly
+      // keeps this correct even if that storage detail ever changes).
+      runProductLookup(id, name, { triggeringListing: { title: sourceTitle, imageDataUri } });
+      const account = currentAccount();
+      const line: LogLine = {
+        ts: Date.now(),
+        level: "info",
+        message: `New item of interest found while scanning: added "${name}" to the Database${
+          imageDataUri ? " with a photo from this listing" : ""
+        } (from "${sourceTitle}").`,
+        productName: name,
+        accountId,
+        accountLabel: account.label,
+      };
+      recordLog(line);
+      sendToRenderer("engine:log", line);
+    },
+  });
+  engineStatusMap.set(accountId, eng.getStatus());
+  return eng;
+}
+
+// Called after any accounts CRUD (add/remove) — creates a ScrapeEngine for
+// each account that doesn't have one yet, and for one that's been removed,
+// stops it and deletes its profile directory (best-effort: a failure here
+// is logged, not thrown, since it shouldn't block the removal itself from
+// completing).
+function syncEnginesWithAccounts(): void {
+  for (const account of config.accounts) ensureEngineFor(account.id);
+  const currentIds = new Set(config.accounts.map((a) => a.id));
+  for (const [id, eng] of engines) {
+    if (currentIds.has(id)) continue;
+    engines.delete(id);
+    engineStatusMap.delete(id);
+    restartGuards.delete(id);
+    eng
+      .shutdown()
+      .catch((err) => console.error(`[accounts] failed to stop removed account ${id}: ${(err as Error).message}`))
+      .finally(() => {
+        try {
+          rmSync(path.join(PROFILES_ROOT, id), { recursive: true, force: true });
+        } catch (err) {
+          console.error(`[accounts] failed to delete profile dir for removed account ${id}: ${(err as Error).message}`);
+        }
+      });
+  }
+  broadcastEngineStatusMap();
+}
+
+// Multi-user login migration — engines used to be populated for every
+// configured account right here at module load. Population now happens
+// inside bootstrapUserSession below, once a real per-user config has been
+// loaded (a fresh, logged-out app has no accounts to create engines for at
+// all yet). Same reasoning for watchScheduler just below: both depend on
+// `store`/`config` actually being this USER's, not module scope defaults.
+let watchScheduler!: WatchScheduler;
+let ebayEngine!: EbayEngine;
+
+// Multi-user login migration — every one of these path constants used to be
+// a fixed, install-wide location computed straight off baseDir. Per
+// explicit instruction, each logged-in user now gets a fully separate slice
+// of local state (own Facebook accounts/browser profiles, own scan
+// history/Database, own config down to theme/ntfy/seller-risk/everything
+// else in Store) — achieved ENTIRELY by pointing CONFIG_PATH/DB_PATH/
+// PROFILES_ROOT at a `data/users/<userId>/` subfolder before the rest of
+// startup ever runs, with zero changes needed to store.ts's schema,
+// scrapeEngine.ts, or any of the ~120 IPC handlers below that already just
+// read/write these three module variables and `config`/`store` directly.
+//
+// First-login migration: a real pre-multi-user install already has its one
+// (implicit, only) user's data sitting at the OLD flat top-level locations
+// (LEGACY_CONFIG_PATH/LEGACY_DB_PATH/LEGACY_PROFILES_ROOT). The very first
+// time this ever runs on such an install (USERS_ROOT doesn't exist yet at
+// all — checked once, before creating it), that data is COPIED (never
+// moved — the originals are left in place untouched as a safety net) into
+// whichever user happens to log in first. A second user's first login (or
+// this same user logging in again later) never re-triggers this, since
+// USERS_ROOT already exists by then.
+function configurePathsForUser(userId: string): void {
+  const isFirstEverLogin = !existsSync(USERS_ROOT);
+  const userRoot = path.join(USERS_ROOT, userId);
+  mkdirSync(userRoot, { recursive: true });
+
+  CONFIG_PATH = path.join(userRoot, "config.json");
+  DB_PATH = path.join(userRoot, "scout.db");
+  PROFILES_ROOT = path.join(userRoot, "browser-profiles");
+
+  if (!isFirstEverLogin) return;
+
+  try {
+    if (!existsSync(CONFIG_PATH) && existsSync(LEGACY_CONFIG_PATH)) {
+      copyFileSync(LEGACY_CONFIG_PATH, CONFIG_PATH);
     }
-    mainWindow?.webContents.send("products:updated", store.getProductById(id));
-    runProductLookup(id, name);
-    const line: LogLine = {
-      ts: Date.now(),
-      level: "info",
-      message: `New item of interest found while scanning: added "${name}" to the Database${
-        imageDataUri ? " with a photo from this listing" : ""
-      } (from "${sourceTitle}").`,
-      productName: name,
-    };
-    recordLog(line);
-    mainWindow?.webContents.send("engine:log", line);
-  },
-});
+  } catch (err) {
+    console.error("[migration] failed to copy legacy config.json:", err);
+  }
+  try {
+    if (!existsSync(DB_PATH) && existsSync(LEGACY_DB_PATH)) {
+      copyFileSync(LEGACY_DB_PATH, DB_PATH);
+      // node:sqlite's WAL-mode sidecar files, if present — copying only the
+      // main file and leaving these behind can lose the most recent
+      // not-yet-checkpointed writes.
+      for (const suffix of ["-wal", "-shm"]) {
+        if (existsSync(LEGACY_DB_PATH + suffix)) copyFileSync(LEGACY_DB_PATH + suffix, DB_PATH + suffix);
+      }
+    }
+  } catch (err) {
+    console.error("[migration] failed to copy legacy scout.db:", err);
+  }
+  try {
+    if (!existsSync(PROFILES_ROOT) && existsSync(LEGACY_PROFILES_ROOT)) {
+      cpSync(LEGACY_PROFILES_ROOT, PROFILES_ROOT, { recursive: true });
+    }
+  } catch (err) {
+    console.error("[migration] failed to copy legacy browser-profiles:", err);
+  }
+}
+
+// Multi-user login migration — the shared teardown sequence, factored out so
+// both an actual app quit (window-all-closed/before-quit below) and a
+// deliberate auth:logout call stop EXACTLY the same things, in the same
+// order, rather than maintaining two copies. A no-op if no user is currently
+// logged in (e.g. the app is closed straight from the LoginScreen, before
+// store/watchScheduler/the sync services were ever constructed).
+async function stopUserSession(): Promise<void> {
+  if (!hasActiveUserSession) return;
+  watchScheduler.stop();
+  ebayEngine.stop();
+  watchSyncService.stop();
+  listingIngestSyncService.stop();
+  feedbackSyncService.stop();
+  productSyncService.stop();
+  if (cloudHeartbeatTimer) {
+    clearInterval(cloudHeartbeatTimer);
+    cloudHeartbeatTimer = null;
+  }
+  cloudClient.stopAuthRefresh();
+  await Promise.all([...engines.values()].map((e) => e.shutdown()));
+}
+
+// Multi-user login migration — the actual "rest of startup" that used to run
+// unconditionally at module scope (store, the 4 sync services, every
+// account's engine, watchScheduler) now runs here instead, once — and every
+// time — a user is actually known: a fresh interactive login/register, or a
+// silently-restored session on relaunch (see the auth:* IPC handlers below).
+// Deliberately does NOT touch window creation or any of the ~120 existing
+// ipcMain.handle/.on registrations — those stay registered once at
+// app.whenReady() exactly as before (Electron disallows registering the
+// same channel twice, and a bare closure registration has no per-user
+// effect of its own); what actually changes per-user is the STATE those
+// closures already close over (config/store/engines/watchScheduler/the sync
+// services), which is exactly what this function (re)builds.
+async function bootstrapUserSession(userId: string, email: string): Promise<void> {
+  configurePathsForUser(userId);
+
+  config = loadConfig(CONFIG_PATH);
+  // Per explicit instruction — cloud auth IS how the user got into the app
+  // at all now; there's no scenario left where you're logged in but cloud
+  // sync is "disabled". apiUrl always mirrors the install-level Server URL
+  // the LoginScreen actually authenticated against (appSettings.cloudApiUrl,
+  // kept in sync with whatever server was used at login — see the auth:login/
+  // auth:register handlers), not something set through the Config screen.
+  config = { ...config, cloud: { enabled: true, apiUrl: appSettings.cloudApiUrl } };
+  saveConfig(CONFIG_PATH, config);
+
+  store = new Store(DB_PATH);
+  watchSyncService = new WatchSyncService(store, cloudClient, () => config);
+  listingIngestSyncService = new ListingIngestSyncService(store, cloudClient, () => config);
+  feedbackSyncService = new FeedbackSyncService(store, cloudClient, () => config);
+  productSyncService = new ProductSyncService(store, cloudClient, () => config);
+
+  // Fresh per-user state — a different user must never see the previous
+  // user's accounts, engines, activity log, or in-flight research.
+  engines.clear();
+  engineStatusMap.clear();
+  restartGuards.clear();
+  recentLogs.length = 0;
+  activeResearch.clear();
+
+  for (const account of config.accounts) ensureEngineFor(account.id);
+
+  // Per explicit instruction — Watch operates independently of the Scanner's
+  // own on/off state, so this starts unconditionally here, not gated behind
+  // any account's start()/the window even existing yet. config.watch.globallyPaused
+  // (checked fresh every tick, see watchScheduler.ts) is the only thing that
+  // actually pauses it.
+  watchScheduler = new WatchScheduler({
+    store,
+    getConfig: () => config,
+    getEngines: () => engines,
+    onLog: (message, level) => {
+      const line: LogLine = { ts: Date.now(), level: level ?? "info", message };
+      recordLog(line);
+      sendToRenderer("engine:log", line);
+    },
+  });
+  watchScheduler.start();
+
+  // Per explicit instruction — a second listing source alongside the
+  // Facebook accounts above (see types.ts's Config.ebay doc comment);
+  // starts unconditionally too, same posture as watchScheduler just above —
+  // config.ebay?.enabled and hasEbayCredentials() are both checked fresh
+  // every tick inside ebayEngine.ts itself, not gated here.
+  ebayEngine = new EbayEngine({
+    store,
+    getConfig: () => config,
+    onLog: (line) => {
+      recordLog(line);
+      sendToRenderer("engine:log", line);
+    },
+    onListing: (record) => sendToRenderer("engine:listing", record),
+    onNarrate: narrate,
+    onWatchMatch: () => sendToRenderer("watches:updated", store.listWatches()),
+    // Per explicit instruction — "a live view of eBay searching just like
+    // the Facebook live scraper": drops eBay into the EXACT SAME
+    // engineStatusMap/engine:statusMap broadcast every Facebook account
+    // already uses (keyed "ebay" instead of a real account id), so
+    // Dashboard's existing LiveAccountTile renders it with zero new
+    // plumbing on the renderer side beyond listing it in the tile grid.
+    onStatus: (status) => {
+      engineStatusMap.set("ebay", status);
+      broadcastEngineStatusMap();
+    },
+  });
+  ebayEngine.start();
+
+  // Same wiring the old config.cloud.enabled-gated block in app.whenReady
+  // used to do once env-based bootstrapAuth had authenticated — the
+  // interactive login that got us into bootstrapUserSession at all is what
+  // authenticates cloudClient now, so this just starts the pieces that used
+  // to wait on that.
+  cloudClient.checkHealth().then((health) => {
+    if (!health.ok) console.warn("[cloud] health check failed at startup:", health.error);
+  });
+  if (!cloudHeartbeatTimer) {
+    cloudHeartbeatTimer = setInterval(() => {
+      cloudClient.sendHeartbeat().catch((err) => console.error("[cloud] heartbeat threw unexpectedly:", err));
+    }, 60_000);
+  }
+  watchSyncService.start();
+  listingIngestSyncService.start();
+  feedbackSyncService.start();
+  productSyncService.start();
+
+  hasActiveUserSession = true;
+  currentUserId = userId;
+  void email; // not otherwise needed by this function — kept for signature symmetry with the auth:* handlers' data
+  sendToRenderer("config:updated", config);
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -861,6 +2095,15 @@ function createWindow() {
     // default this used to always be.
     backgroundColor: config.theme === "light" ? "#f5f3fb" : "#0f0b1e",
     autoHideMenuBar: true,
+    // Per explicit instruction — the Clynx "C" mark as the window/taskbar
+    // icon. Windows normally shows a packaged .exe's own embedded icon
+    // (see package.json's build.win.icon) for the taskbar regardless of
+    // this option, but `electron-vite dev` runs through the generic
+    // Electron binary, which has no such icon — this is what makes the
+    // right icon show up during day-to-day development too. __dirname here
+    // is the compiled out/main directory, so ../../resources reaches back
+    // to the project root's resources/ folder.
+    icon: path.join(__dirname, "../../resources/icon.png"),
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
@@ -883,7 +2126,7 @@ function createWindow() {
   mainWindow.on("close", (event) => {
     if (allowClose) return;
     event.preventDefault();
-    mainWindow?.webContents.send("app:closeRequested");
+    sendToRenderer("app:closeRequested");
   });
 
   if (process.env["ELECTRON_RENDERER_URL"]) {
@@ -900,46 +2143,53 @@ app.whenReady().then(() => {
   ipcMain.handle("config:save", (_e, next: Config) => {
     config = { ...DEFAULT_CONFIG, ...next };
     saveConfig(CONFIG_PATH, config);
+    // Safety net for the general save path — the dedicated accounts:*
+    // handlers already call this themselves, but if the account roster
+    // ever changes via a plain config:save too, engines stay in sync
+    // either way.
+    syncEnginesWithAccounts();
     // So another mounted view (e.g. Dashboard's Filters box) reflects a
     // change made from the Config screen itself, same as the reverse
     // direction already works via update_config's own broadcast.
-    mainWindow?.webContents.send("config:updated", config);
+    sendToRenderer("config:updated", config);
   });
   ipcMain.handle("config:reset", () => {
     config = { ...DEFAULT_CONFIG };
     saveConfig(CONFIG_PATH, config);
-    mainWindow?.webContents.send("config:updated", config);
+    syncEnginesWithAccounts();
+    sendToRenderer("config:updated", config);
     return config;
   });
 
   // Per explicit instruction — the Dashboard's own Filters box: a quicker,
-  // more visible home for the things a user adjusts often (current Search
-  // For items, price range, freshness) than digging into the full Config
-  // screen. A single patch-shaped endpoint (not one IPC channel per field)
-  // specifically so more filters can be added here later ("I'll have more
-  // soon") without new plumbing each time. Patches against the CURRENT
-  // authoritative `config`, not a client-sent full snapshot like
-  // config:save above — Dashboard only ever has a few fields in view, so
-  // round-tripping its own stale copy of the WHOLE config back through
-  // config:save risked silently clobbering something changed elsewhere
-  // (Config screen, chat) in between.
+  // more visible home for the things a user adjusts often (freshness,
+  // rotation) than digging into the full Config screen. A single
+  // patch-shaped endpoint (not one IPC channel per field) specifically so
+  // more filters can be added here later ("I'll have more soon") without
+  // new plumbing each time. Patches against the CURRENT authoritative
+  // `config`, not a client-sent full snapshot like config:save above —
+  // Dashboard only ever has a few fields in view, so round-tripping its own
+  // stale copy of the WHOLE config back through config:save risked silently
+  // clobbering something changed elsewhere (Config screen, chat) in
+  // between. Price range is no longer here — it's per-item now, set at add
+  // time (see add_search_item above).
   ipcMain.handle(
     "filters:update",
-    (_e, patch: Partial<Pick<Config, "minPriceUsd" | "maxPriceUsd" | "maxListingAgeHours" | "rotateSearchItems" | "rotateSearchItemsCount">>) => {
+    (_e, patch: Partial<Pick<Config, "maxListingAgeHours" | "rotateSearchItems" | "rotateSearchItemsCount">>) => {
       config = { ...config, ...patch };
       saveConfig(CONFIG_PATH, config);
-      mainWindow?.webContents.send("config:updated", config);
-      restartEngineIfRunning("your filter changes");
+      sendToRenderer("config:updated", config);
+      restartAllEnginesIfRunning("your filter changes");
     }
   );
   ipcMain.handle("filters:removeSearchItem", (_e, args: { item: string }) => {
     config = { ...config, searchItems: config.searchItems.filter((s) => s.item !== args.item) };
     saveConfig(CONFIG_PATH, config);
-    mainWindow?.webContents.send("config:updated", config);
-    restartEngineIfRunning("your updated Search For list");
+    sendToRenderer("config:updated", config);
+    restartAllEnginesIfRunning("your updated Search For list");
     const line: LogLine = { ts: Date.now(), level: "info", message: `Removed from Search For: "${args.item}"` };
     recordLog(line);
-    mainWindow?.webContents.send("engine:log", line);
+    sendToRenderer("engine:log", line);
   });
 
   // The other half of the close-guard above — the renderer calls this once
@@ -952,14 +2202,176 @@ app.whenReady().then(() => {
 
   ipcMain.handle("env:hasOpenAIKey", () => !!process.env.OPENAI_API_KEY);
   ipcMain.handle("env:saveOpenAIKey", (_e, key: string) => saveEnvKey("OPENAI_API_KEY", key));
+  ipcMain.handle("env:hasEbayCredentials", () => hasEbayCredentials());
 
-  ipcMain.handle("engine:status", () => engine.getStatus());
-  ipcMain.handle("engine:start", () => engine.start());
-  ipcMain.handle("engine:stop", () => engine.stop());
-  ipcMain.handle("engine:runOnce", () => engine.triggerOnce());
-  ipcMain.handle("engine:login", () => engine.login());
-  ipcMain.handle("engine:checkLogin", () => engine.checkLogin());
-  ipcMain.handle("engine:openWatchCountLogin", () => engine.openWatchCountLogin());
+  // Per explicit instruction — multiple Facebook accounts: every engine
+  // control now takes {accountId} and dispatches to that ONE account's own
+  // ScrapeEngine, instead of the single implicit engine a one-account setup
+  // used to have.
+  ipcMain.handle("engine:statusMap", (): Record<string, ScrapeStatus> => Object.fromEntries(engineStatusMap));
+
+  // Multi-user login migration — the interactive login IS the cloud auth
+  // now (no more headless CLYNX_CLOUD_EMAIL/PASSWORD env-based bootstrapAuth
+  // — see cloudClient.ts). App.tsx calls getSession once on mount, before
+  // showing anything else; if it comes back authenticated, bootstrapUserSession
+  // has already fully run (engines/watchScheduler/sync services all up) by
+  // the time this resolves, so the renderer can safely go straight to the
+  // normal app view. Not gated behind any config.cloud.enabled check —
+  // there's no "logged in but cloud disabled" state anymore.
+  ipcMain.handle("auth:getSession", async (): Promise<{ authenticated: boolean; userId: string | null; email: string | null; apiUrl: string | null }> => {
+    if (hasActiveUserSession && currentUserId) {
+      const info = cloudClient.getSessionInfo();
+      return { authenticated: true, userId: currentUserId, email: info.email, apiUrl: info.apiUrl ?? appSettings.cloudApiUrl };
+    }
+    const restored = await cloudClient.restoreSession();
+    if (restored.ok && restored.userId) {
+      if (restored.apiUrl && restored.apiUrl !== appSettings.cloudApiUrl) {
+        appSettings = { ...appSettings, cloudApiUrl: restored.apiUrl };
+        saveAppSettings(appSettings);
+      }
+      await bootstrapUserSession(restored.userId, restored.email ?? "");
+      return { authenticated: true, userId: restored.userId, email: restored.email, apiUrl: restored.apiUrl };
+    }
+    return { authenticated: false, userId: null, email: null, apiUrl: appSettings.cloudApiUrl };
+  });
+
+  ipcMain.handle(
+    "auth:login",
+    async (_e, args: { apiUrl: string; email: string; password: string }): Promise<{ ok: boolean; userId?: string; email?: string; error?: string }> => {
+      const apiUrl = (args.apiUrl || appSettings.cloudApiUrl).trim();
+      const result = await cloudClient.login(apiUrl, args.email.trim(), args.password);
+      if (!result.ok || !result.data) return { ok: false, error: result.error ?? "Login failed" };
+      appSettings = { ...appSettings, cloudApiUrl: apiUrl };
+      saveAppSettings(appSettings);
+      await bootstrapUserSession(result.data.userId, result.data.email);
+      return { ok: true, userId: result.data.userId, email: result.data.email };
+    }
+  );
+
+  ipcMain.handle(
+    "auth:register",
+    async (_e, args: { apiUrl: string; email: string; password: string }): Promise<{ ok: boolean; userId?: string; email?: string; error?: string }> => {
+      const apiUrl = (args.apiUrl || appSettings.cloudApiUrl).trim();
+      const result = await cloudClient.register(apiUrl, args.email.trim(), args.password);
+      if (!result.ok || !result.data) return { ok: false, error: result.error ?? "Registration failed" };
+      appSettings = { ...appSettings, cloudApiUrl: apiUrl };
+      saveAppSettings(appSettings);
+      await bootstrapUserSession(result.data.userId, result.data.email);
+      return { ok: true, userId: result.data.userId, email: result.data.email };
+    }
+  );
+
+  // Reuses the EXACT teardown sequence app-quit uses (see stopUserSession,
+  // shared with window-all-closed/before-quit below) rather than
+  // duplicating it, then clears every other bit of per-user in-memory state
+  // and the persisted cloud session so a relaunch's own auth:getSession
+  // correctly reports "not authenticated" and shows the LoginScreen again.
+  ipcMain.handle("auth:logout", async (): Promise<{ ok: boolean }> => {
+    await stopUserSession();
+    if (hasActiveUserSession) store.close();
+    hasActiveUserSession = false;
+    currentUserId = null;
+    engines.clear();
+    engineStatusMap.clear();
+    restartGuards.clear();
+    recentLogs.length = 0;
+    activeResearch.clear();
+    config = { ...DEFAULT_CONFIG };
+    cloudClient.logout();
+    return { ok: true };
+  });
+
+  // Clynx Cloud Phase 1 — foundation-only wiring, extended for the first UI
+  // status readout (Config.tsx's Cloud Sync section): aggregates
+  // CloudClient's own auth/heartbeat state with all 4 background sync
+  // services' own getStatus(), so the renderer can answer "is this actually
+  // working right now" by polling one IPC call instead of reading terminal
+  // logs or querying Postgres directly. Cloud sync is unconditionally on for
+  // any logged-in user now (see bootstrapUserSession) — this is only ever
+  // called once the renderer is past the LoginScreen, so store/the sync
+  // services below are always already constructed by the time it runs.
+  ipcMain.handle("cloud:getStatus", (): CloudStatus => {
+    const cloud = cloudClient.getStatus();
+    return {
+      enabled: cloud.enabled,
+      apiUrl: cloud.apiUrl,
+      authenticated: cloud.authenticated,
+      deviceId: cloud.deviceId,
+      heartbeat: cloud.heartbeat,
+      sync: {
+        watches: watchSyncService.getStatus(),
+        feedback: feedbackSyncService.getStatus(),
+        products: productSyncService.getStatus(),
+        listings: listingIngestSyncService.getStatus(),
+      },
+    };
+  });
+  // Per explicit instruction — resolves a pending location change (see
+  // resolveAccountLocationIfNeeded/location:setMode) before actually
+  // starting, a no-op once already resolved. Logged either way so a
+  // resolution failure (a bad city/ZIP, a lookup error) is visible in
+  // Activity instead of silently leaving the account scanning the wrong
+  // place — Config itself no longer gets a synchronous result to show
+  // since it no longer does this work itself.
+  ipcMain.handle("engine:start", async (_e, args: { accountId: string }) => {
+    const resolved = await resolveAccountLocationIfNeeded(args.accountId);
+    if (resolved.message) {
+      const line: LogLine = { ts: Date.now(), level: resolved.ok ? "info" : "error", message: resolved.message };
+      recordLog(line);
+      sendToRenderer("engine:log", line);
+    }
+    if (!resolved.ok) return;
+    ensureEngineFor(args.accountId).start();
+  });
+  ipcMain.handle("engine:stop", (_e, args: { accountId: string }) => ensureEngineFor(args.accountId).stop());
+  ipcMain.handle("engine:runOnce", (_e, args: { accountId: string }) => ensureEngineFor(args.accountId).triggerOnce());
+  ipcMain.handle("engine:login", (_e, args: { accountId: string }) => ensureEngineFor(args.accountId).login());
+  ipcMain.handle("engine:checkLogin", (_e, args: { accountId: string }) => ensureEngineFor(args.accountId).checkLogin());
+  // WatchCount login is a shared concern (see getPrimaryEngine) — not
+  // per-account, since it's not tied to any one Facebook login at all.
+  ipcMain.handle("engine:openWatchCountLogin", () => getPrimaryEngine().openWatchCountLogin());
+
+  // Per explicit instruction — Config's account roster (add/remove/rename/
+  // relocate). Each mutation persists via saveConfig and re-syncs engines
+  // (see syncEnginesWithAccounts) so adding an account gets it a real
+  // ScrapeEngine immediately (ready to log into), and removing one tears
+  // its browser session down and deletes its profile directory.
+  ipcMain.handle("accounts:list", (): Account[] => config.accounts);
+  ipcMain.handle("accounts:add", (_e, args: { label: string }): Account => {
+    const account: Account = {
+      id: randomUUID(),
+      label: args.label.trim() || `Account ${config.accounts.length + 1}`,
+      enabled: true,
+      browseUrls: [...DEFAULT_BROWSE_URLS],
+      locationMode: "country",
+      selectedState: null,
+      selectedCityOrZip: null,
+      searchRadiusMiles: 100,
+      locationResolved: true, // country mode's browseUrls is a static list — nothing to resolve
+    };
+    config = { ...config, accounts: [...config.accounts, account] };
+    saveConfig(CONFIG_PATH, config);
+    syncEnginesWithAccounts();
+    sendToRenderer("config:updated", config);
+    return account;
+  });
+  ipcMain.handle("accounts:update", (_e, args: { id: string; patch: Partial<Pick<Account, "label" | "enabled">> }): Account[] => {
+    config = { ...config, accounts: config.accounts.map((a) => (a.id === args.id ? { ...a, ...args.patch } : a)) };
+    saveConfig(CONFIG_PATH, config);
+    sendToRenderer("config:updated", config);
+    return config.accounts;
+  });
+  ipcMain.handle("accounts:remove", (_e, args: { id: string }): Account[] => {
+    // Always leave at least one account — the whole app assumes there's
+    // somewhere to scan; deleting the last one would leave getPrimaryEngine
+    // and every "for the first account" fallback with nothing to point at.
+    if (config.accounts.length <= 1) return config.accounts;
+    config = { ...config, accounts: config.accounts.filter((a) => a.id !== args.id) };
+    saveConfig(CONFIG_PATH, config);
+    syncEnginesWithAccounts();
+    sendToRenderer("config:updated", config);
+    return config.accounts;
+  });
 
   // Per explicit instruction — Config's own "Search locations" dropdown:
   // "country" restores the full nationwide spread, "state" replaces
@@ -968,109 +2380,74 @@ app.whenReady().then(() => {
   // replaces it with exactly one resolved location for a specific city or
   // ZIP. All three fully REPLACE browseUrls rather than appending — this
   // is "where should the scanner look," not "add more places to look."
+  // Per explicit instruction — multiple Facebook accounts: this now sets
+  // ONE account's location (accountId), not the whole app's — every branch
+  // below writes into that one entry in config.accounts instead of the old
+  // flat Config fields, and only restarts/discovers via THAT account's own
+  // engine.
   ipcMain.handle(
     "location:setMode",
-    async (
+    (
       _e,
-      args: { mode: "country" } | { mode: "state"; state: string } | { mode: "city"; cityOrZip: string }
-    ): Promise<{ ok: boolean; message: string }> => {
+      args:
+        | { accountId: string; mode: "country" }
+        | { accountId: string; mode: "state"; state: string }
+        | { accountId: string; mode: "city"; cityOrZip: string }
+    ): { ok: boolean; message: string } => {
+      // Per explicit instruction — "don't have it immediately open
+      // marketplace after applying the setting, just save it until the
+      // user starts a scan": this used to open a browser and drive
+      // Facebook's own "Change location" dialog right here, synchronously,
+      // the moment the mode was changed in Config. Now it ONLY saves the
+      // choice; resolveAccountLocationIfNeeded (below) does the actual
+      // browser work, lazily, the next time this account's engine starts.
       if (args.mode === "country") {
-        config = {
-          ...config,
+        updateAccountLocation(args.accountId, {
           locationMode: "country",
           selectedState: null,
           selectedCityOrZip: null,
           searchRadiusMiles: 100,
           browseUrls: [...DEFAULT_BROWSE_URLS],
-        };
-        saveConfig(CONFIG_PATH, config);
-        mainWindow?.webContents.send("config:updated", config);
-        restartEngineIfRunning("your location settings");
-        return { ok: true, message: `Switched to nationwide rotation — ${DEFAULT_BROWSE_URLS.length} locations.` };
+          locationResolved: true, // nothing to resolve — a static list
+        });
+        return { ok: true, message: `Switched to nationwide rotation — ${DEFAULT_BROWSE_URLS.length} locations. Applied next time this account starts.` };
       }
 
       if (args.mode === "city") {
         const cityOrZip = args.cityOrZip.trim();
         if (!cityOrZip) return { ok: false, message: "Enter a city or ZIP code first." };
-        // Per explicit instruction — a specific city/ZIP search should only
-        // ever cover 20 miles around that exact spot, set live in the SAME
-        // "Change location" dialog visit (and the same Apply click) that
-        // resolves the location itself, not left to drift until the next
-        // scan cycle's own verifyOrSetRadius check corrects it.
-        const CITY_MODE_RADIUS_MILES = 20;
-        const [result] = await engine.discoverLocations([cityOrZip], CITY_MODE_RADIUS_MILES);
-        if (!result.url) {
-          return {
-            ok: false,
-            message: `Couldn't find "${cityOrZip}" on Facebook Marketplace (${result.error ?? "no matching suggestion"}) — try typing it exactly as you would into Facebook's own location search, e.g. "Sacramento, California" (full state name, not an abbreviation).`,
-          };
-        }
-        // Per explicit instruction — a specific city/ZIP search should also
-        // skip any listing that resolves to a different state entirely (a
-        // wide-enough radius near a state line can still pull in
-        // out-of-state listings). A ZIP code alone doesn't say what state
-        // it's in, so this trusts Facebook's OWN confirmation of the
-        // location it actually applied (see scraper.ts's changeLocation),
-        // not the raw text the user typed in.
-        config = {
-          ...config,
+        updateAccountLocation(args.accountId, {
           locationMode: "city",
-          selectedState: result.resolvedState,
           selectedCityOrZip: cityOrZip,
-          searchRadiusMiles: CITY_MODE_RADIUS_MILES,
-          browseUrls: [result.url],
-        };
-        saveConfig(CONFIG_PATH, config);
-        mainWindow?.webContents.send("config:updated", config);
-        restartEngineIfRunning("your location settings");
-        return { ok: true, message: `Now searching only ${cityOrZip}, within ${CITY_MODE_RADIUS_MILES} miles.` };
+          // selectedState/browseUrls are stale until resolution actually
+          // runs — left untouched rather than guessed at here; Facebook's
+          // own confirmation of what it resolved to is what sets
+          // selectedState (see resolveAccountLocationIfNeeded), same as
+          // before, just deferred.
+          locationResolved: false,
+        });
+        return { ok: true, message: `Saved — will search ${cityOrZip} once this account starts.` };
       }
 
       const state = args.state.trim();
       if (!state) return { ok: false, message: "Pick a state first." };
-      // Per explicit instruction — resolving 10 separate cities (10 real
-      // "Change location" dialog drives) before a scan could even start was
-      // genuinely slow for what it bought. One well-chosen city with a
-      // wide-enough radius covers a state just as well for browsing
-      // purposes, so this now asks the AI for just the ONE most
-      // populous/well-known city in the state, formatted as "City, ST" —
-      // the literal string that gets typed into Facebook's own location
-      // search — and resolves that single location instead of ten.
-      const STATE_MODE_RADIUS_MILES = 40;
-      let primaryCity: string;
-      try {
-        primaryCity = await lookupPrimaryCityInState(state);
-      } catch (err) {
-        return { ok: false, message: `Couldn't look up a city for ${state}: ${(err as Error).message}` };
-      }
-      const [result] = await engine.discoverLocations([primaryCity], STATE_MODE_RADIUS_MILES);
-      if (!result.url) {
-        return {
-          ok: false,
-          message: `Found "${primaryCity}" as ${state}'s primary city but couldn't resolve it on Facebook Marketplace (${result.error ?? "no matching suggestion"}) — check Activity for details.`,
-        };
-      }
-      config = {
-        ...config,
+      updateAccountLocation(args.accountId, {
         locationMode: "state",
         selectedState: state,
         selectedCityOrZip: null,
-        searchRadiusMiles: STATE_MODE_RADIUS_MILES,
-        browseUrls: [result.url],
-      };
-      saveConfig(CONFIG_PATH, config);
-      mainWindow?.webContents.send("config:updated", config);
-      restartEngineIfRunning("your location settings");
-      return {
-        ok: true,
-        message: `Now searching ${primaryCity} (${state}), within ${STATE_MODE_RADIUS_MILES} miles — anything found outside ${state} is skipped.`,
-      };
+        locationResolved: false,
+      });
+      return { ok: true, message: `Saved — will search ${state} once this account starts.` };
     }
   );
 
   ipcMain.handle("listings:list", (_e, args: { limit?: number; offset?: number }) =>
     store.listRecent(args?.limit ?? 200, args?.offset ?? 0)
   );
+  // Per explicit instruction — Dashboard's "Listings evaluated" stat needs
+  // the TRUE all-time count, not listings.length off the capped
+  // listListings(500, 0) page the Feed uses for display.
+  ipcMain.handle("listings:count", () => store.countListings());
   ipcMain.handle(
     "listings:feedback",
     (_e, args: { id: string; verdict: FeedbackVerdict; note: string | null }) =>
@@ -1113,7 +2490,7 @@ app.whenReady().then(() => {
           reason ? `User was interested because: ${reason}` : null,
         ].filter((p): p is string => !!p);
         const updated = noteParts.length ? store.recordProductObservation(subject, noteParts.join(" — ")) : existing;
-        if (updated) mainWindow?.webContents.send("products:updated", updated);
+        if (updated) sendToRenderer("products:updated", updated);
         return { ok: true, message: `Reinforced the existing "${existing.name}" profile with this listing.`, productId: existing.id };
       }
 
@@ -1130,17 +2507,45 @@ app.whenReady().then(() => {
       if (imageDataUri) {
         store.editProductProfile(id, { imageUrl: imageDataUri });
         store.addProductImage(id, imageDataUri, listing.title);
+        ensurePhotoDifferenceAnalysis(id);
       }
       if (reason) {
         store.recordProductObservation(subject, `User was interested because: ${reason}`);
       }
-      mainWindow?.webContents.send("products:updated", store.getProductById(id));
-      runProductLookup(id, subject);
+      sendToRenderer("products:updated", store.getProductById(id));
+      // Condition-awareness — listing.title is the live listing that just
+      // triggered this "mark interested" new-product creation, same
+      // reasoning as onNewProductFound's own call above.
+      runProductLookup(id, subject, { triggeringListing: { title: listing.title, imageDataUri } });
       return { ok: true, message: `Added "${subject}" to the Database and researching it now.`, productId: id };
     }
   );
 
   ipcMain.handle("products:list", () => store.listProducts());
+  // Per explicit instruction — "if the ai already has prior knowledge on
+  // the thing you are searching for, have it bring up an image from
+  // Database... prompting the user with a popup asking if that's what
+  // you're searching for": Dashboard's "Add product" flow calls this
+  // before actually adding, using the SAME fuzzy-match logic the scanner
+  // itself relies on elsewhere (see store.findMatchingProduct), so the
+  // popup reflects exactly what the live matching engine would find —
+  // never a separate, possibly-diverging guess reimplemented client-side.
+  ipcMain.handle("products:findMatch", (_e, args: { name: string }): ProductProfile | null => store.findMatchingProduct(args.name));
+  // Per explicit instruction — Dashboard's "Add product" popup now asks for
+  // confirmation 100% of the time, not just when a Database match exists:
+  // when products:findMatch above comes back empty, this is what supplies a
+  // reference photo to confirm against instead — the same web-image search
+  // lookupProduct itself uses (findProductImage: a real search + vision-
+  // verification pass, not a raw unverified image), just without the rest
+  // of lookupProduct's heavier AI-summary/category work, since all this
+  // needs is a picture for the popup, not a new Database entry. Returns
+  // null (never throws) if nothing panned out — the popup still shows in
+  // that case, just without a photo.
+  ipcMain.handle("products:findReferenceImage", (_e, args: { name: string }): Promise<string | null> => findProductImage(args.name));
+  // Initial snapshot for whenever the Database screen (re)mounts after
+  // research already started elsewhere — see activeResearch/
+  // broadcastResearchStatus above for how this stays live afterward.
+  ipcMain.handle("research:status", (): ActiveProductResearch[] => Array.from(activeResearch.values()));
   // The Database screen's own client-side cache of folder-level thumbnails
   // (see ensureGroupThumbnail above) — fetched once up front since this
   // dataset stays small (one row per distinct sub-grouping actually seen),
@@ -1158,6 +2563,20 @@ app.whenReady().then(() => {
 
   ipcMain.handle("products:delete", (_e, args: { id: string }) => store.deleteProduct(args.id));
   ipcMain.handle("products:clearAll", () => store.clearAllProducts());
+  ipcMain.handle("products:countMissingPhotos", () => productsNeedingPhotos().length);
+  ipcMain.handle("products:backfillPhotos", () => runPhotoBackfill());
+  ipcMain.handle("products:photoBackfillStatus", () => ({
+    running: photoBackfill !== null,
+    done: photoBackfill?.done ?? 0,
+    total: photoBackfill?.total ?? 0,
+  }));
+  // Per explicit instruction — "avg. Facebook Marketplace price... place
+  // this right above eBay sold comps." A live aggregation (store.ts's
+  // getFacebookPriceStats), not a cached field — queried fresh whenever the
+  // product's own page wants it, since it should just organically fill in
+  // as more real listings get recognized as this product, with no separate
+  // "Research now" click needed.
+  ipcMain.handle("products:getFacebookPriceStats", (_e, args: { id: string }) => store.getFacebookPriceStats(args.id));
 
   // Per explicit instruction — the Library's own "+" button: a product the
   // user already has their own photo/info for, added directly with no AI
@@ -1173,7 +2592,10 @@ app.whenReady().then(() => {
     const imageDataUri = await pickImageAsDataUri(`Choose a photo for "${name}" (optional)`);
     const id = randomUUID();
     store.createManualProduct(id, name, args.category || "Other", imageDataUri);
-    if (imageDataUri) store.addProductImage(id, imageDataUri, null);
+    if (imageDataUri) {
+      store.addProductImage(id, imageDataUri, null);
+      ensurePhotoDifferenceAnalysis(id);
+    }
     return store.getProductById(id);
   });
 
@@ -1246,7 +2668,7 @@ app.whenReady().then(() => {
   ipcMain.handle("products:setThumbnailFromImage", (_e, args: { id: string; imageDataUri: string }) => {
     store.editProductProfile(args.id, { imageUrl: args.imageDataUri });
     const updated = store.getProductById(args.id);
-    if (updated) mainWindow?.webContents.send("products:updated", updated);
+    if (updated) sendToRenderer("products:updated", updated);
     return updated;
   });
 
@@ -1257,7 +2679,9 @@ app.whenReady().then(() => {
   ipcMain.handle("products:addImage", async (_e, args: { productId: string }) => {
     const dataUri = await pickImageAsDataUri("Add a reference photo");
     if (!dataUri) return null;
-    return store.addProductImage(args.productId, dataUri, null);
+    const added = store.addProductImage(args.productId, dataUri, null);
+    ensurePhotoDifferenceAnalysis(args.productId);
+    return added;
   });
   ipcMain.handle("products:deleteImage", (_e, args: { imageId: string }) => store.deleteProductImage(args.imageId));
 
@@ -1277,7 +2701,7 @@ app.whenReady().then(() => {
 
     const existing = config.searchItems.find((i) => i.item.toLowerCase() === product.name.toLowerCase());
     if (existing) {
-      engine.searchForItemNow(existing).catch(() => {});
+      searchForItemOnActiveAccounts(existing);
       return { ok: true, message: `Searching Facebook Marketplace for "${product.name}" now — check the Feed below.` };
     }
 
@@ -1310,7 +2734,7 @@ app.whenReady().then(() => {
     if (!product) return { ok: false, message: "Product not found." };
     try {
       const analysis = await fetchAndStoreEbayComps(args.id, product.name);
-      mainWindow?.webContents.send("products:updated", store.getProductById(args.id));
+      sendToRenderer("products:updated", store.getProductById(args.id));
       return {
         ok: true,
         message:
@@ -1328,16 +2752,28 @@ app.whenReady().then(() => {
   // for a whole batch of product names composed there at once. Same
   // underlying mechanism as products:searchNow just above — reuses
   // add_search_item via executeChatTool for anything not already tracked
-  // (which itself adds to the Search For list, starts the scanner if it
-  // isn't already running, and kicks off an immediate dedicated search),
-  // and just re-triggers searchForItemNow for anything that's already a
-  // Search For item so re-submitting the same name later doesn't pile up
-  // duplicate config entries. Sequential, not parallel — each add_search_item
-  // call does its own config read-modify-write against the shared in-memory
-  // `config`, and running them concurrently could race and drop one.
+  // (which ONLY adds to the Search For list now — see add_search_item's own
+  // doc comment on why the old auto-start/auto-search behavior was
+  // removed), and just acknowledges anything that's already a Search For
+  // item so re-submitting the same name later doesn't pile up duplicate
+  // config entries or re-trigger a search. Sequential, not parallel — each
+  // add_search_item call does its own config read-modify-write against the
+  // shared in-memory `config`, and running them concurrently could race and
+  // drop one. linkedProductId (see SearchItem's own doc comment) is set by
+  // Dashboard's "is this what you're searching for?" popup and applies to
+  // whichever of `items` actually ends up newly added — in practice always
+  // a single name, since that popup only ever fires for one at a time.
+  // minPriceUsd/maxPriceUsd, likewise, come from Dashboard's follow-up
+  // "Set a price range for ___?" prompt (per explicit instruction — price
+  // is per-product now, asked right before the item is actually queued,
+  // not a global Dashboard filter) and apply the same way: to whichever
+  // name ends up newly added.
   ipcMain.handle(
     "search:addProducts",
-    async (_e, args: { items: string[] }): Promise<{ ok: boolean; message: string }> => {
+    async (
+      _e,
+      args: { items: string[]; linkedProductId?: string | null; minPriceUsd?: number | null; maxPriceUsd?: number | null }
+    ): Promise<{ ok: boolean; message: string }> => {
       const seen = new Set<string>();
       const names = args.items.filter((name) => {
         const key = name.trim().toLowerCase();
@@ -1368,26 +2804,49 @@ app.whenReady().then(() => {
       if (config.generalDeal.enabled) {
         config = { ...config, generalDeal: { ...config.generalDeal, enabled: false } };
         saveConfig(CONFIG_PATH, config);
-        mainWindow?.webContents.send("config:updated", config);
+        sendToRenderer("config:updated", config);
         const line: LogLine = {
           ts: Date.now(),
           level: "info",
           message: "Turned general (unverified) deal detection off — searching for a specific product now stays focused on your Search For list only.",
         };
         recordLog(line);
-        mainWindow?.webContents.send("engine:log", line);
+        sendToRenderer("engine:log", line);
       }
 
       const results: string[] = [];
       for (const name of names) {
         const existing = config.searchItems.find((i) => i.item.toLowerCase() === name.toLowerCase());
         if (existing) {
-          engine.searchForItemNow(existing).catch(() => {});
-          results.push(`Searching for "${existing.item}" again`);
+          // Per explicit instruction — this box should only ever ADD to the
+          // Search For list, never trigger a search itself; that's what
+          // Start Scanning is for. Previously re-ran an immediate search
+          // for an already-tracked item.
+          results.push(`"${existing.item}" is already on your Search For list`);
           continue;
         }
+        // Per explicit instruction — "the ai needs to be able to recognize
+        // shorter versions or abbreviations of products along with
+        // different variants... apply that logic to any product if
+        // needed": this used to pass just [name.toLowerCase()] here, so a
+        // listing titled with the full spelled-out name never matched an
+        // item added by its common abbreviation (or vice versa). See
+        // products.ts's expandSearchKeywords for the actual expansion (and
+        // the safety check keeping it from ever blurring a specific
+        // variant like "PS5 Pro" into matching the plain base item).
+        const matchKeywords = await expandSearchKeywords(name);
         const message = await executeChatTool(
-          { name: "add_search_item", args: { item: name, matchKeywords: [name.toLowerCase()], typicalResaleUsd: 0 } },
+          {
+            name: "add_search_item",
+            args: {
+              item: name,
+              matchKeywords,
+              typicalResaleUsd: 0,
+              linkedProductId: args.linkedProductId ?? null,
+              minPriceUsd: args.minPriceUsd ?? null,
+              maxPriceUsd: args.maxPriceUsd ?? null,
+            },
+          },
           "dashboard"
         );
         results.push(message);
@@ -1395,6 +2854,151 @@ app.whenReady().then(() => {
       return { ok: true, message: results.join(" · ") };
     }
   );
+
+  // --- Watch (persistent background monitoring) ---------------------------
+  // Per explicit instruction — "keep an eye out for this over time and
+  // alert me when it appears," fundamentally different lifecycle from
+  // Search For (session-scoped, reset every launch): Watches persist in
+  // SQLite (see store.ts) and survive restarts. Every mutation broadcasts
+  // the FULL current list on "watches:updated" — same posture as
+  // blacklist:updated/blacklistImages:updated below, simple and correct
+  // for a list this size (a handful to a few dozen objectives, not
+  // thousands of listings).
+  function broadcastWatches(): void {
+    sendToRenderer("watches:updated", store.listWatches());
+  }
+
+  ipcMain.handle(
+    "watch:create",
+    async (
+      _e,
+      args: {
+        name: string;
+        searchPhrase: string;
+        linkedProductId: string | null;
+        minPriceUsd: number | null;
+        maxPriceUsd: number | null;
+        minProfitUsd: number | null;
+        minDiscountPercent: number | null;
+        maxListingAgeMinutes: number | null;
+        locationMode: "country" | "state" | "city";
+        selectedState: string | null;
+        selectedCityOrZip: string | null;
+        searchRadiusMiles: number | null;
+      }
+    ): Promise<Watch> => {
+      // Same keyword-expansion (abbreviations/variants) add_search_item's
+      // own args already get from search:addProducts above — a Watch's
+      // text-matching deserves the exact same breadth a Search For item's
+      // does, not a narrower reimplementation.
+      const matchKeywords = await expandSearchKeywords(args.searchPhrase);
+      const watch = store.createWatch({
+        name: args.name.trim() || args.searchPhrase.trim(),
+        searchPhrase: args.searchPhrase.trim(),
+        matchKeywords,
+        linkedProductId: args.linkedProductId,
+        minPriceUsd: args.minPriceUsd,
+        maxPriceUsd: args.maxPriceUsd,
+        minProfitUsd: args.minProfitUsd,
+        minDiscountPercent: args.minDiscountPercent,
+        maxListingAgeMinutes: args.maxListingAgeMinutes,
+        locationMode: args.locationMode,
+        selectedState: args.selectedState,
+        selectedCityOrZip: args.selectedCityOrZip,
+        searchRadiusMiles: args.searchRadiusMiles,
+      });
+      broadcastWatches();
+      const line: LogLine = { ts: Date.now(), level: "info", message: `Watch created: "${watch.name}"` };
+      recordLog(line);
+      sendToRenderer("engine:log", line);
+      return watch;
+    }
+  );
+
+  ipcMain.handle(
+    "watch:update",
+    async (
+      _e,
+      args: {
+        id: string;
+        patch: Partial<{
+          name: string;
+          searchPhrase: string;
+          linkedProductId: string | null;
+          minPriceUsd: number | null;
+          maxPriceUsd: number | null;
+          minProfitUsd: number | null;
+          minDiscountPercent: number | null;
+          maxListingAgeMinutes: number | null;
+          locationMode: "country" | "state" | "city";
+          selectedState: string | null;
+          selectedCityOrZip: string | null;
+          searchRadiusMiles: number | null;
+        }>;
+      }
+    ): Promise<Watch | null> => {
+      const patch = { ...args.patch } as any;
+      // A search-phrase edit needs its match keywords re-expanded too —
+      // otherwise an edited phrase would keep matching against the OLD
+      // phrase's keyword set. Bug found live: WatchFormFlow.tsx's own
+      // save() always sends the full form (every field, not a true partial
+      // patch) — checking `typeof patch.searchPhrase === "string"` alone
+      // meant this real OpenAI call (see products.ts's
+      // expandSearchKeywords) re-ran on EVERY single edit, even one that
+      // only touched, say, the price — a real, avoidable cost per the
+      // app's own "avoid unnecessary OpenAI calls" principle. Comparing
+      // against what's actually stored is what makes this fire only when
+      // the phrase itself changed.
+      const existing = typeof patch.searchPhrase === "string" ? store.getWatchById(args.id) : null;
+      if (typeof patch.searchPhrase === "string" && patch.searchPhrase !== existing?.searchPhrase) {
+        patch.matchKeywords = await expandSearchKeywords(patch.searchPhrase);
+      }
+      const updated = store.updateWatch(args.id, patch);
+      broadcastWatches();
+      return updated;
+    }
+  );
+
+  ipcMain.handle("watch:setEnabled", (_e, args: { id: string; enabled: boolean }): Watch | null => {
+    const updated = store.setWatchEnabled(args.id, args.enabled);
+    broadcastWatches();
+    return updated;
+  });
+
+  ipcMain.handle("watch:delete", (_e, args: { id: string }) => {
+    store.deleteWatch(args.id);
+    broadcastWatches();
+  });
+
+  ipcMain.handle("watch:list", (): Watch[] => store.listWatches());
+  ipcMain.handle("watch:getById", (_e, args: { id: string }): Watch | null => store.getWatchById(args.id));
+  ipcMain.handle("watch:listMatches", (_e, args: { watchId: string }) => store.listWatchMatches(args.watchId));
+
+  // Per explicit instruction — "global Pause All / Resume All," distinct
+  // from each Watch's own individual `enabled` (see types.ts's Config.watch
+  // doc comment) — a single flag on Config rather than a bulk UPDATE across
+  // every watches row, so per-watch pause state survives a pause/resume
+  // cycle intact.
+  ipcMain.handle("watch:pauseAll", () => {
+    config = { ...config, watch: { ...config.watch, globallyPaused: true } };
+    saveConfig(CONFIG_PATH, config);
+    sendToRenderer("config:updated", config);
+  });
+  ipcMain.handle("watch:resumeAll", () => {
+    config = { ...config, watch: { ...config.watch, globallyPaused: false } };
+    saveConfig(CONFIG_PATH, config);
+    sendToRenderer("config:updated", config);
+  });
+  // Per explicit instruction — drives the Sidebar's unseen-match pulse
+  // indicator (see Config.watch.matchesLastViewedAt's own doc comment):
+  // called once when the user actually opens the Watch screen, not on
+  // every match.
+  ipcMain.handle("watch:markMatchesViewed", () => {
+    config = { ...config, watch: { ...config.watch, matchesLastViewedAt: Date.now() } };
+    saveConfig(CONFIG_PATH, config);
+    sendToRenderer("config:updated", config);
+  });
+  ipcMain.handle("watch:hasUnseenMatches", (): boolean => store.hasUnseenWatchMatches(config.watch.matchesLastViewedAt));
 
   // Per explicit instruction — every image the AI pulls into the Database
   // gets its own "ask about this image" box in the enlarged (lightbox)
@@ -1450,7 +3054,7 @@ app.whenReady().then(() => {
       if (args.kind === "blacklisted" && args.imageId) {
         if (recon.actualSubject) {
           store.removeBlacklistedImage(args.imageId);
-          mainWindow?.webContents.send("blacklistImages:updated", store.listBlacklistedImages());
+          sendToRenderer("blacklistImages:updated", store.listBlacklistedImages());
           return {
             ok: true,
             message: `Removed from Blacklisted Images — on a closer look, this actually appears to be "${recon.actualSubject}," not an ineligible category.`,
@@ -1462,19 +3066,20 @@ app.whenReady().then(() => {
       if (args.kind === "reference" && args.imageId && args.productId) {
         if (recon.note) {
           const updated = store.appendProductWatchNote(args.productId, `Correction: ${recon.note}`);
-          if (updated) mainWindow?.webContents.send("products:updated", updated);
+          if (updated) sendToRenderer("products:updated", updated);
         }
         if (recon.actualSubject && recon.actualSubject.toLowerCase() !== args.currentLabel.toLowerCase()) {
           store.deleteProductImage(args.imageId);
           let target = store.findMatchingProduct(recon.actualSubject);
           if (target) {
             store.addProductImage(target.id, args.imageDataUri, args.sourceTitle ?? null);
-            mainWindow?.webContents.send("products:updated", store.getProductById(target.id));
+            ensurePhotoDifferenceAnalysis(target.id);
+            sendToRenderer("products:updated", store.getProductById(target.id));
           } else {
             const newId = randomUUID();
             store.addProductStub(newId, recon.actualSubject);
             store.editProductProfile(newId, { imageUrl: args.imageDataUri, keepThumbnail: true });
-            mainWindow?.webContents.send("products:updated", store.getProductById(newId));
+            sendToRenderer("products:updated", store.getProductById(newId));
             runProductLookup(newId, recon.actualSubject);
             target = store.getProductById(newId);
           }
@@ -1486,12 +3091,12 @@ app.whenReady().then(() => {
       if (args.kind === "thumbnail" && args.productId) {
         if (recon.note) {
           const updated = store.appendProductWatchNote(args.productId, `Correction: ${recon.note}`);
-          if (updated) mainWindow?.webContents.send("products:updated", updated);
+          if (updated) sendToRenderer("products:updated", updated);
         }
         if (recon.actualSubject && recon.actualSubject.toLowerCase() !== args.currentLabel.toLowerCase()) {
           store.editProductProfile(args.productId, { imageUrl: null, keepThumbnail: false });
           const updated = store.getProductById(args.productId);
-          if (updated) mainWindow?.webContents.send("products:updated", updated);
+          if (updated) sendToRenderer("products:updated", updated);
           return { ok: true, message: "Cleared this thumbnail — it looked like a photo of something else. Refresh will find a new one." };
         }
         return { ok: true, message: "Thanks — noted for next time." };
@@ -1500,6 +3105,38 @@ app.whenReady().then(() => {
       return { ok: false, message: "Couldn't figure out what to do with that feedback." };
     }
   );
+
+  // Condition-awareness — ListingCard's "?" badge confirm/deny. Deliberately
+  // separate from images:feedback above: that one triggers an AI
+  // re-examination and takes one immediate corrective action (move/delete a
+  // Database photo); this one is a plain, fast, no-AI capture of the user's
+  // raw yes/no answer, which only ever gets used later, batched, as few-shot
+  // context on the NEXT listing's own vision call (see store.ts's
+  // getFlawFeedbackExamples / vision.ts's buildFlawFeedbackExamplesBlock).
+  ipcMain.handle(
+    "listings:flawFeedback",
+    (
+      _e,
+      args: { listingId: string; photoNumber: number; description: string; confidence: string; confirmed: boolean; listingTitle: string }
+    ): { ok: boolean } => {
+      store.addFlawFeedback(args);
+      return { ok: true };
+    }
+  );
+
+  // Per explicit instruction — pipeline instrumentation surfaced to the
+  // Activity screen's metrics panel. Pull-based (the renderer polls this
+  // every couple seconds) rather than a new push-broadcast channel, since
+  // metrics update on every single listing evaluation — far too often to
+  // usefully push live, and a couple-second-stale read is entirely fine for
+  // a "how's it doing" panel. metrics:reset is what makes an actual
+  // before/after benchmark possible: zero everything, run for a while under
+  // one configuration, snapshot; reset again, run under another, compare.
+  ipcMain.handle("metrics:snapshot", () => getMetricsSnapshot());
+  ipcMain.handle("metrics:reset", () => {
+    resetMetrics();
+    return getMetricsSnapshot();
+  });
 
   // The Database screen's Blacklist section — manual add/remove, separate
   // from the chat tools (add_blacklist_term/remove_blacklist_term) which
@@ -1511,7 +3148,7 @@ app.whenReady().then(() => {
       "user",
       args.imageDataUri ? { imageData: args.imageDataUri, sourceTitle: args.sourceTitle ?? null } : null
     );
-    if (added && (args.imageDataUri ?? null)) mainWindow?.webContents.send("blacklistImages:updated", store.listBlacklistedImages());
+    if (added && (args.imageDataUri ?? null)) sendToRenderer("blacklistImages:updated", store.listBlacklistedImages());
     return added ? store.listBlacklistTerms() : null;
   });
   ipcMain.handle("blacklist:remove", (_e, args: { term: string }) => {
@@ -1559,6 +3196,7 @@ app.whenReady().then(() => {
         const currentProduct = args.context === "product" && args.productId ? store.getProductById(args.productId) : null;
         const blacklistTerms =
           args.context === "database" || args.context === "dashboard" || args.context === "global" ? store.listBlacklistTerms() : [];
+        const watches = args.context === "dashboard" || args.context === "global" ? store.listWatches() : [];
         const full = await streamChat(
           args.message,
           args.history,
@@ -1581,7 +3219,8 @@ app.whenReady().then(() => {
             ),
           currentProduct,
           blacklistTerms,
-          args.attachments ?? []
+          args.attachments ?? [],
+          watches
         );
         event.sender.send("ai:chatDone", { requestId: args.requestId, full });
       } catch (err) {
@@ -1595,12 +3234,17 @@ app.whenReady().then(() => {
   });
 });
 
+// Multi-user login migration — both handlers now go through the exact same
+// stopUserSession() the auth:logout IPC handler above uses (see its own
+// comment), rather than each maintaining its own copy of this sequence.
+// stopUserSession itself no-ops if no user was ever actually logged in this
+// run (e.g. the app was closed straight from the LoginScreen).
 app.on("window-all-closed", async () => {
-  await engine.shutdown();
-  store.close();
+  await stopUserSession();
+  if (hasActiveUserSession) store.close();
   if (process.platform !== "darwin") app.quit();
 });
 
 app.on("before-quit", async () => {
-  await engine.shutdown();
+  await stopUserSession();
 });

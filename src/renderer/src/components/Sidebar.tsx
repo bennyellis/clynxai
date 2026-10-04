@@ -1,14 +1,52 @@
-import React from "react";
-import { playTabSwitchSound } from "../lib/sound.js";
+import React, { useEffect, useState } from "react";
+import clynxMarkSrc from "../assets/clynx/clynx-mark.png";
 
-export type Screen = "dashboard" | "activity" | "feed" | "database" | "config";
+export type Screen = "dashboard" | "activity" | "feed" | "watch" | "database" | "config";
 
-function IconSvg({ className, children }: { className?: string; children: React.ReactNode }) {
+const CLYNX_ICON_SIZE = 40;
+const CLYNX_LOCKUP_GAP = 12;
+// The sidebar is 220px wide with 14px padding each side, and the lockup
+// itself adds 4px each side (see the JSX below) — 220 - 28 - 8 = 184,
+// minus a little headroom for rounding/kerning slop.
+const CLYNX_LOCKUP_MAX_WIDTH = 178;
+
+// Two guesses at the wordmark's font-size were tried before this and both
+// were visibly wrong in the actual app (once too short relative to the
+// icon, once so wide it wrapped to two lines) — guessing font metrics from
+// outside a real browser just doesn't work reliably. This measures the
+// ACTUAL rendered glyphs in the ACTUAL browser this component is running
+// in via canvas.measureText (real per-user, per-OS font metrics, not a
+// guess), then solves for the font-size that makes "x"'s real ink height
+// equal iconSize — i.e. genuinely the same height as the icon, not just
+// the same font-size number — and finally clamps that down if the word at
+// that size wouldn't fit maxWidth (icon + gap already subtracted), so it
+// can never wrap or overflow the sidebar regardless of what font actually
+// loads.
+function useMatchedWordmarkFontSize(word: string, iconSize: number, maxWidth: number): number {
+  const [fontSize, setFontSize] = useState(iconSize * 1.6);
+  useEffect(() => {
+    const ctx = document.createElement("canvas").getContext("2d");
+    if (!ctx) return;
+    const probe = 200;
+    ctx.font = `300 ${probe}px "Segoe UI", "Century Gothic", sans-serif`;
+    const xMetrics = ctx.measureText("x");
+    const xHeight = xMetrics.actualBoundingBoxAscent + xMetrics.actualBoundingBoxDescent;
+    if (!xHeight) return;
+    let target = (iconSize / xHeight) * probe;
+    ctx.font = `300 ${target}px "Segoe UI", "Century Gothic", sans-serif`;
+    const wordWidth = ctx.measureText(word).width;
+    if (wordWidth > maxWidth) target *= maxWidth / wordWidth;
+    setFontSize(Math.round(target));
+  }, [word, iconSize, maxWidth]);
+  return fontSize;
+}
+
+function IconSvg({ className, children, size = 21 }: { className?: string; children: React.ReactNode; size?: number }) {
   return (
     <svg
       viewBox="0 0 24 24"
-      width="21"
-      height="21"
+      width={size}
+      height={size}
       fill="none"
       stroke="currentColor"
       strokeWidth={2}
@@ -21,24 +59,43 @@ function IconSvg({ className, children }: { className?: string; children: React.
   );
 }
 
-// Speedometer — a gauge arc + needle, for "how fast the scanner is
-// running" at a glance rather than a generic dashboard glyph. Per explicit
-// instruction, this one always reads as "running hot" now, not just on
-// hover: green, needle pinned straight up (see global.css's
-// icon-speedometer-needle-group base transform), with a couple of short
-// motion-line strokes trailing off the tip. Both the needle and the speed
-// lines live in one <g> so they rotate together — the arc they pivot
-// inside stays fixed either way. Hovering plays a bigger, distinct sweep
-// (bottom → top → middle) — see global.css's iconNeedleSweepFull.
-function SpeedometerIcon() {
+// Speedometer — redrawn after the user's reference image: a half-circle dial
+// whose band is hairline-thin at the left and thick at the right (the inner
+// edge is a smaller circle shifted left, so the two edges meet at the left
+// end), with a teardrop needle pivoting on a round hub. Filled shapes in
+// currentColor, so it still takes the nav color when idle and turns green
+// when `live` (the Facebook accounts OR the eBay engine are searching).
+//
+// The needle is parked all the way to the LEFT when idle and swings all the
+// way to the RIGHT while the nav item is hovered. When the scanner STARTS
+// (`live` flips on), the needle sweeps left to right slowly enough to watch
+// while the icon fades red -> green in lockstep (both driven by one animated
+// number, see global.css's --speedo-run); once there it holds at the right
+// and subtly fluctuates, with three motion lines streaming off the left of
+// the dial (they sit outside the 24-unit box, which global.css lets
+// overflow). Stopping runs it back: needle to the left, color fading out.
+//
+// Geometry (24-unit box): outer arc is a semicircle centered (12,17) r=10;
+// the inner edge is centered (10,17) r=8, so the band is 0 wide at x=2 and 4
+// wide at x=22. The needle's hub is (10,16.4) r=1.6, tip (16.6,10.6).
+function SpeedometerIcon({ live }: { live: boolean }) {
   return (
-    <IconSvg className="icon-speedometer">
-      <path d="M12 21a9 9 0 1 1 9-9" />
+    <IconSvg className={`icon-speedometer${live ? " is-live" : ""}`} size={26}>
+      <path d="M2 17A10 10 0 0 1 22 17L18 17A8 8 0 0 0 2 17Z" fill="currentColor" stroke="none" />
+      {/* Two nested groups sharing one pivot: the outer one holds the POSE
+          (parked all the way left; swings all the way right on hover), the
+          inner one holds the live-scanning wobble, so the two animations
+          never fight over the same transform. */}
       <g className="icon-speedometer-needle-group">
-        <path className="icon-speedometer-needle" d="M12 12l4-4" />
-        <path className="icon-speedometer-speedlines" d="M17 6l1.8-1.3M18.8 7.8l2.1-.6M19.3 9.8l2.2.4" />
+        <g className="icon-speedometer-needle-wobble">
+          <path d="M10.941 17.694L16.6 10.6L9.059 15.106A1.6 1.6 0 0 0 10.941 17.694Z" fill="currentColor" stroke="none" />
+        </g>
       </g>
-      <circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none" />
+      <g className="icon-speedometer-speedlines">
+        <path className="icon-speedometer-speedline icon-speedometer-speedline-1" d="M0.5 9.5h-3" />
+        <path className="icon-speedometer-speedline icon-speedometer-speedline-2" d="M0.5 13h-4" />
+        <path className="icon-speedometer-speedline icon-speedometer-speedline-3" d="M0.5 16.5h-3" />
+      </g>
     </IconSvg>
   );
 }
@@ -81,13 +138,33 @@ function FeedIcon() {
   );
 }
 
+// Per explicit instruction — "when the user hovers over the Watch
+// navigation item, animate the eye with a quick, natural blink: open →
+// closed → open. Do not make it continuously flash." One-shot hover
+// animation, same idiom as InfoBubbleIcon's iconDotLightUp above (no
+// `infinite`, targets one tagged sub-element) — see global.css's
+// iconEyeBlink, a scaleY squash-and-release on this whole group rather
+// than a path morph (CSS can't animate between two different `d` shapes
+// without a JS library; a vertical squash reads as a blink just as well
+// and needs none).
+function WatchIcon() {
+  return (
+    <IconSvg className="icon-watch">
+      <g className="icon-watch-lid">
+        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+        <circle cx="12" cy="12" r="3" />
+      </g>
+    </IconSvg>
+  );
+}
+
 // Pulse/EKG line — the standard "activity" glyph, for the scan log's own
 // page. Per explicit instruction, this should actually mimic a heart
 // monitor rather than just bouncing — the line "draws" itself left to
 // right on hover (a classic stroke-dashoffset reveal, see global.css's
-// iconEkgDraw), and keeps redrawing on a loop, in the scanner's success
-// color, the whole time scanning is actually running — see Sidebar's own
-// `running` prop below.
+// iconEkgDraw). While scanning is actually running, in the scanner's success
+// color, it draws the line, holds, ERASES it, then draws it again (see
+// global.css's iconEkgDrawErase) — see Sidebar's own `running` prop below.
 function ActivityIcon({ live }: { live: boolean }) {
   return (
     <IconSvg className={`icon-activity${live ? " is-live" : ""}`}>
@@ -102,29 +179,132 @@ function ActivityIcon({ live }: { live: boolean }) {
   );
 }
 
+// Per explicit instruction — the actual Clynx brand mark (the user's own
+// file, trimmed/resized but otherwise unedited — see assets/clynx), not a
+// hand-built recreation. It's a plain white line-art PNG with a real alpha
+// channel (transparent everywhere except the linework itself), which is
+// what makes the mask-based color layer below possible: `mask-image` reads
+// that same alpha shape, so anything painted underneath it only shows up
+// exactly where the logo's lines are.
+//
+// Two layers, stacked exactly on top of each other:
+// 1. The image itself, always fully visible — the "all white" resting look.
+// 2. A diagonal gradient band masked to the same shape, continuously
+//    translated across it — see global.css's clynxMarkComet. A rotating
+//    conic gradient was the first attempt here and looked wrong: a radial
+//    sweep from the shape's center lights up whatever the current angle
+//    happens to cross, which for a shape this irregular flares up
+//    disconnected parts at once instead of reading as one thing moving.
+//    A single beam translating in a consistent direction reads much more
+//    like color actually traveling along the lines, with the rest of the
+//    logo staying plain white underneath it wherever the beam currently
+//    isn't. A true "flows along this exact path" trace isn't possible
+//    without vector path data (only a raster image was available), but
+//    this is the closest raster equivalent.
+function ClynxMark({ size = 34 }: { size?: number }) {
+  const maskStyle: React.CSSProperties = {
+    position: "absolute",
+    inset: 0,
+    WebkitMaskImage: `url(${clynxMarkSrc})`,
+    maskImage: `url(${clynxMarkSrc})`,
+    WebkitMaskSize: "contain",
+    maskSize: "contain",
+    WebkitMaskRepeat: "no-repeat",
+    maskRepeat: "no-repeat",
+    WebkitMaskPosition: "center",
+    maskPosition: "center",
+  };
+  return (
+    <div className="clynx-mark" style={{ position: "relative", width: size, height: size }} aria-hidden="true">
+      <img src={clynxMarkSrc} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }} />
+      <div className="clynx-mark-comet" style={maskStyle} />
+    </div>
+  );
+}
+
 export function Sidebar({
   active,
   onSelect,
   loggedIn,
-  running,
+  runningCount,
+  accountCount,
+  ebaySearching,
+  hasUnseenWatchMatches,
 }: {
   active: Screen;
   onSelect: (s: Screen) => void;
+  // Per explicit instruction — multiple Facebook accounts: aggregated
+  // across all of them (see App.tsx) rather than one flat boolean, since
+  // there's no single "the" login/running state anymore. loggedIn stays
+  // tri-state (true if ANY account is logged in, false if none are but at
+  // least one status is known, null if nothing's known yet) since the
+  // Sidebar is a glance-level summary, not a per-account breakdown — that
+  // detail lives on Dashboard.
   loggedIn: boolean | null;
-  running: boolean;
+  runningCount: number;
+  accountCount: number;
+  // The eBay engine isn't one of the Facebook accounts counted above, but
+  // it is "actively searching" all the same — folded into the green
+  // Dashboard/Activity icons and the footer status text.
+  ebaySearching: boolean;
+  // Per explicit instruction — "a subtle indicator/pulse until the user
+  // visits Watch." App.tsx derives this from api.hasUnseenWatchMatches
+  // (compares real match timestamps against config.watch.matchesLastViewedAt
+  // — see index.ts's watch:hasUnseenMatches) rather than Sidebar knowing
+  // anything about Watch's own data model.
+  hasUnseenWatchMatches: boolean;
 }) {
+  const running = runningCount > 0 || ebaySearching;
+  // Per explicit instruction — "an occasional but random glitch effect" on
+  // the logo. A fixed-period CSS loop would read as mechanically regular;
+  // this instead schedules each burst at a genuinely random delay (4-10s)
+  // via a real timer, so the effect fires unpredictably rather than on a
+  // metronome. `glitching` just toggles a class on for the short burst
+  // window — see global.css's clynxGlitchBurst for what actually happens
+  // to the logo while it's on.
+  const [glitching, setGlitching] = useState(false);
+  const wordmarkFontSize = useMatchedWordmarkFontSize(
+    "clynx",
+    CLYNX_ICON_SIZE,
+    CLYNX_LOCKUP_MAX_WIDTH - CLYNX_ICON_SIZE - CLYNX_LOCKUP_GAP
+  );
+  useEffect(() => {
+    let scheduleTimer: ReturnType<typeof setTimeout>;
+    let burstTimer: ReturnType<typeof setTimeout>;
+    function scheduleNext() {
+      const delay = 4000 + Math.random() * 6000;
+      scheduleTimer = setTimeout(() => {
+        setGlitching(true);
+        burstTimer = setTimeout(() => {
+          setGlitching(false);
+          scheduleNext();
+        }, 380);
+      }, delay);
+    }
+    scheduleNext();
+    return () => {
+      clearTimeout(scheduleTimer);
+      clearTimeout(burstTimer);
+    };
+  }, []);
+
   // Activity's own icon needs the live `running` prop (see ActivityIcon's
   // continuous pulse while scanning) — built inside the component instead
   // of as a module-level constant for exactly that reason.
   const items: Array<{ id: Screen; label: string; icon: React.ReactNode }> = [
-    { id: "dashboard", label: "Dashboard", icon: <SpeedometerIcon /> },
+    { id: "dashboard", label: "Dashboard", icon: <SpeedometerIcon live={running} /> },
     { id: "activity", label: "Activity", icon: <ActivityIcon live={running} /> },
     { id: "feed", label: "Feed", icon: <FeedIcon /> },
+    { id: "watch", label: "Watch", icon: <WatchIcon /> },
     { id: "database", label: "Database", icon: <InfoBubbleIcon /> },
     { id: "config", label: "Config", icon: <GearIcon /> },
   ];
   return (
     <div
+      // Everything on this left panel is a "primary" destination, so it's
+      // the one region that plays the hover tick (see App.tsx's hover
+      // listener, which only ticks inside [data-hover-sound]).
+      data-hover-sound
       style={{
         width: 220,
         flexShrink: 0,
@@ -137,30 +317,30 @@ export function Sidebar({
         zIndex: 1,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 8px 24px" }}>
-        <div
-          className="logo-badge"
-          style={{
-            width: 34,
-            height: 34,
-            borderRadius: 10,
-            background: "var(--gradient)",
-            backgroundSize: "200% auto",
-            boxShadow: "var(--shadow-glow)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontWeight: 700,
-            color: "white",
-            animation: "shimmer 5s linear infinite",
-            cursor: "default",
-          }}
-        >
-          S
-        </div>
-        <div>
-          <div className="glow-text" style={{ fontWeight: 700, fontSize: 15 }}>Marketplace Scout</div>
-          <div style={{ fontSize: 11, color: "var(--text-dim)" }}>Deal finder</div>
+      <div
+        className={`clynx-lockup${glitching ? " clynx-glitch" : ""}`}
+        style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: CLYNX_LOCKUP_GAP, padding: "4px 4px 28px" }}
+      >
+        <ClynxMark size={CLYNX_ICON_SIZE} />
+        {/* whiteSpace: nowrap is a deliberate safety net, not the primary
+            fix — useMatchedWordmarkFontSize already clamps its own output
+            to fit, but this guarantees a measurement glitch degrades into
+            "slightly clipped" instead of the word wrapping onto a second
+            line the way it did with a blind, unclamped font-size. */}
+        <div className="clynx-wordmark glow-text" style={{ fontSize: wordmarkFontSize, whiteSpace: "nowrap" }}>
+          c
+          {/* Per explicit instruction — "l" should sit at the same height
+              as the other lowercase letters instead of its normal full
+              ascender. Needs its own inline-block box to be transform-able
+              at all, which means it also needs its own independent
+              background-clip:text pass (a plain inline span would just
+              inherit glow-text's color:transparent with nothing of its own
+              to clip a background against, and render invisible) — same
+              gradient/animation as the word around it, just painted on a
+              separate, smaller box, so the two may drift a pixel out of
+              sync with each other without being visually obvious. */}
+          <span className="clynx-l glow-text">l</span>
+          ynx
         </div>
       </div>
 
@@ -169,13 +349,7 @@ export function Sidebar({
           <button
             key={item.id}
             className={`nav-item ghost${active === item.id ? " active" : ""}`}
-            onClick={() => {
-              // Only on an actual switch — re-clicking the tab you're
-              // already on doesn't navigate anywhere, so it shouldn't sound
-              // like it did.
-              if (active !== item.id) playTabSwitchSound();
-              onSelect(item.id);
-            }}
+            onClick={() => onSelect(item.id)}
             style={{
               justifyContent: "flex-start",
               display: "flex",
@@ -189,7 +363,10 @@ export function Sidebar({
               color: active === item.id ? "var(--text)" : "var(--text-muted)",
             }}
           >
-            <span style={{ width: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{item.icon}</span>
+            <span style={{ width: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, position: "relative" }}>
+              {item.icon}
+              {item.id === "watch" && hasUnseenWatchMatches && <span className="nav-item-pulse-dot" />}
+            </span>
             {item.label}
           </button>
         ))}
@@ -204,7 +381,11 @@ export function Sidebar({
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text-muted)" }}>
           <span className={`dot ${running ? "on" : "off"}`} />
-          {running ? "Scanning" : "Idle"}
+          {(() => {
+            const facebookText = accountCount > 1 ? `${runningCount}/${accountCount} scanning` : runningCount > 0 ? "Scanning" : "Idle";
+            if (!ebaySearching) return facebookText;
+            return runningCount > 0 || accountCount > 1 ? `${facebookText} · eBay` : "eBay searching";
+          })()}
         </div>
       </div>
     </div>

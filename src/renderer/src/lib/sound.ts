@@ -135,15 +135,47 @@ export function playDealSound(): void {
 // note, C5 (523.25 Hz). Built from the SAME playChimeNote used for start/
 // stop (sine wave, same reverb treatment) rather than the earlier
 // triangle-wave "tick," per "more similar to the stop sound" — just
-// quieter and shorter, since this fires on ordinary navigation (every tab
-// click), not a meaningful state change worth as much presence as
-// starting/stopping the scanner.
-export function playTabSwitchSound(): void {
+// quieter and shorter, since this fires on ordinary clicks, not a
+// meaningful state change worth as much presence as starting/stopping the
+// scanner.
+//
+// Renamed from playTabSwitchSound per further explicit instruction — "make
+// that D pitched sound play after every clickable thing is clicked," not
+// just Sidebar/Database's own tab switches. See App.tsx's single global
+// click listener, which now calls this for every clickable element in the
+// app — the two old explicit call sites (Database.tsx/Sidebar.tsx's own tab
+// buttons) were removed rather than left in place, since a tab button IS a
+// clickable element the global listener already covers; keeping both would
+// have double-fired the sound on every tab click.
+export function playClickSound(): void {
   if (!soundEnabled) return;
   try {
     const audioCtx = getContext();
     playChimeNote(audioCtx, 293.66 /* D4 */, audioCtx.currentTime, 0.16, 0.22, 0.3);
   } catch {
     // Best-effort, same as the bloops above.
+  }
+}
+
+// Per explicit instruction — "a tiny little sound that plays when hovering
+// over something": a single very short, very quiet high blip (E8 — doubled
+// twice from the first version's E6, which was "too annoying"; ~50ms, barely
+// any reverb, and the gain is trimmed again because the ear is more
+// sensitive up around 5 kHz than at 1-2 kHz) so it reads as a light "tick" under the cursor rather than a note
+// — far quieter and higher than playClickSound's D4 so the two
+// never blur together when a hover is immediately followed by a click. Built
+// from the same playChimeNote as everything else here. Follows the same
+// Config → Sound on/off switch as every other sound (see setSoundEnabled).
+// The context is resumed defensively: a hover isn't a user gesture, so if
+// the browser left the shared AudioContext suspended, a hover tick would
+// otherwise silently never play until the first click.
+export function playHoverSound(): void {
+  if (!soundEnabled) return;
+  try {
+    const audioCtx = getContext();
+    if (audioCtx.state === "suspended") void audioCtx.resume();
+    playChimeNote(audioCtx, 5274.04 /* E8 */, audioCtx.currentTime, 0.016, 0.05, 0.06);
+  } catch {
+    // Best-effort, same as the sounds above.
   }
 }

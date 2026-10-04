@@ -18,9 +18,23 @@ import { createPortal } from "react-dom";
 // one of those cards would end up positioned/clipped relative to the
 // card's own box instead of the viewport if it weren't portaled out from
 // under that ancestor.
-export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+export function Modal({
+  title,
+  onClose,
+  children,
+  aboveLightbox,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+  // Only for a Modal opened FROM inside an already-open ImageLightbox (its
+  // feedback popup) — ordinary Modals sit below the lightbox now, so a
+  // photo opened from inside a Modal (e.g. Database's Reference Photos
+  // panel) shows in front of it instead of behind it.
+  aboveLightbox?: boolean;
+}) {
   return createPortal(
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className={`modal-backdrop${aboveLightbox ? " modal-backdrop-top" : ""}`} onClick={onClose}>
       <div className="modal-card" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <strong style={{ fontSize: 16 }}>{title}</strong>

@@ -1,0 +1,1020 @@
+import React, { useEffect, useRef, useState } from "react";
+import type { Account, CloudStatus, Config as ConfigType } from "../lib/api.js";
+import { api } from "../lib/api.js";
+import { Modal } from "../components/Modal.js";
+import { setSoundEnabled } from "../lib/sound.js";
+import { notifyParticlesToggle } from "../lib/particles.js";
+import { applyThemeColors } from "../lib/colorScheme.js";
+
+// Per explicit instruction — the "State" location mode's own picker.
+// Alaska and Hawaii deliberately excluded — per explicit instruction,
+// ineligible (this app's whole model is nationwide mail-order resale, and
+// neither is practical to ship from/to the same way the contiguous states
+// are).
+export const US_STATES = [
+  "Alabama", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", "Florida",
+  "Georgia", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", "Maine",
+  "Maryland", "Massachusetts", "Michigan", "Minnesota", "Mississippi", "Missouri", "Montana", "Nebraska",
+  "Nevada", "New Hampshire", "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio",
+  "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota", "Tennessee", "Texas",
+  "Utah", "Vermont", "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming",
+];
+
+export function ConfigScreen({
+  onDirtyChange,
+  shakeSignal,
+  onLoggedOut,
+}: {
+  // Per explicit instruction — App.tsx needs to know whether it's safe to
+  // switch away from this screen (see the Sidebar's onSelect wrapper),
+  // which means Config has to report its own dirty state upward instead
+  // of App.tsx trying to duplicate the JSON-diff logic that already lives
+  // here.
+  onDirtyChange?: (dirty: boolean) => void;
+  // Incrementing counter (not a boolean) — App.tsx bumps this every time
+  // it BLOCKS a tab switch, so the same "denied again" signal still
+  // triggers a fresh shake/highlight even if the previous one hasn't
+  // finished animating out yet (a plain boolean flipping true→true on a
+  // second denied attempt wouldn't re-fire the effect below at all).
+  shakeSignal?: number;
+  // Multi-user login migration — Config can't flip App.tsx's own
+  // authenticated state directly, so it reports a successful log-out
+  // upward instead (see the Cloud Sync section's own "Log out" button) —
+  // App.tsx is what actually decides to unmount everything and go back to
+  // LoginScreen.
+  onLoggedOut?: () => void;
+} = {}) {
+  const [config, setConfig] = useState<ConfigType | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [resetting, setResetting] = useState(false);
+  const [showResetDialog, setShowResetDialog] = useState(false);
+  // Per explicit instruction — shaking the screen (a fast, small shake,
+  // 0.5s) and highlighting Save when a tab switch gets denied for having
+  // unsaved changes. Both reset themselves via setTimeout rather than
+  // waiting on the CSS animation's own "end" event, which is simpler and
+  // doesn't need an animationend listener wired up just to clear a class.
+  const [shaking, setShaking] = useState(false);
+  const [highlightSave, setHighlightSave] = useState(false);
+  // Per explicit instruction — you have to actually deal with unsaved
+  // Config changes before the app closes, not lose them silently. Compared
+  // as JSON against whatever was last successfully loaded/saved, rather
+  // than a plain boolean flipped on every field's onChange — that would
+  // also need its own careful resetting after every save/load, where this
+  // is self-correcting: once `config` matches `savedSnapshot` again
+  // (because a save just wrote it, or a fresh load just set both), dirty
+  // naturally goes back to false on its own.
+  const [savedSnapshot, setSavedSnapshot] = useState("");
+  const [showCloseDialog, setShowCloseDialog] = useState(false);
+  // Refs, not just closing over `config`/`savedSnapshot` — the
+  // app:closeRequested listener below subscribes ONCE (empty deps, so it
+  // isn't torn down and rebuilt on every keystroke) but still needs to see
+  // whatever the LATEST values actually are whenever a close is attempted.
+  const configRef = useRef(config);
+  const savedSnapshotRef = useRef(savedSnapshot);
+  configRef.current = config;
+  savedSnapshotRef.current = savedSnapshot;
+
+  // Per explicit instruction — multiple Facebook accounts: adding one is
+  // its own quick round trip (labeled, then immediately editable — see
+  // AccountCard for the location picker/login/remove UI each one gets).
+  const [addingAccount, setAddingAccount] = useState(false);
+  // Per explicit instruction — watchcount.com's anonymous usage cap
+  // (20 lookups/day) is well below a logged-in account's (200/day), and
+  // Google/Facebook sign-in specifically fails inside this app's
+  // automated browser (a restriction those providers apply to any
+  // automation-flagged browser, unrelated to watchcount) — but its plain
+  // email + password login isn't affected by that. Just opens the window;
+  // there's no reliable "logged in now" signal to poll for the way
+  // Facebook's isLoggedIn check has, so this can't show more than "opened."
+  const [watchCountOpening, setWatchCountOpening] = useState(false);
+  // eBay Browse API credentials live in .env, not Config — this is just a
+  // one-time read so the toggle below can tell the user whether flipping it
+  // on will actually do anything yet. No live polling (same posture as
+  // watchCountOpening above): adding/changing .env needs an app restart to
+  // take effect anyway (dotenv loads once at startup), so a fresher check
+  // here wouldn't reflect reality any better.
+  const [hasEbayCredentials, setHasEbayCredentials] = useState(true);
+
+  useEffect(() => {
+    api.getConfig().then((c) => {
+      setConfig(c);
+      setSavedSnapshot(JSON.stringify(c));
+    });
+    api.hasEbayCredentials().then(setHasEbayCredentials);
+  }, []);
+
+  useEffect(() => {
+    const off = api.onCloseRequested(() => {
+      const dirty = !!configRef.current && JSON.stringify(configRef.current) !== savedSnapshotRef.current;
+      if (dirty) setShowCloseDialog(true);
+      else api.confirmClose();
+    });
+    return () => {
+      off();
+    };
+  }, []);
+
+  // Per explicit instruction — a chat-driven config change (see index.ts's
+  // update_config handler broadcasting config:updated) should show up here
+  // live too, not just take effect silently until this screen happens to
+  // reload. Skipped while there are unsaved local edits (dirty) so an
+  // in-progress change on THIS screen never gets silently overwritten by
+  // something changed elsewhere — the fresh value is still just a reload
+  // away once the user's own edit is dealt with.
+  useEffect(() => {
+    const off = api.onConfigUpdated((next) => {
+      const isDirty = !!configRef.current && JSON.stringify(configRef.current) !== savedSnapshotRef.current;
+      if (isDirty) return;
+      setConfig(next);
+      setSavedSnapshot(JSON.stringify(next));
+    });
+    return () => {
+      off();
+    };
+  }, []);
+
+  const dirty = !!config && JSON.stringify(config) !== savedSnapshot;
+
+  // Per explicit instruction — reports dirty state up to App.tsx, which is
+  // what actually decides whether a Sidebar tab switch is allowed to
+  // proceed or gets denied (shaken) instead. Only fires on an actual
+  // true/false transition thanks to the dependency array, not every
+  // keystroke.
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+
+  // Per explicit instruction — App.tsx bumps shakeSignal every time it
+  // denies a tab switch; this reacts by shaking the screen (0.5s) and
+  // pulsing the Save button, both self-clearing via timers.
+  useEffect(() => {
+    if (!shakeSignal) return;
+    setShaking(true);
+    setHighlightSave(true);
+    const shakeTimer = setTimeout(() => setShaking(false), 500);
+    const highlightTimer = setTimeout(() => setHighlightSave(false), 1300);
+    return () => {
+      clearTimeout(shakeTimer);
+      clearTimeout(highlightTimer);
+    };
+  }, [shakeSignal]);
+
+  if (!config) return <div style={{ color: "var(--text-muted)" }}>Loading...</div>;
+  const cfg = config;
+
+  async function save() {
+    if (!config) return;
+    setSaving(true);
+    try {
+      await api.saveConfig(config);
+      setSavedSnapshot(JSON.stringify(config));
+      setSavedAt(Date.now());
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function resetConfig() {
+    setShowResetDialog(false);
+    setResetting(true);
+    try {
+      const fresh = await api.resetConfig();
+      setConfig(fresh);
+      setSavedSnapshot(JSON.stringify(fresh));
+      setSavedAt(Date.now());
+    } finally {
+      setResetting(false);
+    }
+  }
+
+  function update<K extends keyof ConfigType>(key: K, value: ConfigType[K]) {
+    setConfig((c) => (c ? { ...c, [key]: value } : c));
+  }
+
+  // Applied immediately (not just staged like every other field here) so
+  // picking a theme previews live instead of only taking effect after
+  // Save — matches App.tsx's own startup read of config.theme onto the
+  // same attribute. Also reruns applyColorScheme with the NEW theme: the
+  // background tint it computes is theme-aware (a dark vs. a near-white
+  // base), and that inline style value doesn't update on its own just
+  // because data-theme changed — see colorScheme.ts's own comment on why
+  // this has to be inline rather than a [data-theme] CSS override.
+  function setTheme(theme: ConfigType["theme"]) {
+    update("theme", theme);
+    document.documentElement.setAttribute("data-theme", theme);
+    applyThemeColors({ ...cfg, theme });
+  }
+
+  // Same "applies immediately, not just staged" posture as setTheme above —
+  // per explicit instruction ("instead of choosing colors, allow the user
+  // to use a color wheel to pick a primary and accent color"). See
+  // lib/colorScheme.ts for what actually gets derived from these two hex
+  // values (every accent-driven CSS custom property, plus the background
+  // tint).
+  function setPrimaryColor(hex: string) {
+    update("primaryColor", hex);
+    applyThemeColors({ ...cfg, primaryColor: hex });
+  }
+  function setAccentColor(hex: string) {
+    update("accentColor", hex);
+    applyThemeColors({ ...cfg, accentColor: hex });
+  }
+  // Same "applies immediately" posture — the rainbow starts fading the
+  // moment it's switched on, and switching it off snaps straight back to
+  // whatever two colors are picked underneath.
+  function setRainbow(enabled: boolean) {
+    update("rainbowEnabled", enabled);
+    applyThemeColors({ ...cfg, rainbowEnabled: enabled });
+  }
+
+  // Same "applies immediately, not just staged" posture as setTheme above —
+  // per explicit instruction, a Sound on/off switch.
+  function toggleSound(enabled: boolean) {
+    update("soundEnabled", enabled);
+    setSoundEnabled(enabled);
+  }
+
+  // Same "applies immediately, not just staged" posture as setTheme above —
+  // per explicit instruction, a "No particles" switch that turns off both
+  // the starfield background and the click-particle bursts in one toggle.
+  function toggleParticles(enabled: boolean) {
+    update("particlesEnabled", enabled);
+    notifyParticlesToggle(enabled);
+  }
+
+  async function openWatchCountLogin() {
+    setWatchCountOpening(true);
+    try {
+      await api.openWatchCountLogin();
+    } finally {
+      setWatchCountOpening(false);
+    }
+  }
+
+  // Per explicit instruction — "State" and "City/ZIP" both drive a real
+  // browser lookup on Facebook (see index.ts's location:setMode / the
+  // "Change location" dialog automation in scraper.ts/locationDiscovery.ts)
+  // before anything actually changes — one single resolved location either
+  // way now (State mode used to resolve up to 10 separate cities, which was
+  // genuinely slow for little benefit) — busy state stays up the whole
+  // time, and the result (success or a specific failure reason) replaces
+  // it once the round trip resolves. onConfigUpdated
+  // (already wired above) picks up the new browseUrls/searchRadiusMiles
+  // once it succeeds, same as any other chat/IPC-driven config change.
+  async function addAccount() {
+    setAddingAccount(true);
+    try {
+      await api.addAccount(`Account ${cfg.accounts.length + 1}`);
+    } finally {
+      setAddingAccount(false);
+    }
+  }
+
+  return (
+    <div
+      className={shaking ? "shake-deny" : undefined}
+      style={{ display: "flex", flexDirection: "column", gap: 20, height: "100%", overflowY: "auto", paddingRight: 4 }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 30 }}>Config</h1>
+          <p style={{ color: "var(--text-muted)", margin: "4px 0 0" }}>Everything the scout needs to run, in one place.</p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {dirty ? (
+            <span className="pill" style={{ color: "var(--warn)", borderColor: "var(--warn)" }}>
+              unsaved changes
+            </span>
+          ) : (
+            savedAt && <span className="pill">saved {new Date(savedAt).toLocaleTimeString()}</span>
+          )}
+          <button className="danger" disabled={resetting} onClick={() => setShowResetDialog(true)}>
+            {resetting ? "Resetting..." : "Reset to defaults"}
+          </button>
+          <button
+            className={`primary${highlightSave ? " save-highlight" : ""}`}
+            disabled={saving || !dirty}
+            onClick={save}
+          >
+            {saving ? "Saving..." : "Save config"}
+          </button>
+        </div>
+      </div>
+
+      {showResetDialog && (
+        <Modal title="Reset all Config to defaults?" onClose={() => setShowResetDialog(false)}>
+          <p style={{ margin: 0, fontSize: 15.5, lineHeight: 1.5 }}>
+            This clears your Search For list and custom instructions, resets browse locations back to the nationwide
+            default list, and resets every other setting on this screen. Your OpenAI key and Feed history are not
+            affected.
+          </p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="icon" style={{ flex: 1 }} onClick={() => setShowResetDialog(false)}>
+              Cancel
+            </button>
+            <button className="danger-solid" style={{ flex: 1 }} onClick={resetConfig}>
+              Reset
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {showCloseDialog && (
+        <Modal title="Unsaved Config changes" onClose={() => setShowCloseDialog(false)}>
+          <p style={{ margin: 0, fontSize: 15.5, lineHeight: 1.5 }}>
+            You have unsaved changes on this screen. Save them before closing, or discard them?
+          </p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="icon" style={{ flex: 1 }} onClick={() => setShowCloseDialog(false)}>
+              Cancel
+            </button>
+            <button
+              className="danger-solid"
+              style={{ flex: 1 }}
+              onClick={() => {
+                setShowCloseDialog(false);
+                api.confirmClose();
+              }}
+            >
+              Discard & close
+            </button>
+            <button
+              className="primary"
+              style={{ flex: 1 }}
+              onClick={async () => {
+                await save();
+                setShowCloseDialog(false);
+                api.confirmClose();
+              }}
+            >
+              Save & close
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      <Section title="Accounts">
+        <p style={{ fontSize: 13.5, color: "var(--text-dim)", margin: "0 0 14px" }}>
+          Each account is its own Facebook login and browser session, scanning its own location — add one per account
+          you want running concurrently. Everything else (Search For list, price filters, deal threshold, seller-risk
+          rules) is shared across all of them.
+        </p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {cfg.accounts.map((account) => (
+            <AccountCard key={account.id} account={account} />
+          ))}
+        </div>
+        <button type="button" className="primary" style={{ marginTop: 14 }} disabled={addingAccount} onClick={addAccount}>
+          {addingAccount ? "Adding..." : "+ Add account"}
+        </button>
+      </Section>
+
+      <Section title="Facebook Marketplace">
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14.5, color: "var(--text)", cursor: "pointer", marginBottom: 14 }}>
+          <input type="checkbox" checked={cfg.facebookEnabled !== false} onChange={(e) => update("facebookEnabled", e.target.checked)} />
+          Search Facebook Marketplace
+        </label>
+        <p style={{ fontSize: 13.5, color: "var(--text-dim)", margin: "-10px 0 14px" }}>
+          Turn off to skip Facebook entirely — Dashboard's "Start Scanner" won't start any accounts while this is off.
+          Each account's own enabled/disabled switch below still matters whenever this is on.
+        </p>
+        <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+          <Field label="Listings per location before rotating">
+            <input
+              type="number"
+              min={1}
+              style={{ width: 100 }}
+              value={cfg.listingsPerLocation}
+              onChange={(e) => update("listingsPerLocation", Math.max(1, Number(e.target.value)))}
+            />
+          </Field>
+          <Field label="How recent a listing must be">
+            <select
+              value={cfg.maxListingAgeHours === null ? "any" : String(cfg.maxListingAgeHours)}
+              onChange={(e) => update("maxListingAgeHours", e.target.value === "any" ? null : Number(e.target.value))}
+            >
+              <option value="24">Last 24 hours</option>
+              <option value="168">Last 7 days</option>
+              <option value="720">Last 30 days</option>
+              <option value="any">Any time — no freshness filter</option>
+            </select>
+          </Field>
+        </div>
+        <p style={{ fontSize: 14, color: "var(--text-dim)", margin: "10px 0 0" }}>
+          Defaults to the last 24 hours, since this is built for a fast-moving business — broaden it if you'd rather
+          see more (older) listings than miss ones outside that window. Applied two ways: Facebook's own "Date
+          listed" filter is used on the search results page where possible (skips even opening a stale listing), and
+          it's enforced again after the fact regardless, so the window is always respected even if that live filter
+          click doesn't land. Price range (min and max) is set per-product now, right when you add it to the Search
+          For list on the Dashboard, instead of one global cap here.
+        </p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 14 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14, color: "var(--text-muted)", textTransform: "none", fontWeight: 400 }}>
+            <input
+              type="checkbox"
+              checked={cfg.photoAnalysis.enabled}
+              onChange={(e) => update("photoAnalysis", { enabled: e.target.checked })}
+            />
+            Automatically analyze photos (deal verification, ineligible-item detection, Database matching)
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14, color: "var(--text-muted)", textTransform: "none", fontWeight: 400 }}>
+            <input
+              type="checkbox"
+              checked={cfg.autoResearchListings}
+              onChange={(e) => update("autoResearchListings", e.target.checked)}
+            />
+            Automatically research listings (auto-create new Database entries for items it doesn't track yet — turn
+            off to only reinforce existing ones, and add new ones yourself via Research)
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14, color: "var(--text-muted)", textTransform: "none", fontWeight: 400 }}>
+            <input
+              type="checkbox"
+              checked={cfg.researchCondition}
+              onChange={(e) => update("researchCondition", e.target.checked)}
+            />
+            Research condition (flag possible flaws/damage in listing photos with a yellow "?" you can confirm or
+            deny, and have product research also look for a poor-condition example photo — only does anything while
+            "Automatically analyze photos" above is also on)
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14, color: "var(--text-muted)", textTransform: "none", fontWeight: 400 }}>
+            <input
+              type="checkbox"
+              checked={cfg.ignoreBlacklist}
+              onChange={(e) => update("ignoreBlacklist", e.target.checked)}
+            />
+            Ignore Blacklist (temporarily stop auto-skipping listings that match a blacklisted term or image, without
+            clearing the list itself)
+          </label>
+        </div>
+      </Section>
+
+      <Section title="eBay Marketplace">
+        <p style={{ fontSize: 14, color: "var(--text-dim)", margin: "0 0 10px" }}>
+          Same premise as Facebook Marketplace, different platform — eBay's own Browse API is searched automatically
+          for every Search For item and enabled Watch, no browser/login needed (it's plain read access to public
+          listings). Found items flow through the exact same deal scoring, blacklist, Watch matching, and
+          notifications as Facebook ones.
+        </p>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14.5, color: "var(--text)", cursor: "pointer", marginBottom: 8 }}>
+          <input type="checkbox" checked={cfg.ebay?.enabled ?? false} onChange={(e) => update("ebay", { enabled: e.target.checked })} />
+          Search eBay
+        </label>
+        {!hasEbayCredentials && (
+          <p style={{ fontSize: 13.5, color: "var(--warn)", margin: "0 0 10px" }}>
+            No eBay API credentials found — add EBAY_CLIENT_ID and EBAY_CLIENT_SECRET to .env (see .env.example),
+            then restart Clynx. This toggle won't do anything until then.
+          </p>
+        )}
+      </Section>
+
+      <Section title="Seller Risk">
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 15, marginBottom: 12 }}>
+          <input type="checkbox" checked={cfg.sellerRisk.enabled} onChange={(e) => update("sellerRisk", { ...cfg.sellerRisk, enabled: e.target.checked })} />
+          Screen sellers before opening a listing
+        </label>
+        <Field label="Minimum seller rating">
+          <StarRatingPicker
+            value={cfg.sellerRisk.minRating}
+            disabled={!cfg.sellerRisk.enabled}
+            onChange={(minRating) => update("sellerRisk", { ...cfg.sellerRisk, minRating })}
+          />
+        </Field>
+        <p style={{ fontSize: 14, color: "var(--text-dim)", margin: "10px 0 0" }}>
+          Click the left or right half of a star for half-point precision (e.g. 4.5). "Any rating" skips this check
+          entirely — a seller with no rating at all still passes.
+        </p>
+      </Section>
+
+      <Section title="eBay Sold Comps (WatchCount.com)">
+        <p style={{ fontSize: 14, color: "var(--text-dim)", margin: "0 0 10px" }}>
+          Every time a product gets researched, the assistant checks WatchCount's sold eBay listings for real comps
+          (sold price, time to sell) — see that product's own Database page for the results. Anonymous lookups are
+          capped at 20/day; a free WatchCount account raises that to 200/day.
+        </p>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14.5, color: "var(--text)", cursor: "pointer", marginBottom: 12 }}>
+          <input type="checkbox" checked={cfg.watchCountEnabled} onChange={(e) => update("watchCountEnabled", e.target.checked)} />
+          Search WatchCount for comps
+        </label>
+        <p style={{ fontSize: 13.5, color: "var(--text-dim)", margin: "-6px 0 12px" }}>
+          Turn off to skip this automatically for every researched product — useful if you'd rather save your daily
+          lookup allowance, or don't need eBay comps at all. The manual "Refresh eBay comps" button on a product's own
+          Database page still works either way.
+        </p>
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            fontSize: 14.5,
+            color: cfg.watchCountEnabled ? "var(--text)" : "var(--text-dim)",
+            cursor: cfg.watchCountEnabled ? "pointer" : "default",
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={cfg.watchCountOncePerScan}
+            disabled={!cfg.watchCountEnabled}
+            onChange={(e) => update("watchCountOncePerScan", e.target.checked)}
+          />
+          Only check each product once per scan
+        </label>
+        <p style={{ fontSize: 13.5, color: "var(--text-dim)", margin: "4px 0 10px" }}>
+          If the scanner matches the same product again later in the same scan (a Refresh, marking a listing
+          Interested, anything that re-triggers research), skip the WatchCount lookup instead of spending another one
+          of its limited daily lookups on data that hasn't had time to change. Resets every time the scanner starts.
+        </p>
+        <button type="button" className="primary" disabled={watchCountOpening} onClick={openWatchCountLogin}>
+          {watchCountOpening ? "Opening..." : "Log into WatchCount.com"}
+        </button>
+        <p style={{ fontSize: 13.5, color: "var(--text-dim)", margin: "10px 0 0" }}>
+          Opens a real WatchCount window on the same browser profile the lookups themselves use — log in there with
+          email + password, not Google/Facebook: those providers refuse to sign in inside an automated browser
+          window like this one (their own restriction, not WatchCount's), but a plain email + password account isn't
+          affected. This app never sees your password.
+        </p>
+      </Section>
+
+      <Section title="Appearance">
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className={cfg.theme === "dark" ? "primary" : ""} type="button" onClick={() => setTheme("dark")}>
+            🌙 Dark
+          </button>
+          <button className={cfg.theme === "light" ? "primary" : ""} type="button" onClick={() => setTheme("light")}>
+            ☀️ Light
+          </button>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+          <button className={!cfg.rainbowEnabled ? "primary" : ""} type="button" onClick={() => setRainbow(false)}>
+            🎨 Custom colors
+          </button>
+          <button className={cfg.rainbowEnabled ? "primary" : ""} type="button" onClick={() => setRainbow(true)}>
+            🌈 Rainbow
+          </button>
+        </div>
+        <p style={{ fontSize: 13.5, color: "var(--text-dim)", margin: "8px 0 0" }}>
+          Rainbow slowly fades the whole app through every color — gradients, glows, borders and the starfield all
+          drift together. Your custom colors below are kept and come back when you switch it off.
+        </p>
+        <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginTop: 16, opacity: cfg.rainbowEnabled ? 0.4 : 1, pointerEvents: cfg.rainbowEnabled ? "none" : "auto" }}>
+          <Field label="Primary color">
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <input
+                type="color"
+                value={cfg.primaryColor}
+                onChange={(e) => setPrimaryColor(e.target.value)}
+                style={{ width: 46, height: 38, padding: 2, cursor: "pointer" }}
+                title="Opens your system's color picker — pick any color as the app's primary accent"
+              />
+              <span style={{ fontSize: 13.5, color: "var(--text-dim)" }}>{cfg.primaryColor}</span>
+            </div>
+          </Field>
+          <Field label="Accent color">
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <input
+                type="color"
+                value={cfg.accentColor}
+                onChange={(e) => setAccentColor(e.target.value)}
+                style={{ width: 46, height: 38, padding: 2, cursor: "pointer" }}
+                title="Opens your system's color picker — pick any color as the app's secondary accent"
+              />
+              <span style={{ fontSize: 13.5, color: "var(--text-dim)" }}>{cfg.accentColor}</span>
+            </div>
+          </Field>
+        </div>
+        <p style={{ fontSize: 13.5, color: "var(--text-dim)", margin: "10px 0 0" }}>
+          Recolors every gradient, glow, border, and the cursor-reactive background across the whole app — buttons open
+          your system's own color wheel.
+        </p>
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <button className={cfg.soundEnabled ? "primary" : ""} type="button" onClick={() => toggleSound(true)}>
+            🔊 Sound on
+          </button>
+          <button className={!cfg.soundEnabled ? "primary" : ""} type="button" onClick={() => toggleSound(false)}>
+            🔇 Sound off
+          </button>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <button className={cfg.particlesEnabled ? "primary" : ""} type="button" onClick={() => toggleParticles(true)}>
+            ✨ Particles on
+          </button>
+          <button className={!cfg.particlesEnabled ? "primary" : ""} type="button" onClick={() => toggleParticles(false)}>
+            🚫 No particles
+          </button>
+        </div>
+      </Section>
+
+      <Section title="Push notifications (ntfy)">
+        <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+          <Field label="Server">
+            <input value={config.ntfy.server} onChange={(e) => update("ntfy", { ...config.ntfy, server: e.target.value })} />
+          </Field>
+          <Field label="Topic (private, hard to guess)">
+            <input value={config.ntfy.topic} onChange={(e) => update("ntfy", { ...config.ntfy, topic: e.target.value })} />
+          </Field>
+        </div>
+        <p style={{ fontSize: 14, color: "var(--text-dim)", margin: "8px 0 0" }}>
+          Install the ntfy app and subscribe to this exact topic name to get alerts on your phone.
+        </p>
+      </Section>
+
+      <CloudSyncSection onLoggedOut={onLoggedOut} />
+    </div>
+  );
+}
+
+// First UI change in the whole cloud migration — everything before this was
+// backend-only (see cloudClient.ts/watchSync.ts/feedbackSync.ts/
+// productSync.ts/listingIngestSync.ts), so the only way to tell cloud sync
+// was actually working was reading terminal logs or querying Postgres
+// directly. Started as a purely read-only status readout (poll main on an
+// interval, same pattern as Activity.tsx's own MetricsPanel) — the multi-
+// user login migration adds the one actual control it needed: logging out.
+// Cloud sync itself is no longer something to turn on/off from here at all
+// (see index.ts's bootstrapUserSession) — being logged in now IS what turns
+// it on, unconditionally, for whichever user is currently signed in.
+function CloudSyncSection({ onLoggedOut }: { onLoggedOut?: () => void }) {
+  const [status, setStatus] = useState<CloudStatus | null>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  async function logOut() {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await api.auth.logout();
+      onLoggedOut?.();
+    } finally {
+      setLoggingOut(false);
+    }
+  }
+
+  // Mirrors Activity.tsx's MetricsPanel poll-on-an-interval pattern exactly
+  // (immediate poll on mount, then setInterval, cleaned up on unmount) — the
+  // established "renderer polls main for live status" approach in this app,
+  // not a new one. A slower interval than MetricsPanel's 2s is enough here:
+  // the underlying data only changes on a heartbeat (60s) or sync tick
+  // (60-120s depending on the service), not per-listing.
+  useEffect(() => {
+    let cancelled = false;
+    function poll() {
+      api.cloud.getStatus().then((s) => {
+        if (!cancelled) setStatus(s);
+      });
+    }
+    poll();
+    const interval = setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  return (
+    <Section title="Cloud Sync">
+      <p style={{ fontSize: 13.5, color: "var(--text-dim)", margin: "0 0 12px" }}>
+        Watches, Feed feedback, Database products, and every scanned listing all quietly sync to your Clynx account's
+        own server so they're available from more than one device. Being logged in is what keeps this on — there's no
+        separate on/off switch anymore.
+      </p>
+      {!status ? (
+        <p style={{ fontSize: 13, color: "var(--text-dim)", margin: 0 }}>Loading...</p>
+      ) : !status.enabled ? (
+        <p style={{ fontSize: 14, color: "var(--text-muted)", margin: 0 }}>Cloud sync isn't active for this session yet.</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <CloudStatusRow
+              label="Authentication"
+              ok={status.authenticated}
+              detail={status.authenticated ? "Authenticated" : "Not authenticated"}
+            />
+            <CloudStatusRow
+              label="Heartbeat"
+              ok={!!status.heartbeat.lastAt && !status.heartbeat.lastError}
+              detail={
+                status.heartbeat.lastAt
+                  ? `Last sent ${timeAgo(status.heartbeat.lastAt)}${status.heartbeat.lastError ? ` — ${status.heartbeat.lastError}` : ""}`
+                  : status.heartbeat.lastError ?? "Never sent yet"
+              }
+            />
+          </div>
+          <div>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text-dim)", margin: "0 0 6px" }}>Background sync</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <SyncStatusRow label="Watches" status={status.sync.watches} />
+              <SyncStatusRow label="Feed feedback" status={status.sync.feedback} />
+              <SyncStatusRow label="Database products" status={status.sync.products} />
+              <SyncStatusRow label="Listing ingestion" status={status.sync.listings} />
+            </div>
+          </div>
+          <p style={{ fontSize: 12.5, color: "var(--text-dim)", margin: 0 }}>
+            Device ID: {status.deviceId ?? "not registered yet"} · {status.apiUrl ?? "no API URL configured"}
+          </p>
+        </div>
+      )}
+      <button
+        type="button"
+        className="danger"
+        disabled={loggingOut}
+        onClick={logOut}
+        style={{ alignSelf: "flex-start", marginTop: 14 }}
+      >
+        {loggingOut ? "Logging out..." : "Log out"}
+      </button>
+    </Section>
+  );
+}
+
+// A single-line status row with a colored dot — same `.dot` classes
+// Activity.tsx's own "narrating" pill and Sidebar's connection indicators
+// already use for on/off/error states, so this reads as a native part of
+// the app rather than a bolted-on widget.
+function CloudStatusRow({ label, ok, detail }: { label: string; ok: boolean; detail: string }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}>
+      <span className={`dot ${ok ? "on" : "off"}`} style={{ width: 7, height: 7, flexShrink: 0 }} />
+      <span style={{ color: "var(--text-muted)", minWidth: 110 }}>{label}</span>
+      <span style={{ color: ok ? "var(--text)" : "var(--text-dim)" }}>{detail}</span>
+    </div>
+  );
+}
+
+// One row per background sync service — a compact list, same shape as the
+// Accounts section's own per-account cards or Activity.tsx's per-account
+// discovery rate list: a label on the left, the live value on the right.
+// No lastAt at all yet (service enabled but its first tick, 15s after
+// startup, hasn't landed) reads as "off" rather than "error" — there's
+// nothing wrong yet, just nothing to report.
+function SyncStatusRow({ label, status }: { label: string; status: { lastAt: number | null; lastError: string | null } }) {
+  const state: "on" | "off" | "err" = status.lastError ? "err" : status.lastAt ? "on" : "off";
+  const detail = status.lastAt
+    ? `Last synced ${timeAgo(status.lastAt)}${status.lastError ? ` — ${status.lastError}` : ""}`
+    : status.lastError ?? "Not synced yet";
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}>
+      <span className={`dot ${state}`} style={{ width: 7, height: 7, flexShrink: 0 }} />
+      <span style={{ color: "var(--text-muted)", minWidth: 130 }}>{label}</span>
+      <span style={{ color: state === "err" ? "var(--danger)" : "var(--text)" }}>{detail}</span>
+    </div>
+  );
+}
+
+// Same minute-granularity relative-time helper as ListingCard.tsx's own
+// timeAgo (heartbeats/sync ticks here run 60-120s apart, so that precision
+// fits — unlike Watch.tsx's own timeAgoShort, built for a "last checked 42
+// sec ago" display that updates every few seconds). Kept as its own local
+// copy rather than importing ListingCard's, matching this codebase's
+// existing convention of a small private helper per file that needs one
+// (see ListingCard.tsx and Watch.tsx, neither of which exports theirs).
+function timeAgo(ts: number): string {
+  const diffMs = Date.now() - ts;
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="card">
+      <div style={{ fontWeight: 700, marginBottom: 12 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <label>{label}</label>
+      {children}
+    </div>
+  );
+}
+
+// Per explicit instruction — multiple Facebook accounts, each scanning its
+// own location concurrently. One of these per configured account, each
+// managing its OWN location-picker draft state independently (mirrors
+// exactly what the single-account version of this screen used to do with
+// its own locationDraftMode/stateDraft/cityDraft/etc. — just one
+// independent copy per account now instead of one shared copy). Mutations
+// (label/enabled/location) all go through their own IPC round trip and
+// broadcast config:updated, which the parent ConfigScreen already listens
+// for (see its onConfigUpdated effect) — no separate refresh plumbing
+// needed here, this component just re-renders with fresh props once that
+// lands.
+function AccountCard({ account }: { account: Account }) {
+  const [labelDraft, setLabelDraft] = useState(account.label);
+  const [locationDraftMode, setLocationDraftMode] = useState<Account["locationMode"]>(account.locationMode);
+  const [stateDraft, setStateDraft] = useState(account.selectedState ?? "");
+  const [cityDraft, setCityDraft] = useState(account.selectedCityOrZip ?? "");
+  const [locationBusy, setLocationBusy] = useState(false);
+  const [locationResult, setLocationResult] = useState<string | null>(null);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [showRemoveDialog, setShowRemoveDialog] = useState(false);
+
+  async function applyLocationMode() {
+    setLocationBusy(true);
+    setLocationResult(null);
+    try {
+      const args =
+        locationDraftMode === "country"
+          ? ({ accountId: account.id, mode: "country" } as const)
+          : locationDraftMode === "state"
+            ? ({ accountId: account.id, mode: "state", state: stateDraft } as const)
+            : ({ accountId: account.id, mode: "city", cityOrZip: cityDraft } as const);
+      const res = await api.setLocationMode(args);
+      setLocationResult(res.message);
+    } finally {
+      setLocationBusy(false);
+    }
+  }
+
+  async function saveLabel() {
+    const trimmed = labelDraft.trim();
+    if (!trimmed || trimmed === account.label) {
+      setLabelDraft(account.label);
+      return;
+    }
+    await api.updateAccount(account.id, { label: trimmed });
+  }
+
+  async function doRemove() {
+    setRemoving(true);
+    try {
+      await api.removeAccount(account.id);
+    } finally {
+      setRemoving(false);
+      setShowRemoveDialog(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ padding: 18, display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "space-between", flexWrap: "wrap" }}>
+        <input
+          value={labelDraft}
+          onChange={(e) => setLabelDraft(e.target.value)}
+          onBlur={saveLabel}
+          style={{ fontWeight: 700, fontSize: 16, maxWidth: 240 }}
+        />
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button
+            className={account.enabled ? "primary" : "ghost"}
+            type="button"
+            title={account.enabled ? "Included in \"Start all\" / chat-driven start" : "Skipped by \"Start all\" — still loggable/startable on its own"}
+            onClick={() => api.updateAccount(account.id, { enabled: !account.enabled })}
+          >
+            {account.enabled ? "Enabled" : "Disabled"}
+          </button>
+          <button type="button" disabled={loggingIn} onClick={() => { setLoggingIn(true); api.login(account.id).finally(() => setLoggingIn(false)); }}>
+            {loggingIn ? "Opening..." : "Log in"}
+          </button>
+          <button className="danger" type="button" onClick={() => setShowRemoveDialog(true)}>
+            Remove
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <select value={locationDraftMode} onChange={(e) => setLocationDraftMode(e.target.value as Account["locationMode"])}>
+          <option value="country">Whole country</option>
+          <option value="state">State</option>
+          <option value="city">City/ZIP code</option>
+        </select>
+        {locationDraftMode === "state" && (
+          <select value={stateDraft} onChange={(e) => setStateDraft(e.target.value)} style={{ minWidth: 180 }}>
+            <option value="">Choose a state…</option>
+            {US_STATES.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        )}
+        {locationDraftMode === "city" && (
+          <input
+            value={cityDraft}
+            onChange={(e) => setCityDraft(e.target.value)}
+            placeholder='e.g. "Austin, Texas" or a ZIP code'
+            style={{ minWidth: 200 }}
+          />
+        )}
+        <button
+          type="button"
+          className="primary"
+          disabled={locationBusy || (locationDraftMode === "state" && !stateDraft) || (locationDraftMode === "city" && !cityDraft.trim())}
+          onClick={applyLocationMode}
+        >
+          {locationBusy ? "Working…" : "Apply"}
+        </button>
+      </div>
+      {locationResult && !locationBusy && <p style={{ fontSize: 13.5, color: "var(--text-muted)", margin: 0 }}>{locationResult}</p>}
+
+      {/* Per explicit instruction — changing location mode now only saves
+          the choice; it no longer opens a browser to resolve it right away
+          (see index.ts's location:setMode). The actual lookup happens the
+          next time this account starts, so until then browseUrls/
+          searchRadiusMiles below still reflect whatever was PREVIOUSLY
+          resolved, not the newly-saved selection — this note is what keeps
+          that from reading as if the new choice already silently failed to
+          apply. */}
+      {!account.locationResolved ? (
+        <p style={{ fontSize: 13.5, color: "var(--warn)", margin: 0 }}>
+          Saved — {account.locationMode === "state" ? account.selectedState : account.selectedCityOrZip} will be looked
+          up on Facebook Marketplace the next time this account starts.
+        </p>
+      ) : (
+        <p style={{ fontSize: 13, color: "var(--text-dim)", margin: 0 }}>
+          {account.browseUrls.length} location{account.browseUrls.length === 1 ? "" : "s"} configured
+          {account.locationMode === "state"
+            ? ` — ${account.selectedState} (${account.searchRadiusMiles}-mile radius)`
+            : account.locationMode === "city"
+              ? ` — ${account.selectedCityOrZip} (${account.searchRadiusMiles}-mile radius)`
+              : ", spread nationwide"}
+        </p>
+      )}
+
+      {showRemoveDialog && (
+        <Modal title={`Remove "${account.label}"?`} onClose={() => setShowRemoveDialog(false)}>
+          <p style={{ margin: 0, fontSize: 15.5, lineHeight: 1.5 }}>
+            This stops its scanning and permanently deletes its saved Facebook login — you'd need to log in again from
+            scratch if you re-add it. Listings it already found stay in your Feed either way. This can't be undone.
+          </p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="icon" style={{ flex: 1 }} onClick={() => setShowRemoveDialog(false)}>
+              Cancel
+            </button>
+            <button className="danger-solid" style={{ flex: 1 }} disabled={removing} onClick={doRemove}>
+              {removing ? "Removing..." : "Remove"}
+            </button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// Per explicit instruction — a clickable 5-star control split into halves
+// (10 total zones) so the user can land on e.g. 4.5 instead of only whole
+// numbers. null means "no minimum" (the seller-rating check is skipped
+// entirely, including a seller with no rating at all) — represented as an
+// all-empty row plus the "Any rating" label, not as 0 stars, since 0 would
+// misleadingly read as "reject everyone."
+const STAR_PATH = "M12 2.5l2.9 6.06 6.6.87-4.83 4.6 1.24 6.6L12 17.6l-5.91 3.03 1.24-6.6-4.83-4.6 6.6-.87L12 2.5z";
+
+function StarRatingPicker({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: number | null;
+  onChange: (v: number | null) => void;
+  disabled?: boolean;
+}) {
+  const display = value ?? 0;
+  function fillFor(star: number): "empty" | "half" | "full" {
+    if (display >= star) return "full";
+    if (display >= star - 0.5) return "half";
+    return "empty";
+  }
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, opacity: disabled ? 0.5 : 1, pointerEvents: disabled ? "none" : "auto" }}>
+      <div style={{ display: "flex", gap: 2 }}>
+        {[1, 2, 3, 4, 5].map((star) => (
+          <div key={star} style={{ position: "relative", width: 22, height: 22 }}>
+            <svg viewBox="0 0 24 24" width={22} height={22} style={{ position: "absolute", inset: 0 }}>
+              <path d={STAR_PATH} fill="none" stroke="var(--border-strong)" strokeWidth={1.5} strokeLinejoin="round" />
+            </svg>
+            {fillFor(star) !== "empty" && (
+              <svg
+                viewBox="0 0 24 24"
+                width={22}
+                height={22}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  clipPath: fillFor(star) === "half" ? "inset(0 50% 0 0)" : "none",
+                }}
+              >
+                <path d={STAR_PATH} fill="var(--accent-1)" stroke="var(--accent-1)" strokeWidth={1.5} strokeLinejoin="round" />
+              </svg>
+            )}
+            <div style={{ position: "absolute", inset: 0, display: "flex", cursor: "pointer" }}>
+              <div style={{ flex: 1 }} onClick={() => onChange(star - 0.5)} title={`${star - 0.5} stars`} />
+              <div style={{ flex: 1 }} onClick={() => onChange(star)} title={`${star} stars`} />
+            </div>
+          </div>
+        ))}
+      </div>
+      <span style={{ fontSize: 15, color: "var(--text-muted)", minWidth: 74 }}>{value === null ? "Any rating" : `${value.toFixed(1)}+`}</span>
+      <button type="button" className="icon ghost" style={{ fontSize: 13 }} onClick={() => onChange(value === null ? 3.5 : null)}>
+        {value === null ? "Set minimum" : "Clear"}
+      </button>
+    </div>
+  );
+}
+

@@ -1,5 +1,5 @@
-import type { BlacklistTerm, Config, ListingRecord, LogLine, ProductProfile } from "./types.js";
-import { OPENAI_MODEL, OPENAI_URL, getOpenAIApiKey } from "./openai.js";
+import type { BlacklistTerm, Config, ListingRecord, LogLine, ProductProfile, Watch } from "./types.js";
+import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -35,7 +35,12 @@ export interface ToolCall {
     | "update_config"
     | "start_scanner"
     | "stop_scanner"
-    | "clear_feed";
+    | "clear_feed"
+    | "create_watch"
+    | "pause_watch"
+    | "resume_watch"
+    | "delete_watch"
+    | "list_watch_matches";
   args: Record<string, unknown>;
 }
 
@@ -76,6 +81,14 @@ const DASHBOARD_TOOL_NAMES = new Set<ToolCall["name"]>([
   // "stop showing me rentals."
   "add_blacklist_term",
   "remove_blacklist_term",
+  // Per the Watch plan's own phase 4 — persistent, condition-based
+  // monitoring, genuinely different from add_search_item's session-scoped
+  // Search For list (see create_watch's own description below).
+  "create_watch",
+  "pause_watch",
+  "resume_watch",
+  "delete_watch",
+  "list_watch_matches",
 ]);
 
 const DATABASE_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_blacklist_term", "remove_blacklist_term"]);
@@ -101,20 +114,33 @@ const TOOLS = [
     function: {
       name: "add_search_item",
       description:
-        "Add a specific product to the Search For list, so the scraper actively searches for it at every location and precisely flags it with discount-percent math. Use this as soon as the user asks you to find/track/watch/search for a specific, well-defined product — don't hold off to ask about budget or price range first; that's handled separately now, by the Min/Max Price filters on the Dashboard's own Search For Products section, not a per-item conversational ask.",
+        "Add a specific product to the Search For list, so the scraper actively searches for it at every location and precisely flags it with discount-percent math. Use this as soon as the user asks you to find/track/watch/search for a specific, well-defined product — don't hold off to ask about budget or price range first; only set minPriceUsd/maxPriceUsd below if the user actually states one in the same request (e.g. 'search for PS5s between $200 and $400'), otherwise leave them out and it searches with no price range at all.",
       parameters: {
         type: "object",
         properties: {
-          item: { type: "string", description: "Display name, e.g. 'PS5 Slim Digital 1TB'" },
+          item: {
+            type: "string",
+            description:
+              "Display name, e.g. 'PS5 Slim Digital 1TB' — this is ALSO the literal text typed into Facebook Marketplace's own search bar, so it must be an accurate, specific phrase for exactly the product the user asked for, not a loose paraphrase or a more generic category name.",
+          },
           matchKeywords: {
             type: "array",
             items: { type: "string" },
-            description: "Lowercase keywords/phrases likely to appear in a matching listing title, e.g. ['ps5 slim', 'playstation 5 slim']",
+            description:
+              "Lowercase keywords/phrases likely to appear in a matching listing title, e.g. ['ps5 slim', 'playstation 5 slim'] — used only to recognize a match once a listing's already been found, NOT what gets searched for (that's `item`, above).",
           },
           typicalResaleUsd: {
             type: "number",
             description:
               "Typical USD resale value in decent used condition, ONLY if you're genuinely confident of a current real price. Use 0 if you're not sure — the user will need to fill in a real number before this item can trigger deal alerts, same as any manually-added item.",
+          },
+          minPriceUsd: {
+            type: ["number", "null"],
+            description: "This product's own price floor — listings below it are skipped. Only set if the user actually stated one for this product; otherwise omit (no floor).",
+          },
+          maxPriceUsd: {
+            type: ["number", "null"],
+            description: "This product's own price ceiling — listings above it are skipped. Only set if the user actually stated one for this product; otherwise omit (no ceiling).",
           },
         },
         required: ["item", "matchKeywords"],
@@ -262,18 +288,10 @@ const TOOLS = [
           sellerRiskRequireProfilePhoto: { type: "boolean" },
           ntfyTopic: { type: "string" },
           ntfyServer: { type: "string", description: "The ntfy server URL, e.g. https://ntfy.sh" },
-          theme: { type: "string", enum: ["dark", "light"], description: "The Marketplace Scout app's own light/dark appearance." },
+          theme: { type: "string", enum: ["dark", "light"], description: "The Clynx app's own light/dark appearance." },
           maxListingAgeHours: {
             type: ["number", "null"],
             description: "How old a listing can be (in hours) before it's skipped. Pass null for no freshness cap at all (any age).",
-          },
-          maxPriceUsd: {
-            type: ["number", "null"],
-            description: "Global price ceiling — listings above this are skipped. Pass null for no cap.",
-          },
-          minPriceUsd: {
-            type: ["number", "null"],
-            description: "Global price floor — listings below this are skipped. Pass null for no floor.",
           },
           ignoreBlacklist: { type: "boolean", description: "true = temporarily stop auto-skipping blacklisted terms/images without clearing the list." },
           autoResearchListings: {
@@ -318,6 +336,101 @@ const TOOLS = [
       parameters: { type: "object", properties: {} },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "create_watch",
+      description:
+        "Create a persistent Watch — unlike the Search For list (add_search_item, which resets every time the app launches and only matters while you're actively scanning), a Watch keeps looking indefinitely, survives app/scanner restarts, and alerts you the moment a match appears, even if continuous scanning is currently stopped. Use this when the user says things like 'watch for', 'keep an eye out for', 'let me know if/when', or 'alert me the moment' — as opposed to 'search for' (add_search_item, for scanning right now) or 'research' (research_product, for a Database writeup). Every condition below is completely optional except searchPhrase — only set a condition the user actually stated; never invent a price/profit/age/location requirement they didn't ask for.",
+      parameters: {
+        type: "object",
+        properties: {
+          searchPhrase: {
+            type: "string",
+            description: "What to search for, e.g. 'Xbox Series X' — this is the literal text a search would use and what listing titles are matched against.",
+          },
+          matchKeywords: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Lowercase keywords/phrases likely to appear in a matching listing title, e.g. ['ps5 slim', 'playstation 5 slim'] — used to recognize a match once a listing's already been found, NOT what gets searched for (that's `searchPhrase`, above). Same idea as add_search_item's own matchKeywords.",
+          },
+          name: { type: "string", description: "Short display name for the Watch card. Falls back to searchPhrase if omitted." },
+          minPriceUsd: { type: ["number", "null"], description: "Only set if the user stated a price floor." },
+          maxPriceUsd: { type: ["number", "null"], description: "Only set if the user stated a price ceiling." },
+          minProfitUsd: {
+            type: ["number", "null"],
+            description:
+              "Only alert when estimated profit is at least this many dollars. Only meaningful if a real reference resale price can be determined (e.g. the user has sold this before, or Clynx has eBay/Facebook price data for it) — mention that to the user if they ask for a profit condition on something brand new with no pricing history yet.",
+          },
+          minDiscountPercent: { type: ["number", "null"], description: "Only alert when the price is at least this many percent below typical resale value." },
+          maxListingAgeMinutes: {
+            type: ["number", "null"],
+            description: "Only alert on listings posted within this many minutes, e.g. 30 for 'only if it was just posted in the last half hour'.",
+          },
+          locationMode: {
+            type: "string",
+            enum: ["city", "state", "country"],
+            description:
+              "How this Watch picks its OWN search location — deliberately separate from wherever the Scanner itself is currently browsing. 'city' actively, proactively checks Facebook on a schedule at one specific place; 'state'/'country' currently only get passive coverage (matched against whatever the Scanner happens to see while browsing), not a proactive check of their own — mention that tradeoff if the user asks for broad coverage. Default to 'city' unless they clearly want something broader.",
+          },
+          selectedCityOrZip: { type: ["string", "null"], description: "Required when locationMode is 'city' — a city name or ZIP, e.g. 'Richmond, Virginia'." },
+          selectedState: { type: ["string", "null"], description: "Required when locationMode is 'state' — the full state name." },
+          searchRadiusMiles: { type: ["number", "null"], description: "Miles around the location above. Only set if the user stated one; a sensible default is used otherwise." },
+        },
+        required: ["searchPhrase", "matchKeywords"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pause_watch",
+      description: "Pause one Watch by name so it stops checking/alerting, without deleting it or losing its match history — resumable later with resume_watch.",
+      parameters: {
+        type: "object",
+        properties: { name: { type: "string", description: "The Watch's name, as it appears on its card." } },
+        required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "resume_watch",
+      description: "Resume a previously paused Watch by name.",
+      parameters: {
+        type: "object",
+        properties: { name: { type: "string", description: "The Watch's name, as it appears on its card." } },
+        required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "delete_watch",
+      description:
+        "Permanently delete a Watch by name, including its match history. Irreversible — only call this when the user has clearly and specifically asked to delete/remove/stop watching that item, not as a side effect of something else. If there's any ambiguity, ask them to confirm in plain text first.",
+      parameters: {
+        type: "object",
+        properties: { name: { type: "string", description: "The Watch's name, as it appears on its card." } },
+        required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_watch_matches",
+      description: "List the most recent real matches a Watch has found. Use this when the user asks what a Watch has turned up, e.g. 'has the Xbox watch found anything?'.",
+      parameters: {
+        type: "object",
+        properties: { name: { type: "string", description: "The Watch's name, as it appears on its card." } },
+        required: ["name"],
+      },
+    },
+  },
 ];
 
 function toolsForContext(context: ChatContext) {
@@ -331,6 +444,7 @@ function buildDashboardSystemPrompt(
   recentListings: ListingRecord[],
   blacklistTerms: BlacklistTerm[],
   productCount: number,
+  watches: Watch[],
   // Per explicit instruction — the persistent bottom bar (GlobalAssistantBar,
   // every screen except Dashboard) reuses this same prompt almost as-is
   // (it already understands the whole app and has full admin tool access),
@@ -360,7 +474,13 @@ function buildDashboardSystemPrompt(
     ? blacklistTerms.map((t) => `"${t.term}"${t.source === "ai" ? " (auto-added)" : ""}`).join(", ")
     : "none yet";
 
-  return `You are ${isGlobal ? "the assistant built into Marketplace Scout" : "the Dashboard assistant inside Marketplace Scout"}, a desktop tool that browses Facebook Marketplace and screens listings for resale deals. ${isGlobal ? "You're available from a small bar at the bottom of every screen in the app — Feed, Database, Config, wherever the user currently is — not just one page." : ""} You're talking directly with the person who owns and runs this tool, in an ordinary back-and-forth chat — not a scripted command console. Hold context across the conversation and respond conversationally to whatever they bring up, the same as you would anywhere else, while staying useful specifically for their reselling work.
+  const watchTail = watches.length
+    ? watches
+        .map((w) => `"${w.name}"${w.enabled ? "" : " (paused)"} — ${w.matchCount} match${w.matchCount === 1 ? "" : "es"} so far`)
+        .join(", ")
+    : "none yet";
+
+  return `You are ${isGlobal ? "the assistant built into Clynx" : "the Dashboard assistant inside Clynx"}, a desktop tool that browses Facebook Marketplace and screens listings for resale deals. ${isGlobal ? "You're available from a small bar at the bottom of every screen in the app — Feed, Database, Config, wherever the user currently is — not just one page." : ""} You're talking directly with the person who owns and runs this tool, in an ordinary back-and-forth chat — not a scripted command console. Hold context across the conversation and respond conversationally to whatever they bring up, the same as you would anywhere else, while staying useful specifically for their reselling work.
 
 You should understand the WHOLE app well enough to explain any part of it${isGlobal ? "" : ", even the parts you can't directly control from here"}:
 - Feed screen: a grid of every listing that turned out to be a deal or otherwise worth a look (a plain uninteresting skip never shows up there at all, by design). Each card has a photo carousel, the seller's own description with a show-more toggle, a seller-rating line, and Interested/Not interested/Research buttons. A small yellow clock icon on a card's photo means that seller's Facebook account is under a year old — that's the only seller-risk signal currently shown there.
@@ -375,13 +495,14 @@ You should understand the WHOLE app well enough to explain any part of it${isGlo
 - Blacklist: any listing whose title matches a blacklisted term/phrase is skipped before it's ever opened, no AI call spent on it. Terms come from the user directly or get auto-suggested by the AI when a listing looks categorically unrelated to reselling (real estate, job postings, services...) — never from a listing just being uninteresting or cash/pickup-only.
 
 You have full admin access to this app's own settings and controls — whatever the user asks for, look for a tool that does it before telling them to go do it themselves in Config:
-- add_search_item / remove_search_item — add or remove a well-defined product on the Search For list, so the scraper actively searches for it at every location. Call this as soon as they ask — don't hold off to ask about budget or price range first, that's handled separately now by the Min/Max Price filters in the Dashboard's own Search For Products section (which also lists everything currently on the Search For list, with a one-click × to remove any of them).
+- add_search_item / remove_search_item — add or remove a well-defined product on the Search For list, so the scraper actively searches for it at every location. Call this as soon as they ask — price range is per-product now (add_search_item's own minPriceUsd/maxPriceUsd args), so only set those if the user actually stated a range for this specific product in the same request; otherwise leave them out rather than asking as a separate follow-up. The Dashboard's own Search For Products section lists everything currently on the list (with each item's price range shown right on its pill) and has a one-click × to remove any of them.
 - add_custom_instruction — append looser deal-finding guidance that isn't one specific trackable product (use update_config's customInstructions field instead if they want to replace/clear the whole thing rather than add one more line).
 - set_general_deal_detection — turn off (or back on) the AI's own broad "maybe this is a deal" guessing on things outside the Search For list. Use this whenever the user expresses exclusive/focused intent — "only", "just", "nothing else", "don't show me unrelated stuff" — paired with a specific item. E.g. if they say "find me PS5s, I don't want to see t-shirts or random junk", call add_search_item for the PS5 AND set_general_deal_detection(enabled: false) in the same turn, so the scraper actually stops surfacing unrelated general-tier guesses instead of just adding the tracked item on top of everything else it was already flagging.
 - update_config — change any other setting directly: deal threshold, listings per location, poll interval, headless mode, photo-analysis toggle, general-deal confidence, seller-risk filters, ntfy topic.
 - start_scanner / stop_scanner — start or stop continuous scanning. The Activity page logs the instant either one is clicked/called, so the user can always see it actually happened, not just the button's own label changing.
 - clear_feed — permanently wipes every listing in the Feed. Only call this on a clear, specific request to clear/wipe/empty the feed — never as a guess or a side effect of something else, and if it's at all ambiguous whether they mean it, ask in plain text first instead of calling it.
-- add_blacklist_term / remove_blacklist_term — manage the scanning blacklist directly from here. Only for things categorically unrelated to reselling (real estate, job postings, services, event tickets), not for resalable items that are just uninteresting.${
+- add_blacklist_term / remove_blacklist_term — manage the scanning blacklist directly from here. Only for things categorically unrelated to reselling (real estate, job postings, services, event tickets), not for resalable items that are just uninteresting.
+- create_watch / pause_watch / resume_watch / delete_watch / list_watch_matches — a Watch is fundamentally different from a Search For item: it's PERSISTENT (survives app/scanner restarts, keeps looking even with the Scanner stopped), has its own optional conditions (price/profit/discount/freshness/location), and alerts the moment a real match appears. Use "watch for X" / "keep an eye out for X" / "alert me when X shows up" as the signal to create one, not add_search_item — the Watch screen (eye icon in the sidebar) is where the user reviews/edits them directly, so you don't need to explain their conditions back in full, just confirm what was created.${
     isGlobal
       ? '\n- research_product — build (or refresh) a Database profile for a product, right from wherever the user currently is, without sending them to the Database screen first. Same tool the Database assistant itself uses — see its own description for when to call it.'
       : ""
@@ -396,7 +517,12 @@ Current setup:
 - Search For list: ${searchList}
 - General (unverified) deal detection: ${config.generalDeal.enabled ? "on, checking listings at any price" : "off"}
 - Custom instructions in effect: ${config.customInstructions.trim() || "none"}
-- Locations configured: ${config.browseUrls.length}, rotating every ${config.listingsPerLocation} listings
+- Accounts (${config.accounts.length}): ${config.accounts
+        .map((a) => {
+          const where = a.locationMode === "country" ? `nationwide, ${a.browseUrls.length} locations` : a.locationMode === "state" ? `state: ${a.selectedState}` : `city/ZIP: ${a.selectedCityOrZip}`;
+          return `"${a.label}"${a.enabled ? "" : " (disabled)"} — ${where}`;
+        })
+        .join("; ")}, rotating every ${config.listingsPerLocation} listings per account
 - Poll interval: ${config.pollIntervalMinutesMin}-${config.pollIntervalMinutesMax} min between cycles
 - Headless browser: ${config.headless}
 - Never skip or discount a listing for being cash/local-pickup-only, or for not spelling out model/serial numbers in the text — that's expected, not a red flag
@@ -405,6 +531,7 @@ Current setup:
 - ntfy topic: ${config.ntfy.topic || "not set"}
 - Blacklist (${blacklistTerms.length}): ${blacklistTail}
 - Database products tracked: ${productCount}
+- Watches (${watches.length}${config.watch.globallyPaused ? ", all paused via Pause All" : ""}): ${watchTail}
 
 Recent activity log:
 ${logTail || "(none yet)"}
@@ -440,7 +567,7 @@ function buildDatabaseSystemPrompt(products: ProductProfile[], blacklistTerms: B
         .join("\n")
     : "(none yet)";
 
-  return `You are the assistant on the Database screen of Marketplace Scout — a SEPARATE assistant from the one on the Dashboard, with your own conversation. Your only job is researching and maintaining product knowledge profiles; you have NO ability to control the scanner, change app settings, manage the Search For list, or do anything else the Dashboard assistant does — those tools genuinely aren't available to you here, so never claim to have started/stopped scanning or changed a setting. If the user asks for that kind of thing, tell them plainly this chat can't do it and point them to the Dashboard's own assistant.
+  return `You are the assistant on the Database screen of Clynx — a SEPARATE assistant from the one on the Dashboard, with your own conversation. Your only job is researching and maintaining product knowledge profiles; you have NO ability to control the scanner, change app settings, manage the Search For list, or do anything else the Dashboard assistant does — those tools genuinely aren't available to you here, so never claim to have started/stopped scanning or changed a setting. If the user asks for that kind of thing, tell them plainly this chat can't do it and point them to the Dashboard's own assistant.
 
 Your tools:
 - research_product — build (or refresh) an in-depth product profile from a real live web search for specs/variants/common issues (not just your own training knowledge), saved to the Database so it's there for next time. Call this whenever the user asks you to learn about/research/build a profile for a product. A broad, family-level request ("research iPhones", "look into Nintendo Switch") is completely normal — call this once with the general family name and let the writeup itself cover the real variants (storage sizes, generations, OLED vs base, etc.); don't refuse it or demand they narrow it down to one exact SKU first. Only ask a clarifying question if the request could genuinely mean different, unrelated products. Pass ONLY the general, canonical product name as the product argument — e.g. "Xbox Series X", "iPhone", "Nintendo Switch" — never a parenthetical qualifier or variant/bundle/accessory list tacked onto it (NOT "Xbox Series X (console, all variants/bundles/accessories)"); that kind of detail belongs in the writeup itself, not the title.
@@ -473,7 +600,7 @@ function buildProductSystemPrompt(product: ProductProfile): string {
       : "No desired price set yet.";
   const priority = product.prioritized ? "★ Prioritized by the user — noteworthy, worth extra attention when it comes up." : "";
 
-  return `You are the assistant on the Database page for ONE specific product in Marketplace Scout — "${product.name}". Everything in this conversation is about this product specifically; the user doesn't need to keep naming it.
+  return `You are the assistant on the Database page for ONE specific product in Clynx — "${product.name}". Everything in this conversation is about this product specifically; the user doesn't need to keep naming it.
 
 Current research summary: ${product.aiSummary || "(none yet)"}
 Watch-for notes already logged: ${product.lookoutNotes || "(none yet)"}
@@ -509,18 +636,13 @@ async function streamOnce(
   tools: typeof TOOLS | null,
   onChunk: (delta: string) => void
 ): Promise<{ content: string; toolCalls: AccumulatedToolCall[] }> {
-  const apiKey = getOpenAIApiKey();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
 
   try {
-    const res = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    const res = await callOpenAI(
+      "chat",
+      {
         model: OPENAI_MODEL,
         messages,
         max_completion_tokens: 600,
@@ -535,9 +657,9 @@ async function streamOnce(
         // used to send unconditionally, OpenAI does not, so the no-tools
         // case now omits both fields instead of sending tool_choice: "none".
         ...(tools && tools.length ? { tools, tool_choice: "auto" } : {}),
-      }),
-      signal: controller.signal,
-    });
+      },
+      controller.signal
+    );
 
     if (!res.ok || !res.body) {
       const body = await res.text().catch(() => "");
@@ -629,11 +751,12 @@ export async function streamChat(
   // photos), so this needs no separate call/provider — just image_url parts
   // alongside the text in one normal request, tool-calling and streaming
   // both included.
-  attachments: ChatAttachment[] = []
+  attachments: ChatAttachment[] = [],
+  watches: Watch[] = []
 ): Promise<string> {
   const systemPrompt =
     context === "dashboard" || context === "global"
-      ? buildDashboardSystemPrompt(config, recentLogs, recentListings, blacklistTerms, products.length, context === "global")
+      ? buildDashboardSystemPrompt(config, recentLogs, recentListings, blacklistTerms, products.length, watches, context === "global")
       : context === "product" && currentProduct
         ? buildProductSystemPrompt(currentProduct)
         : buildDatabaseSystemPrompt(products, blacklistTerms);
@@ -804,25 +927,20 @@ export async function streamNarration(ctx: NarrationContext, onChunk: (delta: st
 // this app needs, so it's its own small function rather than another
 // branch bolted onto streamOnce.
 async function streamOnceJson(messages: unknown[]): Promise<string> {
-  const apiKey = getOpenAIApiKey();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
   try {
-    const res = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    const res = await callOpenAI(
+      "chat",
+      {
         model: OPENAI_MODEL,
         messages,
         max_completion_tokens: 2048,
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
-      }),
-      signal: controller.signal,
-    });
+      },
+      controller.signal
+    );
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error(`OpenAI API error ${res.status}: ${body}`);
@@ -907,6 +1025,14 @@ export interface ProductSummaryResult {
   // folder thumbnail (see types.ts's ProductProfile.familyLogoUrl) — never
   // true when family itself is null.
   isBrandFamily: boolean;
+  // Per explicit instruction — the Database Research tab shows this live
+  // while research_product is running, in place of the full aiSummary
+  // write-up ("relay its emotional feedback instead of its hyper-
+  // analysis"). Same spirit as vision.ts's PhotoAnalysisResult.expertTake:
+  // a short, first-person, human reseller reaction to what this research
+  // actually found, generated in this SAME call rather than a separate
+  // one.
+  reaction: string;
 }
 
 function categoryAndFamilyInstructions(): string {
@@ -922,12 +1048,15 @@ Separately, reserve "<brand> > Accessories" for a genuine standalone ACCESSORY �
 
 Also decide whether that top-level brand/company (e.g. "Xbox", "Nintendo", "PlayStation") is itself real, official, and well-known enough to have an actual recognizable logo — "Nintendo", "Nike", "Xbox", "Apple", "Dyson" all qualify; a grouping name you had to invent yourself to organize similar things does not, because there's no real logo to find for it. Set isBrandFamily to true only in the genuine-brand case — false whenever family is null, or is just an organizational grouping rather than a real trademark/company name.
 
+Separately, give your own gut reaction (reaction) to what you just found researching this product — write it the way a sharp, experienced Facebook-Marketplace-to-eBay reseller would actually think out loud after digging into it, not a neutral restatement of the summary above. React to whatever's actually most interesting/useful here: genuinely excited about a variant premium or bundle that's easy to miss, wary of a common scam/counterfeit/failure point worth watching for, or just a quick "good to know" if nothing's especially dramatic. 1-2 sentences, plain conversational language, first person.
+
 Respond with ONLY a JSON object, no other text, in this exact shape:
 {
   "summary": string,          // the reference profile described above, as markdown-free plain text with line breaks between bullets
   "category": string,         // exactly one of the category names listed above, verbatim
   "family": string | null,    // the brand/product-line name, optionally with " > "-separated sub-levels — see above
-  "isBrandFamily": boolean    // true only if family's top-level segment is a real, logo-able brand/company name — see above
+  "isBrandFamily": boolean,   // true only if family's top-level segment is a real, logo-able brand/company name — see above
+  "reaction": string          // your own short, human, FIRST-PERSON reaction to what you found researching this product — 1-2 sentences, written the way a sharp, opinionated reseller would actually say it out loud (excited about a variant/bundle premium worth knowing, wary of a scam/failure pattern, or a quick take if nothing stands out) — not a restatement of summary, and not generic ("looks fine")
 }`;
 }
 
@@ -945,12 +1074,13 @@ function parseProductSummary(text: string): ProductSummaryResult {
             .join(" > ") || null
         : null;
     const isBrandFamily = family !== null && !!parsed.isBrandFamily;
-    return { summary, category, family, isBrandFamily };
+    const reaction = typeof parsed.reaction === "string" && parsed.reaction.trim() ? parsed.reaction.trim() : "Done digging into this one.";
+    return { summary, category, family, isBrandFamily, reaction };
   } catch {
     // Shouldn't happen with response_format: json_object, but still useful
     // as a plain-text summary if it ever does — "Other"/null rather than
     // guessing at a category/family from unstructured text.
-    return { summary: text.trim(), category: "Other", family: null, isBrandFamily: false };
+    return { summary: text.trim(), category: "Other", family: null, isBrandFamily: false, reaction: "Done digging into this one." };
   }
 }
 
@@ -1047,6 +1177,55 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
   } catch {
     // Best-effort — a failure here should never block the research pass
     // that triggered it, just mean no siblings get added this time.
+    return [];
+  }
+}
+
+// Per explicit instruction, live: "when the ai is researching a product,
+// have it research other variants of that product. for example, there's
+// iphone 13, but there's also mini, plus, pro, and pro max. even cars have
+// this same system (toyota camry LE, XLE, CE, SE)... apply this logic to
+// anything that may have specific models." Deliberately general, unlike
+// discoverSiblingProducts above (which only ever covers ONE narrow case —
+// other games for the same console generation): this runs for ANY
+// first-time product research regardless of category, and the model
+// itself decides whether named variants genuinely exist at all — most
+// products don't, and get an empty list back rather than an invented one.
+// Training knowledge only (no live web search), same reasoning as
+// discoverSiblingProducts — this just needs well-known real variant names;
+// each one gets the SAME full research pass (its own web search, photo,
+// eBay comps) once index.ts actually creates it.
+export async function discoverProductVariants(params: {
+  productName: string;
+  category: string;
+  alreadyTracked: string[];
+  count: number;
+}): Promise<string[]> {
+  const { productName, category, alreadyTracked, count } = params;
+  const prompt = `A reseller's product Database just researched "${productName}" (category "${category}").
+
+Does this SPECIFIC product commonly come in distinct NAMED variants/trims/models — different tiers, sizes, or configurations that a real listing would specifically call out by name, and that genuinely differ in typical resale price or specs? Examples of the kind of thing this means: "iPhone 13" also has Mini/Plus/Pro/Pro Max; "Toyota Camry" also has LE/SE/XLE/XSE trims; "PlayStation 5" also has a Slim and a Pro. Most products do NOT have this — a generic, one-configuration item should get an empty list, not an invented one.
+
+If it DOES, name up to ${count} of its most well-known OTHER variants (never "${productName}" itself), each as its own full, specific product name exactly as a seller would list it (e.g. "iPhone 13 Pro Max", "Toyota Camry XLE" — not just "Pro Max" or "XLE" alone). Do NOT include any of these — they're already tracked: ${
+    alreadyTracked.length ? alreadyTracked.map((n) => `"${n}"`).join(", ") : "(none yet)"
+  }. If you can't confidently name that many, return fewer rather than guessing or padding the list.
+
+Respond with ONLY a JSON object, no other text, in this exact shape:
+{
+  "variants": string[]   // up to ${count} full variant product names, most well-known first. Empty array if this product doesn't have distinct named variants.
+}`;
+
+  try {
+    const result = await streamOnceJson([{ role: "user", content: prompt }]);
+    const parsed = JSON.parse(result);
+    if (!Array.isArray(parsed.variants)) return [];
+    return parsed.variants
+      .filter((t: unknown): t is string => typeof t === "string" && t.trim().length > 0)
+      .map((t: string) => t.trim())
+      .slice(0, count);
+  } catch {
+    // Best-effort — a failure here should never block the research pass
+    // that triggered it, just mean no variants get added this time.
     return [];
   }
 }

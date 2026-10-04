@@ -1,5 +1,26 @@
 import type { Page } from "playwright";
 import type { ListingDetail, ListingSummary } from "./types.js";
+import { timed, recordStage, recordEventBulk } from "./metrics.js";
+import { US_STATE_ABBREVIATIONS } from "./usStates.js";
+
+// Verified live: a sparse/malformed card (an ad unit, a "Today's picks"
+// variant, one still mid-render) can have aria-label/innerText that's
+// JUST a price and a location, with no real title text at all — e.g.
+// "$80 · Richmond, VA". parseListingCard's title-picking heuristic (the
+// longest non-price line) then picks the LOCATION as the "title" once
+// there's only one non-price line left, since there's nothing else to
+// compare it against — confirmed live via several listings that showed up
+// in Feed literally titled "Richmond, VA" / "Chattanooga, TN", which then
+// got evaluated as if they were real products. Checked before assuming a
+// single leftover line is a genuine title.
+const STATE_NAMES_LOWER = new Set(Object.keys(US_STATE_ABBREVIATIONS).map((s) => s.toLowerCase()));
+const STATE_ABBRS = new Set(Object.values(US_STATE_ABBREVIATIONS));
+function looksLikeBareLocation(line: string): boolean {
+  const match = line.match(/^([A-Za-z .'-]+),\s*([A-Za-z .'-]+)$/);
+  if (!match) return false;
+  const statePart = match[2].trim();
+  return STATE_ABBRS.has(statePart.toUpperCase()) || STATE_NAMES_LOWER.has(statePart.toLowerCase());
+}
 
 // --- IMPORTANT -------------------------------------------------------------
 // Facebook renders Marketplace with obfuscated, frequently-changing class
@@ -21,8 +42,32 @@ import type { ListingDetail, ListingSummary } from "./types.js";
 // locally rather than on your account, so it doesn't carry over between
 // separate browser profiles). See the "Open Facebook Marketplace" flow.
 export async function browseListings(page: Page, browseUrl: string, maxScrolls = 8): Promise<ListingSummary[]> {
-  await page.goto(browseUrl, { waitUntil: "domcontentloaded" });
-  return extractListingsFromCurrentPage(page, maxScrolls);
+  // Per explicit instruction, reversing an earlier optimization: this used
+  // to skip re-navigating when page.url() already equaled browseUrl (to
+  // avoid a pointless extra reload right when scrapeEngine.ts's runCycle
+  // had just switched locations). Diagnosed live: "it seems to always
+  // eventually go back to Richmond and mess everything up... even if the
+  // Activity log says differently" — the URL staying correct doesn't
+  // guarantee the RENDERED content still is. Facebook's account-level
+  // default location (Richmond here, confirmed unrelated to where the user
+  // actually is) can apparently assert itself client-side without ever
+  // changing the URL, which fools a URL-only "are we still there" check —
+  // the log line confirming arrival was accurate at the moment it ran, but
+  // nothing after that point re-verified it before this actually scraped
+  // whatever was on screen. Always navigating fresh here is what actually
+  // closes that gap — trading back a little of the "don't refresh
+  // needlessly" optimization for the correctness that update was clearly
+  // still missing.
+  await timed("marketplace_navigation", () => page.goto(browseUrl, { waitUntil: "domcontentloaded" }));
+  const results = await timed("listing_extraction", () => extractListingsFromCurrentPage(page, maxScrolls));
+  // "Discovered" = every listing Marketplace's own page actually returned,
+  // independent of whatever the caller later does with them (evaluates,
+  // skips on a per-location cap, etc.) — see metrics.ts's own doc comment
+  // on why this is deliberately a bulk increment here rather than counted
+  // again downstream, so it isn't double-counted against the separate
+  // "evaluated" counter recorded per-account in scrapeEngine.ts.
+  recordEventBulk("discovered", results.length);
+  return results;
 }
 
 // "0 listings found" almost never means Facebook genuinely has nothing —
@@ -120,9 +165,40 @@ export async function searchMarketplace(
   // scrapeEngine.ts's own post-fetch price checks. Both null (the default)
   // leaves Facebook's own filter untouched, same posture as maxAgeHours.
   minPriceUsd: number | null = null,
-  maxPriceUsd: number | null = null
+  maxPriceUsd: number | null = null,
+  // Per explicit instruction, diagnosed live from a screen recording:
+  // "right when you start searching, it'll refresh the page a whole bunch
+  // of times and do nothing." Root cause — this function's OWN mandatory
+  // fresh navigation just below (added for a real, different reason: see
+  // this param's sibling explanation right under it) was stacking with
+  // scrapeEngine.ts's runCycle, which ALREADY does its own real,
+  // arrival-confirmed navigation (up to 3 retries) to this exact URL right
+  // before calling this function — meaning a multi-location cycle
+  // routinely reloaded the same page 2-4 times in a row before ever typing
+  // anything. Set to true ONLY by a caller that just did that same
+  // confirmed navigation itself, moments ago, with nothing else touching
+  // the page in between — never by a caller (like the URL-fallback path
+  // below, or browseListings' own callers) with no such guarantee, which
+  // still need the fresh-navigate safety net this used to always run.
+  alreadyOnCorrectPage = false
 ): Promise<ListingSummary[]> {
-  await page.goto(browseUrl, { waitUntil: "domcontentloaded" });
+  // Per explicit instruction, reversing an earlier optimization (see
+  // browseListings' own doc comment above for the full diagnosis): this
+  // used to skip re-navigating when page.url() already equaled browseUrl,
+  // to avoid a pointless reload right after runCycle had just switched
+  // locations. Diagnosed live: "it seems to always eventually go back to
+  // Richmond and mess everything up... even if the Activity log says
+  // differently" — the URL matching doesn't guarantee the rendered content
+  // still does, if Facebook's account-level default location (confirmed
+  // unrelated to where the user actually is) asserts itself client-side
+  // without changing the URL. Always navigating fresh right before typing
+  // the search query is what actually closes that gap — UNLESS the caller
+  // just did an equivalent real, verified navigation to this exact URL
+  // itself (alreadyOnCorrectPage), in which case doing it again a moment
+  // later is pure redundant reloading, not extra safety.
+  if (!alreadyOnCorrectPage) {
+    await timed("marketplace_navigation", () => page.goto(browseUrl, { waitUntil: "domcontentloaded" }));
+  }
 
   const box = await findSearchMarketplaceBox(page);
   if (!box) {
@@ -135,12 +211,55 @@ export async function searchMarketplace(
     await box.click({ timeout: 5000 });
     await box.fill("");
     await box.type(query, { delay: 30 });
+    // Per explicit redefinition of the search order — "log and check to
+    // see if [the search terms/filters] are filled in correctly
+    // constantly": read back what the box actually holds right after
+    // typing (before Enter submits/reloads it) instead of just assuming
+    // the type() above landed — this is what actually catches a
+    // long-running session silently drifting off the requested query
+    // (autocomplete overwriting it, a stray keystroke, a race with page
+    // content still loading), rather than trusting intent alone.
+    const typedValue = await box.inputValue().catch(() => null);
     await page.keyboard.press("Enter");
     await page.waitForTimeout(1500);
+    // Per explicit instruction — "every time the product is typed into
+    // marketplace's search bar it is logged in Activity... it keeps
+    // losing track completely in the long run." The caller already logs
+    // "Actively searching for X" right before this runs, but that's
+    // announcing INTENT, not confirming the actual DOM interaction above
+    // succeeded — this is the real trace of what the browser actually did,
+    // useful for spotting exactly where a long-running session drifted.
+    if (typedValue !== null && typedValue.trim() !== query.trim()) {
+      onFallback?.(`Typed "${query}" into the Search Marketplace box, but it read back as "${typedValue}" — the search may not be accurate.`, "warn");
+    } else {
+      onFallback?.(`Typed "${query}" into the Search Marketplace box.`, "info");
+    }
   } catch (err) {
     onFallback?.(`Search box interaction failed (${(err as Error).message}) — falling back to URL-based search for "${query}".`);
     return browseListings(page, buildSearchUrl(browseUrl, query), maxScrolls);
   }
+
+  // Per explicit instruction, diagnosed live: "it's searching for min/max
+  // price but not date listed." Price Range (see applyPriceRangeFilter) has
+  // to reload the page to a freshly-built URL to guarantee the correct
+  // city/query survive it (see that function's own doc comment on the
+  // Richmond bug this fixed) — but Date Listed is applied by CLICKING a
+  // Facebook UI control with no URL representation at all, so running Price
+  // Range AFTER it (the original order) silently discarded Date Listed's
+  // effect on every reload, every time a price filter was also set. Price
+  // Range now runs FIRST, so its one guaranteed reload happens before
+  // anything else touches the page; Date Listed's click-based interaction
+  // runs LAST, on that already-settled page, with nothing left afterward
+  // that could wipe it out again.
+  //
+  // Reported live as "the price range feature doesn't work" earlier this
+  // session: Min/Max Price was only ever enforced after the fact
+  // (scrapeEngine.ts's own per-SearchItem minPriceUsd/maxPriceUsd checks in
+  // evaluateListing), never told to Facebook's own search filter — this
+  // closes that gap by talking to Facebook's own URL-based filter directly,
+  // evaluateListing's own checks staying in place as the backstop guarantee
+  // regardless of whether this live interaction lands.
+  await applyPriceRangeFilter(page, minPriceUsd, maxPriceUsd, browseUrl, query, onFallback);
 
   // Narrows results to the configured freshness window using Facebook's
   // OWN "Date listed" filter, right on the search results page — this is
@@ -158,15 +277,6 @@ export async function searchMarketplace(
   // rather than breaking the search outright.
   await applyDateListedFilter(page, maxAgeHours, onFallback);
 
-  // Same idea, same posture, for Price Range — see applyPriceRangeFilter.
-  // Reported live as "the price range feature doesn't work": Min/Max Price
-  // was only ever enforced after the fact (scrapeEngine.ts's own
-  // config.maxPriceUsd/minPriceUsd checks in evaluateListing), never told
-  // to Facebook's own search filter the way the freshness window already
-  // was — this closes that gap the same way, evaluateListing's own checks
-  // staying in place as the backstop guarantee exactly like maxAgeHours's.
-  await applyPriceRangeFilter(page, minPriceUsd, maxPriceUsd, onFallback);
-
   // Radius is deliberately NOT re-checked here on every single search —
   // see verifyOrSetRadius's own doc comment and scrapeEngine.ts's runCycle,
   // which checks/corrects it exactly once per cycle instead, right after
@@ -176,7 +286,9 @@ export async function searchMarketplace(
   // Range just established) risked disturbing that instead of just fixing
   // the radius — a once-per-cycle check on a clean page avoids that.
 
-  return extractListingsFromCurrentPage(page, maxScrolls);
+  const results = await timed("listing_extraction", () => extractListingsFromCurrentPage(page, maxScrolls));
+  recordEventBulk("discovered", results.length);
+  return results;
 }
 
 // Maps the configured freshness window to Facebook's own "Date listed"
@@ -239,29 +351,74 @@ async function applyDateListedFilter(page: Page, maxAgeHours: number | null, onF
 // this switches to the SAME mechanism the URL-based fallback search
 // already relies on (see buildSearchUrl below): Facebook Marketplace's
 // search results page reads minPrice/maxPrice straight from its own URL
-// query string, so re-navigating to the current page's URL with those
-// params added applies the filter without depending on finding or
-// interacting with any specific UI element at all — far fewer ways for
-// this to silently fail than a multi-step click-and-type sequence. Runs
-// AFTER applyDateListedFilter so it builds on whatever URL that already
-// produced (preserving that filter) rather than a stale, pre-date-filter
-// snapshot. Same backstop posture as before: scrapeEngine.ts's own
-// config.minPriceUsd/maxPriceUsd checks in evaluateListing still enforce
-// the actual range regardless of whether Facebook's own filter took.
+// query string, so re-navigating to a URL with those params added applies
+// the filter without depending on finding or interacting with any specific
+// UI element at all — far fewer ways for this to silently fail than a
+// multi-step click-and-type sequence. Builds that URL from browseUrl/query
+// (see this function's own param comments below for why), not from
+// whatever applyDateListedFilter's click-based interaction may or may not
+// have left in the URL bar — so Date Listed's own effect,
+// if Facebook happens to encode it in the URL at all, doesn't survive this
+// reload. Same backstop posture as before either way: scrapeEngine.ts's own
+// per-SearchItem minPriceUsd/maxPriceUsd AND maxListingAgeHours checks in
+// evaluateListing still enforce both ranges regardless of whether
+// Facebook's own filters took.
 async function applyPriceRangeFilter(
   page: Page,
   minPriceUsd: number | null,
   maxPriceUsd: number | null,
-  onFallback?: (reason: string) => void
+  // Per explicit instruction, diagnosed live: "only when i put in a min/max
+  // price, it'll still just stay locked in richmond... when just searching
+  // with no min/max, it's working." This used to build its target URL from
+  // page.url() alone, trusting that typing the query (and applying Date
+  // Listed) had already encoded the correct city + query into the URL bar.
+  // They may not have — Facebook's search-box interaction and the Date
+  // Listed filter both read as CLIENT-SIDE-only updates (no confirmed URL
+  // change), so page.url() at this point could still be whatever bare city
+  // URL was last actually navigated to. Reloading THAT with just
+  // minPrice/maxPrice appended reapplies no query at all, and a bare
+  // reload of a generic Marketplace URL is exactly the shape of request
+  // that fell back to Facebook's own default location in an earlier bug
+  // this session. browseUrl + query are the two things this function can
+  // ALWAYS trust are correct (they're what the caller explicitly asked
+  // for), so the target URL is built from those via the same buildSearchUrl
+  // mechanism the "search box not found" fallback already relies on,
+  // instead of trusting whatever page.url() happens to currently read.
+  browseUrl: string,
+  query: string,
+  onFallback?: (reason: string, level?: "info" | "warn") => void
 ): Promise<void> {
   if (minPriceUsd === null && maxPriceUsd === null) return;
 
   try {
-    const current = new URL(page.url());
+    const current = new URL(buildSearchUrl(browseUrl, query));
     if (minPriceUsd !== null) current.searchParams.set("minPrice", String(Math.max(0, Math.round(minPriceUsd))));
     if (maxPriceUsd !== null) current.searchParams.set("maxPrice", String(Math.max(0, Math.round(maxPriceUsd))));
     await page.goto(current.toString(), { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(1500);
+    // Per explicit instruction — "log searching for min/max prices too,"
+    // same "leave a real trace in Activity" reasoning as the search-box
+    // typing confirmation above — this used to only ever log on FAILURE,
+    // so a successful price filter left no trace at all.
+    const rangeLabel =
+      minPriceUsd !== null && maxPriceUsd !== null
+        ? `$${Math.round(minPriceUsd)}-$${Math.round(maxPriceUsd)}`
+        : minPriceUsd !== null
+          ? `$${Math.round(minPriceUsd)}+`
+          : `up to $${Math.round(maxPriceUsd!)}`;
+    // Per explicit redefinition of the search order — "log and check to
+    // see if [filters] are filled in correctly constantly": re-read the
+    // actual resulting URL rather than assuming the goto above applied the
+    // params as intended — Facebook redirecting/stripping a query param
+    // would otherwise silently look like a successful filter.
+    const resultUrl = new URL(page.url());
+    const minMatches = minPriceUsd === null || resultUrl.searchParams.get("minPrice") === String(Math.max(0, Math.round(minPriceUsd)));
+    const maxMatches = maxPriceUsd === null || resultUrl.searchParams.get("maxPrice") === String(Math.max(0, Math.round(maxPriceUsd)));
+    if (minMatches && maxMatches) {
+      onFallback?.(`Applied price filter: ${rangeLabel}.`, "info");
+    } else {
+      onFallback?.(`Tried to apply price filter ${rangeLabel}, but the page doesn't reflect it (now "${resultUrl.search || "no filters"}") — it may not have taken.`, "warn");
+    }
   } catch (err) {
     onFallback?.(`Couldn't apply your min/max price to the search (${(err as Error).message}) — searching without it.`);
   }
@@ -300,7 +457,7 @@ async function readCurrentRadiusMiles(page: Page): Promise<number | null> {
 // locationDiscovery.ts's discoverLocation) can find out which STATE a
 // city/ZIP search actually resolved to, without needing to already know it
 // going in — a ZIP code alone doesn't say what state it's in.
-async function readCurrentLocationLabel(page: Page): Promise<string | null> {
+export async function readCurrentLocationLabel(page: Page): Promise<string | null> {
   try {
     const text = await page.evaluate(() => document.body?.innerText ?? "");
     const match = text.match(/([A-Za-z][A-Za-z .'-]*,\s*[A-Za-z][A-Za-z .'-]*?)\s*·\s*Within\s+\d{1,4}\s*mi/i);
@@ -784,31 +941,16 @@ async function waitForListingLinks(page: Page, timeoutMs: number): Promise<boole
   }
 }
 
-async function extractListingsFromCurrentPage(page: Page, maxScrolls: number): Promise<ListingSummary[]> {
-  // Verified live: the item-link pattern this waits for is still exactly
-  // right, and a real Marketplace page (once it actually finishes
-  // rendering) has plenty of these — a "0 listings" result is far more
-  // likely a slow/heavy initial render than a genuinely empty page, so one
-  // retry after a short pause is worth it before writing off the whole
-  // location. Reported live as "Empty browse" on a page that, per
-  // diagnoseEmptyPage's OLD body-wide snippet, looked indistinguishable
-  // from a real empty page even when it wasn't (see that function's own
-  // comment) — this retry plus that fix together should both reduce false
-  // empties and make any real ones actually diagnosable going forward.
-  let found = await waitForListingLinks(page, 15000);
-  if (!found) {
-    await page.waitForTimeout(3000);
-    found = await waitForListingLinks(page, 8000);
-  }
-  if (!found) return [];
-
-  // Scroll repeatedly so the lazily-loaded feed keeps rendering more cards.
-  for (let i = 0; i < maxScrolls; i++) {
-    await page.mouse.wheel(0, 1800);
-    await page.waitForTimeout(700);
-  }
-
-  const raw = await page.evaluate(() => {
+async function readListingAnchors(page: Page): Promise<
+  Array<{
+    id: string;
+    url: string;
+    ariaLabel: string | null;
+    innerText: string;
+    thumbnailUrl: string | null;
+  }>
+> {
+  return page.evaluate(() => {
     const anchors = Array.from(document.querySelectorAll('a[href*="/marketplace/item/"]'));
     const seen = new Set<string>();
     const results: Array<{
@@ -838,6 +980,56 @@ async function extractListingsFromCurrentPage(page: Page, maxScrolls: number): P
     }
     return results;
   });
+}
+
+// Per explicit instruction — "most relevant results exist at the top of
+// the page, not the bottom... prioritize looking at the first few results,
+// only scroll if there are no good matches": this used to ALWAYS scroll
+// the full maxScrolls (8 — several full screens) BEFORE ever reading the
+// page at all, on every single call, whether the top of the page already
+// had plenty to look at or not. Facebook's own results are relevance-
+// sorted, but that sort only covers actual matches for the query — once
+// those run out, scrolling further pulls in whatever "you might also
+// like"-style backfill Facebook renders next, which is exactly the
+// "most unrelated" stuff described live as showing up. Every listing (top
+// AND bottom) then got evaluated identically, with nothing keeping the
+// genuinely relevant top-of-page results the priority.
+//
+// Now reads the page FIRST with no scrolling, and only scrolls (one step
+// at a time, re-checking after each) when there genuinely aren't enough
+// candidates on screen yet — the common case for an actual product search
+// (a search term like "ps5" alone easily clears this without scrolling at
+// all) never touches the deeper backfill zone in the first place; scrolling
+// toward maxScrolls only still happens for a thin/slow-loading page, same
+// worst case as before this change, not a regression for that case.
+const EARLY_STOP_CANDIDATE_COUNT = 12;
+
+async function extractListingsFromCurrentPage(page: Page, maxScrolls: number): Promise<ListingSummary[]> {
+  // Verified live: the item-link pattern this waits for is still exactly
+  // right, and a real Marketplace page (once it actually finishes
+  // rendering) has plenty of these — a "0 listings" result is far more
+  // likely a slow/heavy initial render than a genuinely empty page, so one
+  // retry after a short pause is worth it before writing off the whole
+  // location. Reported live as "Empty browse" on a page that, per
+  // diagnoseEmptyPage's OLD body-wide snippet, looked indistinguishable
+  // from a real empty page even when it wasn't (see that function's own
+  // comment) — this retry plus that fix together should both reduce false
+  // empties and make any real ones actually diagnosable going forward.
+  let found = await waitForListingLinks(page, 15000);
+  if (!found) {
+    await page.waitForTimeout(3000);
+    found = await waitForListingLinks(page, 8000);
+  }
+  if (!found) return [];
+
+  let raw = await readListingAnchors(page);
+  let scrollsUsed = 0;
+  while (raw.length < EARLY_STOP_CANDIDATE_COUNT && scrollsUsed < maxScrolls) {
+    await page.mouse.wheel(0, 1800);
+    await page.waitForTimeout(700);
+    scrollsUsed++;
+    raw = await readListingAnchors(page);
+  }
 
   return raw.map((r) => parseListingCard(r));
 }
@@ -859,8 +1051,16 @@ function parseListingCard(r: {
   const price = priceLine ? parsePrice(priceLine) : null;
 
   const nonPriceLines = lines.filter((l) => l !== priceLine);
-  const title = nonPriceLines.sort((a, b) => b.length - a.length)[0] ?? "(untitled listing)";
-  const locationText = nonPriceLines.length > 1 ? nonPriceLines[nonPriceLines.length - 1] : null;
+  // A single leftover line that's shaped exactly like "City, State"/"City,
+  // ST" is almost certainly the card's location with no real title text
+  // available at all (see looksLikeBareLocation's own doc comment) — that
+  // case falls back to "(untitled listing)" rather than silently wearing
+  // the location as its title, and keeps the location text itself instead
+  // of discarding it.
+  const soleLine = nonPriceLines.length === 1 ? nonPriceLines[0] : null;
+  const soleLineIsLocation = soleLine !== null && looksLikeBareLocation(soleLine);
+  const title = soleLineIsLocation ? "(untitled listing)" : nonPriceLines.sort((a, b) => b.length - a.length)[0] ?? "(untitled listing)";
+  const locationText = soleLineIsLocation ? soleLine : nonPriceLines.length > 1 ? nonPriceLines[nonPriceLines.length - 1] : null;
 
   return {
     id: r.id,
@@ -880,7 +1080,16 @@ function parsePrice(text: string): number | null {
 }
 
 export async function fetchListingDetail(page: Page, listing: ListingSummary): Promise<ListingDetail> {
-  await page.goto(listing.url, { waitUntil: "domcontentloaded" });
+  await timed("detail_page_load", () => page.goto(listing.url, { waitUntil: "domcontentloaded" }));
+  // Everything from here to the return below is parsing/extraction against
+  // the now-loaded page (no further navigation) — timed as one "detail
+  // extraction" stage, separate from the page load above, since those are
+  // the two genuinely distinct steps that already exist here (unlike
+  // "extraction" vs "normalization," which this codebase doesn't actually
+  // separate — DOM parsing produces already-normalized fields directly).
+  // Recorded manually rather than via timed()'s callback wrapper since this
+  // function has a single exit point already, several lines below.
+  const detailExtractionStart = Date.now();
   await page.waitForTimeout(1200);
 
   const bodyText: string = await page.evaluate(() => {
@@ -1012,6 +1221,7 @@ export async function fetchListingDetail(page: Page, listing: ListingSummary): P
     return { urls: Array.from(new Set(urls)).slice(0, 12), hasVideo };
   });
 
+  recordStage("detail_extraction", Date.now() - detailExtractionStart, true);
   return {
     ...listing,
     description,

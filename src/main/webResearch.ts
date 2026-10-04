@@ -11,6 +11,8 @@
 
 import sharp from "sharp";
 import { verifyThumbnailCandidate } from "./vision.js";
+import { OPENAI_IMAGE_MODEL, callOpenAI } from "./openai.js";
+import { hasEbayCredentials, searchEbayItems } from "./ebayClient.js";
 
 const SEARCH_TIMEOUT_MS = 15_000;
 const PAGE_FETCH_TIMEOUT_MS = 12_000;
@@ -304,6 +306,33 @@ export async function findProductImage(productName: string, preferredCandidateUr
   return findAndVerifyImage(candidates, productName, "product");
 }
 
+// Condition-awareness — parallels findProductImage above, but deliberately
+// searches for a damaged/poor-condition example instead of a clean one, so
+// the Database can show what a beat-up real one actually looks like. Skips
+// the Wikipedia lookup (no dedicated article for a damaged variant of
+// anything) and reuses the exact same "product" vision-verification check
+// findProductImage does — that check only confirms "is this genuinely a
+// photo of the product itself, not a logo/unrelated thing," which a
+// damaged unit still satisfies, so no new vision prompt is needed here.
+// Best-effort like every other research step in this app: returns null
+// (never throws) on no hit, so a failure here can't take down the rest of
+// product research.
+export async function findPoorConditionProductImage(productName: string, maxResults = 8): Promise<string | null> {
+  const candidates: string[] = [];
+  try {
+    const results = await searchWeb(`${productName} damaged broken cracked for parts`, maxResults);
+    for (const r of results) {
+      const page = await fetchPage(r.url);
+      if (page.imageUrl && !looksLikeLogoAsset(page.imageUrl) && !candidates.includes(page.imageUrl)) candidates.push(page.imageUrl);
+      if (candidates.length >= 5) break;
+    }
+  } catch {
+    // Nothing to fall back to here (no preferredCandidateUrl/Wikipedia the
+    // way findProductImage has) — a dead search just means no hit.
+  }
+  return findAndVerifyImage(candidates, productName, "product");
+}
+
 // Per explicit instruction — a representative "collection" photo for a
 // FOLDER-level grouping (e.g. "Xbox games", "Xbox accessories") rather
 // than one specific product — see index.ts's group-thumbnail caching
@@ -444,14 +473,24 @@ const MAX_IMAGE_BYTES = 4_000_000;
 // responses. Best-effort: returns null (never throws) on any failure, same
 // as everything else in this file.
 export async function downloadImageAsDataUri(url: string): Promise<string | null> {
+  const result = await downloadImageBuffer(url);
+  return result ? `data:${result.contentType};base64,${result.buffer.toString("base64")}` : null;
+}
+
+// Per explicit instruction — ntfy notifications now attach the listing's
+// own photo (notify.ts), which needs the raw bytes to upload directly
+// rather than a base64 data: URI — pulled the actual download out of
+// downloadImageAsDataUri above (which now just calls this and re-encodes)
+// instead of duplicating the fetch/timeout/size-cap logic in notify.ts too.
+export async function downloadImageBuffer(url: string): Promise<{ buffer: Buffer; contentType: string } | null> {
   try {
     const res = await fetchWithTimeout(url, PAGE_FETCH_TIMEOUT_MS);
     if (!res.ok) return null;
     const contentType = res.headers.get("content-type") ?? "";
     if (!contentType.startsWith("image/")) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.byteLength === 0 || buf.byteLength > MAX_IMAGE_BYTES) return null;
-    return `data:${contentType};base64,${buf.toString("base64")}`;
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (buffer.byteLength === 0 || buffer.byteLength > MAX_IMAGE_BYTES) return null;
+    return { buffer, contentType };
   } catch {
     return null;
   }
@@ -512,4 +551,317 @@ export async function buildImageCollage(imageDataUris: string[], maxTiles = 9): 
   } catch {
     return null;
   }
+}
+
+function escapeXml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+const CATEGORY_IMAGE_PX = 1024;
+const CATEGORY_IMAGE_TIMEOUT_MS = 60_000;
+
+// Per explicit instruction — "instead of there being 4 different photos
+// smashed into one, generate an image of '<category>' and include text on
+// the image of what that category is... make sure it's the same format for
+// the image creation process and it uses the same font in the same size in
+// the same spot in every thumbnail." Two deliberately separate steps, not
+// one single image-gen call asked to include the label itself: image
+// generation models are unreliable at rendering clean, correctly-spelled,
+// consistently-positioned text (a well-known weak spot even in current
+// models) — asking gpt-image-1 for the artwork ONLY (explicitly told not to
+// include any text/logos/watermarks) and then compositing the label on
+// ourselves with sharp/SVG is what actually GUARANTEES "same font, same
+// size, same spot every time," since that overlay is fixed code, not a
+// fresh generation each time. Category names are a small, fixed list (see
+// Database.tsx's CATEGORY_ORDER), so this only ever runs a bounded number
+// of times total, then caches forever (see index.ts's ensureCategoryThumbnail
+// — same store.ts group_thumbnails table/cache-forever pattern as folder
+// thumbnails, just keyed by the plain category name instead of a family
+// path).
+export async function generateCategoryImage(category: string): Promise<string | null> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), CATEGORY_IMAGE_TIMEOUT_MS);
+    let artworkBuffer: Buffer;
+    try {
+      const res = await callOpenAI(
+        "images",
+        {
+          model: OPENAI_IMAGE_MODEL,
+          prompt: `A clean, professional stock-photo-style image representing the product category "${category}" for a reseller's catalog folder icon. Simple, uncluttered composition, realistic or tastefully illustrated, centered subject. Absolutely NO text, NO letters, NO words, NO logos, NO watermarks anywhere in the image.`,
+          size: "1024x1024",
+          n: 1,
+        },
+        controller.signal
+      );
+      if (!res.ok) throw new Error(`OpenAI image API error ${res.status}: ${await res.text()}`);
+      const data = (await res.json()) as { data?: Array<{ b64_json?: string }> };
+      const b64 = data.data?.[0]?.b64_json;
+      if (!b64) throw new Error("No image returned");
+      artworkBuffer = Buffer.from(b64, "base64");
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    // Fixed dark bar across the bottom third + centered bold white label —
+    // literally the same SVG shape/position/font/size every single call,
+    // only the text content itself changes. Generic bold sans-serif (not
+    // one of this app's own bundled fonts) since sharp's SVG renderer needs
+    // a font actually installed/embeddable where the main process runs —
+    // this guarantees identical rendering everywhere rather than silently
+    // falling back to something else if a specific custom font isn't found.
+    const barTop = Math.round(CATEGORY_IMAGE_PX * 0.72);
+    const barHeight = CATEGORY_IMAGE_PX - barTop;
+    const fontSize = 46;
+    const svg = `
+      <svg width="${CATEGORY_IMAGE_PX}" height="${CATEGORY_IMAGE_PX}" xmlns="http://www.w3.org/2000/svg">
+        <rect x="0" y="${barTop}" width="${CATEGORY_IMAGE_PX}" height="${barHeight}" fill="rgba(10,10,16,0.72)" />
+        <text
+          x="50%"
+          y="${barTop + barHeight / 2}"
+          font-family="Arial, Helvetica, sans-serif"
+          font-weight="700"
+          font-size="${fontSize}"
+          fill="#ffffff"
+          text-anchor="middle"
+          dominant-baseline="middle"
+        >${escapeXml(category)}</text>
+      </svg>`;
+
+    // Verified live: chaining resize -> composite -> resize in ONE sharp
+    // pipeline reliably threw "Image to composite must have same
+    // dimensions or smaller," even though the pre-composite buffer and the
+    // SVG overlay were both confirmed exactly CATEGORY_IMAGE_PX square —
+    // isolated testing traced it specifically to a second .resize() chained
+    // right after .composite() in the same pipeline (removing just that
+    // trailing resize made the identical composite call succeed every
+    // time). Splitting into three separately-materialized steps — resize to
+    // square, THEN composite the text overlay, THEN resize down to the
+    // final thumbnail size — sidesteps whatever fusion/reordering sharp was
+    // doing across those chained calls.
+    const squared = await sharp(artworkBuffer).resize(CATEGORY_IMAGE_PX, CATEGORY_IMAGE_PX, { fit: "cover" }).toBuffer();
+    const labeled = await sharp(squared)
+      .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
+      .jpeg({ quality: 88 })
+      .toBuffer();
+    const composed = await sharp(labeled).resize(640, 640).jpeg({ quality: 88 }).toBuffer();
+    return `data:image/jpeg;base64,${composed.toString("base64")}`;
+  } catch (err) {
+    console.error(`[category-image] failed for "${category}": ${(err as Error).message}`);
+    return null;
+  }
+}
+
+
+// --- Stock / reference photo gathering --------------------------------------
+// Per explicit instruction: a newly-found product should get a real product
+// photo as its Database thumbnail (not an empty box) AND a whole set of
+// reference photos, so the scanner already recognizes it on its next
+// Facebook/eBay encounter.
+//
+// Why this exists: findProductImage above depends on DuckDuckGo's HTML
+// search, which now answers every automated request with a bot challenge
+// (HTTP 202, zero results) — verified live — so anything without its own
+// Wikipedia article came back with no photo at all. This pulls candidates
+// from sources that currently work with a plain request instead:
+//   1. Wikipedia's page image (clean, usually a retail product shot/cover).
+//   2. Bing Images — dozens of full-size retailer/stock photos per query.
+//   3. eBay's Browse API listing photos, if credentials are configured —
+//      used to top up when the first two don't yield enough.
+// Every candidate is downloaded, normalized, de-duplicated (perceptual
+// hash, so the same photo syndicated across ten retailer sites only counts
+// once) and then vision-verified against the exact product before it's
+// kept.
+
+const REFERENCE_PHOTO_MAX_DIM = 800;
+const REFERENCE_PHOTO_MIN_DIM = 200;
+const REFERENCE_CANDIDATE_LIMIT = 44;
+const REFERENCE_CONCURRENCY = 4;
+const REFERENCE_TIME_BUDGET_MS = 120_000;
+// Two photos this close (out of 64 bits) are the same picture, re-encoded or
+// resized — not two different angles.
+const NEAR_DUPLICATE_HAMMING = 6;
+
+async function searchBingImages(query: string, max: number): Promise<string[]> {
+  try {
+    const res = await fetchWithTimeout(`https://www.bing.com/images/search?q=${encodeURIComponent(query)}&form=HDRSC2&first=1`, SEARCH_TIMEOUT_MS);
+    if (!res.ok) return [];
+    const html = await res.text();
+    const urls: string[] = [];
+    // Each result tile carries its full-size source as "murl" inside an
+    // HTML-escaped JSON attribute (quotes as &quot;, ampersands as &amp;).
+    const re = /murl&quot;:&quot;(https?:.*?)&quot;/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) && urls.length < max * 2) {
+      const url = m[1].replace(/&amp;/g, "&");
+      if (looksLikeLogoAsset(url) || /\.gif(\?|$)/i.test(url)) continue;
+      if (!urls.includes(url)) urls.push(url);
+    }
+    return urls.slice(0, max);
+  } catch {
+    return [];
+  }
+}
+
+// 64-bit average hash: shrink to 8x8 grayscale, bit = pixel brighter than
+// the mean. Cheap, and robust to resizing/re-compression.
+async function averageHash(jpeg: Buffer): Promise<string> {
+  const { data } = await sharp(jpeg).greyscale().resize(8, 8, { fit: "fill" }).raw().toBuffer({ resolveWithObject: true });
+  let sum = 0;
+  for (const v of data) sum += v;
+  const mean = sum / data.length;
+  let bits = "";
+  for (const v of data) bits += v > mean ? "1" : "0";
+  return bits;
+}
+
+function hammingDistance(a: string, b: string): number {
+  let d = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d++;
+  return d;
+}
+
+// Resizes to a sane storage size (a stock photo straight off a retailer CDN
+// can be several MB), flattens transparency onto white (cut-out product PNGs
+// are common and would otherwise store as black), and rejects images too
+// small to identify anything in or with a banner-like aspect ratio.
+async function normalizeReferencePhoto(buffer: Buffer): Promise<{ dataUri: string; hash: string } | null> {
+  try {
+    const img = sharp(buffer, { failOn: "none" }).rotate();
+    const meta = await img.metadata();
+    const w = meta.width ?? 0;
+    const h = meta.height ?? 0;
+    if (w < REFERENCE_PHOTO_MIN_DIM || h < REFERENCE_PHOTO_MIN_DIM) return null;
+    const ratio = w / h;
+    if (ratio > 2.2 || ratio < 0.45) return null;
+    const jpeg = await img
+      .resize(REFERENCE_PHOTO_MAX_DIM, REFERENCE_PHOTO_MAX_DIM, { fit: "inside", withoutEnlargement: true })
+      .flatten({ background: { r: 255, g: 255, b: 255 } })
+      .jpeg({ quality: 82 })
+      .toBuffer();
+    return { dataUri: `data:image/jpeg;base64,${jpeg.toString("base64")}`, hash: await averageHash(jpeg) };
+  } catch {
+    return null;
+  }
+}
+
+export interface ReferencePhoto {
+  imageData: string;
+  // Short human label for where it came from — stored as the reference
+  // photo's sourceTitle so the Database shows it wasn't a real listing.
+  label: string;
+}
+
+interface ReferenceCandidate {
+  url: string;
+  label: string;
+}
+
+async function gatherReferenceCandidates(productName: string): Promise<ReferenceCandidate[]> {
+  const candidates: ReferenceCandidate[] = [];
+  const seen = new Set<string>();
+  const add = (url: string, label: string) => {
+    if (seen.has(url)) return;
+    seen.add(url);
+    candidates.push({ url, label });
+  };
+
+  const wiki = await findImageViaWikipedia(productName);
+  if (wiki) add(wiki, "Stock photo — Wikipedia");
+
+  // Two phrasings: the bare name, then "product photo" appended, which
+  // steers Bing toward clean retail shots (and away from wallpapers and
+  // gameplay screenshots) for products whose bare name is mostly media.
+  const [plain, productShots] = await Promise.all([searchBingImages(productName, 24), searchBingImages(`${productName} product photo`, 24)]);
+  const hostOf = (u: string) => {
+    try {
+      return new URL(u).hostname.replace(/^www\./, "");
+    } catch {
+      return "web";
+    }
+  };
+  // Interleave so a poor first query can't crowd out a good second one.
+  for (let i = 0; i < Math.max(plain.length, productShots.length); i++) {
+    if (plain[i]) add(plain[i], `Stock photo — ${hostOf(plain[i])}`);
+    if (productShots[i]) add(productShots[i], `Stock photo — ${hostOf(productShots[i])}`);
+  }
+
+  if (hasEbayCredentials()) {
+    try {
+      const items = await searchEbayItems(productName, { limit: 15 });
+      for (const item of items) {
+        if (!item.imageUrl) continue;
+        // Search results carry a 225px thumbnail; the same path at s-l1600
+        // is the full-size original.
+        add(item.imageUrl.replace(/s-l\d+(\.\w+)$/i, "s-l1600$1"), `eBay listing photo — ${item.title.slice(0, 80)}`);
+      }
+    } catch {
+      // eBay being unavailable just means fewer candidates.
+    }
+  }
+  return candidates.slice(0, REFERENCE_CANDIDATE_LIMIT);
+}
+
+// Finds up to `want` verified reference photos of one exact product.
+// `existingImages` (data URIs the product already has) are used only to skip
+// near-duplicates. Best-effort throughout: never throws, returns whatever it
+// managed to verify (possibly nothing). Photos come back best-first —
+// candidate order is Wikipedia, then Bing results, then eBay — so the first
+// one is the natural thumbnail.
+export async function findReferencePhotos(
+  productName: string,
+  opts: { want: number; existingImages?: string[] }
+): Promise<{ photos: ReferencePhoto[]; examined: number }> {
+  const photos: Array<ReferencePhoto & { rank: number }> = [];
+  let examined = 0;
+  try {
+    const candidates = await gatherReferenceCandidates(productName);
+    const hashes: string[] = [];
+    for (const uri of opts.existingImages ?? []) {
+      const parsed = parseDataUri(uri);
+      if (!parsed) continue;
+      try {
+        hashes.push(await averageHash(parsed.buffer));
+      } catch {
+        // an unreadable existing photo just can't be used for dedup
+      }
+    }
+
+    const deadline = Date.now() + REFERENCE_TIME_BUDGET_MS;
+    let next = 0;
+    let consecutiveVerifyErrors = 0;
+    const worker = async () => {
+      while (photos.length < opts.want && Date.now() < deadline && consecutiveVerifyErrors < 3) {
+        const rank = next++;
+        if (rank >= candidates.length) return;
+        const candidate = candidates[rank];
+        const download = await downloadImageBuffer(candidate.url);
+        if (!download) continue;
+        const normalized = await normalizeReferencePhoto(download.buffer);
+        if (!normalized) continue;
+        // Claimed BEFORE the (slow) vision call so two workers holding the
+        // same picture from different sites can't both pass the check.
+        if (hashes.some((h) => hammingDistance(h, normalized.hash) <= NEAR_DUPLICATE_HAMMING)) continue;
+        hashes.push(normalized.hash);
+        examined++;
+        const check = await verifyThumbnailCandidate(normalized.dataUri, productName, "reference");
+        if (check.error) {
+          // Unlike a thumbnail, a gallery of unverified photos would quietly
+          // poison later matching — so an error means "skip", not "accept".
+          consecutiveVerifyErrors++;
+          hashes.pop();
+          continue;
+        }
+        consecutiveVerifyErrors = 0;
+        if (!check.matches) continue;
+        if (photos.length < opts.want) photos.push({ imageData: normalized.dataUri, label: candidate.label, rank });
+      }
+    };
+    await Promise.all(Array.from({ length: REFERENCE_CONCURRENCY }, worker));
+  } catch (err) {
+    console.error(`[referencePhotos] "${productName}" failed: ${(err as Error).message}`);
+  }
+  photos.sort((a, b) => a.rank - b.rank);
+  console.log(`[referencePhotos] "${productName}": kept ${photos.length}/${opts.want} (checked ${examined})`);
+  return { photos: photos.map(({ imageData, label }) => ({ imageData, label })), examined };
 }

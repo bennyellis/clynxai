@@ -9,14 +9,221 @@ export interface SearchItem {
   item: string;
   typicalResaleUsd: number;
   matchKeywords: string[];
-  // Per explicit instruction — there used to also be a per-item maxBudgetUsd
-  // here, a personally-stated "I'll spend $X on this" ceiling entered right
-  // alongside adding the item. Removed for being functionally the same
-  // knob as config.maxPriceUsd (the Dashboard's own Max Price filter) with
-  // a confusingly separate home — that single global field is now the one
-  // and only "what am I willing to pay" signal, both for filtering what the
-  // scanner even looks at (see scraper.ts/scrapeEngine.ts) and for deal
-  // scoring (see scorer.ts's evaluateSearchItemPricing).
+  // Per explicit instruction — "if the ai already has prior knowledge on
+  // the thing you are searching for, have it bring up an image from
+  // Database... prompting the user with a popup asking if that's what
+  // you're searching for": set when the user confirms that popup (see
+  // Dashboard.tsx's addToSearchList and index.ts's products:findMatch),
+  // pointing at the confirmed Database product's own id. When set,
+  // scrapeEngine.ts prefers THIS specific product's reference photos for
+  // vision comparison over the fuzzy name-based findMatchingProduct lookup
+  // it would otherwise fall back to — an explicit, user-confirmed link
+  // instead of a guess. Optional: an item added without a matching
+  // Database entry (or where the user said "no, that's not it") has none,
+  // and matching falls back to the existing fuzzy-name behavior.
+  linkedProductId?: string | null;
+  // Per explicit instruction — price range is PER-PRODUCT, not a single
+  // global knob (Config used to have one maxPriceUsd/minPriceUsd shared by
+  // everything on the Search For list — see the doc comment where that used
+  // to live). Set once, at add time, via Dashboard's "Set a price range for
+  // ___?" prompt (or add_search_item's own params from chat) — there's no
+  // separate editing UI for it afterward; remove and re-add to change it.
+  // Enforced two ways, same posture the old global fields had: as a hard
+  // skip in scrapeEngine.ts's evaluateListing once this item is the one a
+  // listing matched, and as the dedicated Facebook search's own minPrice/
+  // maxPrice query params (scraper.ts's searchMarketplace) so the search
+  // itself is scoped, not just filtered after the fact. null = no
+  // floor/ceiling for this item.
+  minPriceUsd: number | null;
+  maxPriceUsd: number | null;
+}
+
+// Per explicit instruction — "Watch: keep an eye out for this over time and
+// alert me when it appears," persistent across app/scanner/account
+// restarts, unlike SearchItem above (which is deliberately session-scoped —
+// see config.ts's loadConfig, which resets searchItems on every launch).
+// Stored in its own SQLite table (store.ts), not on Config, for exactly
+// that reason. A Watch is evaluated by the SAME matching primitives a
+// SearchItem is (matchSearchItem/findGreenFlagCandidate/
+// evaluateSearchItemPricing in scorer.ts all only ever read item/
+// matchKeywords/typicalResaleUsd/minPriceUsd/maxPriceUsd off a
+// SearchItem-shaped object — a Watch row supplies those directly, no
+// adapter type needed), but layers its own independent conditions
+// (profit/discount/age/location) on top, checked against a reference price
+// this domain derives itself (see watchMatching.ts) rather than the
+// SearchItem-oriented scored.referencePriceUsd, which can be null whenever
+// general (unverified) deal detection is off — an expected, normal
+// operating state for a persistent Watch, unlike the momentary Search For
+// session.
+//
+// Unrelated naming note: this is NOT the same concept as
+// appendProductWatchNote/add_product_watch_note/ProductProfile.lookoutNotes
+// elsewhere in this app — that's a pre-existing, unrelated AI-only
+// per-product observation log. Pure English collision, not a code
+// relationship.
+export interface Watch {
+  id: string;
+  name: string;
+  searchPhrase: string;
+  matchKeywords: string[];
+  // Optional link to a confirmed Database product — set via the same
+  // "is this what you meant?" popup add_search_item's own linkedProductId
+  // uses. When set, watchMatching.ts prefers this product's own
+  // resalePriceUsd/ebayAvgSoldPriceUsd/live Facebook-avg pricing for
+  // profit/discount conditions instead of guessing.
+  linkedProductId: string | null;
+  minPriceUsd: number | null;
+  maxPriceUsd: number | null;
+  minProfitUsd: number | null;
+  minDiscountPercent: number | null;
+  // Minutes, not hours (Config.maxListingAgeHours' own unit) — deliberately
+  // finer-grained since a Watch condition like "30 minutes" is a common,
+  // meaningful ask that an hour-only field couldn't express.
+  maxListingAgeMinutes: number | null;
+  // Per explicit instruction — "a Watch needs its own desired location
+  // rather than blindly inheriting whatever location the Scanner currently
+  // happens to be using." Mirrors Account's own location shape exactly
+  // (locationMode/selectedState/selectedCityOrZip/searchRadiusMiles) so it
+  // can drive the SAME locationDiscovery.ts's discoverLocation(page, city,
+  // radius) resolution account onboarding already uses, with zero adapter
+  // code.
+  locationMode: "country" | "state" | "city";
+  selectedState: string | null;
+  selectedCityOrZip: string | null;
+  searchRadiusMiles: number | null;
+  // Resolved-location cache — populated once (see WatchScheduler), reused
+  // on every scheduled active check thereafter rather than re-driving
+  // Facebook's own "Change location" dialog per check. Null until the
+  // active scheduler resolves it for the first time.
+  resolvedLocationUrl: string | null;
+  resolvedLocationLabel: string | null;
+  resolvedLocationCheckedAt: number | null;
+  // Per-watch pause, independent of the global config.watch.globallyPaused
+  // "Pause All" switch — see Config's own watch field below for how the
+  // two combine (effectiveEnabled = enabled && !globallyPaused).
+  enabled: boolean;
+  listingsSeenCount: number;
+  matchCount: number;
+  lastCheckedAt: number | null;
+  lastActiveCheckAt: number | null;
+  nextCheckAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// A confirmed Watch match — references the CANONICAL listings row rather
+// than copying listing data, per explicit instruction ("reuse the
+// canonical listing record"), so match history survives even after the
+// real Facebook listing disappears (the local row is never deleted just
+// because Facebook's own listing is gone). price/discount/profit are
+// snapshotted AT MATCH TIME, separately from Watch's own live condition
+// inputs above, since a listing's own scored fields can still change on a
+// later re-save (vision re-pricing, bundle-value correction) — match
+// history should reflect what was true when it matched, not whatever the
+// live row says now.
+export interface WatchMatch {
+  id: string;
+  watchId: string;
+  listingId: string;
+  matchedAt: number;
+  foundByAccountId: string | null;
+  foundByAccountLabel: string | null;
+  discoveryMode: "passive" | "active";
+  priceAtMatch: number | null;
+  discountPercentAtMatch: number | null;
+  profitUsdAtMatch: number | null;
+  notified: boolean;
+  notifiedAt: number | null;
+}
+
+// Per explicit instruction — support running MULTIPLE Facebook accounts
+// concurrently, each its own persistent browser session (own login, own
+// Playwright profile directory — see index.ts's PROFILES_ROOT) browsing
+// its OWN location, all feeding into the one shared database/Feed/
+// Database exactly like a single account already does (listing dedup
+// already keys on Facebook's own item id, not anything session-local, so
+// two accounts finding the same real listing was already safe before this
+// existed). Confirmed with the user: accounts differ ONLY by location and
+// login — every other setting (Search For list, price filters, deal
+// threshold, seller-risk rules, etc.) stays a single shared Config field,
+// not duplicated per account. This is exactly the location-related subset
+// that used to live flat on Config itself (see the migration in
+// config.ts's loadConfig, which wraps an old flat config's location
+// fields into a single-item accounts array so upgrading loses nothing).
+export interface Account {
+  id: string;
+  // User-facing name shown in Config's account roster and on Dashboard's
+  // per-account Start/Stop row — purely cosmetic, no matching logic
+  // depends on it.
+  label: string;
+  // Per explicit instruction — an account can be added without being
+  // actively scanned yet (e.g. mid-setup, still needs a login). index.ts
+  // still creates its ScrapeEngine either way (so "Log in" always works),
+  // this only gates whether Dashboard's "Start all" includes it.
+  enabled: boolean;
+  // Base Marketplace URLs to rotate through — no query/search term, just
+  // wherever "browse everything" lands for THIS account's location.
+  // Radius is NOT set via these URLs (see the "Change location" dialog
+  // flow); each URL just needs a different location center. The scraper
+  // switches to the next one every listingsPerLocation evaluated
+  // listings, since Facebook still seems to bias results toward whatever
+  // location is current even with a large radius set.
+  browseUrls: string[];
+  // "country" is the original always-on behavior (browseUrls stays the
+  // full nationwide spread); "state" replaces browseUrls with exactly one
+  // resolved location for that state's single most populous/well-known
+  // city (see locationDiscovery.ts's lookupPrimaryCityInState); "city"
+  // replaces browseUrls with exactly one resolved location for a specific
+  // city/ZIP the user typed in. Both go through the SAME "Change
+  // location" dialog the radius check already drives. Only one of
+  // selectedState/selectedCityOrZip is ever meaningful at a time, matching
+  // whichever mode is active — both null in "country" mode.
+  locationMode: "country" | "state" | "city";
+  // Also doubles as the target for scrapeEngine.ts's listingStateMatches
+  // filter in both "state" and "city" mode (in "city" mode it's the state
+  // Facebook's OWN confirmation resolved the search to, not necessarily
+  // anything the user typed) — this account's engine skips a listing
+  // whose visible location doesn't match.
+  selectedState: string | null;
+  selectedCityOrZip: string | null;
+  // The search radius applied to every browse location for THIS account
+  // (see scrapeEngine.ts's runCycle, which re-verifies/corrects this once
+  // per cycle). Defaults to 100. "state" mode overrides this to 40
+  // automatically, "city" mode to 20 — both set live in the same "Change
+  // location" dialog visit that resolves the location itself (see
+  // index.ts's location:setMode); switching back to "country" resets it
+  // to 100.
+  searchRadiusMiles: number;
+  // Per explicit instruction — "don't have it immediately open marketplace
+  // after applying the setting, just save it until the user starts a
+  // scan": changing locationMode/selectedState/selectedCityOrZip in Config
+  // now only saves the CHOICE — it no longer opens a browser and drives
+  // Facebook's own "Change location" dialog right away (see index.ts's
+  // location:setMode, which used to do that eagerly). false here means
+  // browseUrls/searchRadiusMiles may be stale for the currently-saved
+  // mode/state/city; index.ts's resolveAccountLocationIfNeeded does the
+  // actual resolution (opens a browser, looks up the primary city, drives
+  // the dialog) the next time this account starts, and only then, setting
+  // this back to true. Always true in "country" mode, which has nothing to
+  // resolve (browseUrls is a static list).
+  locationResolved: boolean;
+  // Root-caused live: "country" mode's real resolution (see index.ts's
+  // resolveAccountLocationIfNeeded and config.ts's DEFAULT_COUNTRY_CITIES)
+  // drives Facebook's real "Change location" dialog for up to 48 cities,
+  // paced ~15-20s apart to stay under Facebook's own anti-automation
+  // throttling — a genuine 12-15 minute one-time cost. Closing the app (or
+  // it crashing) partway through used to lose ALL of that work, since
+  // locationResolved/browseUrls only ever got written once, after the
+  // ENTIRE 48-city pass finished — reported live as "why does it need to
+  // keep searching for them, it's already there," after restarting mid-run
+  // repeatedly threw away real progress every time. This tracks each named
+  // city's own outcome (its resolved URL, or null if that one attempt
+  // failed) as it happens, persisted after EVERY city, not just at the end
+  // — resolveAccountLocationIfNeeded only re-attempts cities missing here
+  // or previously null, so a resumed run picks up where it left off
+  // instead of starting the whole 48-city pass over. Undefined for an
+  // account that's never started a country-mode resolution.
+  countryCityProgress?: Record<string, string | null>;
 }
 
 export interface GeneralDealConfig {
@@ -36,14 +243,18 @@ export interface GeneralDealConfig {
 }
 
 export interface Config {
-  // Base Marketplace URLs to rotate through — no query/search term, just
-  // wherever "browse everything" lands for a given location on your
-  // account. Radius is NOT set via these URLs (see the "Open Facebook
-  // Marketplace" flow); each URL just needs a different location center.
-  // The scraper switches to the next one every listingsPerLocation
-  // evaluated listings, since Facebook still seems to bias results toward
-  // whatever location is current even with a large radius set.
-  browseUrls: string[];
+  // Per explicit instruction — multiple Facebook accounts, each its own
+  // browser session/login/location, scanning CONCURRENTLY. See the
+  // Account interface above for what each entry holds (this replaces the
+  // old flat browseUrls/locationMode/selectedState/selectedCityOrZip/
+  // searchRadiusMiles fields, which used to describe a single implicit
+  // account — see config.ts's loadConfig for the migration that wraps an
+  // old config's flat fields into a single-item array here). index.ts
+  // keeps one ScrapeEngine per entry, each fed a synthesized Config that
+  // merges this shared object with that one account's own location
+  // fields — everything else on Config (below) stays a single shared
+  // value read by every account's engine alike.
+  accounts: Account[];
   listingsPerLocation: number;
   headless: boolean;
   pollIntervalMinutesMin: number;
@@ -83,37 +294,49 @@ export interface Config {
   // this app's original, only-ever-shipped appearance; "light" is the new
   // alternate palette (see global.css's [data-theme="light"] block).
   theme: "dark" | "light";
+  // Per explicit instruction ("instead of choosing colors, allow the user
+  // to use a color wheel to pick a primary and accent color") — replaces
+  // an earlier fixed-preset scheme picker with two freely-chosen hex
+  // colors. Defaults are this app's original purple/blue accents, so a
+  // fresh config still looks exactly like it always has ("keep the
+  // purple/blue color scheme as the default"). See the renderer's
+  // lib/colorScheme.ts (applyColorScheme) for how these two colors get
+  // turned into every derived CSS custom property (gradients, borders,
+  // glows, and the background tint itself) — orthogonal to theme, which
+  // still separately controls light vs. dark surfaces.
+  primaryColor: string;
+  accentColor: string;
+  // Per explicit instruction — a "rainbow" color scheme: instead of the two
+  // fixed colors above, the app slowly fades through the whole spectrum
+  // (see the renderer's lib/colorScheme.ts startRainbow). primaryColor/
+  // accentColor are kept untouched underneath, so turning this off returns
+  // to exactly the colors that were picked. Defaults off.
+  rainbowEnabled: boolean;
   // Per explicit instruction — a single on/off switch for every app sound
   // (start/stop bloops, tab-switch tick, the deal-alert chime), not a
   // per-sound toggle. Defaults true — existing behavior unchanged until
   // someone deliberately turns it off. See lib/sound.ts's setSoundEnabled.
   soundEnabled: boolean;
-  // Per explicit instruction — Config's own "Search locations" setting.
-  // "country" is the original always-on behavior (browseUrls stays the
-  // full nationwide spread); "state" replaces browseUrls with exactly one
-  // resolved location for that state's single most populous/well-known
-  // city (see locationDiscovery.ts's lookupPrimaryCityInState — resolving
-  // 10 separate cities used to be the behavior here, which was slow for
-  // little benefit); "city" replaces browseUrls with exactly one resolved
-  // location for a specific city/ZIP the user typed in. Both go through
-  // the SAME "Change location" dialog the radius check already drives.
-  // Only one of selectedState/selectedCityOrZip is ever meaningful at a
-  // time, matching whichever mode is active — both null in "country" mode.
-  // selectedState also doubles as the target for scrapeEngine.ts's
-  // listingStateMatches filter in both "state" and "city" mode (in "city"
-  // mode it's the state Facebook's OWN confirmation resolved the search
-  // to, not necessarily anything the user typed).
-  locationMode: "country" | "state" | "city";
-  selectedState: string | null;
-  selectedCityOrZip: string | null;
-  // Per explicit instruction — the search radius applied to every browse
-  // location (see scrapeEngine.ts's runCycle, which re-verifies/corrects
-  // this once per cycle). Defaults to 100, the original fixed assumption.
-  // "state" mode overrides this to 40 automatically, "city" mode to 20 —
-  // both set live in the same "Change location" dialog visit that resolves
-  // the location itself (see index.ts's location:setMode); switching back
-  // to "country" resets it to 100.
-  searchRadiusMiles: number;
+  // Per explicit instruction — a Config "No particles" switch that turns
+  // off BOTH the cursor-reactive starfield background (see
+  // StarfieldBackground.tsx) and the per-click particle bursts (see
+  // ClickParticles.tsx) in one toggle, for anyone who'd rather have a
+  // plain, static UI (a slower machine, a preference, whatever). Defaults
+  // true (particles ON) — existing behavior unchanged until someone
+  // deliberately turns it off. See the renderer's lib/particles.ts for how
+  // this reaches App.tsx live, the same "preview before Save" posture as
+  // theme/colorScheme/soundEnabled above.
+  particlesEnabled: boolean;
+  // Per explicit instruction — a master on/off for whether the scanner
+  // automatically searches WatchCount.com for eBay sold comps at all,
+  // separate from watchCountOncePerScan below (which only throttles HOW
+  // OFTEN it happens, not whether it happens). Turning this off skips the
+  // automatic lookup inside runProductLookup entirely (index.ts) — the
+  // manual "refresh eBay comps" button on a product's own Database page is
+  // a deliberate one-off action and stays available regardless, same
+  // reasoning as why that button already ignores watchCountOncePerScan.
+  // Defaults on — existing behavior unchanged until turned off in Config.
+  watchCountEnabled: boolean;
   // Per explicit instruction — "if it finds an xbox series x within a
   // scan, there's no reason to search watchcount multiple times." Once a
   // given product has had an eBay comps lookup during the CURRENT scan
@@ -125,22 +348,12 @@ export interface Config {
   // its limited daily lookups on data that hasn't had time to change.
   // Defaults on — there's rarely a reason to want the opposite.
   watchCountOncePerScan: boolean;
-  // Per explicit instruction — a global price ceiling the user controls
-  // directly, on top of (not instead of) the existing scam-bait/placeholder-
-  // price checks (isSuspiciousPrice/isNonRoundPrice). The one and only "max
-  // I'll pay" signal — used both to filter what the scanner ever opens (see
-  // scrapeEngine.ts's evaluateListing) and, for a matched Search For item,
-  // as the deal-scoring budget ceiling (see scorer.ts's
-  // evaluateSearchItemPricing) — there used to also be a separate per-item
-  // maxBudgetUsd doing the second job, removed for being confusingly
-  // redundant with this. null = no cap.
-  maxPriceUsd: number | null;
-  // The floor counterpart — per explicit instruction (the Dashboard's own
-  // Filters box, Min Price alongside Max Price), for filtering out listings
-  // too cheap to be worth the seller-risk/scam-bait profile a suspiciously
-  // low price often carries, or just not worth the time on a low-value
-  // flip. null = no floor. Same enforcement point as maxPriceUsd.
-  minPriceUsd: number | null;
+  // Per explicit instruction — reversing an earlier decision to make this a
+  // single GLOBAL "max I'll pay" (Config.maxPriceUsd/minPriceUsd used to
+  // live here): "they may want to have multiple products with multiple
+  // different min/max prices... each time they set one of those parameters
+  // should only apply to the product they're trying to search." Now lives
+  // on SearchItem instead — see minPriceUsd/maxPriceUsd below.
   // Per explicit instruction — bypasses the Blacklist term/image checks
   // (see store.ts's isBlacklisted and scrapeEngine.ts's blacklisted-image
   // handling) without having to clear the actual blacklist out, so a
@@ -160,6 +373,19 @@ export interface Config {
   // Database chat). Defaults to true, matching the behavior this app has
   // always had.
   autoResearchListings: boolean;
+  // Per explicit instruction — condition-awareness for the Database side:
+  // gates BOTH (a) vision.ts detecting visible flaws in listing photos
+  // (ListingCard's yellow-outline "?" badge) and (b) automatic product
+  // research also searching for a poor-condition/damaged reference photo,
+  // not just a clean one (see webResearch.ts's findPoorConditionProductImage).
+  // One toggle for both, confirmed — "condition awareness" is one on/off
+  // switch, not two. Defaults false: unlike autoResearchListings above,
+  // this is new, unproven prompt surface with a real extra cost (a second
+  // web-image search per product) — off until the user opts in, same
+  // posture as ignoreBlacklist. Also silently does nothing for (a) unless
+  // photoAnalysis.enabled above is ALSO on, since flaw detection piggybacks
+  // on that same vision call rather than running independently.
+  researchCondition: boolean;
   // Per explicit instruction — Facebook only lets you actively search ONE
   // thing at a time, so with more than one Search For item there's a real
   // choice in how the scanner splits its attention between them (see the
@@ -180,7 +406,91 @@ export interface Config {
   // searches for the one item, same as before this setting existed.
   rotateSearchItems: boolean;
   rotateSearchItemsCount: number;
+  // Per explicit instruction — Watch's own global controls, deliberately
+  // NOT on the watches table itself (see store.ts) since these are app-wide
+  // toggles/bookkeeping, same home as photoAnalysis/ntfy above.
+  // globallyPaused is the "Pause All" switch — combines with each Watch's
+  // own `enabled` (effectiveEnabled = watch.enabled && !globallyPaused)
+  // without destroying individual per-watch pause state on a bulk
+  // pause/resume. matchesLastViewedAt drives the Sidebar's unseen-match
+  // pulse indicator (a match newer than this timestamp exists) — visiting
+  // the Watch screen just bumps this one value rather than an UPDATE per
+  // match row.
+  watch: {
+    globallyPaused: boolean;
+    matchesLastViewedAt: number;
+  };
+  // Clynx Cloud Phase 1 — a purely additive, off-by-default foundation for
+  // an eventual cloud-connected mode (see cloudClient.ts). Optional so an
+  // existing config.json with no idea this field exists still parses fine;
+  // config.ts's DEFAULT_CONFIG supplies { enabled: false } for a fresh
+  // install too. Nothing in the existing scanner/Watch/Database pathways
+  // reads this — only index.ts's own small heartbeat/status wiring does.
+  cloud?: {
+    enabled: boolean;
+    apiUrl?: string;
+  };
+  // A second listing source alongside the Facebook accounts above — eBay's
+  // own Browse API (REST, OAuth client-credentials, no browser/login/
+  // per-account model needed at all, see ebayClient.ts), searched
+  // automatically for every Search For item and enabled Watch once turned
+  // on. Optional/off-by-default for the same config.json-forward-compat
+  // reason cloud above is. Credentials (EBAY_CLIENT_ID/EBAY_CLIENT_SECRET)
+  // live in .env, not here — same precedent OPENAI_API_KEY originally had.
+  ebay?: {
+    enabled: boolean;
+  };
+  // Per explicit instruction ("facebook or ebay or both") — Facebook has no
+  // single global on/off elsewhere (only per-account enabled + manual
+  // Dashboard Start/Stop); this gates the Dashboard's "Start all accounts"
+  // convenience action so the toggle reads symmetrically with ebay.enabled
+  // above. Optional, defaults true (config.ts's DEFAULT_CONFIG) so an
+  // existing install's accounts keep starting exactly as before.
+  facebookEnabled?: boolean;
 }
+
+// First UI status readout (see Config.tsx's Cloud Sync section) — the
+// shape each of the 4 background sync services' own getStatus() returns
+// (watchSync.ts/feedbackSync.ts/productSync.ts/listingIngestSync.ts).
+// lastAt marks the end of the most recently COMPLETED sync tick (whether or
+// not something inside it failed); lastError is whatever the most recent
+// failure inside that tick reported, cleared the next time a tick runs
+// clean. Both null before a service's first tick has ever run (e.g. cloud
+// sync just got enabled, or the app just started and the 15s startup delay
+// hasn't elapsed yet).
+export interface SyncStatus {
+  lastAt: number | null;
+  lastError: string | null;
+}
+
+// Aggregates CloudClient.getStatus() plus all 4 sync services' own
+// SyncStatus into the one response ipcMain.handle("cloud:getStatus")
+// returns (see index.ts) — everything Config.tsx's read-only Cloud Sync
+// section needs to answer "is this actually working right now" without the
+// user reading terminal logs or querying Postgres directly.
+export interface CloudStatus {
+  enabled: boolean;
+  apiUrl: string | null;
+  authenticated: boolean;
+  deviceId: string | null;
+  heartbeat: SyncStatus;
+  sync: {
+    watches: SyncStatus;
+    feedback: SyncStatus;
+    products: SyncStatus;
+    listings: SyncStatus;
+  };
+}
+
+// What a single ScrapeEngine instance actually reads (scrapeEngine.ts's
+// own getConfig callback returns this, not Config) — the shared Config
+// object plus ONE account's own location fields flattened back onto it,
+// synthesized live in index.ts per engine. This is what lets
+// scrapeEngine.ts keep reading config.browseUrls/locationMode/
+// selectedState/selectedCityOrZip/searchRadiusMiles exactly as it always
+// has, with zero internal changes, despite those fields now living on
+// Account instead of Config.
+export type EngineConfig = Omit<Config, "accounts"> & Account;
 
 export interface ListingSummary {
   id: string;
@@ -189,6 +499,12 @@ export interface ListingSummary {
   price: number | null;
   thumbnailUrl: string | null;
   locationText: string | null;
+  // Which marketplace this listing came from. Optional and undefined at
+  // every existing Facebook Marketplace construction site (scraper.ts) —
+  // undefined means "facebook" everywhere this is read, so adding eBay as a
+  // second source required zero changes to any FB code path. Only ever set
+  // explicitly to "ebay" by ebayNormalize.ts.
+  source?: "facebook" | "ebay";
 }
 
 export interface SellerSignals {
@@ -200,6 +516,19 @@ export interface SellerSignals {
   // picture") — the only place a plain-text name reliably shows up in the
   // markup this app can see. Null when that alt text isn't found/parseable.
   name: string | null;
+  // eBay's own trust signals — deliberately separate fields, never aliased
+  // into rating/ratingCount above. eBay's feedbackPercentage is a 0-100
+  // scale; rating above is a 0-5 star scale (see Config.tsx's
+  // StarRatingPicker) — blending the two would silently make every eBay
+  // seller look like a ~99-star seller and defeat minRating filtering
+  // entirely. sellerRisk.ts's evaluateSellerRisk never reads these two (it
+  // only knows about rating/joinedFacebookYear/etc, all left undefined for
+  // an eBay listing) — they exist purely for notify.ts's own eBay-
+  // appropriate trust line. Optional (not `| null`), same reasoning as
+  // ListingSummary.source above — undefined at every existing Facebook
+  // construction site, no changes needed there.
+  ebayFeedbackScore?: number;
+  ebayFeedbackPercentage?: number;
 }
 
 export interface ListingDetail extends ListingSummary {
@@ -304,8 +633,40 @@ export interface FeedbackExample {
   reasoning: string;
 }
 
+// A visible condition flaw (a crack, a missing part, damage) vision.ts's
+// own photo analysis noticed in one specific listing photo — whether or not
+// the seller's own text mentioned it. Deliberately mirrors ListingDetail's
+// existing photoAttribution shape (same boundingBox convention: fractional
+// 0-1, top-left origin) rather than inventing a new one, since it's the
+// exact same "point at a region of a specific photo" concept, just for a
+// flaw instead of a product. Gated entirely behind Config.researchCondition
+// — empty array whenever that's off.
+export interface PhotoFlaw {
+  photoNumber: number;
+  description: string;
+  boundingBox: { x: number; y: number; width: number; height: number };
+  confidence: "low" | "medium" | "high";
+}
+
+// One past flaw flag the user confirmed or denied (ListingCard's "?" badge,
+// see vision.ts's buildFlawFeedbackExamplesBlock) — the exact same few-shot-
+// training-example idea as FeedbackExample above, just keyed to one flagged
+// photo instead of a whole listing's deal verdict. listingTitle is
+// denormalized (not a join against listings) so the few-shot prompt block
+// never needs one.
+export interface FlawFeedbackExample {
+  listingTitle: string;
+  description: string;
+  confidence: "low" | "medium" | "high";
+  confirmed: boolean;
+}
+
 export interface ListingRecord {
   id: string;
+  // Which marketplace this listing came from — Feed's source filter and the
+  // Dashboard's Facebook/eBay badges read this. Rows saved before eBay
+  // existed have no source and are all Facebook (store.ts's rowToRecord).
+  source: "facebook" | "ebay";
   title: string;
   price: number | null;
   url: string;
@@ -348,6 +709,11 @@ export interface ListingRecord {
   // disambiguates.
   photoAnalysis: string | null;
   photoAnalysisCheckedAt: number | null;
+  // Structured flaws vision.ts's photo analysis noticed (see PhotoFlaw's own
+  // doc comment) — always [] unless Config.researchCondition was on when
+  // this listing was analyzed. ListingCard uses this to outline whichever
+  // carousel photo matches the currently-displayed one in yellow.
+  photoFlaws: PhotoFlaw[];
   // Per explicit instruction — Feed's "est. value" used to show the general
   // (unverified) pathway's own AI-guessed range unconditionally, which is
   // exactly a guess with no real data behind it. This is real data instead:
@@ -364,6 +730,16 @@ export interface ListingRecord {
   // average sold price above (see enrichWithMatchedProductPricing, same
   // lookup, same null cases).
   matchedProductAvgRunTimeDays: number | null;
+  // Per explicit instruction — multi-account scanning: which account's
+  // browser session actually found this listing, so the user knows which
+  // Facebook login to act from (message the seller, mark interested,
+  // etc.) — that session is the one with this listing actually loaded.
+  // Null for anything found before multi-account existed, or if that
+  // account has since been removed (see index.ts's account-removal path,
+  // which deliberately leaves past listings' attribution alone rather
+  // than blanking it out).
+  foundByAccountId: string | null;
+  foundByAccountLabel: string | null;
 }
 
 // A user-curated product "database" entry. aiSummary is built from a real,
@@ -451,10 +827,11 @@ export interface ProductProfile {
   resaleTimeToSell: string | null;
   // Per explicit instruction — what the user is actually willing to pay for
   // this exact product, set right alongside the resale-history fields
-  // above. Distinct from config.maxPriceUsd (a global cap across every
-  // listing the scanner looks at) — this lives on the Database entry
-  // itself, so it applies to a product the user is just tracking/
-  // researching too, independent of whatever the global filter is set to.
+  // above. Distinct from a SearchItem's own minPriceUsd/maxPriceUsd (which
+  // only exist once the product is actively being searched for) — this
+  // lives on the Database entry itself, so it applies to a product the user
+  // is just tracking/researching too, independent of whether it's on the
+  // Search For list at all.
   // Trains the AI's judgment toward what THIS user considers worth paying,
   // same spirit as store.getFeedbackExamples. Null until the user sets one.
   desiredPriceUsd: number | null;
@@ -506,6 +883,13 @@ export interface ProductProfile {
   ebayCompsCheckedAt: number | null;
   loading: boolean;
   createdAt: number;
+  // Clynx Cloud Phase 6 — bumped on every mutating product write (see
+  // store.ts's addProductStub/createManualProduct/updateProductProfile/
+  // updateProductEbayComps/editProductProfile/appendProductWatchNote/
+  // recordProductObservation/setProductLoading), same purpose as Watch's own
+  // updatedAt: the last-write-wins comparison productSync.ts's push/pull use
+  // against the cloud mirror (see cloud/src/products/routes.ts).
+  updatedAt: number;
 }
 
 // A confirmed-genuine reference photo for a product — auto-added whenever
@@ -523,6 +907,12 @@ export interface ProductImage {
   imageData: string; // a data: URI, always already downloaded — never a bare remote URL
   sourceTitle: string | null; // the listing title this came from, for context when reviewing the gallery
   createdAt: number;
+  // Condition-awareness — "poor_condition" is a deliberately-researched
+  // damaged/broken example (see webResearch.ts's
+  // findPoorConditionProductImage), kept in its own Database gallery
+  // section, never used as vision.ts's "what does this normally look like"
+  // ground truth. Every existing/normal reference photo is "normal".
+  kind: "normal" | "poor_condition";
 }
 
 // A term/phrase that instantly skips a listing (see store.ts's
@@ -560,6 +950,15 @@ export interface BlacklistedImage {
   sourceTitle: string | null; // the listing title this came from, for context
   category: string | null; // the AI's own short category guess, e.g. "boat"
   reason: string | null; // the AI's own one-line explanation
+  // Per explicit instruction — "when the AI blacklists listings, make sure
+  // it blacklists both the title and the image(s), report both in
+  // Blacklist": the normalized BlacklistTerm.term this image was added
+  // alongside (see store.ts's addBlacklistTerm), so the Database Blacklist
+  // section can show a term's own photo(s) right next to it instead of the
+  // user having to cross-reference a separate gallery. null for an image
+  // added purely from the AI's own photo classification with no companion
+  // term (see evaluateListing's thumbnail pre-check).
+  linkedTerm: string | null;
   // True once the user has explicitly reviewed this and agreed it's a
   // genuine mistake-to-avoid, as opposed to just sitting there unreviewed
   // since the AI added it — confirmed images are trusted more (sent first,
@@ -621,6 +1020,23 @@ export interface ScrapeStatus {
   currentReaction: string | null;
 }
 
+// Per explicit instruction — the Database Research tab should show what
+// the AI is CURRENTLY researching, and "relay its emotional feedback
+// instead of its hyper-analysis" (i.e. chat.ts's ProductSummaryResult.
+// reaction, not the full written-up aiSummary). A plain array (not a
+// single "current" object) because research_product can genuinely be
+// researching several products at once — auto-discovered siblings run
+// concurrently with whatever the user just asked for by name — so the
+// Research tab needs to show all of them, not just the latest.
+export interface ActiveProductResearch {
+  id: string;
+  name: string;
+  // Null while the research call is still in flight — the Research tab
+  // shows a plain "Researching..." placeholder for that window, then
+  // swaps in this line once index.ts's runProductLookup has it.
+  reaction: string | null;
+}
+
 export interface LogLine {
   ts: number;
   // "deal" is its own level (not just "info") specifically so the
@@ -652,4 +1068,12 @@ export interface LogLine {
   // about a specific external listing or an in-app product), though
   // nothing enforces that beyond how the call sites are written.
   productName?: string;
+  // Per explicit instruction — multi-account scanning: which account this
+  // line came from, so Activity's single shared timeline can still show
+  // which login is doing what (a small label chip on the row) without
+  // splitting into separate per-account feeds. Optional — a line not
+  // produced by any one account's engine (chat-driven actions, config
+  // changes, etc.) just omits it, same as today's unlabeled behavior.
+  accountId?: string;
+  accountLabel?: string;
 }

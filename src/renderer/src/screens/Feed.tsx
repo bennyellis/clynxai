@@ -6,6 +6,8 @@ import { ThumbnailSizeSlider, useThumbnailSize } from "../components/ThumbnailSi
 import { api } from "../lib/api.js";
 
 type Filter = "all" | "deals";
+type SourceFilter = "all" | "facebook" | "ebay";
+const SOURCE_FILTER_LABELS: Record<SourceFilter, string> = { all: "All sources", facebook: "Facebook", ebay: "eBay" };
 
 export function Feed({
   listings,
@@ -19,6 +21,9 @@ export function Feed({
   onGoToProduct: (productId: string) => void;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
+  // Per explicit instruction — see only Facebook listings, only eBay ones,
+  // or both. Combines with the All/Deals filter and the search box.
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [clearing, setClearing] = useState(false);
   // Per explicit instruction — popups should match the app's own theme, not
   // the browser's native window.confirm.
@@ -40,6 +45,7 @@ export function Feed({
   // "All" vs "Deals" (and the search box) stay exactly as they were.
   const filtered = useMemo(() => {
     let result = filter === "deals" ? listings.filter((l) => l.isDeal) : listings;
+    if (sourceFilter !== "all") result = result.filter((l) => l.source === sourceFilter);
     const q = searchQuery.trim().toLowerCase();
     if (q) {
       result = result.filter(
@@ -47,7 +53,7 @@ export function Feed({
       );
     }
     return result;
-  }, [listings, filter, searchQuery]);
+  }, [listings, filter, sourceFilter, searchQuery]);
 
   // Per explicit instruction — a listing that arrives WHILE the user is
   // watching Feed gets to play its "reveal" (see ListingCard's Blacklisted
@@ -115,6 +121,13 @@ export function Feed({
               {f}
             </button>
           ))}
+          <div style={{ display: "flex", gap: 8, paddingLeft: 12, marginLeft: 4, borderLeft: "1px solid var(--border-strong)" }}>
+            {(["all", "facebook", "ebay"] as SourceFilter[]).map((src) => (
+              <button key={src} className={sourceFilter === src ? "primary" : ""} onClick={() => setSourceFilter(src)}>
+                {SOURCE_FILTER_LABELS[src]}
+              </button>
+            ))}
+          </div>
           <button className="danger" disabled={clearing || !listings.length} onClick={() => setShowClearAllDialog(true)}>
             {clearing ? "Clearing..." : "Clear all"}
           </button>
@@ -140,7 +153,11 @@ export function Feed({
       <div style={{ flex: 1, overflowY: "auto", paddingRight: 4 }}>
         {filtered.length === 0 && (
           <div className="card" style={{ color: "var(--text-dim)" }}>
-            {searchQuery.trim() ? `No listings match "${searchQuery.trim()}".` : "Nothing here yet."}
+            {searchQuery.trim()
+              ? `No listings match "${searchQuery.trim()}".`
+              : sourceFilter !== "all"
+                ? `No ${SOURCE_FILTER_LABELS[sourceFilter]} listings here yet.`
+                : "Nothing here yet."}
           </div>
         )}
         <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(${cardSize}px, 1fr))`, gap: 16 }}>

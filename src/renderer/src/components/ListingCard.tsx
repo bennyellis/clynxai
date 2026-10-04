@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ListingRecord } from "../lib/api.js";
+import type { ListingRecord, PhotoFlaw } from "../lib/api.js";
+import { FlameIcon, SOURCE_COLORS, SOURCE_NAMES, SourceLogo, isHotListing } from "./ListingSourceMarks.js";
 import { api } from "../lib/api.js";
 import { Modal } from "./Modal.js";
 
@@ -129,6 +130,8 @@ export function ListingCard({
   const [showInterestedDialog, setShowInterestedDialog] = useState(false);
   const [showNotInterestedDialog, setShowNotInterestedDialog] = useState(false);
   const [showBlacklistDialog, setShowBlacklistDialog] = useState(false);
+  const [showFlawDialog, setShowFlawDialog] = useState(false);
+  const [flawSaving, setFlawSaving] = useState(false);
 
   // Every photo the scraper found on the listing page, falling back to just
   // the thumbnail if that's all there is (or nothing, for the placeholder
@@ -136,6 +139,30 @@ export function ListingCard({
   // 44px thumbnails with an actual carousel through the main image itself.
   const images = record.imageUrls.length > 0 ? record.imageUrls : record.thumbnailUrl ? [record.thumbnailUrl] : [];
   const currentImage = images[imgIndex] ?? null;
+
+  // Condition-awareness — vision.ts's photoNumber is 1-indexed (matches the
+  // order it was shown the photos in, the same order as record.imageUrls/
+  // images above), imgIndex is 0-indexed, hence the +1. Always [] unless
+  // Config.researchCondition was on when this listing was analyzed.
+  const currentFlaw: PhotoFlaw | null = record.photoFlaws.find((f) => f.photoNumber === imgIndex + 1) ?? null;
+
+  async function submitFlawFeedback(confirmed: boolean) {
+    if (!currentFlaw) return;
+    setFlawSaving(true);
+    try {
+      await api.submitFlawFeedback({
+        listingId: record.id,
+        photoNumber: currentFlaw.photoNumber,
+        description: currentFlaw.description,
+        confidence: currentFlaw.confidence,
+        confirmed,
+        listingTitle: record.title,
+      });
+    } finally {
+      setFlawSaving(false);
+      setShowFlawDialog(false);
+    }
+  }
 
   // Per explicit instruction — a listing skipped for matching a blacklisted
   // term (see scrapeEngine.ts's evaluateListing, whose reasoning for this
@@ -328,12 +355,36 @@ export function ListingCard({
   const originalPriceUsd = priceDropOriginal !== null && priceDropOriginal !== record.price ? priceDropOriginal : null;
   const cleanedDescription = priceDropMatch ? record.description.replace(priceDropMatch[0], "").trim() : record.description;
 
+  // Per explicit instruction — same marks as the Dashboard's listings:
+  // Facebook = blue outline + small Facebook logo, eBay = green outline +
+  // small eBay logo, and a really good listing also gets an orange flame and
+  // a glow. The glow lives on a wrapper rather than the card itself so its
+  // infinite pulse can't replace the card's own entrance animation.
+  const hot = isHotListing(record);
+  const sourceColor = SOURCE_COLORS[record.source];
+
   return (
+    <div className={hot ? "listing-hot" : undefined} style={{ borderRadius: "var(--radius-lg)" }}>
     <div
       className={`card enter ${record.isDeal ? "flash-deal" : ""}`}
-      style={{ height: cardHeight, display: "flex", flexDirection: "column", padding: 0, overflow: "hidden", animationDelay: `${delayMs}ms` }}
+      style={{
+        height: cardHeight,
+        display: "flex",
+        flexDirection: "column",
+        padding: 0,
+        overflow: "hidden",
+        animationDelay: `${delayMs}ms`,
+        border: `2px solid ${sourceColor}`,
+      }}
     >
       <div style={{ position: "relative", flexShrink: 0 }}>
+        <div
+          title={SOURCE_NAMES[record.source]}
+          style={{ position: "absolute", top: 8, left: 8, zIndex: 2, display: "flex", alignItems: "center", gap: 5, pointerEvents: "none" }}
+        >
+          <SourceLogo source={record.source} size={20} />
+          {hot && <FlameIcon size={24} />}
+        </div>
         {/* Per explicit instruction, this stays a real link to the actual
             Facebook listing on click — the one deliberate exception to
             "every image opens a zoomed-in view" (see ImageLightbox.tsx),
@@ -450,6 +501,53 @@ export function ListingCard({
             🕐
           </span>
         )}
+        {currentFlaw && (
+          <>
+            {/* Pure visual overlay, not a click target — the "?" badge below
+                is what's actually clickable. */}
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                border: "2px solid var(--warn)",
+                borderRadius: "inherit",
+                pointerEvents: "none",
+              }}
+            />
+            <button
+              title="Possible condition flaw — click to confirm or deny"
+              // Per explicit instruction — same interception prevImage/
+              // nextImage already use, needed here for the same reason:
+              // stop the surrounding <a href={record.url}> from navigating
+              // to Facebook when this badge itself is what's clicked.
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setShowFlawDialog(true);
+              }}
+              style={{
+                position: "absolute",
+                bottom: 10,
+                right: 10,
+                width: 26,
+                height: 26,
+                borderRadius: "50%",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: "rgba(20,18,28,0.72)",
+                border: `1px solid var(--warn)`,
+                color: "var(--warn)",
+                fontSize: 14,
+                fontWeight: 700,
+                cursor: "pointer",
+                padding: 0,
+              }}
+            >
+              ?
+            </button>
+          </>
+        )}
         {onDelete && (
           <button
             className="icon ghost"
@@ -547,6 +645,13 @@ export function ListingCard({
           <div title={`Found by the scanner ${timeAgo(record.firstSeenAt)}`} style={{ fontSize: 12, color: "var(--text-dim)" }}>
             {ageStateLine}
           </div>
+        )}
+        {/* Per explicit instruction — multiple Facebook accounts: which
+            login actually has this listing open, so the user knows which
+            account to act from (message the seller, etc.) rather than
+            guessing. Null for anything found before multi-account existed. */}
+        {record.foundByAccountLabel && (
+          <div style={{ fontSize: 12, color: "var(--text-dim)" }}>via {record.foundByAccountLabel}</div>
         )}
 
         {record.matchedItem && (
@@ -722,6 +827,23 @@ export function ListingCard({
           </div>
         </Modal>
       )}
+      {showFlawDialog && currentFlaw && (
+        <Modal title="Does this photo show a damaged item?" onClose={() => setShowFlawDialog(false)}>
+          <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.5 }}>Clynx flagged this: "{currentFlaw.description}"</p>
+          <p style={{ margin: 0, fontSize: 12, color: "var(--text-dim)" }}>
+            Your answer helps Clynx get better at recognizing real flaws over time.
+          </p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="icon" style={{ flex: 1 }} disabled={flawSaving} onClick={() => submitFlawFeedback(false)}>
+              No, looks fine
+            </button>
+            <button className="primary" style={{ flex: 1 }} disabled={flawSaving} onClick={() => submitFlawFeedback(true)}>
+              Yes, that's damage
+            </button>
+          </div>
+        </Modal>
+      )}
+    </div>
     </div>
   );
 }

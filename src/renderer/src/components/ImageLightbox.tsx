@@ -144,7 +144,7 @@ export function ImageLightbox({
         alignItems: "center",
         justifyContent: "center",
         gap: 12,
-        zIndex: 1100,
+        zIndex: 1300,
         cursor: "zoom-out",
         animation: "fadeIn 0.15s ease both",
         padding: 20,
@@ -252,6 +252,7 @@ export function ImageLightbox({
 
       {showFeedback && context && (
         <Modal
+          aboveLightbox
           title={correctionReason ? "Do you know what this actually is?" : "What's wrong with this image?"}
           onClose={() => {
             setShowFeedback(false);

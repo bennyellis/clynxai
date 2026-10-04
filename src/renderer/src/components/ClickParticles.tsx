@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 // Per explicit instruction — "light particle animations to each click...
 // only make them appear when something clickable is clicked." Mounted
@@ -10,6 +11,19 @@ import React, { useEffect, useRef, useState } from "react";
 // (a button/link/role="button", or an element that registered its own
 // onclick). Purely decorative — pointer-events: none on the overlay means
 // this can never intercept or interfere with the click it's reacting to.
+//
+// Portals to document.body, per further explicit instruction ("I see in
+// some places the particles spawn way to the left") — likely the REAL
+// explanation all along, not just CustomCursor's own separate lag bug:
+// this app's shared `.enter` entrance animation holds a permanent
+// `transform: translateY(0)` (animation-fill-mode: both), which per the
+// CSS spec makes that element a containing block for any `position: fixed`
+// descendant — see Modal.tsx and CustomCursor.tsx's own doc comments,
+// which hit the exact same class of bug. "In some places" fits a
+// containing-block bug precisely (it only misfires depending on this
+// overlay's position in the tree relative to an animated card at any given
+// moment) far better than a flat coordinate-math bug would. Portaling
+// straight to document.body removes it from that tree entirely.
 interface Burst {
   id: number;
   x: number;
@@ -48,6 +62,20 @@ export function ClickParticles() {
     function onClick(e: MouseEvent) {
       if (!isClickableTarget(e.target)) return;
       const id = nextIdRef.current++;
+      // Per explicit instruction — "make sure that when you click, the
+      // particles stem ONLY from the cursor": this event's own clientX/Y
+      // IS the cursor's true position at the instant of the click — the
+      // most direct, always-accurate source there is. An earlier attempt
+      // here read from a shared position CustomCursor updates once per
+      // animation frame instead, on the theory that it'd guarantee the two
+      // never disagree — verified live that it does the opposite: that
+      // value only updates on the next rAF tick after a real mousemove, so
+      // it can be a frame stale (confirmed a real case diverging by 100+
+      // px in testing). The actual "particles spawn to the left" bug this
+      // was meant to fix was CustomCursor's own rendering lag (a
+      // filter: drop-shadow recomputed on every mousemove) making the
+      // VISIBLE cursor trail behind the true pointer — fixed there
+      // directly (see that component) — not a real inaccuracy here.
       setBursts((prev) => [...prev, { id, x: e.clientX, y: e.clientY }]);
       setTimeout(() => setBursts((prev) => prev.filter((b) => b.id !== id)), 700);
     }
@@ -57,7 +85,7 @@ export function ClickParticles() {
     return () => document.removeEventListener("click", onClick, true);
   }, []);
 
-  return (
+  return createPortal(
     <div style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 9999, overflow: "hidden" }}>
       {bursts.map((b) => (
         <div key={b.id} style={{ position: "absolute", left: b.x, top: b.y, width: 0, height: 0 }}>
@@ -90,6 +118,7 @@ export function ClickParticles() {
           })}
         </div>
       ))}
-    </div>
+    </div>,
+    document.body
   );
 }

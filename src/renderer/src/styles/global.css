@@ -50,6 +50,14 @@
   --accent-1: #7c6cf6;
   --accent-2: #a855f7;
   --accent-3: #4f8ef7;
+  /* Bare "r, g, b" triplets alongside the hex values above — a custom
+     property is just string substitution (no color parsing), so anywhere
+     that needs rgba(..., <alpha>) for a scheme-reactive glow/pulse (body's
+     ambient background, saveHighlightPulse) has to build it from one of
+     these rather than accent-1/2/3 directly. Every scheme block below
+     defines its own pair to match. */
+  --accent-1-rgb: 124, 108, 246;
+  --accent-2-rgb: 168, 85, 247;
   --gradient: linear-gradient(135deg, var(--accent-3), var(--accent-1) 55%, var(--accent-2));
   --gradient-soft: linear-gradient(135deg, rgba(124, 108, 246, 0.16), rgba(168, 85, 247, 0.1));
 
@@ -89,6 +97,15 @@
   --text-dim: #8f89a6;
 }
 
+/* Per explicit instruction ("instead of choosing colors, allow the user to
+   use a color wheel to pick a primary and accent color") — the fixed
+   preset schemes that used to live here (cyan/emerald/crimson/amber
+   [data-scheme="..."] blocks) are gone; the renderer's lib/colorScheme.ts
+   now computes every one of these same custom properties at runtime from
+   whatever two colors the user actually picks, and applies them as inline
+   styles on this same root element (which always wins the cascade over any
+   selector-based rule here, purple default included). */
+
 * {
   box-sizing: border-box;
 }
@@ -103,8 +120,15 @@ body {
   margin: 0;
   background-color: var(--bg);
   background-repeat: no-repeat;
-  background-image: radial-gradient(1200px 800px at center, rgba(124, 108, 246, 0.16), transparent 60%),
-    radial-gradient(1000px 700px at center, rgba(168, 85, 247, 0.12), transparent 55%);
+  /* Per explicit instruction ("instead of a grid in the background, add a
+     lot more cursor reactive particles") — a grid-pattern layer used to
+     live here; it's gone in favor of StarfieldBackground.tsx's dense star
+     field doing the "pattern/graphics" work instead. These two ambient
+     glows are scheme-aware via --accent-*-rgb (set at runtime by
+     lib/colorScheme.ts), so they re-tint with whatever primary/accent
+     color the user picks instead of staying hardcoded purple. */
+  background-image: radial-gradient(1200px 800px at center, rgba(var(--accent-1-rgb), 0.16), transparent 60%),
+    radial-gradient(1000px 700px at center, rgba(var(--accent-2-rgb), 0.12), transparent 55%);
   background-position: 15% -10%, 100% 0%;
   animation: ambientDrift 40s ease-in-out infinite alternate;
   color: var(--text);
@@ -243,7 +267,22 @@ label {
   padding: 18px;
 }
 .card:hover {
-  transform: translateY(-2px) scale(1.01);
+  /* Per explicit instruction, live (a screenshot of Dashboard's Best Deals
+     row): "I don't want the contents to be skewed and have there be an
+     ugly scroll bar." Root cause — scale(1.01) here, however small, grows
+     a hovered card's PAINTED bounds past its own layout box, and browsers
+     factor a hovered descendant's post-transform paint bounds into an
+     ancestor's scrollable-overflow calculation — so a card sitting flush
+     against a tight row/grid's edge could push that row's total content
+     width juuust past the container, popping a horizontal scrollbar in
+     and out (and shifting everything above/below it) on every hover. This
+     is a GLOBAL rule (every .card in the app uses it — Dashboard, Database,
+     Feed), so the fix belongs here, not patched per-section. Dropping the
+     scale (keeping just the lift) removes any horizontal growth at all —
+     translateY alone can never widen anything, so this class of overflow
+     is now impossible from this rule, not just less likely.
+     */
+  transform: translateY(-2px);
   border-color: var(--border-strong);
   box-shadow: 0 14px 34px rgba(10, 6, 24, 0.35);
 }
@@ -265,7 +304,7 @@ label {
   color: var(--success);
 }
 .badge.skip {
-  background: rgba(168, 148, 255, 0.1);
+  background: rgba(var(--accent-1-rgb), 0.1);
   color: var(--text-muted);
 }
 .badge.warn {
@@ -292,15 +331,18 @@ label {
   display: flex;
   align-items: center;
   justify-content: center;
-  /* Above ImageLightbox's own z-index (1100) — a Modal (e.g. the image
-     feedback popup) opened from within an already-open lightbox needs to
-     land on top of it, not behind it. Was 1000, which made exactly that
-     popup render invisible-behind-the-lightbox: reported live as "it pops
-     up but not in front and is invisible." Modal is meant to always be the
-     topmost blocking dialog in the app, so this stays ahead of every other
-     z-index here, not just the lightbox's. */
+  /* Ordinary Modals sit BELOW the image lightbox (1300): a photo opened
+     from inside a Modal — Database's Reference Photos panel — has to show
+     in front of that panel, not behind it (reported live: "the reference
+     photos gui is above the image that is supposed to pop up"). The one
+     exception is a Modal opened from inside the lightbox itself (its
+     feedback popup) — that passes aboveLightbox and uses the variant
+     below, so it still lands on top of the lightbox. */
   z-index: 1200;
   animation: fadeIn 0.15s ease both;
+}
+.modal-backdrop-top {
+  z-index: 1400;
 }
 .modal-card {
   background: var(--bg-card);
@@ -407,8 +449,8 @@ a {
    shook at them. Runs a little longer than the shake itself so it's still
    visible after the shake finishes. */
 @keyframes saveHighlightPulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 108, 246, 0.7); }
-  50% { box-shadow: 0 0 0 10px rgba(124, 108, 246, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(var(--accent-1-rgb), 0.7); }
+  50% { box-shadow: 0 0 0 10px rgba(var(--accent-1-rgb), 0); }
 }
 .save-highlight {
   animation: saveHighlightPulse 0.6s ease-out 2;
@@ -590,6 +632,158 @@ a {
   animation: shimmer 6s linear infinite;
 }
 
+/* Per explicit instruction — the "clynx" wordmark's own light, geometric
+   feel (distinct from the app's regular "Made Tommy Soft" body/heading
+   font, which is much heavier). Segoe UI Light ships on every Windows
+   install this app targets, so this doesn't need a bundled font file the
+   way Made Tommy Soft does. */
+.clynx-wordmark {
+  font-family: "Segoe UI", "Century Gothic", sans-serif;
+  font-weight: 300;
+  /* font-size is set inline per-instance by Sidebar.tsx's
+     useMatchedWordmarkFontSize — a font's own em-box is much taller than
+     what actually renders ink-on-screen for lowercase letters, so a fixed
+     value here (tried twice: equal to the icon's own size, then a blind
+     2x guess) either left the text looking shorter than the icon despite
+     an equal-height CSS box, or overflowed the sidebar and wrapped. That
+     hook measures the REAL rendered font in the browser this is actually
+     running in and solves for the right number instead of guessing it. */
+  line-height: 1;
+  letter-spacing: 0.02em;
+}
+/* Per explicit instruction — brings "l"'s ascender down to the same visual
+   height as c/y/n/x's x-height. scaleY(0.72) is Segoe UI's approximate
+   x-height-to-ascender ratio, anchored at the bottom so the compression
+   comes off the TOP of the letter (its baseline stays put) — an estimate,
+   since this environment can't render a live preview to fine-tune the
+   exact factor against. */
+.clynx-l {
+  display: inline-block;
+  transform: scaleY(0.72);
+  transform-origin: bottom;
+}
+
+/* Per explicit instruction — "colors from the color scheme travel along
+   the lines of the logo," built on the user's actual PNG mark (see
+   ClynxMark in Sidebar.tsx). A rotating conic gradient was tried first and
+   rejected ("animated wrong") — a radial sweep from the shape's center
+   lights up whatever the current angle happens to cross, which for a shape
+   this irregular means disconnected parts of the mark flare up at once
+   rather than reading as one thing moving. A diagonal linear-gradient
+   band, translated continuously via background-position (the same
+   background-size + background-position technique global.css's own
+   shimmer keyframe already uses for glow-text), reads much more like a
+   single beam of light traveling across the lines in one consistent
+   direction. background-size well over 100% is what gives the band room
+   to fully enter and exit before the position loops. */
+.clynx-mark-comet {
+  background: linear-gradient(
+    115deg,
+    transparent 32%,
+    var(--accent-3) 44%,
+    var(--accent-1) 50%,
+    var(--accent-2) 56%,
+    transparent 68%
+  );
+  background-size: 260% 260%;
+  animation: clynxMarkComet 2.8s linear infinite;
+}
+@keyframes clynxMarkComet {
+  0% { background-position: 100% 100%; }
+  100% { background-position: 0% 0%; }
+}
+
+/* Per explicit instruction — "an occasional but random glitch effect."
+   The randomness itself lives in Sidebar.tsx's timer (a fixed CSS loop
+   would read as mechanically regular); this is just what plays during
+   each burst window — a few sharp, discrete jump-cuts (steps(1), not a
+   smooth easing) combining a position jitter, an RGB-channel-split
+   drop-shadow in the app's own accent colors, and a couple of scanline-
+   style clip-path slices, then settling back to normal. */
+.clynx-glitch {
+  animation: clynxGlitchBurst 0.38s steps(1) both;
+}
+@keyframes clynxGlitchBurst {
+  0%, 100% { transform: translate(0, 0); filter: none; clip-path: none; opacity: 1; }
+  10% { transform: translate(-2px, 1px); filter: drop-shadow(-2px 0 rgba(var(--accent-1-rgb), 0.85)) drop-shadow(2px 0 rgba(var(--accent-2-rgb), 0.85)); }
+  22% { transform: translate(2px, -1px); clip-path: inset(15% 0 55% 0); opacity: 0.85; }
+  34% { transform: translate(-1px, 0); filter: drop-shadow(2px 0 rgba(var(--accent-1-rgb), 0.85)) drop-shadow(-2px 0 rgba(var(--accent-2-rgb), 0.85)); }
+  47% { transform: translate(1px, 1px); clip-path: inset(58% 0 8% 0); opacity: 0.9; }
+  61% { transform: translate(-2px, 0); filter: none; clip-path: none; }
+  76% { transform: translate(1px, -1px); clip-path: inset(30% 0 40% 0); }
+}
+
+/* Per explicit instruction ("full of animations, graphics... everything
+   that makes it appear more futuristic") — every screen's own page-title
+   h1 (Dashboard/Database/Config/Activity/Feed all just render a bare
+   <h1 style={{fontSize:...}}>, no shared class) gets the same shimmering
+   gradient-text treatment the Sidebar logo already had, applied once here
+   instead of touching all five screens individually. */
+h1 {
+  background: var(--gradient);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 6s linear infinite;
+  letter-spacing: 0.01em;
+}
+
+/* HUD-style corner brackets on every card — per explicit instruction, a
+   "futuristic" graphic touch. Drawn with two linear-gradients per corner
+   clipped to a small box via background-size/position (cheaper than four
+   pseudo-elements, and doesn't disturb .card's own ::before/::after-free
+   layout). Off by default and faded in on hover only — at rest they'd just
+   be visual noise on dozens of cards on screen at once. */
+.card {
+  /* Deliberately no overflow:hidden here — .card is reused everywhere,
+     including places that intentionally hang a badge/icon slightly past
+     the card's own edge (a "sticker" look), which clipping would break.
+     position:relative alone is enough for the ::after corner brackets
+     below, since they're inset:0 (exactly the card's own box, nothing to
+     clip). */
+  position: relative;
+}
+.card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  background-image:
+    linear-gradient(var(--accent-1), var(--accent-1)), linear-gradient(var(--accent-1), var(--accent-1)),
+    linear-gradient(var(--accent-2), var(--accent-2)), linear-gradient(var(--accent-2), var(--accent-2));
+  background-size: 14px 2px, 2px 14px, 14px 2px, 2px 14px;
+  background-position: top 0 left 0, top 0 left 0, bottom 0 right 0, bottom 0 right 0;
+  background-repeat: no-repeat;
+}
+.card:hover::after {
+  opacity: 0.6;
+}
+
+/* A slow diagonal light-sweep across primary buttons — per explicit
+   instruction, a subtle bit of "always-on" motion for the app's main
+   call-to-action buttons specifically (everything else stays still so the
+   sweep still reads as an accent instead of visual noise). */
+button.primary {
+  position: relative;
+  overflow: hidden;
+}
+button.primary::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(115deg, transparent 30%, rgba(255, 255, 255, 0.25) 48%, transparent 66%);
+  background-size: 220% 100%;
+  animation: buttonSheen 3.2s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes buttonSheen {
+  0% { background-position: 140% 0; }
+  55%, 100% { background-position: -60% 0; }
+}
+
 .cursor-blink {
   display: inline-block;
   width: 2px;
@@ -614,6 +808,12 @@ a {
 }
 .typing-dots span:nth-child(2) { animation-delay: 0.15s; }
 .typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+/* Dashboard's "Scanning" button state (button.success's own text color is a
+   dark near-black, not the light --text-muted these dots default to — that
+   would barely show up against the bright green background). */
+.success .typing-dots span {
+  background: currentColor;
+}
 
 button, .card, input, select, textarea, .pill, .badge {
   transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
@@ -637,12 +837,6 @@ button:active:not(:disabled) {
 .floaty {
   display: inline-block;
   animation: floaty 3s ease-in-out infinite;
-}
-
-@keyframes wiggle {
-  0%, 100% { transform: rotate(0deg); }
-  25% { transform: rotate(-8deg); }
-  75% { transform: rotate(8deg); }
 }
 
 .nav-item {
@@ -687,36 +881,127 @@ button.nav-item:hover:not(:disabled) {
   animation: iconGearSpin 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-/* Speedometer — per explicit instruction, this icon's RESTING appearance
-   (not just its hover state) always reads as "running hot": green, and
-   the needle+speed-lines group (see Sidebar.tsx) pinned straight up via a
-   static -45deg rotation rather than sitting at the SVG's own drawn
-   (up-right) angle. transform-box: view-box is what lets an SVG child
-   rotate around a specific SVG-space coordinate instead of its own tiny
-   bounding box — the arc it pivots inside stays fixed either way. */
-.icon-speedometer {
-  color: var(--success);
+/* Speedometer — redrawn after the user's reference image (see Sidebar.tsx's
+   SpeedometerIcon for the geometry). Per explicit instruction, green ONLY
+   while Clynx is actively searching (the .is-live class, set from Sidebar's
+   Facebook + eBay state); idle it just takes the nav item's normal color.
+   transform-box: view-box is what lets the needle rotate around its hub's
+   SVG-space coordinate (10,16.4) instead of its own tiny bounding box. The
+   svg itself is allowed to overflow its 24-unit box so the motion lines,
+   which stream off the dial's left side, aren't clipped. */
+/* The dial is driven by two animated numbers instead of separate needle and
+   color transitions, so the needle and the color can never drift out of sync:
+     --speedo-hover  0 -> 1 while the nav item is hovered
+     --speedo-run    0 -> 1 while Clynx is actively searching
+   The needle's position is max(hover, run) (0 = parked all the way left, 1 =
+   all the way right), and the icon's color is a function of --speedo-run
+   alone. Both are registered as <number>s so the browser can transition
+   them like any other property, with one shared easing curve. */
+@property --speedo-hover {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
 }
+@property --speedo-run {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+/* Specificity note: `.nav-item svg` (the generic hover scale-up above) would
+   beat a bare `.icon-speedometer` and its transition shorthand would wipe
+   out ours, so these are scoped under .nav-item too and re-state the
+   scale-up's own transform transition. */
+.nav-item .icon-speedometer {
+  overflow: visible;
+  /* Drawn a bit larger than the other nav icons (a semicircle is short for
+     its width, so at the same box size it looked tiny); the negative margin
+     keeps its footprint in the row identical so the labels stay aligned. */
+  margin: 0 -2.5px;
+  --speedo-hover: 0;
+  --speedo-run: 0;
+  transition:
+    transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1),
+    --speedo-hover 0.75s cubic-bezier(0.34, 1.25, 0.64, 1),
+    --speedo-run 0.75s ease-in-out;
+  /* Color: idle = the plain nav color (currentcolor, i.e. inherited). As
+     --speedo-run climbs, it first snaps to red (the first ~12% of the
+     sweep), then fades red -> orange -> yellow -> green (hue-interpolated, so
+     it passes through bright colors instead of a muddy brown) exactly as the
+     needle travels. Stopping runs it in reverse. */
+  color: color-mix(
+    in srgb,
+    color-mix(in hsl, var(--success) calc(clamp(0, var(--speedo-run), 1) * 100%), var(--danger))
+      calc(min(1, clamp(0, var(--speedo-run), 1) * 8) * 100%),
+    currentcolor
+  );
+}
+.nav-item:hover .icon-speedometer {
+  --speedo-hover: 1;
+}
+/* Scanner started: a slow, watchable sweep. */
+.nav-item .icon-speedometer.is-live {
+  --speedo-run: 1;
+  transition:
+    transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1),
+    --speedo-hover 0.75s cubic-bezier(0.34, 1.25, 0.64, 1),
+    --speedo-run 1.8s cubic-bezier(0.45, 0.05, 0.25, 1);
+}
+
+/* The needle's pose: all the way LEFT at 0 (rotate -144deg from the drawn
+   pose, which points ~36deg above horizontal-right, lays it flat along the
+   baseline pointing left) to all the way RIGHT at 1 (rotate +36deg: flat,
+   pointing right), sweeping over the top. So: parked left when idle, swung
+   right while hovered, and swung right (and held) while the scanner is
+   running, with the same sweep on hover and on start. */
 .icon-speedometer-needle-group {
   transform-box: view-box;
-  transform-origin: 12px 12px;
-  transform: rotate(-45deg);
+  transform-origin: 10px 16.4px;
+  transform: rotate(calc(-144deg + 180deg * max(var(--speedo-hover), var(--speedo-run))));
 }
-.icon-speedometer-speedlines {
-  stroke-width: 1.3;
-  opacity: 0.75;
+
+/* Live: once the start sweep has finished, the needle subtly fluctuates
+   around its held position at the right. Lives on an inner group (same
+   pivot) so it composes with the pose above instead of replacing it. Only
+   small COUNTER-clockwise offsets, which at the right lift the needle a few
+   degrees off the baseline rather than dipping below it. The delay equals the
+   sweep's length, so it doesn't jitter while the needle is still travelling. */
+.icon-speedometer-needle-wobble {
+  transform-box: view-box;
+  transform-origin: 10px 16.4px;
 }
-/* Hover plays its own bigger, distinct sweep — all the way down to the
-   gauge's bottom (empty), up past vertical to the top (pinned/maxed), then
-   back down to a middle reading — instead of the small "kick and settle"
-   this used to do, which is now the icon's permanent resting pose above. */
-@keyframes iconNeedleSweepFull {
-  0% { transform: rotate(135deg); }
-  50% { transform: rotate(-45deg); }
+@keyframes iconNeedleFluctuate {
+  0% { transform: rotate(0deg); }
+  16% { transform: rotate(-6deg); }
+  31% { transform: rotate(-2deg); }
+  47% { transform: rotate(-8deg); }
+  64% { transform: rotate(-1deg); }
+  82% { transform: rotate(-5deg); }
   100% { transform: rotate(0deg); }
 }
-.nav-item:hover .icon-speedometer-needle-group {
-  animation: iconNeedleSweepFull 1.1s ease-in-out;
+.icon-speedometer.is-live .icon-speedometer-needle-wobble {
+  animation: iconNeedleFluctuate 2.4s ease-in-out 1.8s infinite;
+}
+
+/* Live: three motion lines stream leftward off the dial and fade, staggered
+   so they read as a continuous rush of "work" rather than one blink. Hidden
+   entirely when idle. */
+.icon-speedometer-speedline {
+  stroke-width: 1.7;
+  opacity: 0;
+}
+@keyframes iconSpeedLineStream {
+  0% { opacity: 0; transform: translateX(2.2px); }
+  30% { opacity: 0.95; }
+  100% { opacity: 0; transform: translateX(-2.6px); }
+}
+.icon-speedometer.is-live .icon-speedometer-speedline {
+  animation: iconSpeedLineStream 0.8s ease-out infinite;
+}
+.icon-speedometer.is-live .icon-speedometer-speedline-2 {
+  animation-delay: 0.27s;
+}
+.icon-speedometer.is-live .icon-speedometer-speedline-3 {
+  animation-delay: 0.53s;
 }
 
 /* Feed — the three lines fade in on their own, staggered top to bottom,
@@ -745,12 +1030,55 @@ button.nav-item:hover:not(:disabled) {
   animation: iconDotLightUp 0.6s ease-in-out;
 }
 
+/* Watch — per explicit instruction, "animate the eye with a quick, natural
+   blink: open → closed → open... do not make it continuously flash." A
+   vertical squash-and-release on the whole eye shape (outline + pupil
+   together, via icon-watch-lid) reads as a blink; CSS can't morph between
+   two different path `d` shapes without a JS library, and this needs none.
+   transform-box:fill-box is what makes `center` actually mean the shape's
+   own center in SVG (without it, percentage-based transform-origin resolves
+   against the SVG viewport, not this element). One-shot, hover-only, same
+   idiom as iconDotLightUp above. */
+@keyframes iconEyeBlink {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.1); }
+}
+.icon-watch-lid {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.nav-item:hover .icon-watch-lid {
+  animation: iconEyeBlink 0.5s ease-in-out;
+}
+
+/* Per explicit instruction — "a subtle indicator/pulse until the user
+   visits Watch." Reuses liveDotPulse (Dashboard's own Live-panel pulse,
+   defined above) rather than pulseGlow — pulseGlow's box-shadow is
+   hardcoded to var(--success)/green, but this needs to read as an alert
+   (red), and liveDotPulse is already the currentColor-keyed variant built
+   for exactly that (set `color`, not just `background`, for its box-shadow
+   to pick up the right shade). Positioned as a small corner badge on the
+   Watch nav icon; the wrapping <span> this is a child of is
+   position:relative (see Sidebar.tsx) so this positions relative to the
+   icon, not the whole nav button. */
+.nav-item-pulse-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  color: var(--danger);
+  animation: liveDotPulse 1.6s ease-in-out infinite;
+}
+
 /* Activity's pulse-line icon — per explicit instruction, actually mimics a
    heart monitor: the line "draws" itself left to right via a classic
    stroke-dashoffset reveal (46 is this exact polyline's approximate total
-   length) rather than the icon just bouncing. Redraws once on hover, or on
-   a continuous loop — in the scanner's success color — the whole time
-   scanning is actually running (see Sidebar.tsx's is-live class), so the
+   length) rather than the icon just bouncing. Redraws once on hover, or —
+   in the scanner's success color — draws, erases and redraws itself for the
+   whole time scanning is actually running (see Sidebar.tsx's is-live class), so the
    icon doubles as a live "something's happening" indicator even before you
    click into the page. */
 .icon-activity-line {
@@ -767,8 +1095,22 @@ button.nav-item:hover:not(:disabled) {
 .icon-activity.is-live {
   color: var(--success);
 }
+/* While the scanner runs: draw the line, hold it a beat, erase it, rest
+   briefly, then draw it again — instead of redrawing the same sweep over and
+   over. Erasing is the draw continued in the same direction: with a dash
+   pattern as long as the line, a dashoffset of 46 -> 0 reveals it left to
+   right, and 0 -> -46 then removes it left to right (the tail follows the
+   head off the end), so it reads like a heart-monitor trace being swept
+   away. 46 and -46 are both fully blank, so the loop point is seamless. */
+@keyframes iconEkgDrawErase {
+  0% { stroke-dashoffset: 46; }
+  37% { stroke-dashoffset: 0; }
+  53% { stroke-dashoffset: 0; }
+  90% { stroke-dashoffset: -46; }
+  100% { stroke-dashoffset: -46; }
+}
 .icon-activity.is-live .icon-activity-line {
-  animation: iconEkgDraw 1.4s linear infinite;
+  animation: iconEkgDrawErase 3s linear infinite;
 }
 
 .tile-image {
@@ -778,6 +1120,15 @@ button.nav-item:hover:not(:disabled) {
   transform: scale(1.08);
 }
 
-.logo-badge:hover {
-  animation: wiggle 0.5s ease-in-out;
+
+
+/* Dashboard listings — a really good listing (see ListingSourceMarks.tsx's
+   isHotListing) glows orange, pulsing slowly. Layered on top of the card's
+   own blue (Facebook) / green (eBay) outline, which stays visible. */
+@keyframes hotGlowPulse {
+  0%, 100% { box-shadow: 0 0 10px 1px rgba(249, 115, 22, 0.45), 0 0 26px 4px rgba(249, 115, 22, 0.2); }
+  50% { box-shadow: 0 0 18px 3px rgba(249, 115, 22, 0.8), 0 0 42px 10px rgba(249, 115, 22, 0.35); }
+}
+.listing-hot {
+  animation: hotGlowPulse 2.2s ease-in-out infinite;
 }

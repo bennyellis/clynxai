@@ -4,7 +4,8 @@
 // separate provider/key the way Gemini did before switching everything to
 // OpenAI.
 import sharp from "sharp";
-import { OPENAI_MODEL, OPENAI_URL, getOpenAIApiKey } from "./openai.js";
+import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
+import type { FlawFeedbackExample, PhotoFlaw } from "./types.js";
 
 // Kept generous — a multi-photo, multi-item analysis is legitimately more
 // work than a one-line text reply, so this is a real safety margin, not a
@@ -106,6 +107,13 @@ export interface PhotoAnalysisResult {
   // standalone photo (a bad angle, mid-motion, or a paused intro screen).
   // Null if nothing among the photos clearly matches the title's claim.
   titleMatchPhoto: string | null;
+  // Per explicit instruction — visible condition flaws (a crack, a missing
+  // part, damage) the model noticed in the photos, whether or not the
+  // seller's own text mentioned them — see types.ts's PhotoFlaw. Only ever
+  // populated when analyzeListingPhotos was called with detectFlaws: true
+  // (Config.researchCondition); always [] otherwise, at zero extra prompt/
+  // response cost when the feature is off.
+  flaws: PhotoFlaw[];
   error: string | null;
 }
 
@@ -122,6 +130,7 @@ function errorResult(error: string): PhotoAnalysisResult {
     mismatchReason: null,
     matchedKnownProduct: null,
     titleMatchPhoto: null,
+    flaws: [],
     error,
   };
 }
@@ -239,6 +248,21 @@ async function cropToBoundingBox(img: DownloadedImage, box: BoundingBox): Promis
   }
 }
 
+// Mirrors scorer.ts's buildFeedbackExamplesBlock exactly — same few-shot-
+// training-example idea, just for flaw flags instead of deal verdicts. Only
+// ever called when detectFlaws is on, so this never adds prompt weight for
+// anyone with Config.researchCondition off.
+function buildFlawFeedbackExamplesBlock(examples: FlawFeedbackExample[]): string {
+  if (!examples.length) return "";
+  const lines = examples.map(
+    (e) =>
+      `- A photo from "${e.listingTitle}" was flagged as possible damage ("${e.description}", confidence: ${e.confidence}) — the user confirmed this ${
+        e.confirmed ? "WAS genuine visible damage" : "was NOT actually damage"
+      }.`
+  );
+  return `\nRecent feedback this exact user has given on past flaw flags — learn from it what actually counts as visible damage here, and weigh it more heavily than a generic assumption when a new photo resembles one of these:\n${lines.join("\n")}\n`;
+}
+
 // Analyzes up to `maxImages` photos from a listing together in one call —
 // deliberately one request for the whole set (not per-photo) so the model
 // can reason across them, e.g. "this is a console bundle, here's every
@@ -288,11 +312,19 @@ export async function analyzeListingPhotos(
     // from that video rather than a genuine standalone photo, and to
     // weight bestTitleMatchPhotoNumber accordingly.
     hasVideo?: boolean;
+    // Per explicit instruction — Config.researchCondition. Off by default:
+    // when false/omitted, the prompt doesn't ask for flaws at all and the
+    // response always has flaws: [], at zero extra cost either way.
+    detectFlaws?: boolean;
+    // Past flaw flags this exact user confirmed or denied (see store.ts's
+    // getFlawFeedbackExamples), fetched fresh per-listing by the caller —
+    // same "look up live, not cached" posture as watchFor above. Only
+    // meaningful (and only ever passed) when detectFlaws is also true.
+    flawFeedbackExamples?: FlawFeedbackExample[];
   }
 ): Promise<PhotoAnalysisResult> {
-  let apiKey: string;
   try {
-    apiKey = getOpenAIApiKey();
+    ensureOpenAIAccess();
   } catch (err) {
     return errorResult((err as Error).message);
   }
@@ -311,6 +343,8 @@ export async function analyzeListingPhotos(
   const referenceProducts = opts?.referenceProducts?.filter((r) => r.name.trim() && r.imageDataUri) ?? [];
   const claimedItemReferenceImages = claimedItem ? (opts?.claimedItemReferenceImages ?? []).filter(Boolean) : [];
   const hasVideo = !!opts?.hasVideo;
+  const detectFlaws = !!opts?.detectFlaws;
+  const flawFeedbackExamples = detectFlaws ? (opts?.flawFeedbackExamples ?? []) : [];
 
   const prompt = `You're looking at ${images.length} photo(s), numbered 1 to ${images.length} in the order shown below, from a single Facebook Marketplace listing titled "${context.title}", asking price ${context.price !== null ? `$${context.price}` : "not listed"}. Listing text: "${context.description.slice(0, 500)}"
 
@@ -331,7 +365,7 @@ Separately from the per-product photos above: look across ALL ${images.length} p
   }
 ${
   claimedItem
-    ? `\nThis listing is supposed to be a "${claimedItem}". Check carefully whether the photos actually show that — a common scam/mistake pattern is a listing titled/matched as a full item (e.g. a game console) whose photos actually show only a minor accessory for it (e.g. just a controller or a cable), which is worth far less. Base this purely on what the photos themselves show — never on how good a price sounds; a steep discount is not evidence of a mismatch, and this business exists specifically to find those. If the photos clearly show something meaningfully different or lesser than "${claimedItem}" itself, set matchesClaim to false and explain what they actually show instead. If the photos are consistent with it (even if you can't be 100% certain), set matchesClaim to true.${
+    ? `\nThis listing is supposed to be a "${claimedItem}". Check CAREFULLY and STRICTLY whether the photos actually show that specific product — per explicit instruction, require a genuinely high-confidence match (call it >80% sure), not just "plausible" or "could be it." A common scam/mistake pattern is a listing titled/matched as a full item (e.g. a game console) whose photos actually show only a minor accessory for it (e.g. just a controller or a cable), a different variant/model/color than claimed, or a bundle that's missing the core item itself — all of these are worth meaningfully less and are NOT a match, even though they're related to "${claimedItem}". Base this purely on what the photos themselves show — never on how good a price sounds; a steep discount is not evidence of a mismatch, and this business exists specifically to find those. Set matchesClaim to true ONLY when you're confident the photos show the same specific product this listing claims to be. Set it to false whenever the photos show something meaningfully different or lesser (wrong variant, accessory-only, incomplete bundle, or a different product entirely), OR whenever the photos genuinely aren't clear/complete enough to be confident either way — treat an uncertain call as a mismatch, not a pass. Explain what they actually show instead when false.${
         claimedItemReferenceImages.length
           ? ` You'll also see ${claimedItemReferenceImages.length} confirmed-genuine reference photo(s) of a real "${claimedItem}" right after the listing's own photos — use those as concrete ground truth for this comparison, not just your general knowledge of what one looks like.`
           : ""
@@ -340,6 +374,10 @@ ${
 }${watchFor ? `\nThe user has specifically asked to watch for this in listings of this product: "${watchFor}". Check the photos carefully for it and mention what you find either way.\n` : ""}${
     referenceProducts.length
       ? `\nAfter the listing's own photos above, you'll see ${referenceProducts.length} reference photo(s) of products the user already tracks, each labeled with its name. This listing has no confirmed match yet — sellers sometimes put a vague or wrong title on a listing that's actually one of these. Compare the listing's OWN photos against each reference photo: if the listing genuinely appears to show the same product as one of them, set matchedKnownProduct to that exact name. Only do this if you're reasonably confident — a passing resemblance isn't enough, and leaving it null is fine (and expected most of the time).\n`
+      : ""
+  }${
+    detectFlaws
+      ? `\nAlso specifically look for visible CONDITION FLAWS — a cracked/scratched screen, a missing button/plate/part, visible water or physical damage, "for parts"/"doesn't power on" indicators, anything that would matter to a buyer — whether or not the listing's own text mentions it. Sellers routinely under-describe this. For each genuine flaw you can actually make out, report which photo number it's in, a short plain description, and a tight boundingBox around JUST the flawed area (same fractional 0-1, top-left-origin convention as identifiedProducts' own boundingBox above). Only report something you can actually see — don't infer a flaw from the price or the listing being vague; absence of evidence is not evidence of damage. A perfectly normal-looking item should produce an empty flaws array, which is the common case.${buildFlawFeedbackExamplesBlock(flawFeedbackExamples)}\n`
       : ""
   }
 Be concrete and specific — list what you actually see, don't guess at things you can't make out. If a photo is too blurry/small to read something, say so rather than inventing it.
@@ -358,7 +396,11 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
   "matchesClaim": boolean | null,   // ${claimedItem ? `whether the photos are consistent with this actually being a "${claimedItem}" — see above` : "null — no claimed item was given to compare against"}
   "mismatchReason": string,         // if matchesClaim is false: what the photos actually show instead, plainly. Empty string otherwise.
   "matchedKnownProduct": string | null,  // ${referenceProducts.length ? "the exact name of a reference product above, ONLY if this listing's photos genuinely appear to show it — see above" : "null — no reference products were given to compare against"}
-  "bestTitleMatchPhotoNumber": number | null  // the ONE photo number (1 to ${images.length}) that most clearly represents what the listing's title is selling overall — see above.${hasVideo ? " Avoid a video frame/thumbnail if a genuine standalone photo is available." : ""} Null only if none of the photos usefully represent it at all.
+  "bestTitleMatchPhotoNumber": number | null,  // the ONE photo number (1 to ${images.length}) that most clearly represents what the listing's title is selling overall — see above.${hasVideo ? " Avoid a video frame/thumbnail if a genuine standalone photo is available." : ""} Null only if none of the photos usefully represent it at all.${
+    detectFlaws
+      ? `\n  "flaws": [ { "photoNumber": number, "description": string, "boundingBox": { "x": number, "y": number, "width": number, "height": number }, "confidence": "low"|"medium"|"high" } ]  // see above — empty array if the photos show nothing wrong, which is expected most of the time`
+      : ""
+  }
 }`;
 
   const content: unknown[] = [{ type: "text", text: prompt }];
@@ -377,13 +419,9 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
   try {
-    const res = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    const res = await callOpenAI(
+      "chat",
+      {
         model: OPENAI_MODEL,
         messages: [{ role: "user", content }],
         max_completion_tokens: 2048,
@@ -396,9 +434,9 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         // extracting JSON out of free text, which is what the previous
         // (Gemini) implementation had to do.
         response_format: { type: "json_object" },
-      }),
-      signal: controller.signal,
-    });
+      },
+      controller.signal
+    );
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       return errorResult(`OpenAI API error ${res.status}: ${body.slice(0, 300)}`);
@@ -450,6 +488,27 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
       }
       await Promise.all(cropTasks);
 
+      // Mirrors the photoAttribution parse loop directly above — same
+      // validation posture (real photo index, a usable boundingBox), just
+      // for a flaw instead of a product. An entry whose box doesn't parse
+      // is dropped entirely rather than kept box-less, since the UI badge
+      // this feeds (ListingCard's yellow outline) needs a real region to
+      // draw, not just a "somewhere in this photo" flag.
+      const flaws: PhotoFlaw[] = [];
+      if (detectFlaws && Array.isArray(parsed.flaws)) {
+        for (const entry of parsed.flaws) {
+          const num = Number(entry?.photoNumber);
+          const description = typeof entry?.description === "string" ? entry.description.trim() : "";
+          if (!description) continue;
+          if (!Number.isInteger(num) || num < 1 || num > images.length) continue;
+          const box = parseBoundingBox(entry?.boundingBox);
+          if (!box) continue;
+          const confidence: PhotoFlaw["confidence"] =
+            entry?.confidence === "low" || entry?.confidence === "high" ? entry.confidence : "medium";
+          flaws.push({ photoNumber: num, description, boundingBox: box, confidence });
+        }
+      }
+
       // Per explicit instruction — resolved the same way productPhotos
       // entries are, but uncropped (this is a whole-listing representative
       // photo, not a single product's own cropped reference shot) and only
@@ -477,6 +536,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
             ? parsed.matchedKnownProduct.trim()
             : null,
         titleMatchPhoto,
+        flaws,
         error: null,
       };
     } catch {
@@ -494,6 +554,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         mismatchReason: null,
         matchedKnownProduct: null,
         titleMatchPhoto: null,
+        flaws: [],
         error: null,
       };
     }
@@ -541,9 +602,8 @@ export async function classifyThumbnailImage(
   // caller since every entry here is an extra image in the request.
   referenceIneligibleImages: Array<{ imageDataUri: string; category: string | null }> = []
 ): Promise<ImageEligibilityResult> {
-  let apiKey: string;
   try {
-    apiKey = getOpenAIApiKey();
+    ensureOpenAIAccess();
   } catch (err) {
     return imageEligibilityError((err as Error).message);
   }
@@ -581,21 +641,17 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    const res = await callOpenAI(
+      "chat",
+      {
         model: OPENAI_MODEL,
         messages: [{ role: "user", content }],
         max_completion_tokens: 400,
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
-      }),
-      signal: controller.signal,
-    });
+      },
+      controller.signal
+    );
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       return imageEligibilityError(`OpenAI API error ${res.status}: ${body.slice(0, 300)}`);
@@ -624,6 +680,309 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
   }
 }
 
+export interface ReferenceImageMatchResult {
+  // True when the thumbnail looks like the SAME specific product as one of
+  // the reference photos — independent of whatever the listing's title
+  // says.
+  matches: boolean;
+  reason: string | null; // one-line explanation, useful for Activity/debugging
+  error: string | null;
+}
+
+function referenceImageMatchError(error: string): ReferenceImageMatchResult {
+  return { matches: false, reason: null, error };
+}
+
+// Per explicit instruction — "prioritize the listing's title over the first
+// image... but at the same time, someone could list a 'gaming console' and
+// the first image the AI sees is a bona fide Xbox Series X, and this time
+// it'd be the AI's image recognition ability to look any further into that
+// listing": an OR, not an AND, against the title-based checks in
+// scrapeEngine.ts (matchSearchItem/findGreenFlagCandidate) — this is called
+// ONLY when the title alone didn't already justify a closer look, as the
+// fallback "does the PHOTO alone make this worth opening" signal, using a
+// user-confirmed Database product's own real reference photos (see
+// SearchItem.linkedProductId) rather than the model's general world
+// knowledge of what the item looks like. Same cheap/small posture as
+// classifyThumbnailImage above — one thumbnail, a short answer, sitting
+// directly in front of every active-search listing whose title didn't
+// already match.
+export async function matchesReferenceProduct(
+  thumbnailDataUri: string,
+  itemName: string,
+  referenceImages: string[]
+): Promise<ReferenceImageMatchResult> {
+  if (!referenceImages.length) return { matches: false, reason: null, error: null };
+
+  try {
+    ensureOpenAIAccess();
+  } catch (err) {
+    return referenceImageMatchError((err as Error).message);
+  }
+
+  const prompt = `You're looking at the thumbnail photo for a Facebook Marketplace listing. After it, you'll see ${referenceImages.length} reference photo(s) of a specific product: "${itemName}". Does the LISTING'S thumbnail show that same specific product — the item itself, not a game, accessory, case, or unrelated item that merely relates to it?
+
+Be conservative — only say yes if you're genuinely confident it's the same specific product, not just a similar category (e.g. some other game console, or a different variant/generation). If the thumbnail doesn't show the product clearly enough to tell, say no rather than guessing.
+
+Respond with ONLY a JSON object, no other text, in this exact shape:
+{ "matches": boolean, "reason": string }`;
+
+  const content: unknown[] = [
+    { type: "text", text: "Listing thumbnail:" },
+    { type: "image_url", image_url: { url: thumbnailDataUri } },
+  ];
+  for (const img of referenceImages) {
+    content.push({ type: "text", text: `Reference photo of "${itemName}":` });
+    content.push({ type: "image_url", image_url: { url: img } });
+  }
+  content.unshift({ type: "text", text: prompt });
+
+  // Same short timeout as classifyThumbnailImage — this sits directly in
+  // front of every active-search listing whose title didn't already
+  // match, so a hung request here shouldn't stall the scanner for long.
+  const timeoutMs = 30_000;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await callOpenAI(
+      "chat",
+      {
+        model: OPENAI_MODEL,
+        messages: [{ role: "user", content }],
+        max_completion_tokens: 400,
+        reasoning_effort: "minimal",
+        response_format: { type: "json_object" },
+      },
+      controller.signal
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return referenceImageMatchError(`OpenAI API error ${res.status}: ${body.slice(0, 300)}`);
+    }
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const text = data.choices?.[0]?.message?.content ?? "";
+    if (!text.trim()) return referenceImageMatchError("OpenAI returned an empty response.");
+    try {
+      const parsed = JSON.parse(text);
+      return {
+        matches: !!parsed.matches,
+        reason: typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : null,
+        error: null,
+      };
+    } catch {
+      return referenceImageMatchError("Couldn't parse the AI's response.");
+    }
+  } catch (err) {
+    if ((err as Error).name === "AbortError") {
+      return referenceImageMatchError(`OpenAI request timed out after ${timeoutMs / 1000}s`);
+    }
+    return referenceImageMatchError((err as Error).message);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Per explicit instruction, live: "I've posted multiple reference photos
+// for 'Wireless Xbox Controller'. the fact that these controllers are
+// different colors is important. look at the D pad on each controller
+// too — older ones only have the '+' shape while newer ones have more of
+// an octagonal shape. finding these sorts of tiny little differences can
+// make all the difference." A product's Reference Photos gallery
+// accumulates real, confirmed photos over time (see index.ts/scrapeEngine.ts's
+// ensurePhotoDifferenceAnalysis, which calls this) but nothing ever
+// actually looked ACROSS them as a set — each one only ever got compared
+// ONE AT A TIME against a listing thumbnail (matchesReferenceProduct
+// above). This is a genuinely different question — not "does X match this
+// product" but "what actually varies between the confirmed-genuine photos
+// of this product I already have" (colorways, hardware revisions, D-pad/
+// port/button shape changes across generations) — the kind of specific,
+// checkable detail worth writing into the product's own lookout notes
+// (see store.ts's appendProductWatchNote) so future listing evaluations
+// and the user's own buying decisions both benefit from it, the same way
+// the existing "Correction: box front labels this a Pro" notes already do.
+export interface ReferencePhotoDifferencesResult {
+  // Null when the model found nothing meaningfully distinguishing across
+  // the photos (all consistent) — not surfaced as an error, just nothing
+  // worth adding to the notes this time.
+  summary: string | null;
+  error: string | null;
+}
+
+export async function analyzeReferencePhotoDifferences(
+  productName: string,
+  referenceImages: string[]
+): Promise<ReferencePhotoDifferencesResult> {
+  if (referenceImages.length < 2) return { summary: null, error: null };
+
+  try {
+    ensureOpenAIAccess();
+  } catch (err) {
+    return { summary: null, error: (err as Error).message };
+  }
+
+  const prompt = `You're looking at ${referenceImages.length} reference photos, all confirmed to genuinely be "${productName}" from real Facebook Marketplace listings. Compare them closely and identify any MEANINGFUL visual differences between them that a reseller should actively watch for — different colors/colorways, hardware revisions (e.g. a button/D-pad shape that changed between generations, a port that moved or was added/removed, a logo or badge that differs), size/shape variants, or anything else that could mean these aren't all the exact same SKU even though they're the same product name.
+
+Be specific and concrete (name the actual difference and which photos show it), not vague ("some variation in appearance"). Only report differences you can actually SEE and are reasonably confident about — don't guess or invent ones. If the photos all look consistent with no meaningful differences, say so plainly.
+
+Respond with ONLY a JSON object, no other text, in this exact shape:
+{ "hasDifferences": boolean, "summary": string }
+"summary" should be empty if hasDifferences is false. If true, a short (1-3 sentence) note a reseller could act on, e.g. "Comes in at least two colors (black and red/black) — see photos 1 and 3. Older units have a plain cross-shaped D-pad; newer ones (photo 4) have an octagonal D-pad — useful for telling generations apart."`;
+
+  const content: unknown[] = [{ type: "text", text: prompt }];
+  referenceImages.forEach((img, i) => {
+    content.push({ type: "text", text: `Photo ${i + 1}:` });
+    content.push({ type: "image_url", image_url: { url: img } });
+  });
+
+  const timeoutMs = 45_000;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await callOpenAI(
+      "chat",
+      {
+        model: OPENAI_MODEL,
+        messages: [{ role: "user", content }],
+        max_completion_tokens: 800,
+        reasoning_effort: "minimal",
+        response_format: { type: "json_object" },
+      },
+      controller.signal
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return { summary: null, error: `OpenAI API error ${res.status}: ${body.slice(0, 300)}` };
+    }
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const text = data.choices?.[0]?.message?.content ?? "";
+    if (!text.trim()) return { summary: null, error: "OpenAI returned an empty response." };
+    try {
+      const parsed = JSON.parse(text);
+      const summary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";
+      return { summary: parsed.hasDifferences && summary ? summary : null, error: null };
+    } catch {
+      return { summary: null, error: "Couldn't parse the AI's response." };
+    }
+  } catch (err) {
+    if ((err as Error).name === "AbortError") {
+      return { summary: null, error: `OpenAI request timed out after ${timeoutMs / 1000}s` };
+    }
+    return { summary: null, error: (err as Error).message };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Per explicit instruction, live: "once there reaches 10 reference photos
+// for a specific product, the ai should have a good understanding of what
+// that product looks like and what it doesn't look like... the ai should be
+// able to automatically sort through reference photos across all Library
+// listings and be able to make corrections on its own." Unlike
+// analyzeReferencePhotoDifferences above (which only writes an
+// informational note about variation WITHIN a consistent gallery), this
+// looks for photos that don't belong there AT ALL — the same kind of
+// judgment reconsiderImageFeedback makes for one user-flagged photo, just
+// applied across the whole gallery at once with the OTHER photos' consensus
+// as the ground truth instead of typed-in user feedback. "confident" is the
+// caller's signal for whether it's safe to actually move/delete the photo
+// unattended — deliberately conservative, since this runs with no human in
+// the loop; the prompt tells the model to leave a photo alone rather than
+// guess when it isn't sure.
+export interface ReferencePhotoAuditFinding {
+  // 1-based, matches the "Photo N:" labels in the prompt below.
+  photoIndex: number;
+  actualSubject: string;
+  confident: boolean;
+  reason: string;
+}
+export interface ReferencePhotoAuditResult {
+  findings: ReferencePhotoAuditFinding[];
+  error: string | null;
+}
+
+export async function auditReferencePhotoGallery(
+  productName: string,
+  referenceImages: string[],
+  knownProducts: string[]
+): Promise<ReferencePhotoAuditResult> {
+  if (referenceImages.length < 2) return { findings: [], error: null };
+
+  try {
+    ensureOpenAIAccess();
+  } catch (err) {
+    return { findings: [], error: (err as Error).message };
+  }
+
+  const prompt = `These are all ${referenceImages.length} reference photos currently filed under "${productName}" on a resale Database's product page. Most of them should genuinely show the same real-world product — treat that majority consensus as the ground truth for what "${productName}" actually looks like.
+
+Look at every photo and find any that CLEARLY show a different, specific, identifiable product than that consensus. Do NOT flag a photo just because it's a worse angle, bad lighting, a different color/condition of the SAME product, or a different generation/variant that still IS "${productName}" — only flag a genuine misfile, something that shouldn't be filed under this product at all.
+
+For each genuine mismatch, name what it actually shows using ONLY its own canonical, generic model name — the name a retailer would use (no condition, color, or listing phrasing folded in). First check whether it matches one of these already-tracked products, and if so use that EXACT name verbatim: ${
+    knownProducts.length ? knownProducts.map((n) => `"${n}"`).join(", ") : "(none tracked yet)"
+  }.
+
+Be conservative: set "confident" true only when you're sure enough that this photo should actually be moved or removed right now with no one double-checking. If you're genuinely unsure, still report it but set "confident" false.
+
+Respond with ONLY a JSON object, no other text, in this exact shape:
+{ "mismatches": [ { "photo": number, "actualSubject": string, "confident": boolean, "reason": string } ] }
+"mismatches" should be an empty array if every photo genuinely belongs.`;
+
+  const content: unknown[] = [{ type: "text", text: prompt }];
+  referenceImages.forEach((img, i) => {
+    content.push({ type: "text", text: `Photo ${i + 1}:` });
+    content.push({ type: "image_url", image_url: { url: img } });
+  });
+
+  const timeoutMs = 45_000;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await callOpenAI(
+      "chat",
+      {
+        model: OPENAI_MODEL,
+        messages: [{ role: "user", content }],
+        max_completion_tokens: 1000,
+        reasoning_effort: "minimal",
+        response_format: { type: "json_object" },
+      },
+      controller.signal
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return { findings: [], error: `OpenAI API error ${res.status}: ${body.slice(0, 300)}` };
+    }
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const text = data.choices?.[0]?.message?.content ?? "";
+    if (!text.trim()) return { findings: [], error: "OpenAI returned an empty response." };
+    try {
+      const parsed = JSON.parse(text);
+      const raw = Array.isArray(parsed.mismatches) ? parsed.mismatches : [];
+      const findings: ReferencePhotoAuditFinding[] = raw
+        .filter(
+          (m: any) =>
+            m && typeof m.photo === "number" && typeof m.actualSubject === "string" && m.actualSubject.trim()
+        )
+        .map((m: any) => ({
+          photoIndex: m.photo,
+          actualSubject: m.actualSubject.trim(),
+          confident: m.confident === true,
+          reason: typeof m.reason === "string" ? m.reason.trim() : "",
+        }));
+      return { findings, error: null };
+    } catch {
+      return { findings: [], error: "Couldn't parse the AI's response." };
+    }
+  } catch (err) {
+    if ((err as Error).name === "AbortError") {
+      return { findings: [], error: `OpenAI request timed out after ${timeoutMs / 1000}s` };
+    }
+    return { findings: [], error: (err as Error).message };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export interface ImageQuestionResult {
   answer: string | null;
   error: string | null;
@@ -637,9 +996,8 @@ export interface ImageQuestionResult {
 // SAME vision model as everything else in this file, just a single free-
 // text question about a single photo instead of a fixed analysis shape.
 export async function answerImageQuestion(imageDataUri: string, question: string, subjectName: string): Promise<ImageQuestionResult> {
-  let apiKey: string;
   try {
-    apiKey = getOpenAIApiKey();
+    ensureOpenAIAccess();
   } catch (err) {
     return { answer: null, error: (err as Error).message };
   }
@@ -659,18 +1017,17 @@ Respond with ONLY a JSON object, no other text: { "answer": string }`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const res = await callOpenAI(
+      "chat",
+      {
         model: OPENAI_MODEL,
         messages: [{ role: "user", content }],
         max_completion_tokens: 800,
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
-      }),
-      signal: controller.signal,
-    });
+      },
+      controller.signal
+    );
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       return { answer: null, error: `OpenAI API error ${res.status}: ${body.slice(0, 300)}` };
@@ -703,11 +1060,18 @@ export interface ThumbnailVerification {
   error: string | null;
 }
 
-const THUMBNAIL_VERIFICATION_PROMPTS: Record<"product" | "brandLogo" | "group", (subject: string) => string> = {
+export type ThumbnailVerificationKind = "product" | "brandLogo" | "group" | "reference";
+
+const THUMBNAIL_VERIFICATION_PROMPTS: Record<ThumbnailVerificationKind, (subject: string) => string> = {
   product: (subject) =>
     `You're checking a candidate Database thumbnail for the specific product "${subject}". It should be an actual photo (or a realistic product render) of that physical item itself — reject it if it's actually a brand/company logo or wordmark, an unrelated product, a screenshot of a webpage/search results, or a generic stock image of something else entirely.`,
   brandLogo: (subject) =>
     `You're checking a candidate logo image for the brand/company "${subject}". It should be that brand's own official logo or wordmark — a graphic mark representing the company/brand itself, containing or stylizing its name — reject it if it's actually a photo of one of their products, a building, a person, packaging, or an unrelated logo.`,
+  // Stricter than "product" above: these photos become the reference gallery
+  // the scanner later compares real Facebook/eBay listings against, so a
+  // photo of the WRONG model/variant is worse than no photo at all.
+  reference: (subject) =>
+    `You're checking a candidate REFERENCE PHOTO for the exact product "${subject}". It will be used to recognize this product in marketplace listings, so it must show that exact product — the correct model, generation and variant (reject a sibling model, an older/newer generation, a different size or edition, or a bundle where this product isn't the clear main subject). Accept a clean product shot, packaging/box art or cover art for it, or a real-world photo of it from any angle. Reject: a brand/company logo, a screenshot of gameplay or a webpage, a wallpaper or fan art, a collage of several different products, an accessory/part/case for it rather than the product itself, an image that is mostly text/ads/banners, and anything blurry or too small to identify.`,
   group: (subject) =>
     `You're checking a candidate thumbnail meant to represent a general collection/category: "${subject}" — it should reasonably represent that whole grouping (not one unrelated single item, and not a brand logo/wordmark).`,
 };
@@ -729,11 +1093,10 @@ const THUMBNAIL_VERIFICATION_PROMPTS: Record<"product" | "brandLogo" | "group", 
 export async function verifyThumbnailCandidate(
   imageDataUri: string,
   subjectName: string,
-  kind: "product" | "brandLogo" | "group"
+  kind: ThumbnailVerificationKind
 ): Promise<ThumbnailVerification> {
-  let apiKey: string;
   try {
-    apiKey = getOpenAIApiKey();
+    ensureOpenAIAccess();
   } catch (err) {
     return { matches: false, reason: null, error: (err as Error).message };
   }
@@ -752,10 +1115,9 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const res = await callOpenAI(
+      "chat",
+      {
         model: OPENAI_MODEL,
         messages: [
           {
@@ -769,9 +1131,9 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         max_completion_tokens: 300,
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
-      }),
-      signal: controller.signal,
-    });
+      },
+      controller.signal
+    );
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       return { matches: false, reason: null, error: `OpenAI API error ${res.status}: ${body.slice(0, 300)}` };
@@ -826,9 +1188,8 @@ export async function reconsiderImageFeedback(
   feedback: string,
   knownProducts: string[]
 ): Promise<ImageFeedbackResult> {
-  let apiKey: string;
   try {
-    apiKey = getOpenAIApiKey();
+    ensureOpenAIAccess();
   } catch (err) {
     return { actualSubject: null, note: null, error: (err as Error).message };
   }
@@ -860,18 +1221,17 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const res = await callOpenAI(
+      "chat",
+      {
         model: OPENAI_MODEL,
         messages: [{ role: "user", content }],
         max_completion_tokens: 600,
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
-      }),
-      signal: controller.signal,
-    });
+      },
+      controller.signal
+    );
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       return { actualSubject: null, note: null, error: `OpenAI API error ${res.status}: ${body.slice(0, 300)}` };

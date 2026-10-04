@@ -1,13 +1,26 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import type { Config } from "./types.js";
 
-// A nationwide spread (one per state capital, minus a couple with
-// unresolved slugs) so the scraper rotates across the whole country
-// looking for deals instead of staying local — the whole point of buying
-// exclusively by mail rather than local pickup. Not independently verified
-// live (no way to browse Facebook from here) — if any of these turn out to
-// be a dead/wrong slug, Facebook will just show an empty or default feed
-// for it and the "Empty browse" diagnostic in Activity will say so.
+// LEGACY, kept only so loadConfig's migration below can recognize an
+// existing account that still has these exact URLs and force it to
+// re-resolve (see the migration a bit further down + index.ts's
+// resolveAccountLocationIfNeeded). Root-caused live with 4 concurrent
+// accounts all running "country" mode: every account's evaluated listings
+// were clustering in Virginia/Maryland (near Richmond) regardless of which
+// of these 48 URLs the rotation had just shuffled to, and the account's own
+// Facebook sidebar kept reading "Richmond, Virginia" no matter what — these
+// city-slug URLs were NEVER actually confirmed to change Facebook's served
+// location (the comment that used to sit here literally admitted that: "if
+// any of these turn out to be a dead/wrong slug, Facebook will just show an
+// empty or default feed for it"). That's exactly what was happening for
+// most of them — Facebook was silently falling back to each account's own
+// default location instead of erroring, so the rotation LOOKED like it was
+// working (a different URL every visit) while actually just re-rendering
+// the same nearby-Richmond results 48 times per cycle. Country mode now
+// resolves through the exact same dialog-driven, Facebook-CONFIRMED
+// mechanism state mode already used (see DEFAULT_COUNTRY_CITIES and
+// resolveAccountLocationIfNeeded) instead of trusting guessed URLs.
 export const DEFAULT_BROWSE_URLS = [
   "https://www.facebook.com/marketplace/montgomery",
   "https://www.facebook.com/marketplace/phoenix",
@@ -59,8 +72,106 @@ export const DEFAULT_BROWSE_URLS = [
   "https://www.facebook.com/marketplace/cheyenne",
 ];
 
+// The SAME nationwide spread as the legacy list above (one per state
+// capital, minus Alaska/Hawaii — mail-only shipping doesn't cover those
+// well), but as real "City, State" names for resolveAccountLocationIfNeeded
+// to drive through Facebook's own "Change location" dialog (see
+// locationDiscovery.ts's discoverLocation/changeLocation) — the same
+// verified-not-guessed mechanism state mode's lookupTopCitiesInState +
+// discoverLocations already used. Full state names, not abbreviations —
+// confirmed live that's what Facebook's own Location field expects (see
+// lookupTopCitiesInState's own comment on this).
+export const DEFAULT_COUNTRY_CITIES = [
+  "Montgomery, Alabama",
+  "Phoenix, Arizona",
+  "Little Rock, Arkansas",
+  "Sacramento, California",
+  "Denver, Colorado",
+  "Hartford, Connecticut",
+  "Dover, Delaware",
+  "Tallahassee, Florida",
+  "Atlanta, Georgia",
+  "Boise, Idaho",
+  "Springfield, Illinois",
+  "Indianapolis, Indiana",
+  "Des Moines, Iowa",
+  "Topeka, Kansas",
+  "Frankfort, Kentucky",
+  "Baton Rouge, Louisiana",
+  "Augusta, Maine",
+  "Annapolis, Maryland",
+  "Boston, Massachusetts",
+  "Lansing, Michigan",
+  "Saint Paul, Minnesota",
+  "Jackson, Mississippi",
+  "Jefferson City, Missouri",
+  "Helena, Montana",
+  "Lincoln, Nebraska",
+  "Carson City, Nevada",
+  "Concord, New Hampshire",
+  "Trenton, New Jersey",
+  "Santa Fe, New Mexico",
+  "Albany, New York",
+  "Raleigh, North Carolina",
+  "Bismarck, North Dakota",
+  "Columbus, Ohio",
+  "Oklahoma City, Oklahoma",
+  "Salem, Oregon",
+  "Harrisburg, Pennsylvania",
+  "Providence, Rhode Island",
+  "Columbia, South Carolina",
+  "Pierre, South Dakota",
+  "Nashville, Tennessee",
+  "Austin, Texas",
+  "Salt Lake City, Utah",
+  "Montpelier, Vermont",
+  "Richmond, Virginia",
+  "Olympia, Washington",
+  "Charleston, West Virginia",
+  "Madison, Wisconsin",
+  "Cheyenne, Wyoming",
+];
+
 export const DEFAULT_CONFIG: Config = {
-  browseUrls: DEFAULT_BROWSE_URLS,
+  // Per explicit instruction — multiple Facebook accounts scanning
+  // concurrently, each its own location (see types.ts's Account). A fresh
+  // install still gets exactly one account with the app's original
+  // always-on nationwide "country" mode, so a new user's first-run
+  // experience is unchanged. "default" (not a random id) since this is a
+  // fixed constant, not something generated per-launch.
+  accounts: [
+    {
+      id: "default",
+      label: "Account 1",
+      enabled: true,
+      // Interim-only — overwritten the moment this account first resolves
+      // (see resolveAccountLocationIfNeeded's "country" branch), just like
+      // state/city mode leave browseUrls empty until their own first
+      // resolution. Kept as the legacy guessed list rather than empty so a
+      // Start that somehow races ahead of resolution still has SOMETHING to
+      // browse instead of erroring on "No browse URLs configured."
+      browseUrls: DEFAULT_BROWSE_URLS,
+      locationMode: "country",
+      selectedState: null,
+      selectedCityOrZip: null,
+      // Per explicit instruction — "for whole country, change the search
+      // radius from 100 miles to 500 miles" (see index.ts's
+      // COUNTRY_MODE_RADIUS_MILES, which is what actually gets applied —
+      // this default only matters for the brief window before a fresh
+      // account's first real resolution overwrites it).
+      searchRadiusMiles: 500,
+      // Per explicit instruction — changing location mode in Config should
+      // just save the choice, not immediately open a browser to resolve it;
+      // resolution now happens lazily the next time this account starts
+      // (see index.ts's resolveAccountLocationIfNeeded). Root-caused live
+      // (see DEFAULT_BROWSE_URLS's own comment above): country mode's
+      // browseUrls are NOT actually reliable without being driven through
+      // Facebook's own "Change location" dialog first, exactly like state
+      // and city mode already require — so this can no longer default to
+      // true the way it used to.
+      locationResolved: false,
+    },
+  ],
   listingsPerLocation: 20,
   headless: false,
   // Per explicit instruction ("can it be a little faster?") — trimmed down
@@ -96,21 +207,42 @@ export const DEFAULT_CONFIG: Config = {
   },
   maxListingAgeHours: 24,
   theme: "dark",
+  primaryColor: "#7c6cf6",
+  accentColor: "#a855f7",
+  rainbowEnabled: false,
   soundEnabled: true,
-  locationMode: "country",
-  selectedState: null,
-  selectedCityOrZip: null,
-  searchRadiusMiles: 100,
+  particlesEnabled: true,
+  // Per explicit instruction — a master on/off for the automatic WatchCount
+  // comps lookup, separate from watchCountOncePerScan below (which only
+  // throttles frequency, not whether it happens at all). Defaults to true
+  // so nothing changes for existing users until they deliberately turn it
+  // off in Config.
+  watchCountEnabled: true,
   watchCountOncePerScan: true,
-  // Per explicit instruction — user-controlled filtering parameters, all
-  // off/unset by default so nothing about existing behavior changes until
-  // the user deliberately turns one on.
-  maxPriceUsd: null,
-  minPriceUsd: null,
+  // Per explicit instruction — user-controlled filtering parameter, off/
+  // unset by default so nothing about existing behavior changes until the
+  // user deliberately turns it on. (Min/Max Price used to live here too, as
+  // a single global cap — now per-item on SearchItem itself, see types.ts.)
   ignoreBlacklist: false,
   autoResearchListings: true,
+  // Condition-awareness — off by default, see types.ts's Config.researchCondition.
+  researchCondition: false,
   rotateSearchItems: false,
   rotateSearchItemsCount: 5,
+  watch: {
+    globallyPaused: false,
+    matchesLastViewedAt: 0,
+  },
+  // Clynx Cloud Phase 1 foundation — off by default, see types.ts's Config.cloud.
+  cloud: {
+    enabled: false,
+  },
+  // eBay Browse API integration — off by default until credentials are
+  // configured, see types.ts's Config.ebay.
+  ebay: {
+    enabled: false,
+  },
+  facebookEnabled: true,
 };
 
 // Derives a plain "browse everything" URL (no /search, no query) from an
@@ -134,16 +266,73 @@ export function loadConfig(configPath: string): Config {
     const raw = JSON.parse(readFileSync(configPath, "utf-8"));
     const merged: Config = { ...DEFAULT_CONFIG, ...raw };
 
-    // Migrate configs saved before multi-location rotation existed
-    // (single browseUrl string) into the new browseUrls array.
-    if ((!merged.browseUrls || !merged.browseUrls.length) && typeof raw.browseUrl === "string" && raw.browseUrl) {
-      merged.browseUrls = [raw.browseUrl];
+    // Per explicit instruction — multiple Facebook accounts. A config
+    // saved before this existed described its ONE location flatly
+    // (browseUrls/locationMode/selectedState/selectedCityOrZip/
+    // searchRadiusMiles right on Config) rather than in an accounts
+    // array; wrap those fields into a single-item array here so upgrading
+    // loses no location setup. Resolves the FULL historical chain first
+    // (an even older single browseUrl string, or older still,
+    // searchUrlTemplate) rather than assuming raw.browseUrls is already
+    // the array form — those two migrations used to write straight to
+    // merged.browseUrls, which no longer exists as a top-level Config
+    // field now that it lives on Account instead.
+    if (!Array.isArray(raw.accounts) || !raw.accounts.length) {
+      let legacyBrowseUrls: string[] = Array.isArray(raw.browseUrls) ? raw.browseUrls : [];
+      if (!legacyBrowseUrls.length && typeof raw.browseUrl === "string" && raw.browseUrl) {
+        legacyBrowseUrls = [raw.browseUrl];
+      }
+      if (!legacyBrowseUrls.length && raw.searchUrlTemplate) {
+        const derived = deriveBrowseUrlFromLegacySearchUrl(raw.searchUrlTemplate);
+        if (derived) legacyBrowseUrls = [derived];
+      }
+      if (!legacyBrowseUrls.length) legacyBrowseUrls = DEFAULT_BROWSE_URLS;
+
+      merged.accounts = [
+        {
+          id: randomUUID(),
+          label: "Account 1",
+          enabled: true,
+          browseUrls: legacyBrowseUrls,
+          locationMode: raw.locationMode === "state" || raw.locationMode === "city" ? raw.locationMode : "country",
+          selectedState: typeof raw.selectedState === "string" ? raw.selectedState : null,
+          selectedCityOrZip: typeof raw.selectedCityOrZip === "string" ? raw.selectedCityOrZip : null,
+          searchRadiusMiles: typeof raw.searchRadiusMiles === "number" ? raw.searchRadiusMiles : 100,
+          // Already resolved — these browseUrls came from a working config.
+          locationResolved: true,
+        },
+      ];
     }
-    // Migrate even older pre-browse-mode configs (searchUrlTemplate + searches[]).
-    if ((!merged.browseUrls || !merged.browseUrls.length) && raw.searchUrlTemplate) {
-      const derived = deriveBrowseUrlFromLegacySearchUrl(raw.searchUrlTemplate);
-      if (derived) merged.browseUrls = [derived];
-    }
+
+    // Per explicit instruction — a config saved before locationResolved
+    // existed (including one already migrated into the accounts array by
+    // an older version of this app) has no way to know whether its saved
+    // browseUrls are still valid for its saved locationMode/selectedState.
+    // Defaulting missing values to true (not false) is the safe direction:
+    // it assumes an existing account's already-working browseUrls are
+    // still good, rather than forcing every upgrading user's next Start to
+    // pay an unexpected resolution delay for a location that hasn't
+    // actually changed.
+    merged.accounts = merged.accounts.map((a) => ({ ...a, locationResolved: a.locationResolved ?? true }));
+
+    // Root-caused live with 4 concurrent accounts (see DEFAULT_BROWSE_URLS's
+    // own comment) — every "country" mode account saved before this fix
+    // carries the OLD guessed city-slug URLs and locationResolved: true
+    // (country mode used to skip resolution entirely), so the safe-default
+    // pass just above would leave them exactly as broken as they already
+    // were. Detecting that exact legacy shape (same length, same first URL)
+    // and forcing ONE more resolution pass — through the now-real
+    // dialog-driven "country" branch in resolveAccountLocationIfNeeded — is
+    // what actually fixes an existing install instead of just new ones. A
+    // country-mode account that's already been re-resolved since this fix
+    // shipped has real, Facebook-confirmed URLs here instead (a different
+    // length/shape almost certainly, since discoverLocations only keeps the
+    // cities that actually resolved), so it's correctly left alone.
+    const looksLikeLegacyGuessedCountryUrls = (browseUrls: string[]): boolean =>
+      browseUrls.length === DEFAULT_BROWSE_URLS.length && browseUrls[0] === DEFAULT_BROWSE_URLS[0];
+    merged.accounts = merged.accounts.map((a) =>
+      a.locationMode === "country" && looksLikeLegacyGuessedCountryUrls(a.browseUrls) ? { ...a, locationResolved: false } : a
+    );
 
     // Migrate configs saved before the "Search For" rename/simplification
     // — old referencePrices entries (which had a since-removed activeSearch
@@ -153,6 +342,8 @@ export function loadConfig(configPath: string): Config {
         item: r.item,
         typicalResaleUsd: r.typicalResaleUsd,
         matchKeywords: r.matchKeywords ?? [],
+        minPriceUsd: null,
+        maxPriceUsd: null,
       }));
     }
     merged.searchItems = merged.searchItems ?? [];
@@ -176,9 +367,12 @@ export function loadConfig(configPath: string): Config {
     // exactly what the user asked for once that confusion was cleared up.)
     // Everything else below this point (API-key-adjacent toggles, the
     // location list, items per location, poll interval, notification
-    // settings, seller-risk filters, Min/Max Price, Date Listed, etc.)
-    // persists exactly as saved until changed — those live on (or are
-    // reachable from) Config/the Dashboard Filters area, not chat-only.
+    // settings, seller-risk filters, Date Listed, etc.) persists exactly as
+    // saved until changed — those live on (or are reachable from) Config/
+    // the Dashboard Filters area, not chat-only. Min/Max Price is the one
+    // exception among "things you set per search item" that's still
+    // session-scoped: it lives ON each (now-reset) searchItems entry rather
+    // than as its own standing Config field.
     merged.searchItems = [];
     merged.customInstructions = "";
     merged.generalDeal = { ...merged.generalDeal, enabled: DEFAULT_CONFIG.generalDeal.enabled };

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { ChatAttachment, ChatMessage, LogLine, ProductProfile, ScrapeStatus } from "../lib/api.js";
+import type { ChatAttachment, ChatMessage, EventStats, LogLine, MetricsSnapshot, ProductProfile, ScrapeStatus, StageStats } from "../lib/api.js";
 import { api } from "../lib/api.js";
 
 // Same cap vision.ts already applies when downloading a listing's own
@@ -277,6 +277,8 @@ export function Activity({
         </p>
       </div>
 
+      <MetricsPanel />
+
       <div className="card" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, padding: 0, overflow: "hidden" }}>
         <div
           style={{
@@ -428,6 +430,179 @@ export function Activity({
   );
 }
 
+// Per explicit instruction — a compact, collapsible pipeline-metrics panel:
+// discovered/evaluated/unique/duplicate rates, dedup cache effectiveness,
+// the vision queue, and per-stage latency (nav, extraction, scoring,
+// vision, eBay, ...). Pull-based — polls metrics:snapshot every 2s rather
+// than a push channel, since these numbers change on every single listing
+// evaluation (see preload/index.ts's own doc comment on why). Collapsed by
+// default so it doesn't compete with the actual Activity feed for
+// attention; the Reset button clears counters to start a fresh
+// before/after measurement window (see metrics.ts's resetMetrics).
+function MetricsPanel() {
+  const [open, setOpen] = useState(false);
+  const [snapshot, setSnapshot] = useState<MetricsSnapshot | null>(null);
+  const [accountLabels, setAccountLabels] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    function poll() {
+      api.getMetricsSnapshot().then((s) => {
+        if (!cancelled) setSnapshot(s);
+      });
+    }
+    poll();
+    const interval = setInterval(poll, 2000);
+    api.listAccounts().then((accounts) => {
+      if (!cancelled) setAccountLabels(Object.fromEntries(accounts.map((a) => [a.id, a.label])));
+    });
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [open]);
+
+  async function reset() {
+    const s = await api.resetMetrics();
+    setSnapshot(s);
+  }
+
+  function eventStat(name: string): EventStats | undefined {
+    return snapshot?.events.find((e) => e.name === name);
+  }
+  function stageStat(name: string): StageStats | undefined {
+    return snapshot?.stages.find((s) => s.stage === name);
+  }
+
+  const uniqueTotal = eventStat("unique")?.total ?? 0;
+  const duplicateTotal = eventStat("duplicate")?.total ?? 0;
+  const duplicateRate = uniqueTotal + duplicateTotal > 0 ? (duplicateTotal / (uniqueTotal + duplicateTotal)) * 100 : 0;
+  const cacheHitTotal = eventStat("dedup_cache_hit")?.total ?? 0;
+  const cacheMissTotal = eventStat("dedup_cache_miss")?.total ?? 0;
+  const cacheHitRate = cacheHitTotal + cacheMissTotal > 0 ? (cacheHitTotal / (cacheHitTotal + cacheMissTotal)) * 100 : 0;
+
+  const STAGE_ORDER = [
+    "marketplace_navigation",
+    "listing_extraction",
+    "cheap_filters",
+    "thumbnail_classification",
+    "detail_page_load",
+    "detail_extraction",
+    "scoring_ai",
+    "vision_analysis",
+    "db_dedup_lookup",
+    "dedup_cache_check",
+    "ebay_lookup",
+  ];
+
+  return (
+    <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          all: "unset",
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "10px 16px",
+          width: "100%",
+          boxSizing: "border-box",
+        }}
+      >
+        <span style={{ fontWeight: 700, fontSize: 13.5 }}>📊 Pipeline metrics</span>
+        <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{open ? "Hide ▲" : "Show ▼"}</span>
+      </button>
+      {open && (
+        <div style={{ padding: "0 16px 14px", display: "flex", flexDirection: "column", gap: 12 }}>
+          {!snapshot ? (
+            <p style={{ fontSize: 13, color: "var(--text-dim)", margin: 0 }}>Loading...</p>
+          ) : (
+            <>
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <button className="icon ghost" style={{ fontSize: 12 }} onClick={reset}>
+                  Reset counters
+                </button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8 }}>
+                <MetricTile label="Discovered/sec" value={(eventStat("discovered")?.perSec ?? 0).toFixed(2)} />
+                <MetricTile label="Evaluated/sec" value={(eventStat("evaluated")?.perSec ?? 0).toFixed(2)} />
+                <MetricTile label="Unique/sec" value={(eventStat("unique")?.perSec ?? 0).toFixed(2)} />
+                <MetricTile label="Duplicate rate" value={`${duplicateRate.toFixed(0)}%`} />
+                <MetricTile label="Dedup cache hit rate" value={`${cacheHitRate.toFixed(0)}%`} />
+                <MetricTile label="Vision queue depth" value={String(snapshot.gauges.vision_queue_depth ?? 0)} />
+                <MetricTile label="Vision jobs/sec" value={(eventStat("vision_completed")?.perSec ?? 0).toFixed(2)} />
+                <MetricTile label="Avg vision latency" value={`${(stageStat("vision_analysis")?.avgMs ?? 0).toFixed(0)} ms`} />
+              </div>
+
+              {Object.keys(snapshot.perAccountEvents).length > 0 && (
+                <div>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text-dim)", margin: "2px 0 6px" }}>Per-account discovery rate</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    {Object.entries(snapshot.perAccountEvents).map(([accountId, events]) => {
+                      const evaluated = events.find((e) => e.name === "evaluated");
+                      return (
+                        <div key={accountId} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
+                          <span style={{ color: "var(--text-muted)" }}>{accountLabels[accountId] ?? accountId}</span>
+                          <span>{(evaluated?.perSec ?? 0).toFixed(2)}/sec ({evaluated?.total ?? 0} total)</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text-dim)", margin: "2px 0 6px" }}>Stage latency</div>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ color: "var(--text-dim)", textAlign: "left" }}>
+                        <th style={{ fontWeight: 600, padding: "2px 8px 2px 0" }}>Stage</th>
+                        <th style={{ fontWeight: 600, padding: "2px 8px" }}>Count</th>
+                        <th style={{ fontWeight: 600, padding: "2px 8px" }}>Avg</th>
+                        <th style={{ fontWeight: 600, padding: "2px 8px" }}>p50</th>
+                        <th style={{ fontWeight: 600, padding: "2px 8px" }}>p95</th>
+                        <th style={{ fontWeight: 600, padding: "2px 8px" }}>Errors</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {STAGE_ORDER.map((name) => {
+                        const s = stageStat(name);
+                        if (!s) return null;
+                        return (
+                          <tr key={name}>
+                            <td style={{ padding: "2px 8px 2px 0" }}>{name}</td>
+                            <td style={{ padding: "2px 8px" }}>{s.count}</td>
+                            <td style={{ padding: "2px 8px" }}>{s.avgMs.toFixed(0)} ms</td>
+                            <td style={{ padding: "2px 8px" }}>{s.p50Ms.toFixed(0)} ms</td>
+                            <td style={{ padding: "2px 8px" }}>{s.p95Ms.toFixed(0)} ms</td>
+                            <td style={{ padding: "2px 8px", color: s.errors ? "var(--danger)" : undefined }}>{s.errors}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MetricTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ background: "var(--bg-elevated)", borderRadius: 8, padding: "8px 10px" }}>
+      <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{label}</div>
+      <div style={{ fontSize: 15, fontWeight: 700 }}>{value}</div>
+    </div>
+  );
+}
+
 // A raw activity-log line — compact monospace, deliberately understated so
 // it doesn't visually compete with ChatRow entries (see below) even at
 // high volume (a nationwide location rotation produces a lot of these).
@@ -504,6 +679,20 @@ function LogRow({
   const content = (
     <>
       <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{new Date(line.ts).toLocaleTimeString()}</span>
+      {/* Per explicit instruction — multiple Facebook accounts sharing this
+          one timeline: a small label so it's clear which account's session
+          produced this line, without splitting Activity into separate
+          per-account feeds. Only set on lines that actually came from a
+          scanner engine (see index.ts's createEngineForAccount) — chat/
+          config-driven lines have no accountId and just omit this. */}
+      {line.accountLabel && (
+        <span
+          className="pill"
+          style={{ flexShrink: 0, fontSize: 10, textTransform: "none", color: "var(--text-muted)", background: "var(--bg-card)" }}
+        >
+          {line.accountLabel}
+        </span>
+      )}
       {isAnalyzing && <AnalyzingGearIcon />}
       <span>{line.message}</span>
       {line.listingUrl && (

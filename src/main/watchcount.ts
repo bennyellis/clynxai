@@ -1,5 +1,5 @@
 import type { Page } from "playwright";
-import { OPENAI_MODEL, OPENAI_URL, getOpenAIApiKey } from "./openai.js";
+import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 
 export interface EbayComp {
   title: string;
@@ -143,19 +143,23 @@ export async function searchSoldComps(page: Page, query: string): Promise<EbayCo
 export async function deriveWatchCountQuery(fallbackName: string, sourceTitle: string | null, imageDataUri: string | null): Promise<string> {
   if (!sourceTitle && !imageDataUri) return fallbackName;
 
-  let apiKey: string;
   try {
-    apiKey = getOpenAIApiKey();
+    ensureOpenAIAccess();
   } catch {
     return fallbackName;
   }
 
+  // Per explicit instruction — this used to explicitly strip condition/
+  // completeness wording into a clean, generic retailer-style name. That
+  // worked against condition-awareness: a query genuinely closer to the
+  // seller's own words is more likely to surface sold comps in a
+  // comparable condition, which analyzeEbayComps below now actually uses.
   const prompt = `A resale-tracking app is about to search eBay's sold listings for comps on a specific product. Base your answer ONLY on the actual Facebook Marketplace listing below — ignore any other name this product might be filed under elsewhere in the app, which may be wrong.
 
 Listing title: "${sourceTitle ?? "(not available)"}"
 ${imageDataUri ? "A photo from this exact listing is attached below." : "(no photo available for this listing)"}
 
-Give your best educated guess at a SHORT, SIMPLE, canonical eBay search query for this SAME product — just brand, model, and the one or two specs that actually distinguish this product line from other variants (e.g. screen size and year for a laptop, generation for a game console, storage size for a phone). Do NOT include color, cosmetic condition, completeness/missing-parts wording (used, no charger, no case, no controller, missing parts, scratches, etc.), seller filler, or the same spec repeated in different phrasing — a real seller's listing title is often redundant or cluttered ("MacBook Pro 15-inch 2018 15\" 2018 Silver, no charger"); your job is to distill that down to the clean, generic name a retailer or eBay category page would use, e.g. "Apple MacBook Pro 15 Inch 2018" — nothing more.
+Give your best educated guess at a real eBay search query for this SAME product, staying as close as reasonable to the seller's own wording — brand, model, the spec(s) that actually distinguish this product line from other variants (e.g. screen size and year for a laptop, generation for a game console, storage size for a phone), AND any condition/completeness/bundle wording actually present in the listing title (used, for parts, no charger, no controller, bundle, etc.) — keep that instead of stripping it, since matching the seller's own phrasing helps find sold comps in a genuinely comparable condition, not just the same base product. Only clean up genuine noise: the same spec repeated in different phrasing, seller filler ("must sell today," "priced to move"), or anything that isn't actually part of describing the item itself.
 
 Respond with ONLY a JSON object, no other text: { "query": string }`;
 
@@ -166,18 +170,17 @@ Respond with ONLY a JSON object, no other text: { "query": string }`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const res = await callOpenAI(
+      "chat",
+      {
         model: OPENAI_MODEL,
         messages: [{ role: "user", content }],
         max_completion_tokens: 500,
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
-      }),
-      signal: controller.signal,
-    });
+      },
+      controller.signal
+    );
     if (!res.ok) return fallbackName;
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const text = data.choices?.[0]?.message?.content ?? "";
@@ -209,8 +212,15 @@ export async function analyzeEbayComps(
 ): Promise<{ avgSoldPriceUsd: number | null; avgRunTimeDays: number | null; avgShippingUsd: number | null; sampleSize: number }> {
   if (comps.length === 0) return { avgSoldPriceUsd: null, avgRunTimeDays: null, avgShippingUsd: null, sampleSize: 0 };
 
+  // Per explicit instruction — this used to tell the model condition
+  // wording "still counts as a match" regardless, i.e. condition was only
+  // ever a product-IDENTITY pass/fail filter. Condition segmentation is now
+  // handled afterward in plain arithmetic (see below, same "far more
+  // reliable than trusting an LLM's own math" posture as the rest of this
+  // function) using each comp's own already-parsed condition field — the AI
+  // here only ever needs to judge product identity, never condition.
   const prompt = `You're comparing eBay sold listings against a specific product a reseller is researching: "${productName}".
-For EACH listing below, decide whether its title genuinely refers to the SAME base product — same model, NOT a special/limited/collector's edition, NOT a meaningfully different bundle/capacity/accessory set, and NOT a clearly unrelated item. Ordinary condition wording (new/used/refurbished) and minor color variants still count as a match.
+For EACH listing below, decide whether its title genuinely refers to the SAME base product — same model, NOT a special/limited/collector's edition, NOT a meaningfully different bundle/capacity/accessory set, and NOT a clearly unrelated item. Minor color variants still count as a match.
 
 Listings (index: title):
 ${comps.map((c, i) => `${i}: ${c.title}`).join("\n")}
@@ -218,14 +228,12 @@ ${comps.map((c, i) => `${i}: ${c.title}`).join("\n")}
 Respond with ONLY a JSON object, no other text, in this exact shape:
 { "matchingIndices": number[] }`;
 
-  const apiKey = getOpenAIApiKey();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
   try {
-    const res = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const res = await callOpenAI(
+      "chat",
+      {
         model: OPENAI_MODEL,
         messages: [{ role: "user", content: prompt }],
         max_completion_tokens: 800,
@@ -233,9 +241,9 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         // completion-token budget on invisible reasoning tokens without
         // this, same lesson as everywhere else this app calls OpenAI.
         reasoning_effort: "minimal",
-      }),
-      signal: controller.signal,
-    });
+      },
+      controller.signal
+    );
     if (!res.ok) throw new Error(`OpenAI API error ${res.status}: ${await res.text()}`);
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const content = data.choices?.[0]?.message?.content ?? "";
@@ -245,17 +253,47 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
     const matched = indices.map((i) => comps[i]).filter((c): c is EbayComp => !!c);
     if (matched.length === 0) return { avgSoldPriceUsd: null, avgRunTimeDays: null, avgShippingUsd: null, sampleSize: 0 };
 
-    const avgSoldPriceUsd = matched.reduce((sum, c) => sum + c.priceUsd, 0) / matched.length;
-    const withRunTime = matched.filter((c) => c.runTimeDays !== null);
+    // Condition-awareness — segment the AI-confirmed matches by each comp's
+    // own already-parsed condition (searchSoldComps' parseCompCard already
+    // extracts "Used"/"New"/null per comp; this was previously parsed and
+    // never read anywhere), and average over whichever condition segment
+    // is actually the LARGEST among the matches — the condition a real
+    // Facebook Marketplace resale item is overwhelmingly likely to turn up
+    // in — rather than blending every condition together into one number.
+    // Falls back to the full blended set when no single segment clears a
+    // real sample floor (3), so a lone outlier or a 1-comp segment can't
+    // skew the result off a meaningless sliver of data. Plain arithmetic,
+    // no AI involved — same "far more reliable than trusting an LLM's own
+    // math" posture the rest of this function already commits to.
+    const MIN_SEGMENT_SAMPLES = 3;
+    const byCondition = new Map<string, EbayComp[]>();
+    for (const c of matched) {
+      const key = c.condition ?? "unknown";
+      const list = byCondition.get(key);
+      if (list) list.push(c);
+      else byCondition.set(key, [c]);
+    }
+    let dominantSegment = matched;
+    let dominantSize = 0;
+    for (const list of byCondition.values()) {
+      if (list.length > dominantSize) {
+        dominantSize = list.length;
+        dominantSegment = list;
+      }
+    }
+    const source = dominantSize >= MIN_SEGMENT_SAMPLES ? dominantSegment : matched;
+
+    const avgSoldPriceUsd = source.reduce((sum, c) => sum + c.priceUsd, 0) / source.length;
+    const withRunTime = source.filter((c) => c.runTimeDays !== null);
     const avgRunTimeDays = withRunTime.length > 0 ? withRunTime.reduce((sum, c) => sum + (c.runTimeDays ?? 0), 0) / withRunTime.length : null;
     // Only averaged across comps where a shipping cost was actually parsed
     // (see parseShippingUsd) — a comp whose shipping line didn't match
     // either known shape is left out of this average entirely rather than
     // silently counted as $0, so one unparsed listing can't drag the
     // average down.
-    const withShipping = matched.filter((c) => c.shippingUsd !== null);
+    const withShipping = source.filter((c) => c.shippingUsd !== null);
     const avgShippingUsd = withShipping.length > 0 ? withShipping.reduce((sum, c) => sum + (c.shippingUsd ?? 0), 0) / withShipping.length : null;
-    return { avgSoldPriceUsd, avgRunTimeDays, avgShippingUsd, sampleSize: matched.length };
+    return { avgSoldPriceUsd, avgRunTimeDays, avgShippingUsd, sampleSize: source.length };
   } catch (err) {
     if ((err as Error).name === "AbortError") {
       throw new Error(`OpenAI request timed out after ${OPENAI_TIMEOUT_MS / 1000}s`);

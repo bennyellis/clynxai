@@ -3,7 +3,12 @@ out/
 dist/
 data/
 browser-profile/
+browser-profiles/
 ebay-profile/
 .env
 config.json
 *.log
+
+# Per-install login/session state (holds a refresh token) — never commit
+cloud-session.json
+app-settings.json

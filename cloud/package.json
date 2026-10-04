@@ -1,0 +1,44 @@
+{
+  "name": "clynx-cloud",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Clynx Cloud backend — auth, devices, Watch sync, listing ingestion/dedup, and the async job queue (Phases 1-4). Standalone project, isolated from the Electron app.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "dev:worker": "tsx watch src/worker.ts",
+    "dev:all": "npm run db:up && npm run migrate && concurrently -n api,worker -c blue,magenta \"npm:dev\" \"npm:dev:worker\"",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "migrate": "tsx src/db/migrate.ts",
+    "worker": "tsx src/worker.ts"
+  },
+  "dependencies": {
+    "argon2": "^0.41.1",
+    "bullmq": "^5.34.7",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.0",
+    "ioredis": "^5.4.2",
+    "jose": "^5.9.6",
+    "pg": "^8.13.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/pg": "^8.11.10",
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  },
+  "allowScripts": {
+    "argon2@0.41.1": true,
+    "esbuild@0.28.2": true,
+    "esbuild@0.21.5": true
+  }
+}
