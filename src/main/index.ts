@@ -1,13 +1,16 @@
 import "dotenv/config";
-import { app, BrowserWindow, ipcMain, shell, Menu, dialog } from "electron";
+import { makePhotoCheck } from "./compPhotoCheck.js";
+import { app, BrowserWindow, ipcMain, shell, Menu, dialog, Notification } from "electron";
 import path from "node:path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, cpSync } from "node:fs";
 import { Store } from "./store.js";
+import { colorsConflict, colorsIn } from "./colors.js";
 import { ScrapeEngine } from "./scrapeEngine.js";
 import { WatchScheduler } from "./watchScheduler.js";
 import { EbayEngine } from "./ebayEngine.js";
 import { hasEbayCredentials } from "./ebayClient.js";
-import { initOpenAIProxy } from "./openai.js";
+import { hasOpenAIAccess, initOpenAIProxy } from "./openai.js";
+import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
 import { loadConfig, saveConfig, DEFAULT_CONFIG, DEFAULT_BROWSE_URLS, DEFAULT_COUNTRY_CITIES } from "./config.js";
 import {
   streamChat,
@@ -23,7 +26,7 @@ import {
 } from "./chat.js";
 import { randomUUID } from "node:crypto";
 import { lookupProduct, expandSearchKeywords } from "./products.js";
-import { downloadImageAsDataUri, findBrandLogoImage, findGroupImage, findProductImage, findPoorConditionProductImage, findReferencePhotos, buildImageCollage, generateCategoryImage } from "./webResearch.js";
+import { downloadImageAsDataUri, shrinkImageDataUri, findBrandLogoImage, findGroupImage, findPoorConditionProductImage, findReferencePhotos, findFreeReferencePhotos, buildImageCollage, generateCategoryImage, lookUpOnWeb } from "./webResearch.js";
 import {
   answerImageQuestion,
   reconsiderImageFeedback,
@@ -31,17 +34,48 @@ import {
   auditReferencePhotoGallery,
 } from "./vision.js";
 import { lookupTopCitiesInState } from "./locationDiscovery.js";
-import { analyzeEbayComps, deriveWatchCountQuery } from "./watchcount.js";
+import { analyzeEbayComps, deriveWatchCountQuery, type CompAnalysis } from "./watchcount.js";
+import { fetchActiveAsks } from "./ebayActive.js";
+import { resolveIdentityTarget } from "./productIdentity.js";
+import { buyerTotalUsd, estimateMarketValue } from "./marketValue.js";
+import { compMatchesSpecs, modelLettersConflict, titleLooksLikeProduct } from "./compFilter.js";
+import { focalProductName } from "./dealSummary.js";
+import type { MarketCheck } from "./preAlert.js";
+import { fetchMyStoreReference, parseSellerName } from "./myStore.js";
+import { pushRecentSearch, removeRecentSearch } from "./recentSearches.js";
+import { baseNameOfBrokenVariant, brokenVariantName, isBrokenVariantName } from "./brokenVariant.js";
+import { clampMarginPercent, clampNetPercent } from "./resaleMath.js";
+import { snapToFacebookRadius, snapToWatchInterval } from "./watchOptions.js";
 import { timed, getMetricsSnapshot, resetMetrics } from "./metrics.js";
+import { DiscoveryFeed, type DiscoverySource } from "./discovery.js";
+import { breakDownListing, valueBundle, type BundleValuation, type PricedBundleItem } from "./bundleBreakdown.js";
 import { CloudClient } from "./cloudClient.js";
 import { WatchSyncService } from "./watchSync.js";
 import { ListingIngestSyncService } from "./listingIngestSync.js";
 import { FeedbackSyncService } from "./feedbackSync.js";
 import { ProductSyncService } from "./productSync.js";
-import type { Account, ActiveProductResearch, CloudStatus, Config, EngineConfig, FeedbackVerdict, LogLine, ProductProfile, ScrapeStatus, SearchItem, Watch } from "./types.js";
+import type { Account, ActiveProductResearch, CloudStatus, Config, EngineConfig, FeedbackVerdict, LogLine, ProductProfile, ScrapeStatus, SearchItem, Watch, WatchPlatform, WatchTerm } from "./types.js";
 import { rmSync } from "node:fs";
 
 Menu.setApplicationMenu(null);
+
+// Only one Clynx may run at a time. A second copy (double-clicking the exe
+// again, or the dev build alongside the packaged one) would share this
+// install's SQLite database, the same Facebook/eBay browser profiles, and —
+// worst — the same single-use cloud refresh token: the second copy's login
+// check made the server see the token being reused, which it treats as theft
+// and answers by revoking every session ("Refresh token reuse detected; all
+// sessions revoked"), logging the user out. The second launch now just
+// brings the first window to the front and exits.
+const hasInstanceLock = app.requestSingleInstanceLock();
+if (!hasInstanceLock) app.quit();
+app.on("second-instance", () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
 
 const baseDir = app.isPackaged ? app.getPath("userData") : app.getAppPath();
 // Multi-user login migration — every one of these three used to be a fixed
@@ -113,6 +147,7 @@ function saveEnvKey(varName: string, key: string): void {
 // `config` variable exactly as before — the only thing that changed is WHEN
 // it first gets a real value.
 let config: Config = { ...DEFAULT_CONFIG };
+registerLowAiModeSource(() => config.lowAiMode !== false);
 
 // Clynx Cloud Phase 1 — see cloudClient.ts. getConfig always reads the
 // live `config` variable (reassigned throughout this file on save), not a
@@ -520,6 +555,143 @@ async function resolveAccountLocationIfNeeded(accountId: string): Promise<{ ok: 
   };
 }
 
+// A Watch's minimum eBay seller rating, as typed by the user or produced by
+// the chat model: a percentage from 0 to 100, or null for "no requirement".
+// Anything else (empty, NaN, out of range) is treated as no requirement
+// rather than guessed at.
+// Tells the user a Watch found something: a Windows notification (the phone push, if a
+// topic is set, is sent separately by the engine). Clicking it brings the app to the front
+// on Feed, where the listing now is.
+function notifyWatchMatch(watch: Watch, info: { listingId: string }): void {
+  // A Watch with its own ntfy topic is run for somebody else: its finds go to that topic only, no desktop ping here.
+  if (watch.ntfyTopic?.trim()) return;
+  if (config.desktopNotifications === false || !Notification.isSupported()) return;
+  const record = store.getById(info.listingId);
+  if (!record) return;
+  const where = record.locationText ? ` · ${record.locationText}` : "";
+  const price = record.price !== null ? ` — $${record.price}` : "";
+  const notification = new Notification({
+    title: `${record.justListed ? "Just listed" : "New"}: Watch "${watch.name}" found something`,
+    body: `${record.title}${price}${where}`,
+  });
+  notification.on("click", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+    sendToRenderer("app:navigate", "feed");
+  });
+  notification.show();
+}
+
+// Older listings stored a whole-size photo (150-200 KB as base64) as their first image. Feed
+// fetches every listing on each refresh, so those were megabytes of avoidable IPC, memory and
+// decoding. A few at a time, shortly after login (so it never delays start-up), each is
+// replaced by a card-sized copy; listings that are already small are never touched, so this is
+// a no-op once it has run.
+function scheduleListingPhotoShrink(forStore: Store): void {
+  const BATCH = 6;
+  let changed = 0;
+  const step = async (): Promise<void> => {
+    if (store !== forStore) return; // a different user signed in meanwhile
+    const batch = forStore.listHeavyListingPhotos(BATCH);
+    if (!batch.length) {
+      if (changed) sendToRenderer("listings:refresh");
+      return;
+    }
+    let progressed = false;
+    for (const row of batch) {
+      const next = await Promise.all(row.imageUrls.map((u) => (u.startsWith("data:image") ? shrinkImageDataUri(u) : u)));
+      if (next.some((u, i) => u !== row.imageUrls[i])) {
+        forStore.setListingImageUrls(row.id, next);
+        changed++;
+        progressed = true;
+      }
+    }
+    // Rows that can't be made smaller would be returned forever; stop rather than loop.
+    if (!progressed) return;
+    setTimeout(() => void step().catch(() => {}), 400);
+  };
+  setTimeout(() => void step().catch(() => {}), 20_000);
+}
+
+// A Watch that was just created should start watching. "Pause All" would otherwise
+// hold it back silently, so creating one turns that off.
+function startWatching(): void {
+  if (!config.watch.globallyPaused) return;
+  config = { ...config, watch: { ...config.watch, globallyPaused: false } };
+  saveConfig(CONFIG_PATH, config);
+  sendToRenderer("config:updated", config);
+}
+
+function sanitizeSellerRating(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n) || n < 0 || n > 100) return null;
+  return n;
+}
+
+function locationModeOrCity(src: { locationMode?: "country" | "state" | "city" }): "country" | "state" | "city" {
+  return src.locationMode ?? "city";
+}
+
+const MAX_WATCH_TERMS = 20;
+
+// What a Watch is told to look for, as typed in the form (no keywords yet): the
+// trimmed, non-empty, de-duplicated phrases, the first MAX_WATCH_TERMS of them.
+function cleanTermInputs(inputs: Array<{ phrase: string; linkedProductId?: string | null }>): Array<{ phrase: string; linkedProductId: string | null }> {
+  const seen = new Set<string>();
+  const out: Array<{ phrase: string; linkedProductId: string | null }> = [];
+  for (const input of inputs) {
+    const phrase = String(input.phrase ?? "").trim();
+    const key = phrase.toLowerCase();
+    if (!phrase || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ phrase, linkedProductId: input.linkedProductId ?? null });
+    if (out.length >= MAX_WATCH_TERMS) break;
+  }
+  return out;
+}
+
+// Turns the form's terms into stored ones by working out each one's match keywords.
+// A phrase the Watch already had keeps the keywords it has (no new AI call).
+async function buildWatchTerms(inputs: Array<{ phrase: string; linkedProductId?: string | null }>, existing: WatchTerm[] = []): Promise<WatchTerm[]> {
+  const known = new Map(existing.map((t) => [t.phrase.toLowerCase(), t]));
+  return Promise.all(
+    cleanTermInputs(inputs).map(async (t) => {
+      const prior = known.get(t.phrase.toLowerCase());
+      return { phrase: t.phrase, linkedProductId: t.linkedProductId, matchKeywords: prior ? prior.matchKeywords : await expandSearchKeywords(t.phrase) };
+    })
+  );
+}
+
+// Only ids of accounts that exist; an empty list means "any account".
+function cleanAccountIds(ids: unknown): string[] {
+  if (!Array.isArray(ids)) return [];
+  const real = new Set(config.accounts.map((a) => a.id));
+  return [...new Set(ids.map(String))].filter((id) => real.has(id));
+}
+
+// Location fields a new/edited Watch is stored with. Only Facebook Watches
+// search a place; an eBay Watch searches the whole marketplace, so it's
+// stored as "country" with no place or radius (the columns are NOT NULL on
+// location_mode, and "country" is the inert value everything else already
+// treats as "nowhere in particular").
+function watchLocationFor(
+  platform: WatchPlatform,
+  src: { locationMode?: "country" | "state" | "city"; selectedState?: string | null; selectedCityOrZip?: string | null; searchRadiusMiles?: number | null }
+): { locationMode: "country" | "state" | "city"; selectedState: string | null; selectedCityOrZip: string | null; searchRadiusMiles: number | null } {
+  if (platform === "ebay") return { locationMode: "country", selectedState: null, selectedCityOrZip: null, searchRadiusMiles: null };
+  return {
+    locationMode: src.locationMode ?? "city",
+    selectedState: src.selectedState ?? null,
+    selectedCityOrZip: src.selectedCityOrZip ?? null,
+    // Only the radii Facebook's location dialog offers; anything else snaps to the nearest.
+    searchRadiusMiles: locationModeOrCity(src) === "city" ? snapToFacebookRadius(src.searchRadiusMiles) : null,
+  };
+}
+
 // Same case-insensitive-exact-then-substring leniency remove_search_item's
 // plain string match doesn't bother with (Search For items are usually
 // referred to verbatim) — a Watch's name is user-chosen free text, so "the
@@ -579,8 +751,13 @@ async function executeChatTool(
     // Search For list — see types.ts's SearchItem doc comment.
     const minPriceUsd = typeof call.args.minPriceUsd === "number" ? call.args.minPriceUsd : null;
     const maxPriceUsd = typeof call.args.maxPriceUsd === "number" ? call.args.maxPriceUsd : null;
-    const newItem = { item, matchKeywords, typicalResaleUsd, linkedProductId, minPriceUsd, maxPriceUsd };
-    config = { ...config, searchItems: [...config.searchItems, newItem] };
+    const includeBroken = call.args.includeBroken === true;
+    const newItem = { item, matchKeywords, typicalResaleUsd, linkedProductId, minPriceUsd, maxPriceUsd, ...(includeBroken ? { includeBroken: true } : {}) };
+    config = {
+      ...config,
+      searchItems: [...config.searchItems, newItem],
+      recentSearches: pushRecentSearch(config.recentSearches, { item, minPriceUsd, maxPriceUsd, linkedProductId, includeBroken }),
+    };
     // Bug fix (verified live: "I see it finding good listings at times but
     // it really fails to stay on track long term") — this used to rely on
     // the AI itself remembering to separately call
@@ -654,6 +831,13 @@ async function executeChatTool(
     return `Added to custom instructions: "${instruction}"`;
   }
 
+  // Clynx looking something up the way a person would (a web search it reads and explains in chat): nothing is saved or changed.
+  if (call.name === "web_research") {
+    const query = String(call.args.query ?? "").trim();
+    if (!query) return "Failed: no search query given.";
+    return await lookUpOnWeb(query);
+  }
+
   if (call.name === "research_product") {
     const product = String(call.args.product ?? "").trim();
     if (!product) return "Failed: no product name given.";
@@ -678,13 +862,12 @@ async function executeChatTool(
       // throwing away the extra specificity the user asked about; `product`
       // (the user's actual query) is what has to actually get researched,
       // existing.id is just where the result gets saved.
-      runProductLookup(existing.id, product);
+      runProductLookup(existing.id, product, { source: "you" });
       return `Already have a Database profile for "${existing.name}" — refreshing it with a fresh web search for "${product}" now, check the Database tab in a moment.`;
     }
-    const id = randomUUID();
-    store.addProductStub(id, product);
+    const id = store.addProductStub(randomUUID(), product);
     sendToRenderer("products:updated", store.getProductById(id));
-    runProductLookup(id, product);
+    runProductLookup(id, product, { source: "you" });
     return `Added "${product}" to the Database and researching it now — variant/identifying details will show up on the Database tab in a moment.`;
   }
 
@@ -783,9 +966,11 @@ async function executeChatTool(
     const changed: string[] = [];
 
     if (typeof a.dealThresholdPercent === "number") { patch.dealThresholdPercent = a.dealThresholdPercent; changed.push("deal threshold"); }
+    if (typeof a.ebayNetPercent === "number") { patch.ebayNetPercent = clampNetPercent(a.ebayNetPercent); changed.push("eBay take-home %"); }
+    if (typeof a.minProfitMarginPercent === "number") { patch.minProfitMarginPercent = clampMarginPercent(a.minProfitMarginPercent); changed.push("minimum profit margin"); }
     if (typeof a.listingsPerLocation === "number") { patch.listingsPerLocation = Math.max(1, Math.round(a.listingsPerLocation)); changed.push("listings per location"); }
-    if (typeof a.pollIntervalMinutesMin === "number") { patch.pollIntervalMinutesMin = Math.max(0.5, a.pollIntervalMinutesMin); changed.push("min poll interval"); }
-    if (typeof a.pollIntervalMinutesMax === "number") { patch.pollIntervalMinutesMax = Math.max(0.5, a.pollIntervalMinutesMax); changed.push("max poll interval"); }
+    if (typeof a.pollIntervalMinutesMin === "number") { patch.pollIntervalMinutesMin = Math.max(0, a.pollIntervalMinutesMin); changed.push("min wait between passes"); }
+    if (typeof a.pollIntervalMinutesMax === "number") { patch.pollIntervalMinutesMax = Math.max(0, a.pollIntervalMinutesMax); changed.push("max wait between passes"); }
     if (typeof a.headless === "boolean") { patch.headless = a.headless; changed.push("headless mode"); }
     if (typeof a.customInstructions === "string") { patch.customInstructions = a.customInstructions; changed.push("custom instructions (replaced)"); }
     if (typeof a.photoAnalysisEnabled === "boolean") { patch.photoAnalysis = { enabled: a.photoAnalysisEnabled }; changed.push("photo analysis auto-check"); }
@@ -876,7 +1061,11 @@ async function executeChatTool(
     // engine — see ensureEngineFor — but "start all" only touches ones the
     // user has actually enabled).
     const toStart = config.accounts.filter((a) => a.enabled && !ensureEngineFor(a.id).getStatus().running);
-    if (!toStart.length) return "The scanner is already running.";
+    if (!toStart.length) {
+      return config.accounts.some((a) => a.enabled)
+        ? "The scanner is already running."
+        : "No Facebook account is switched on, so there is nothing to start. Turn one on in Config > Sources (the Enabled button on its card), or press Start Scanner on the Dashboard, which then starts all of them.";
+    }
     // Per explicit instruction — resolve any pending location change (see
     // resolveAccountLocationIfNeeded) before actually starting each one; a
     // no-op for an account whose location is already resolved.
@@ -945,22 +1134,35 @@ async function executeChatTool(
       : [];
     if (!matchKeywords.length) return "Failed: need at least one match keyword.";
     const name = String(call.args.name ?? "").trim() || searchPhrase;
+    const platform: WatchPlatform = call.args.platform === "ebay" ? "ebay" : "facebook";
     const locationMode = call.args.locationMode === "state" || call.args.locationMode === "country" ? call.args.locationMode : "city";
     const selectedCityOrZip = typeof call.args.selectedCityOrZip === "string" ? call.args.selectedCityOrZip.trim() || null : null;
     const selectedState = typeof call.args.selectedState === "string" ? call.args.selectedState.trim() || null : null;
     // city/state modes need a real place to resolve — country mode needs
     // nothing extra (same as an Account's own country mode). Caught here
     // rather than left to fail silently later when the scheduler/resolution
-    // finds nothing to search.
-    if (locationMode === "city" && !selectedCityOrZip) {
+    // finds nothing to search. (An eBay Watch has no location at all.)
+    if (platform === "facebook" && locationMode === "city" && !selectedCityOrZip) {
       return "Failed: a city/ZIP Watch needs a specific location — ask the user which city or ZIP to watch, then try again.";
     }
-    if (locationMode === "state" && !selectedState) {
+    if (platform === "facebook" && locationMode === "state" && !selectedState) {
       return "Failed: a state Watch needs a state — ask the user which state to watch, then try again.";
     }
     const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
+    // Extra products for a Facebook Watch. The model is already an LLM, so (as above) their
+    // match keywords come from the phrase itself rather than another AI call.
+    const extraPhrases = platform === "facebook" && Array.isArray(call.args.alsoWatchFor) ? (call.args.alsoWatchFor as unknown[]).map((p) => String(p).trim()).filter(Boolean) : [];
+    const terms: WatchTerm[] = [{ phrase: searchPhrase, matchKeywords, linkedProductId: null }];
+    for (const phrase of extraPhrases) {
+      if (terms.length >= MAX_WATCH_TERMS) break;
+      if (terms.some((t) => t.phrase.toLowerCase() === phrase.toLowerCase())) continue;
+      terms.push({ phrase, matchKeywords: [phrase.toLowerCase()], linkedProductId: null });
+    }
     const watch = store.createWatch({
       name,
+      platform,
+      terms,
+      checkIntervalMinutes: snapToWatchInterval(num(call.args.checkIntervalMinutes) ?? undefined),
       searchPhrase,
       matchKeywords,
       linkedProductId: null,
@@ -969,13 +1171,12 @@ async function executeChatTool(
       minProfitUsd: num(call.args.minProfitUsd),
       minDiscountPercent: num(call.args.minDiscountPercent),
       maxListingAgeMinutes: num(call.args.maxListingAgeMinutes),
-      locationMode,
-      selectedState,
-      selectedCityOrZip,
-      searchRadiusMiles: num(call.args.searchRadiusMiles),
+      minSellerRatingPercent: platform === "ebay" ? sanitizeSellerRating(call.args.minSellerRatingPercent) : null,
+      ...watchLocationFor(platform, { locationMode, selectedState, selectedCityOrZip, searchRadiusMiles: num(call.args.searchRadiusMiles) }),
     });
+    startWatching();
     sendToRenderer("watches:updated", store.listWatches());
-    const line: LogLine = { ts: Date.now(), level: "info", message: `Watch created via chat: "${watch.name}"` };
+    const line: LogLine = { ts: Date.now(), level: "info", message: `${platform === "ebay" ? "eBay" : "Facebook"} Watch created via chat: "${watch.name}"` };
     recordLog(line);
     sendToRenderer("engine:log", line);
     // Same warning WatchFormFlow.tsx already shows inline when creating one
@@ -987,7 +1188,14 @@ async function executeChatTool(
       (watch.minProfitUsd !== null || watch.minDiscountPercent !== null) && !watch.linkedProductId
         ? " Heads up: the profit/discount condition needs a linked Database product with known pricing to ever be judged — without one, it won't trigger. Link one from the Watch screen if you want that condition to actually work."
         : "";
-    return `Created Watch "${watch.name}" for "${searchPhrase}" — it'll keep looking even with the scanner stopped, and you can review or edit it anytime on the Watch screen (eye icon in the sidebar).${pricingCaveat}`;
+    // An eBay Watch is only ever searched by the eBay engine, which does
+    // nothing while "Search eBay" is off in Config or the API credentials are
+    // missing — say so instead of letting a Watch silently never run.
+    const ebayCaveat =
+      platform === "ebay" && (!config.ebay?.enabled || !hasEbayCredentials())
+        ? ` Heads up: eBay searching is currently ${config.ebay?.enabled ? "missing its API credentials (EBAY_CLIENT_ID/EBAY_CLIENT_SECRET in .env)" : "turned off — it needs \"Search eBay\" switched on in Config"}, so this Watch won't run until that's fixed.`
+        : "";
+    return `Created ${platform === "ebay" ? "an eBay" : "a Facebook"} Watch "${watch.name}" for "${searchPhrase}" — it'll keep looking even with the scanner stopped, and you can review or edit it anytime on the Watch screen (eye icon in the sidebar).${pricingCaveat}${ebayCaveat}`;
   }
 
   if (call.name === "pause_watch") {
@@ -1111,6 +1319,7 @@ function ensureGroupThumbnail(segments: string[]): void {
 // in-flight dedup / fetch-once-cache-forever / fire-and-forget shape too.
 const categoryThumbnailsInFlight = new Set<string>();
 function ensureCategoryThumbnail(category: string): void {
+  if (isLowAiMode()) return; // a generated image per category: not worth credits; the tile shows its products' photos
   const key = category.toLowerCase();
   if (categoryThumbnailsInFlight.has(key) || store.getGroupThumbnail(category)) return;
   categoryThumbnailsInFlight.add(key);
@@ -1146,7 +1355,7 @@ function ensureCategoryThumbnail(category: string): void {
 // comparing photos instead of user-typed.
 const photoDifferenceAnalysisInFlight = new Set<string>();
 function ensurePhotoDifferenceAnalysis(productId: string): void {
-  if (photoDifferenceAnalysisInFlight.has(productId)) return;
+  if (isLowAiMode() || photoDifferenceAnalysisInFlight.has(productId)) return;
   photoDifferenceAnalysisInFlight.add(productId);
   (async () => {
     try {
@@ -1191,7 +1400,7 @@ function ensurePhotoDifferenceAnalysis(productId: string): void {
 // is still there to catch anything this leaves behind.
 const photoGalleryAuditInFlight = new Set<string>();
 function ensurePhotoGalleryAudit(productId: string): void {
-  if (photoGalleryAuditInFlight.has(productId)) return;
+  if (isLowAiMode() || photoGalleryAuditInFlight.has(productId)) return;
   photoGalleryAuditInFlight.add(productId);
   (async () => {
     try {
@@ -1202,7 +1411,9 @@ function ensurePhotoGalleryAudit(productId: string): void {
       // slicing needed here the way the 8-photo difference-analysis above
       // has to bound itself.
       const images = store.listProductImages(productId);
-      if (images.length < 10) return;
+      // An entry that names a color gets checked from 3 photos on (a white console among black ones is obvious early); the
+      // rest wait for 10, when the gallery's consensus is reliable.
+      if (images.length < (colorsIn(product.name).size > 0 ? 3 : 10)) return;
       const knownProducts = store
         .listProducts()
         .map((p) => p.name)
@@ -1237,10 +1448,23 @@ function ensurePhotoGalleryAudit(productId: string): void {
         // just removed from where it clearly didn't belong (turning a
         // stray photo into a new product is still the manual feedback
         // path's job, same as it always has been).
-        const target = store.findMatchingProduct(finding.actualSubject);
-        if (target) {
+        // The entry for what the photo really shows: that exact name, else the same product in that exact color, else
+        // a fuzzy name match. A DIFFERENT COLOR of this very product with no entry yet gets one of its own (the white
+        // Xbox Series S found among the black ones); anything else unmatched is just removed, as before.
+        const wantedColors = colorsIn(finding.actualSubject);
+        const target =
+          store.getProductByName(finding.actualSubject) ??
+          (wantedColors.size > 0 ? store.findColorVariant(finding.actualSubject) : null) ??
+          store.findMatchingProduct(finding.actualSubject);
+        if (target && target.id !== productId) {
           store.addProductImage(target.id, image.imageData, image.sourceTitle);
           sendToRenderer("products:updated", store.getProductById(target.id));
+        } else if (!target && wantedColors.size > 0 && colorsConflict(product.name, finding.actualSubject)) {
+          const created = createSpecificModel(finding.actualSubject, image.imageData, image.sourceTitle ?? product.name, {
+            parentId: product.parentProductId,
+            familyFromId: product.id,
+          });
+          store.appendProductWatchNote(productId, `Correction: moved a reference photo to its own "${created.product.name}" entry (a different color of this product).`);
         }
       }
       if (changed) {
@@ -1269,7 +1493,23 @@ function ensurePhotoGalleryAudit(productId: string): void {
 // chat, which was never found on a real listing to begin with) rather than
 // the product's current (possibly already-wrong) name — deriveWatchCountQuery
 // itself falls back to that name when there's no such photo to go on.
-async function fetchAndStoreEbayComps(
+async function fetchAndStoreEbayComps(id: string, fallbackName: string, currentListing?: { title: string; imageDataUri?: string | null }): Promise<CompsResearchResult> {
+  // Shows up on the Discovery tab (joins the product's entry when a bigger research pass is already running).
+  discovery.begin(id, fallbackName, "refresh", `Checking what "${fallbackName}" really sells for on eBay.`);
+  discovery.note(id, "step", "Looking at sold prices on WatchCount and what sellers are asking on eBay right now.");
+  try {
+    const result = await researchEbayComps(id, fallbackName, currentListing);
+    describeCompsFindings(id, result);
+    discovery.finish(id);
+    return result;
+  } catch (err) {
+    discovery.note(id, "warn", `The eBay check didn't work out: ${(err as Error).message}`);
+    discovery.finish(id, "failed");
+    throw err;
+  }
+}
+
+async function researchEbayComps(
   id: string,
   fallbackName: string,
   // Condition-awareness — "the exact keywords to the original listing it
@@ -1281,7 +1521,7 @@ async function fetchAndStoreEbayComps(
   // interested" new-product path) pass this; every other call site keeps
   // today's exact oldest-reference-photo fallback behavior unchanged.
   currentListing?: { title: string; imageDataUri?: string | null }
-): Promise<{ avgSoldPriceUsd: number | null; avgRunTimeDays: number | null; avgShippingUsd: number | null; sampleSize: number }> {
+): Promise<CompsResearchResult> {
   let sourceTitle: string | null;
   let imageDataUri: string | null;
   if (currentListing) {
@@ -1293,12 +1533,309 @@ async function fetchAndStoreEbayComps(
     sourceTitle = original?.sourceTitle ?? null;
     imageDataUri = original?.imageData ?? null;
   }
+  // A "(For Parts / Broken)" variant is researched on its own terms: sold comps and asking prices of BROKEN copies of the base product.
+  if (isBrokenVariantName(fallbackName)) return researchBrokenVariantComps(id, fallbackName);
   const query = await deriveWatchCountQuery(fallbackName, sourceTitle, imageDataUri);
   const comps = await timed("ebay_lookup", () => getPrimaryEngine().fetchEbayComps(query));
-  const analysis = await analyzeEbayComps(query, comps);
-  store.updateProductEbayComps(id, analysis);
+  // The product's own name backs up the search query for hard facts like capacity (see compFilter.ts).
+  // Cross-check every result's photo against this product's reference photos (not the ones that came from eBay: those would
+  // only vouch for themselves), falling back to its thumbnail. No photo to compare with = text checks only.
+  const referencePhotos = store
+    .listProductImages(id)
+    .filter((img) => img.kind === "normal" && !img.sourceTitle?.startsWith("eBay listing"))
+    .slice(0, 3)
+    .map((img) => img.imageData);
+  const thumb = store.getProductById(id)?.imageUrl;
+  if (referencePhotos.length === 0 && thumb && thumb.startsWith("data:image")) referencePhotos.push(thumb);
+  const photoCheck = makePhotoCheck(fallbackName, referencePhotos);
+  const analysis = await analyzeEbayComps(query, comps, fallbackName, photoCheck);
+  // What sellers are asking for the same thing right now: sold comps stay the main evidence, asking prices fill in
+  // when there are few of them (see marketValue.ts). Never fails the research: no data just means sold comps alone.
+  const active = await fetchActiveAsks(query, fallbackName, analysis.dominantCondition, photoCheck, false, store.getProductById(id)?.family ?? null);
+  // Both sides are what a buyer pays IN TOTAL (sold: item + shipping paid; asking: item + the seller's shipping charge).
+  const estimate = estimateMarketValue(
+    { mean: buyerTotalUsd(analysis.avgSoldPriceUsd, analysis.avgShippingUsd), n: analysis.sampleSize },
+    { median: active.medianUsd, n: active.sampleSize }
+  );
+  store.updateProductEbayComps(id, {
+    avgSoldPriceUsd: analysis.avgSoldPriceUsd,
+    avgRunTimeDays: analysis.avgRunTimeDays,
+    avgShippingUsd: analysis.avgShippingUsd,
+    sampleSize: analysis.sampleSize,
+    activeMedianUsd: active.medianUsd,
+    activeSampleSize: active.sampleSize,
+    estimatedValueUsd: estimate.valueUsd,
+    estimateBasis: estimate.basis,
+  });
   getPrimaryEngine().markEbayCompsResearched(id);
-  return analysis;
+  await refreshMyStoreReference(id, fallbackName);
+  // The listings that were just confirmed to be this exact product have real photos of it: keep a few as reference photos.
+  void addEbayReferencePhotos(id, fallbackName, active.photos);
+  return { ...analysis, photoRejected: analysis.photoRejected + active.photoRejected, activeMedianUsd: active.medianUsd, activeSampleSize: active.sampleSize, estimatedValueUsd: estimate.valueUsd };
+}
+
+// What the user's own linked eBay store lists this product for (a price reference of their own, kept apart from the market
+// numbers). Quiet no-op when no store is linked. A product none of their listings matches has its old reference cleared.
+async function refreshMyStoreReference(productId: string, productName: string): Promise<void> {
+  const seller = config.ebayStoreUsername?.trim();
+  if (!seller) return;
+  const ref = await fetchMyStoreReference(seller, productName);
+  store.setProductMyStore(productId, ref);
+  const updated = store.getProductById(productId);
+  if (updated) sendToRenderer("products:updated", updated);
+}
+
+let myStoreBackfillRun = 0;
+// After linking (or changing) the store: look up every product in the Database, one at a time, newest linking wins.
+async function backfillMyStoreReferences(): Promise<void> {
+  const run = ++myStoreBackfillRun;
+  for (const product of store.listProducts()) {
+    if (run !== myStoreBackfillRun || !config.ebayStoreUsername?.trim()) return;
+    await refreshMyStoreReference(product.id, product.name);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+// Before a deal notification goes out, Clynx asks WatchCount (sold prices) and eBay (what sellers ask now) about the product,
+// files the answer in the Database and decides with it (see preAlert.ts), instead of trusting a price the Database may have
+// had for days. Skipped when the Database already looked the exact same product up recently. For a product the Database
+// doesn't have yet, the entry is created (and filled in in the background) when the lookup finds real prices for it.
+const MARKET_RECENT_MS = 3 * 24 * 60 * 60 * 1000;
+const MARKET_CHECK_TIMEOUT_MS = 150_000;
+const marketChecksInFlight = new Map<string, Promise<MarketCheck | null>>();
+
+function isExactProduct(productName: string, matchedItem: string | null, title: string): boolean {
+  const sameName = !!matchedItem && matchedItem.trim().toLowerCase() === productName.trim().toLowerCase();
+  if (sameName && compMatchesSpecs(productName, title) && !modelLettersConflict(productName, title)) return true;
+  return titleLooksLikeProduct(productName, title);
+}
+
+async function checkMarketBeforeAlert(listing: { title: string; matchedItem: string | null; purpose?: "bundle" }): Promise<MarketCheck | null> {
+  const signals = store.getProductSignals(listing.matchedItem, listing.title);
+  const exact = !!signals && isExactProduct(signals.name, listing.matchedItem, listing.title);
+  const recentlyChecked = (checkedAt: number | null | undefined) => !!checkedAt && Date.now() - checkedAt < MARKET_RECENT_MS;
+  if (signals && exact && recentlyChecked(signals.checkedAt)) {
+    return {
+      productId: signals.id,
+      productName: signals.name,
+      valueUsd: signals.valueUsd,
+      refreshed: false,
+      note: `"${signals.name}" was checked on WatchCount and eBay recently: using what the Database has.`,
+    };
+  }
+  if (!config.watchCountEnabled) return null; // turned off in Config: the Database's own numbers decide
+  const name =
+    signals && exact
+      ? signals.name
+      : listing.matchedItem?.trim() || focalProductName({ signalName: null, matchedItem: null, category: null, title: listing.title });
+  if (!name) return null;
+  const key = name.toLowerCase();
+  const running = marketChecksInFlight.get(key);
+  if (running) return running;
+  const job = runMarketCheck(name, listing.title, signals && exact ? signals.id : null, listing.purpose).finally(() => marketChecksInFlight.delete(key));
+  marketChecksInFlight.set(key, job);
+  return job;
+}
+
+async function runMarketCheck(name: string, listingTitle: string, existingId: string | null, purpose?: "bundle"): Promise<MarketCheck | null> {
+  let id = existingId;
+  let created = false;
+  if (!id) {
+    const before = store.getProductByName(name);
+    id = store.addProductStub(randomUUID(), name);
+    created = !before && store.getProductById(id)?.name === name;
+    const known = store.getProductById(id);
+    if (!created && known?.ebayCompsCheckedAt && Date.now() - known.ebayCompsCheckedAt < MARKET_RECENT_MS) {
+      const signals = store.getProductSignals(name, listingTitle);
+      return { productId: id, productName: known.name, valueUsd: signals?.valueUsd ?? null, refreshed: false, note: `"${known.name}" was checked on WatchCount and eBay recently: using what the Database has.` };
+    }
+  }
+  const productId = id;
+  discovery.begin(
+    productId,
+    name,
+    purpose === "bundle" ? "bundle" : "alert",
+    purpose === "bundle"
+      ? `"${listingTitle}" holds several products, so I'm pricing "${name}" on its own first.`
+      : `Before I alert you about "${listingTitle}", I'm double-checking what "${name}" is really worth.`
+  );
+  const research = fetchAndStoreEbayComps(productId, name, { title: listingTitle });
+  const timedOut = Symbol("timeout");
+  let timer: NodeJS.Timeout | undefined;
+  const winner = await Promise.race([
+    research,
+    new Promise<typeof timedOut>((resolve) => {
+      timer = setTimeout(() => resolve(timedOut), MARKET_CHECK_TIMEOUT_MS);
+    }),
+  ]).catch((err) => {
+    console.error(`[marketCheck] "${name}" failed: ${(err as Error).message}`);
+    return null;
+  });
+  if (timer) clearTimeout(timer);
+  if (winner === timedOut || winner === null) {
+    discovery.note(productId, "warn", winner === timedOut ? "eBay was too slow to answer, so I'm going with what the Database already knows." : "I couldn't get a price check through, so I'm going with what the Database already knows.");
+    discovery.finish(productId, "failed");
+    if (winner === timedOut) research.catch(() => {}); // keeps going in the background and still files its answer
+    if (created) store.deleteProduct(productId);
+    return { productId: created ? null : productId, productName: name, valueUsd: null, refreshed: false, note: `Couldn't reach WatchCount/eBay in time for "${name}": using what the Database has.` };
+  }
+  const valueUsd = winner.estimatedValueUsd ?? winner.avgSoldPriceUsd;
+  if (created) {
+    if (valueUsd === null) {
+      discovery.finish(productId);
+      store.deleteProduct(productId);
+      return { productId: null, productName: name, valueUsd: null, refreshed: true, note: `WatchCount and eBay had no prices for "${name}": nothing to file in the Database.` };
+    }
+    runProductLookup(productId, name, { triggeringListing: { title: listingTitle, imageDataUri: null } });
+  }
+  discovery.finish(productId);
+  const updated = store.getProductById(productId);
+  if (updated) sendToRenderer("products:updated", updated);
+  const soldTotal = buyerTotalUsd(winner.avgSoldPriceUsd, winner.avgShippingUsd);
+  const sold = soldTotal !== null ? `sold for about $${Math.round(soldTotal)} with shipping (${winner.sampleSize} sales)` : "no sold comps";
+  const asking = winner.activeMedianUsd !== null ? `listed at about $${Math.round(winner.activeMedianUsd)} (${winner.activeSampleSize} listings)` : "no active listings";
+  return {
+    productId,
+    productName: name,
+    valueUsd,
+    refreshed: true,
+    note: `Checked WatchCount and eBay for "${name}": ${sold}, ${asking}. Saved to the Database${created ? " as a new product" : ""}.`,
+  };
+}
+
+// A listing that holds several products ("PS5 Pro with 2 controllers and a 2TB external hard drive"): Clynx breaks it into items first,
+// finds what each extra sells for on its own (the Database's number when it has a recent one, otherwise a real WatchCount/eBay lookup
+// that is filed in the Database like any other product), and only then values the lot (see bundleBreakdown.ts). The main item's own
+// value is passed in: it is the product the listing was already matched to, priced on its own.
+const BUNDLE_MAX_EXTRAS = 4;
+async function valueListingBundle(args: { title: string; description: string; mainName: string; mainValueUsd: number }): Promise<BundleValuation | null> {
+  const breakdown = await breakDownListing(args.title, args.description);
+  if (!breakdown) return null;
+  const main = breakdown.items.find((i) => i.role === "main");
+  // A single product is nothing to break down.
+  const extras = breakdown.items.filter((i) => i !== main).slice(0, BUNDLE_MAX_EXTRAS);
+  if (!main || extras.length === 0) return null;
+  const priced: PricedBundleItem[] = await Promise.all(
+    extras.map(async (item): Promise<PricedBundleItem> => {
+      let valueUsd: number | null = null;
+      try {
+        valueUsd = (await checkMarketBeforeAlert({ title: item.name, matchedItem: item.name, purpose: "bundle" }))?.valueUsd ?? null;
+      } catch (err) {
+        console.error(`[bundle] pricing "${item.name}" failed: ${(err as Error).message}`);
+      }
+      const signals = store.getProductSignals(item.name, item.name);
+      const exact = !!signals && isExactProduct(signals.name, item.name, item.name);
+      // Nothing found: the model's own rough guess stands in, flagged as an estimate.
+      const estimated = valueUsd === null && item.guessUsd !== null;
+      return { item, unitValueUsd: valueUsd ?? item.guessUsd, runTimeDays: exact ? (signals?.runTimeDays ?? null) : null, estimated };
+    })
+  );
+  return valueBundle({ main: { ...main, name: args.mainName }, mainValueUsd: args.mainValueUsd, extras: priced });
+}
+
+// What broken / for-parts copies of a product sell for (the research behind a "(For Parts / Broken)" Database variant): WatchCount
+// sold comps for "<product> for parts" and eBay's asking prices in its "For parts or not working" condition, both kept only when
+// the listing is really a broken copy of this product. Stored on the variant exactly like a normal product's comps.
+async function researchBrokenVariantComps(id: string, variantName: string): Promise<CompsResearchResult> {
+  const baseName = baseNameOfBrokenVariant(variantName);
+  const baseQuery = await deriveWatchCountQuery(baseName, null, null);
+  let analysis: CompAnalysis = { avgSoldPriceUsd: null, avgRunTimeDays: null, avgShippingUsd: null, sampleSize: 0, dominantCondition: null, rejectedCount: 0, photoRejected: 0 };
+  if (config.watchCountEnabled) {
+    const comps = await timed("ebay_lookup", () => getPrimaryEngine().fetchEbayComps(`${baseQuery} for parts`));
+    analysis = await analyzeEbayComps(baseQuery, comps, baseName, null, true);
+  }
+  const active = await fetchActiveAsks(baseQuery, baseName, null, null, true, store.getProductByName(baseName)?.family ?? store.getProductById(id)?.family ?? null);
+  const estimate = estimateMarketValue({ mean: buyerTotalUsd(analysis.avgSoldPriceUsd, analysis.avgShippingUsd), n: analysis.sampleSize }, { median: active.medianUsd, n: active.sampleSize });
+  store.updateProductEbayComps(id, {
+    avgSoldPriceUsd: analysis.avgSoldPriceUsd,
+    avgRunTimeDays: analysis.avgRunTimeDays,
+    avgShippingUsd: analysis.avgShippingUsd,
+    sampleSize: analysis.sampleSize,
+    activeMedianUsd: active.medianUsd,
+    activeSampleSize: active.sampleSize,
+    estimatedValueUsd: estimate.valueUsd,
+    estimateBasis: estimate.basis,
+  });
+  getPrimaryEngine().markEbayCompsResearched(id);
+  return { ...analysis, activeMedianUsd: active.medianUsd, activeSampleSize: active.sampleSize, estimatedValueUsd: estimate.valueUsd };
+}
+
+// A broken / for-parts listing of a Search For item that includes broken listings: make sure the product has its "(For Parts / Broken)"
+// VARIANT in the Database (a child of the product, not a separate product) and that variant knows what broken ones sell for, so
+// the listing can be priced properly. The variant is created the first time one is seen; its eBay research is redone after 3 days.
+const brokenVariantsInFlight = new Map<string, Promise<void>>();
+async function ensureBrokenVariant(itemName: string, listingTitle: string): Promise<void> {
+  const key = itemName.trim().toLowerCase();
+  const running = brokenVariantsInFlight.get(key);
+  if (running) return running;
+  const job = (async () => {
+    const parent = store.getProductByName(itemName) ?? store.findMatchingProduct(itemName) ?? createPlainProduct(itemName, null, listingTitle);
+    const variantName = brokenVariantName(parent.name);
+    let variant = store.getProductByName(variantName);
+    let created = false;
+    if (!variant) {
+      const variantId = store.addProductStub(randomUUID(), variantName);
+      store.setProductParent(variantId, parent.id);
+      variant = store.getProductById(variantId);
+      created = true;
+      if (variant) sendToRenderer("products:updated", variant);
+      const line: LogLine = {
+        ts: Date.now(),
+        level: "info",
+        message: `Added a "${variantName}" variant under "${parent.name}" in the Database (what broken ones sell for), from "${listingTitle}".`,
+        productName: variantName,
+      };
+      recordLog(line);
+      sendToRenderer("engine:log", line);
+    }
+    if (!variant) return;
+    const stale = !variant.ebayCompsCheckedAt || Date.now() - variant.ebayCompsCheckedAt > MARKET_RECENT_MS;
+    if (stale) {
+      const research = fetchAndStoreEbayComps(variant.id, variantName);
+      research.catch((err) => console.error(`[brokenVariant] research for "${variantName}" failed: ${(err as Error).message}`));
+      await Promise.race([research.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, MARKET_CHECK_TIMEOUT_MS))]);
+      const updated = store.getProductById(variant.id);
+      if (updated) sendToRenderer("products:updated", updated);
+    }
+    // The write-up, family and photos for the new variant fill in behind the scenes.
+    if (created) runProductLookup(variant.id, variantName, { skipSiblingDiscovery: true, forcedFamily: parent.family ?? undefined, source: "variant" });
+  })().finally(() => brokenVariantsInFlight.delete(key));
+  brokenVariantsInFlight.set(key, job);
+  return job;
+}
+
+// Per explicit instruction — "when Clynx is searching eBay for products, use images straight from eBay as reference
+// photos as well to train Clynx better." The photos of the eBay listings confirmed to be this exact product (same
+// model numbers/capacity/color, AI-judged brand/edition) are candidates; each still goes through the usual download,
+// near-duplicate and vision check before it is kept, so one seller's wrong picture can't poison the gallery.
+// Fire-and-forget, best-effort, and bounded: a few per research pass, and no more once the gallery has plenty of them.
+const EBAY_REFERENCE_PHOTOS_PER_PASS = 4;
+const EBAY_REFERENCE_PHOTOS_MAX = 8;
+const GALLERY_SOFT_LIMIT = 16;
+async function addEbayReferencePhotos(productId: string, productName: string, photos: Array<{ url: string; label: string }>): Promise<void> {
+  if (photos.length === 0) return;
+  try {
+    const existing = store.listProductImages(productId).filter((img) => img.kind === "normal");
+    const fromEbay = existing.filter((img) => img.sourceTitle?.startsWith("eBay listing:")).length;
+    const want = Math.min(EBAY_REFERENCE_PHOTOS_PER_PASS, EBAY_REFERENCE_PHOTOS_MAX - fromEbay, GALLERY_SOFT_LIMIT - existing.length);
+    if (want <= 0) return;
+    const found = await findReferencePhotos(productName, { want, existingImages: existing.map((img) => img.imageData), candidates: photos });
+    for (const photo of found.photos) store.addProductImage(productId, photo.imageData, photo.label);
+    if (found.photos.length > 0) {
+      store.touchProduct(productId);
+      ensurePhotoDifferenceAnalysis(productId);
+      const updated = store.getProductById(productId);
+      if (updated) sendToRenderer("products:updated", updated);
+    }
+  } catch (err) {
+    console.error(`[ebayReferencePhotos] "${productName}" failed: ${(err as Error).message}`);
+  }
+}
+
+interface CompsResearchResult extends CompAnalysis {
+  activeMedianUsd: number | null;
+  activeSampleSize: number;
+  estimatedValueUsd: number | null;
 }
 
 // Per explicit instruction — the Database Research tab shows what's
@@ -1315,6 +1852,32 @@ function broadcastResearchStatus(): void {
   sendToRenderer("research:status", Array.from(activeResearch.values()));
 }
 
+// The Database's Discovery tab: every product Clynx looks into, with its running thoughts about it (see discovery.ts).
+const discovery = new DiscoveryFeed((entry) => sendToRenderer("discovery:entry", entry));
+
+const money0 = (n: number) => `$${Math.round(n)}`;
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+// What the eBay research found, in Clynx's own words, for the Discovery tab.
+function describeCompsFindings(productId: string, result: CompsResearchResult): void {
+  const soldTotal = buyerTotalUsd(result.avgSoldPriceUsd, result.avgShippingUsd);
+  const thrownOut = result.rejectedCount + result.photoRejected;
+  if (thrownOut > 0) discovery.note(productId, "step", `I threw out ${plural(thrownOut, "listing")} that weren't really this exact product (wrong edition, bundle or photos).`);
+  const evidence: string[] = [];
+  if (soldTotal !== null && result.sampleSize > 0) evidence.push(`${plural(result.sampleSize, "sale")} averaging ${money0(soldTotal)} with shipping`);
+  if (result.activeMedianUsd !== null && result.activeSampleSize > 0) evidence.push(`${plural(result.activeSampleSize, "listing")} asking about ${money0(result.activeMedianUsd)}`);
+  if (result.estimatedValueUsd !== null) {
+    discovery.note(productId, "finding", `My read: it's worth about ${money0(result.estimatedValueUsd)} to a buyer on eBay${evidence.length ? `, going by ${evidence.join(" and ")}` : ""}.`);
+  } else if (evidence.length) {
+    discovery.note(productId, "finding", `I only found ${evidence.join(" and ")}: not enough to put a number on it yet.`);
+  } else {
+    discovery.note(productId, "warn", "I couldn't find eBay sales or listings I trust for this one, so there's no price yet.");
+  }
+  if (result.avgRunTimeDays !== null && result.sampleSize > 0) {
+    discovery.note(productId, "finding", `They sell in ${result.avgRunTimeDays < 1 ? "under a day" : `about ${result.avgRunTimeDays.toFixed(1)} days`} on average.`);
+  }
+}
+
 // Per explicit instruction — "have Clynx find stock photos of that product
 // and download a whole bunch of reference photos... so it'll already be
 // familiar with it when it comes across it again on Facebook or eBay."
@@ -1328,12 +1891,12 @@ function broadcastResearchStatus(): void {
 // product so two near-simultaneous research passes can't double-fill.
 const REFERENCE_PHOTO_TARGET = 10;
 const referencePhotoFillInFlight = new Set<string>();
-async function fillReferencePhotos(id: string, name: string, replaceThumbnail: boolean): Promise<void> {
+async function fillReferencePhotos(id: string, name: string, replaceThumbnail: boolean, target: number = REFERENCE_PHOTO_TARGET): Promise<void> {
   if (referencePhotoFillInFlight.has(id)) return;
   referencePhotoFillInFlight.add(id);
   try {
     const existing = store.listProductImages(id).filter((img) => img.kind === "normal");
-    const needed = REFERENCE_PHOTO_TARGET - existing.length;
+    const needed = target - existing.length;
     let added = 0;
     let bestPhoto: string | null = null;
     if (needed > 0) {
@@ -1358,6 +1921,7 @@ async function fillReferencePhotos(id: string, name: string, replaceThumbnail: b
     if (added > 0) {
       store.touchProduct(id);
       ensurePhotoDifferenceAnalysis(id);
+      discovery.note(id, "step", `Saved ${plural(added, "reference photo")} so I'll recognize it on sight next time.`);
     }
     const updated = store.getProductById(id);
     if (updated) sendToRenderer("products:updated", updated);
@@ -1439,7 +2003,8 @@ async function runProductLookup(
   // Condition-awareness — see fetchAndStoreEbayComps' own currentListing
   // param. Only set by call sites that genuinely have a live, current
   // listing in scope; everything else keeps today's behavior.
-  opts: { skipSiblingDiscovery?: boolean; forcedFamily?: string; triggeringListing?: { title: string; imageDataUri?: string | null } } = {}
+  // source: why this product is being looked into (shown on its Discovery entry).
+  opts: { skipSiblingDiscovery?: boolean; forcedFamily?: string; triggeringListing?: { title: string; imageDataUri?: string | null }; source?: DiscoverySource } = {}
 ): Promise<void> {
   // A user-picked thumbnail (see products:pickThumbnail) is deliberate —
   // research finding (or not finding) a photo of its own should never
@@ -1456,6 +2021,23 @@ async function runProductLookup(
   const hadFamilyBefore = before?.family != null;
   activeResearch.set(id, { id, name, reaction: null });
   broadcastResearchStatus();
+  const source = opts.source ?? "scanner";
+  discovery.begin(
+    id,
+    name,
+    source,
+    source === "you"
+      ? `You asked me to look into "${name}". Let me dig in.`
+      : source === "refresh"
+        ? `Refreshing what I know about "${name}".`
+        : source === "related"
+          ? `"${name}" is related to something I just researched, so I'm looking into it too.`
+          : source === "variant"
+            ? `Finding out what broken and for-parts copies of this sell for.`
+            : `I came across "${name}" while scanning. Let me find out what it really is and what it's worth.`
+  );
+  if (opts.triggeringListing?.title) discovery.note(id, "step", `The listing that caught my eye: "${opts.triggeringListing.title}".`);
+  let researchFailed = false;
   try {
     const result = await lookupProduct(name);
     // Reaction is available as soon as the main research call resolves —
@@ -1467,6 +2049,8 @@ async function runProductLookup(
       inFlight.reaction = result.reaction;
       broadcastResearchStatus();
     }
+    if (result.reaction) discovery.note(id, "reaction", result.reaction);
+    discovery.note(id, "step", `Filing it under ${result.category}${result.family ? ` / ${result.family}` : ""}.`);
 
     // Per explicit instruction: when the family the AI just assigned is
     // itself a real, recognizable brand (Nintendo, Nike, Xbox, ...) rather
@@ -1565,7 +2149,10 @@ async function runProductLookup(
     if (config.researchCondition) {
       try {
         const poorConditionImage = await findPoorConditionProductImage(name);
-        if (poorConditionImage) store.addProductImage(id, poorConditionImage, null, "poor_condition");
+        if (poorConditionImage) {
+          store.addProductImage(id, poorConditionImage, null, "poor_condition");
+          discovery.note(id, "step", "Found a photo of a damaged one too, so I can tell the difference.");
+        }
       } catch (err) {
         console.error(`[webResearch] poor-condition reference photo search failed for "${name}": ${(err as Error).message}`);
       }
@@ -1600,6 +2187,7 @@ async function runProductLookup(
     if (!config.watchCountEnabled) {
       // no-op — WatchCount lookups are turned off in Config
     } else if (config.watchCountOncePerScan && getPrimaryEngine().hasResearchedEbayComps(id)) {
+      discovery.note(id, "step", "I already checked eBay for this one during this scan, so I'm reusing those numbers.");
       const line: LogLine = {
         ts: Date.now(),
         level: "info",
@@ -1624,7 +2212,7 @@ async function runProductLookup(
     if (!opts.skipSiblingDiscovery && !hadFamilyBefore && resolvedFamily && config.autoResearchListings) {
       const segments = resolvedFamily.split(">").map((s) => s.trim());
       if (segments.length >= 3 && segments[1].toLowerCase() === "games") {
-        discoverAndCreateSiblingProducts(segments[0], segments[2], result.category, resolvedFamily).catch((err) =>
+        discoverAndCreateSiblingProducts(segments[0], segments[2], result.category, resolvedFamily, id).catch((err) =>
           console.error(`[siblings] discovery failed for "${resolvedFamily}": ${(err as Error).message}`)
         );
       }
@@ -1641,11 +2229,13 @@ async function runProductLookup(
     // not this code guessing from category. Fire-and-forget, same reasoning
     // as the sibling discovery above.
     if (!opts.skipSiblingDiscovery && !hadFamilyBefore && config.autoResearchListings) {
-      discoverAndCreateProductVariants(name, result.category, resolvedFamily).catch((err) =>
+      discoverAndCreateProductVariants(name, result.category, resolvedFamily, id).catch((err) =>
         console.error(`[variants] discovery failed for "${name}": ${(err as Error).message}`)
       );
     }
   } catch (err) {
+    researchFailed = true;
+    discovery.note(id, "warn", `I hit a snag researching this one: ${(err as Error).message}`);
     store.updateProductProfile(id, {
       aiSummary: `(Research failed: ${(err as Error).message})`,
       category: "Other",
@@ -1656,6 +2246,7 @@ async function runProductLookup(
   }
   activeResearch.delete(id);
   broadcastResearchStatus();
+  discovery.finish(id, researchFailed ? "failed" : "done");
   const updated = store.getProductById(id);
   if (updated) sendToRenderer("products:updated", updated);
 }
@@ -1673,7 +2264,7 @@ async function runProductLookup(
 // expensive and a good way to flood the Database from one single listing.
 const SIBLING_DISCOVERY_COUNT = 6;
 
-async function discoverAndCreateSiblingProducts(brand: string, generation: string, category: string, familyPath: string): Promise<void> {
+async function discoverAndCreateSiblingProducts(brand: string, generation: string, category: string, familyPath: string, parentId?: string): Promise<void> {
   // Fresh query at call time (not the products list from whenever the
   // triggering research started) — if two different games for the same
   // generation get researched close together, the second one's own
@@ -1687,6 +2278,7 @@ async function discoverAndCreateSiblingProducts(brand: string, generation: strin
 
   const titles = await discoverSiblingProducts({ brand, generation, category, count: SIBLING_DISCOVERY_COUNT, alreadyTracked });
   if (!titles.length) return;
+  if (parentId) discovery.note(parentId, "finding", `Other ${generation} games worth tracking: ${titles.join(", ")}. I'll look into them next.`);
 
   for (const title of titles) {
     // Skip anything that already matches an existing product (exactly or
@@ -1695,10 +2287,11 @@ async function discoverAndCreateSiblingProducts(brand: string, generation: strin
     // shouldn't get a duplicate entry here; Refresh on the existing one is
     // how that'd get corrected instead.
     if (store.findMatchingProduct(title)) continue;
-    const id = randomUUID();
-    store.addProductStub(id, title);
+    const candidateId = randomUUID();
+    const id = store.addProductStub(candidateId, title);
+    if (id !== candidateId) continue; // already in the Database under this name
     sendToRenderer("products:updated", store.getProductById(id));
-    await runProductLookup(id, title, { skipSiblingDiscovery: true, forcedFamily: familyPath });
+    await runProductLookup(id, title, { skipSiblingDiscovery: true, forcedFamily: familyPath, source: "related" });
   }
 }
 
@@ -1716,10 +2309,11 @@ async function discoverAndCreateSiblingProducts(brand: string, generation: strin
 // same-base-name products regardless of family.
 const VARIANT_DISCOVERY_COUNT = 5;
 
-async function discoverAndCreateProductVariants(productName: string, category: string, familyPath: string | null): Promise<void> {
+async function discoverAndCreateProductVariants(productName: string, category: string, familyPath: string | null, parentId?: string): Promise<void> {
   const alreadyTracked = store.listProducts().map((p) => p.name);
   const variantNames = await discoverProductVariants({ productName, category, alreadyTracked, count: VARIANT_DISCOVERY_COUNT });
   if (!variantNames.length) return;
+  if (parentId) discovery.note(parentId, "finding", `It comes in other versions I should know about: ${variantNames.join(", ")}. Looking into those next.`);
 
   for (const title of variantNames) {
     // Skip anything already tracked ANYWHERE in the Database — relies on
@@ -1728,10 +2322,11 @@ async function discoverAndCreateProductVariants(productName: string, category: s
     // names, so a genuine variant here is never mistaken for a duplicate of
     // the base product that triggered this.
     if (store.findMatchingProduct(title)) continue;
-    const id = randomUUID();
-    store.addProductStub(id, title);
+    const candidateId = randomUUID();
+    const id = store.addProductStub(candidateId, title);
+    if (id !== candidateId) continue; // already in the Database under this name
     sendToRenderer("products:updated", store.getProductById(id));
-    await runProductLookup(id, title, { skipSiblingDiscovery: true, forcedFamily: familyPath ?? undefined });
+    await runProductLookup(id, title, { skipSiblingDiscovery: true, forcedFamily: familyPath ?? undefined, source: "related" });
   }
 }
 
@@ -1742,8 +2337,17 @@ async function discoverAndCreateProductVariants(productName: string, category: s
 // setup had. Keyed by account id; Dashboard renders one row/Live panel per
 // entry.
 const engineStatusMap = new Map<string, ScrapeStatus>();
+// Status changes arrive in bursts (every listing viewed, every photo
+// analysis step, from every engine). The window only applies a few updates a
+// second anyway, so these collapse into one send per ~120ms carrying the
+// latest map — less to serialize and ship across the process boundary.
+let statusBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
 function broadcastEngineStatusMap(): void {
-  sendToRenderer("engine:statusMap", Object.fromEntries(engineStatusMap));
+  if (statusBroadcastTimer) return;
+  statusBroadcastTimer = setTimeout(() => {
+    statusBroadcastTimer = null;
+    sendToRenderer("engine:statusMap", Object.fromEntries(engineStatusMap));
+  }, 120);
 }
 
 // One ScrapeEngine per Facebook account — own persistent Playwright
@@ -1759,6 +2363,9 @@ function createEngineForAccount(accountId: string): ScrapeEngine {
   }
 
   const eng = new ScrapeEngine({
+    checkMarket: checkMarketBeforeAlert,
+    ensureBrokenVariant,
+    valueBundle: valueListingBundle,
     profileDir: path.join(PROFILES_ROOT, accountId),
     getConfig: (): EngineConfig => ({ ...config, ...currentAccount() }),
     store,
@@ -1803,7 +2410,11 @@ function createEngineForAccount(accountId: string): ScrapeEngine {
     // app.whenReady, while engines are created at module scope) — so the
     // Watch screen's live match count and the Sidebar's unseen-match pulse
     // update without the user needing to manually refresh.
-    onWatchMatch: () => sendToRenderer("watches:updated", store.listWatches()),
+    onWatchMatch: (watch, info) => {
+      sendToRenderer("watches:updated", store.listWatches());
+      sendToRenderer("listings:refresh");
+      notifyWatchMatch(watch, info);
+    },
     // Per explicit instruction — same create-stub + background web research
     // pattern as the manual Research button/research_product chat tool (see
     // listings:research below), just triggered by the scanner itself finding
@@ -1817,32 +2428,24 @@ function createEngineForAccount(accountId: string): ScrapeEngine {
     // photo once research finishes, since this is always a confidently-named
     // exact product to begin with (that's the only way a product gets
     // auto-created at all — see specificSubjects in scrapeEngine.ts).
-    onNewProductFound: (name, imageDataUri, sourceTitle) => {
-      const id = randomUUID();
-      store.addProductStub(id, name);
-      if (imageDataUri) {
-        store.editProductProfile(id, { imageUrl: imageDataUri });
-        store.addProductImage(id, imageDataUri, sourceTitle);
-        ensurePhotoDifferenceAnalysis(id);
-      }
-      sendToRenderer("products:updated", store.getProductById(id));
-      // Condition-awareness — sourceTitle here IS the live listing that
-      // just triggered this auto-create (see scrapeEngine.ts's own
-      // onNewProductFound(subject, subjectImageDataUri, listing.title)
-      // call), so WatchCount's own query can derive from it directly
-      // instead of falling back to whichever reference photo gets saved
-      // first (which, right after addProductImage above, would actually
-      // BE this exact same listing anyway — but passing it explicitly
-      // keeps this correct even if that storage detail ever changes).
-      runProductLookup(id, name, { triggeringListing: { title: sourceTitle, imageDataUri } });
+    onNewProductFound: (name, imageDataUri, sourceTitle, relation) => {
+      // A specific model (or color) of an existing entry is filed through createSpecificModel (see productIdentity.ts).
+      // Condition-awareness — sourceTitle IS the live listing that just triggered this auto-create, so WatchCount's own
+      // query can derive from it directly.
+      const { product, created } = relation
+        ? createSpecificModel(name, imageDataUri, sourceTitle, relation)
+        : { product: createPlainProduct(name, imageDataUri, sourceTitle), created: true };
+      const parent = relation?.parentId ? store.getProductById(relation.parentId) : null;
+      const sibling = relation && !parent ? store.getProductById(relation.familyFromId) : null;
+      if (!created) return;
       const account = currentAccount();
       const line: LogLine = {
         ts: Date.now(),
         level: "info",
-        message: `New item of interest found while scanning: added "${name}" to the Database${
-          imageDataUri ? " with a photo from this listing" : ""
-        } (from "${sourceTitle}").`,
-        productName: name,
+        message: `New item of interest found while scanning: added "${product.name}" to the Database${
+          parent ? ` under "${parent.name}"` : sibling ? ` next to "${sibling.name}"` : ""
+        }${imageDataUri ? " with a photo from this listing" : ""} (from "${sourceTitle}").`,
+        productName: product.name,
         accountId,
         accountLabel: account.label,
       };
@@ -1852,6 +2455,187 @@ function createEngineForAccount(accountId: string): ScrapeEngine {
   });
   engineStatusMap.set(accountId, eng.getStatus());
   return eng;
+}
+
+// A product the scanner found that nothing in the Database matches: its own entry, with the listing's photo as a
+// placeholder (the background lookup replaces it with a clean one), researched in the background.
+function createPlainProduct(name: string, imageDataUri: string | null, sourceTitle: string): ProductProfile {
+  const id = store.addProductStub(randomUUID(), name);
+  if (imageDataUri) {
+    store.editProductProfile(id, { imageUrl: imageDataUri });
+    store.addProductImage(id, imageDataUri, sourceTitle);
+    ensurePhotoDifferenceAnalysis(id);
+  }
+  sendToRenderer("products:updated", store.getProductById(id));
+  runProductLookup(id, name, { triggeringListing: { title: sourceTitle, imageDataUri } });
+  return store.getProductById(id)!;
+}
+
+// A specific model or color of a product already in the Database (see productIdentity.ts): the EVGA card under the
+// generic RTX 3060 Ti, the white Xbox Series S next to the black one. `relation.parentId` is the general entry it goes
+// under (null: a top-level sibling) and it joins the family of `relation.familyFromId`. If an entry by that name (or
+// that exact color) already exists (another account made it a moment ago), its gallery gets the photo instead of a twin.
+function createSpecificModel(
+  name: string,
+  imageDataUri: string | null,
+  sourceTitle: string,
+  relation: { parentId: string | null; familyFromId: string }
+): { product: ProductProfile; created: boolean } {
+  const twin = store.getProductByName(name) ?? store.findColorVariant(name);
+  if (twin) {
+    if (imageDataUri) {
+      store.addProductImage(twin.id, imageDataUri, sourceTitle);
+      ensurePhotoDifferenceAnalysis(twin.id);
+      sendToRenderer("products:updated", store.getProductById(twin.id));
+    }
+    return { product: twin, created: false };
+  }
+  const familyFrom = store.getProductById(relation.familyFromId);
+  const id = store.addProductStub(randomUUID(), name);
+  if (relation.parentId) store.setProductParent(id, relation.parentId);
+  if (imageDataUri) {
+    store.editProductProfile(id, { imageUrl: imageDataUri });
+    store.addProductImage(id, imageDataUri, sourceTitle);
+    ensurePhotoDifferenceAnalysis(id);
+  }
+  sendToRenderer("products:updated", store.getProductById(id));
+  // It lands in the same family as what it is a variant of, and doesn't go hunting for yet more variants of itself.
+  runProductLookup(id, name, {
+    triggeringListing: { title: sourceTitle, imageDataUri },
+    skipSiblingDiscovery: true,
+    forcedFamily: familyFrom?.family ?? undefined,
+  });
+  return { product: store.getProductById(id)!, created: true };
+}
+
+// Per explicit instruction — "anything with a blank box icon should also be automatically researched and accounted
+// for." A Database entry with no thumbnail is one whose research never finished (the AI was unavailable, the app was
+// closed mid-lookup) or that only ever got a stub. Each such entry is tried once per session: a photo it already has
+// becomes its thumbnail; one that was never researched gets the full lookup (summary, family, photos, eBay value); one
+// that was researched but has no photo gets a reference-photo search. Two at a time, in the background.
+const blankSweepAttempted = new Set<string>();
+// A sweep does this many entries, then the next one starts a few minutes later: a big library of blank entries is
+// worked through steadily instead of in one burst of hundreds of searches and AI checks.
+const BLANK_SWEEP_BATCH = 10;
+const BLANK_SWEEP_GAP_MS = 5 * 60_000;
+// Just enough photos to give the entry a thumbnail and a start on a gallery; the manual backfill tops them up.
+const BLANK_SWEEP_PHOTOS = 3;
+let blankSweepRunning = false;
+let lastBlankSweepAt = 0;
+
+// One entry with a blank box: finds it a thumbnail from what it already has, or from a search by its name (and does
+// the whole first research if it never had one).
+async function researchBlankProduct(id: string): Promise<void> {
+  const fresh = store.getProductById(id);
+  if (!fresh || fresh.imageUrl || fresh.keepThumbnail || activeResearch.has(id)) return;
+  const photos = store.listProductImages(id).filter((img) => img.kind === "normal");
+  if (photos.length > 0) {
+    store.editProductProfile(id, { imageUrl: photos[0].imageData });
+    sendToRenderer("products:updated", store.getProductById(id));
+    return;
+  }
+  // First the free way (no AI, no credits): see findFreeReferencePhotos.
+  const free = await findFreeReferencePhotos(fresh.name, { want: BLANK_SWEEP_PHOTOS });
+  if (free.length > 0) {
+    for (const photo of free) store.addProductImage(id, photo.imageData, photo.label);
+    const current = store.getProductById(id);
+    if (current && !current.imageUrl && !current.keepThumbnail) store.editProductProfile(id, { imageUrl: free[0].imageData });
+    store.touchProduct(id);
+    sendToRenderer("products:updated", store.getProductById(id));
+  }
+  // Then, when AI is available, the full research for an entry that never had it, or the vision-checked photo search
+  // for one that still has no photo.
+  if (!hasOpenAIAccess()) return;
+  if (!fresh.aiSummary) {
+    await runProductLookup(id, fresh.name, { skipSiblingDiscovery: true, forcedFamily: fresh.family ?? undefined });
+  } else if (free.length === 0) {
+    await fillReferencePhotos(id, fresh.name, true, BLANK_SWEEP_PHOTOS);
+  }
+}
+
+// The entries the user is looking at (a tile scrolled into view, a product page, its variants) don't wait for the slow
+// background sweep: each blank one is researched as soon as it is seen, at most once every half hour. Requests go into
+// one queue worked by a few workers, so scrolling past a hundred blank tiles doesn't start a hundred searches at once.
+const blankViewRequestedAt = new Map<string, number>();
+const folderImageAttemptedAt = new Map<string, number>();
+const thumbnailQueue: Array<{ id: string; store: Store }> = [];
+let thumbnailWorkers = 0;
+const THUMBNAIL_WORKERS = 3;
+function pumpThumbnailQueue(): void {
+  while (thumbnailWorkers < THUMBNAIL_WORKERS && thumbnailQueue.length > 0) {
+    const job = thumbnailQueue.shift()!;
+    if (job.store !== store) continue; // another user's database by now
+    thumbnailWorkers++;
+    researchBlankProduct(job.id)
+      .catch((err) => console.error(`[database] thumbnail research failed: ${(err as Error).message}`))
+      .finally(() => {
+        thumbnailWorkers--;
+        pumpThumbnailQueue();
+      });
+  }
+}
+function ensureThumbnailsFor(ids: string[]): number {
+  const now = Date.now();
+  let queued = 0;
+  for (const id of ids.slice(0, 60)) {
+    const p = store.getProductById(id);
+    if (!p || p.imageUrl || p.keepThumbnail || activeResearch.has(id) || now - (blankViewRequestedAt.get(id) ?? 0) <= 30 * 60_000) continue;
+    blankViewRequestedAt.set(id, now);
+    thumbnailQueue.push({ id, store });
+    queued++;
+  }
+  pumpThumbnailQueue();
+  return queued;
+}
+async function sweepBlankProducts(): Promise<void> {
+  if (blankSweepRunning) return;
+  blankSweepRunning = true;
+  lastBlankSweepAt = Date.now();
+  const startStore = store;
+  let moreToDo = false;
+  try {
+    const allBlanks = startStore.listProducts().filter((p) => !p.imageUrl && !activeResearch.has(p.id) && !blankSweepAttempted.has(p.id));
+    if (allBlanks.length === 0) return;
+    const blanks = allBlanks.slice(0, BLANK_SWEEP_BATCH);
+    moreToDo = allBlanks.length > blanks.length;
+    console.log(`[database] ${allBlanks.length} entr${allBlanks.length === 1 ? "y has" : "ies have"} no thumbnail: researching ${blanks.length} now`);
+    for (let i = 0; i < blanks.length && store === startStore; i += 2) {
+      await Promise.all(
+        blanks.slice(i, i + 2).map((p) => {
+          blankSweepAttempted.add(p.id);
+          return researchBlankProduct(p.id).catch((err) => console.error(`[database] auto-research of "${p.name}" failed: ${(err as Error).message}`));
+        })
+      );
+    }
+  } finally {
+    blankSweepRunning = false;
+    if (moreToDo && store === startStore) setTimeout(() => void sweepBlankProducts(), BLANK_SWEEP_GAP_MS);
+  }
+}
+
+// "Make sure Database does not contain duplicate listings": folds together Database entries that are the same product
+// (see Store.mergeDuplicateProducts), and repoints the Search For items in config that were linked to a removed one.
+// Whether a Watch's check is running right now (the sidebar's Watch eye is awake while it is, asleep otherwise).
+let watchSearching = false;
+
+function mergeDuplicateProductEntries(): void {
+  try {
+    const merged = store.mergeDuplicateProducts();
+    if (merged.size === 0) return;
+    let configChanged = false;
+    for (const item of config.searchItems) {
+      const keep = item.linkedProductId ? merged.get(item.linkedProductId) : undefined;
+      if (keep) {
+        item.linkedProductId = keep;
+        configChanged = true;
+      }
+    }
+    if (configChanged) saveConfig(CONFIG_PATH, config);
+    console.log(`[database] merged ${merged.size} duplicate product entr${merged.size === 1 ? "y" : "ies"}`);
+    for (const keptId of new Set(merged.values())) sendToRenderer("products:updated", store.getProductById(keptId));
+  } catch (err) {
+    console.error(`[database] duplicate merge failed: ${(err as Error).message}`);
+  }
 }
 
 // Called after any accounts CRUD (add/remove) — creates a ScrapeEngine for
@@ -1986,6 +2770,7 @@ async function stopUserSession(): Promise<void> {
 // services), which is exactly what this function (re)builds.
 async function bootstrapUserSession(userId: string, email: string): Promise<void> {
   configurePathsForUser(userId);
+  discovery.clear();
 
   config = loadConfig(CONFIG_PATH);
   // Per explicit instruction — cloud auth IS how the user got into the app
@@ -1998,7 +2783,11 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   saveConfig(CONFIG_PATH, config);
 
   store = new Store(DB_PATH);
+  mergeDuplicateProductEntries();
+  // A little after startup, so the app is up and the first scan isn't competing with it.
+  setTimeout(() => void sweepBlankProducts(), 8000);
   watchSyncService = new WatchSyncService(store, cloudClient, () => config);
+  scheduleListingPhotoShrink(store);
   listingIngestSyncService = new ListingIngestSyncService(store, cloudClient, () => config);
   feedbackSyncService = new FeedbackSyncService(store, cloudClient, () => config);
   productSyncService = new ProductSyncService(store, cloudClient, () => config);
@@ -2027,6 +2816,11 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
       recordLog(line);
       sendToRenderer("engine:log", line);
     },
+    onChecked: () => sendToRenderer("watches:updated", store.listWatches()),
+    onSearchingChange: (searching) => {
+      watchSearching = searching;
+      sendToRenderer("watch:searching", searching);
+    },
   });
   watchScheduler.start();
 
@@ -2036,6 +2830,7 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   // config.ebay?.enabled and hasEbayCredentials() are both checked fresh
   // every tick inside ebayEngine.ts itself, not gated here.
   ebayEngine = new EbayEngine({
+    checkMarket: checkMarketBeforeAlert,
     store,
     getConfig: () => config,
     onLog: (line) => {
@@ -2044,7 +2839,11 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
     },
     onListing: (record) => sendToRenderer("engine:listing", record),
     onNarrate: narrate,
-    onWatchMatch: () => sendToRenderer("watches:updated", store.listWatches()),
+    onWatchMatch: (watch, info) => {
+      sendToRenderer("watches:updated", store.listWatches());
+      sendToRenderer("listings:refresh");
+      notifyWatchMatch(watch, info);
+    },
     // Per explicit instruction — "a live view of eBay searching just like
     // the Facebook live scraper": drops eBay into the EXACT SAME
     // engineStatusMap/engine:statusMap broadcast every Facebook account
@@ -2137,6 +2936,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  if (!hasInstanceLock) return; // a second copy is already shutting itself down — don't build a window or register handlers
   createWindow();
 
   ipcMain.handle("config:get", () => config);
@@ -2182,6 +2982,12 @@ app.whenReady().then(() => {
       restartAllEnginesIfRunning("your filter changes");
     }
   );
+  // Forget one of the "Recent searches" (Dashboard > Add product).
+  ipcMain.handle("searches:removeRecent", (_e, args: { item: string; minPriceUsd: number | null; maxPriceUsd: number | null; includeBroken?: boolean }) => {
+    config = { ...config, recentSearches: removeRecentSearch(config.recentSearches, args) };
+    saveConfig(CONFIG_PATH, config);
+    sendToRenderer("config:updated", config);
+  });
   ipcMain.handle("filters:removeSearchItem", (_e, args: { item: string }) => {
     config = { ...config, searchItems: config.searchItems.filter((s) => s.item !== args.item) };
     saveConfig(CONFIG_PATH, config);
@@ -2218,7 +3024,17 @@ app.whenReady().then(() => {
   // the time this resolves, so the renderer can safely go straight to the
   // normal app view. Not gated behind any config.cloud.enabled check —
   // there's no "logged in but cloud disabled" state anymore.
-  ipcMain.handle("auth:getSession", async (): Promise<{ authenticated: boolean; userId: string | null; email: string | null; apiUrl: string | null }> => {
+  // Bug fix: the renderer asks "am I logged in?" from a mount effect, and
+  // in dev (React StrictMode) or on any window reload that can fire twice
+  // at essentially the same moment. Both calls used to run restoreSession()
+  // with the SAME single-use refresh token; the second one made the cloud
+  // see a token being reused, which it treats as theft and answers by
+  // revoking every session ("Refresh token reuse detected; all sessions
+  // revoked") — logging the user out for no reason. Concurrent callers now
+  // share one in-flight check instead of racing.
+  type SessionCheck = { authenticated: boolean; userId: string | null; email: string | null; apiUrl: string | null };
+  let sessionCheckInFlight: Promise<SessionCheck> | null = null;
+  async function checkOrRestoreSession(): Promise<SessionCheck> {
     if (hasActiveUserSession && currentUserId) {
       const info = cloudClient.getSessionInfo();
       return { authenticated: true, userId: currentUserId, email: info.email, apiUrl: info.apiUrl ?? appSettings.cloudApiUrl };
@@ -2233,6 +3049,14 @@ app.whenReady().then(() => {
       return { authenticated: true, userId: restored.userId, email: restored.email, apiUrl: restored.apiUrl };
     }
     return { authenticated: false, userId: null, email: null, apiUrl: appSettings.cloudApiUrl };
+  }
+  ipcMain.handle("auth:getSession", (): Promise<SessionCheck> => {
+    if (!sessionCheckInFlight) {
+      sessionCheckInFlight = checkOrRestoreSession().finally(() => {
+        sessionCheckInFlight = null;
+      });
+    }
+    return sessionCheckInFlight;
   });
 
   ipcMain.handle(
@@ -2314,16 +3138,27 @@ app.whenReady().then(() => {
   // place — Config itself no longer gets a synchronous result to show
   // since it no longer does this work itself.
   ipcMain.handle("engine:start", async (_e, args: { accountId: string }) => {
+    const eng = ensureEngineFor(args.accountId);
+    // A saved location that hasn't been looked up on Facebook yet is resolved first, which can take minutes (a state looks up
+    // ten cities). The account shows as running meanwhile, so the Dashboard says "Scanning" and Stop can cancel the lookup.
+    const needsLookup = !!config.accounts.find((a) => a.id === args.accountId && !a.locationResolved);
+    if (needsLookup) eng.beginStarting("Looking up your location on Facebook...");
     const resolved = await resolveAccountLocationIfNeeded(args.accountId);
+    // Stop was clicked while the lookup ran: nothing to report, and nothing to start.
+    if (needsLookup && eng.stopWasRequested) return;
     if (resolved.message) {
       const line: LogLine = { ts: Date.now(), level: resolved.ok ? "info" : "error", message: resolved.message };
       recordLog(line);
       sendToRenderer("engine:log", line);
     }
-    if (!resolved.ok) return;
-    ensureEngineFor(args.accountId).start();
+    if (!resolved.ok) {
+      eng.cancelStarting();
+      return;
+    }
+    eng.start();
   });
   ipcMain.handle("engine:stop", (_e, args: { accountId: string }) => ensureEngineFor(args.accountId).stop());
+  ipcMain.handle("engine:skipWait", (_e, args: { accountId: string }) => ensureEngineFor(args.accountId).skipWait());
   ipcMain.handle("engine:runOnce", (_e, args: { accountId: string }) => ensureEngineFor(args.accountId).triggerOnce());
   ipcMain.handle("engine:login", (_e, args: { accountId: string }) => ensureEngineFor(args.accountId).login());
   ipcMain.handle("engine:checkLogin", (_e, args: { accountId: string }) => ensureEngineFor(args.accountId).checkLogin());
@@ -2481,71 +3316,154 @@ app.whenReady().then(() => {
       if (!subject) return { ok: false, message: "Nothing on this listing to research.", productId: null };
       const reason = args.reason?.trim() || null;
 
+      const listingImage = listing.thumbnailUrl ?? listing.imageUrls[0] ?? null;
+      let imageDataUri: string | null | undefined; // undefined = not downloaded yet
+      const listingPhoto = async () => (imageDataUri === undefined ? (imageDataUri = listingImage ? await downloadImageAsDataUri(listingImage) : null) : imageDataUri);
+
+      let productName = subject;
+      let relationForNew: { parentId: string | null; familyFromId: string } | null = null;
       const existing = store.findMatchingProduct(subject);
       if (existing) {
-        const noteParts = [
-          listing.price !== null ? `$${listing.price}` : null,
-          listing.extractedAttributes || null,
-          listing.photoAnalysis ? `Photo analysis: ${listing.photoAnalysis.slice(0, 500)}` : null,
-          reason ? `User was interested because: ${reason}` : null,
-        ].filter((p): p is string => !!p);
-        const updated = noteParts.length ? store.recordProductObservation(subject, noteParts.join(" — ")) : existing;
-        if (updated) sendToRenderer("products:updated", updated);
-        return { ok: true, message: `Reinforced the existing "${existing.name}" profile with this listing.`, productId: existing.id };
+        // The name matched an existing entry; is this listing really that exact product, or a more specific model of
+        // it (an EVGA card under the generic RTX 3060 Ti entry)? See productIdentity.ts.
+        const { action } = await resolveIdentityTarget(store, existing, {
+          title: listing.title,
+          description: listing.description,
+          imageDataUri: await listingPhoto(),
+        });
+        if (action.kind === "create") {
+          // The user asked to research it, so give it its own entry under the general one (unless that exact name exists).
+          const twin = store.getProductByName(action.name) ?? store.findColorVariant(action.name);
+          if (!twin) {
+            productName = action.name;
+            relationForNew = { parentId: action.parentId, familyFromId: action.familyFromId };
+          }
+        }
+        if (!relationForNew) {
+          const target =
+            action.kind === "attach" ? (store.getProductById(action.productId) ?? existing) : action.kind === "create" ? (store.getProductByName(action.name) ?? existing) : existing;
+          const noteParts = [
+            listing.price !== null ? `$${listing.price}` : null,
+            listing.extractedAttributes || null,
+            listing.photoAnalysis ? `Photo analysis: ${listing.photoAnalysis.slice(0, 500)}` : null,
+            reason ? `User was interested because: ${reason}` : null,
+          ].filter((p): p is string => !!p);
+          const updated = noteParts.length ? store.appendProductObservation(target, subject, noteParts.join(" — ")) : target;
+          if (updated) sendToRenderer("products:updated", updated);
+          return { ok: true, message: `Reinforced the existing "${target.name}" profile with this listing.`, productId: target.id };
+        }
       }
 
-      const id = randomUUID();
-      store.addProductStub(id, subject);
+      const id = store.addProductStub(randomUUID(), productName);
+      const parentForNew = relationForNew?.parentId ? store.getProductById(relationForNew.parentId) : null;
+      const familyFromNew = relationForNew ? store.getProductById(relationForNew.familyFromId) : null;
+      if (parentForNew) store.setProductParent(id, parentForNew.id);
       // Per explicit instruction — same pattern as scrapeEngine.ts's
       // onNewProductFound: a real photo from THIS listing shows immediately
       // as a placeholder and is saved into the Reference Photos gallery,
       // but isn't kept as the permanent thumbnail — the background
       // web-research lookup below gets to replace it with a clean,
       // representative product photo instead.
-      const listingImage = listing.thumbnailUrl ?? listing.imageUrls[0] ?? null;
-      const imageDataUri = listingImage ? await downloadImageAsDataUri(listingImage) : null;
-      if (imageDataUri) {
-        store.editProductProfile(id, { imageUrl: imageDataUri });
-        store.addProductImage(id, imageDataUri, listing.title);
+      const photo = await listingPhoto();
+      if (photo) {
+        store.editProductProfile(id, { imageUrl: photo });
+        store.addProductImage(id, photo, listing.title);
         ensurePhotoDifferenceAnalysis(id);
       }
       if (reason) {
-        store.recordProductObservation(subject, `User was interested because: ${reason}`);
+        store.recordProductObservation(productName, `User was interested because: ${reason}`);
       }
       sendToRenderer("products:updated", store.getProductById(id));
       // Condition-awareness — listing.title is the live listing that just
       // triggered this "mark interested" new-product creation, same
       // reasoning as onNewProductFound's own call above.
-      runProductLookup(id, subject, { triggeringListing: { title: listing.title, imageDataUri } });
-      return { ok: true, message: `Added "${subject}" to the Database and researching it now.`, productId: id };
+      runProductLookup(id, productName, {
+        triggeringListing: { title: listing.title, imageDataUri: photo },
+        ...(relationForNew ? { skipSiblingDiscovery: true, forcedFamily: familyFromNew?.family ?? undefined } : {}),
+      });
+      return {
+        ok: true,
+        message: parentForNew
+          ? `Added "${productName}" to the Database under "${parentForNew.name}" and researching it now.`
+          : relationForNew
+            ? `Added "${productName}" to the Database next to "${familyFromNew?.name ?? "its variants"}" and researching it now.`
+            : `Added "${subject}" to the Database and researching it now.`,
+        productId: id,
+      };
     }
   );
 
-  ipcMain.handle("products:list", () => store.listProducts());
-  // Per explicit instruction — "if the ai already has prior knowledge on
-  // the thing you are searching for, have it bring up an image from
-  // Database... prompting the user with a popup asking if that's what
-  // you're searching for": Dashboard's "Add product" flow calls this
-  // before actually adding, using the SAME fuzzy-match logic the scanner
-  // itself relies on elsewhere (see store.findMatchingProduct), so the
-  // popup reflects exactly what the live matching engine would find —
+  // A folder tile (a brand, a sub-grouping) that is on screen with nothing to show: its brand logo / group picture, found
+  // without AI (see webResearch.ts's findFreeBrandLogo / findFreeGroupImage). True when something new was stored.
+  ipcMain.handle("watch:isSearching", (): boolean => watchSearching);
+  // Link (or, with an empty value, unlink) the user's own eBay store: its listings become a separate price reference.
+  ipcMain.handle("ebayStore:link", (_e, input: string): { ok: boolean; username: string; error?: string } => {
+    const raw = typeof input === "string" ? input.trim() : "";
+    const username = raw ? parseSellerName(raw) : "";
+    if (username === null) return { ok: false, username: config.ebayStoreUsername ?? "", error: "That doesn't look like an eBay username. Use the name shown on your eBay profile (ebay.com/usr/yourname)." };
+    if (username && !hasEbayCredentials()) return { ok: false, username: config.ebayStoreUsername ?? "", error: "Clynx needs its eBay keys (EBAY_CLIENT_ID and EBAY_CLIENT_SECRET in .env) to read your store." };
+    config = { ...config, ebayStoreUsername: username };
+    saveConfig(CONFIG_PATH, config);
+    sendToRenderer("config:updated", config);
+    store.clearAllMyStoreRefs();
+    for (const product of store.listProducts()) sendToRenderer("products:updated", store.getProductById(product.id));
+    if (username) void backfillMyStoreReferences();
+    else myStoreBackfillRun++;
+    return { ok: true, username };
+  });
+  ipcMain.handle("watch:setNtfyTopic", (_e, args: { id: string; topic: string | null }): Watch | null => {
+    // ntfy topics are letters, digits, underscores and dashes (up to 64); anything else would just fail to send.
+    const topic = typeof args.topic === "string" ? args.topic.trim() : "";
+    if (topic && !/^[A-Za-z0-9_-]{1,64}$/.test(topic)) return null;
+    const updated = store.setWatchNtfyTopic(args.id, topic || null);
+    return updated;
+  });
+  ipcMain.handle("products:ensureFolderImage", async (_e, args: { segments: string[] }): Promise<boolean> => {
+    const segments = Array.isArray(args?.segments) ? args.segments.filter((x) => typeof x === "string" && x.trim()) : [];
+    if (segments.length === 0) return false;
+    const path = segments.join(" > ");
+    const key = path.toLowerCase();
+    if (folderImageAttemptedAt.has(key) && Date.now() - (folderImageAttemptedAt.get(key) ?? 0) < 30 * 60_000) return false;
+    folderImageAttemptedAt.set(key, Date.now());
+    try {
+      if (segments.length === 1) {
+        if (store.getFamilyLogoUrl(segments[0])) return false;
+        const logo = await findBrandLogoImage(segments[0]);
+        if (!logo) return false;
+        store.setFamilyLogo(segments[0], logo);
+        return true;
+      }
+      if (store.getGroupThumbnail(path)) return false;
+      const query = segments.length === 2 ? `${segments[0]} ${segments[1]}` : `${segments[segments.length - 1]} ${segments[1]}`;
+      const imageData = await findGroupImage(query);
+      if (!imageData) return false;
+      store.setGroupThumbnail(path, imageData);
+      sendToRenderer("groupThumbnails:updated", { path, imageData });
+      return true;
+    } catch (err) {
+      console.error(`[folder-image] failed for "${path}": ${(err as Error).message}`);
+      return false;
+    }
+  });
+  ipcMain.handle("products:ensureThumbnails", (_e, args: { ids: string[] }): number => ensureThumbnailsFor(Array.isArray(args?.ids) ? args.ids.filter((x) => typeof x === "string") : []));
+  ipcMain.handle("products:list", () => {
+    // Folds together entries that turned out to be the same product (see Store.mergeDuplicateProducts); a no-op normally.
+    mergeDuplicateProductEntries();
+    // Opening the Database also checks for blank-box entries, at most every 10 minutes.
+    if (Date.now() - lastBlankSweepAt > 10 * 60_000) void sweepBlankProducts();
+    return store.listProducts();
+  });
+  // Looks up an existing Database entry by name using the SAME fuzzy-match logic the scanner
+  // itself relies on elsewhere (see store.findMatchingProduct), so what the Dashboard's "Add
+  // product" and the Watch form link to is exactly what the live matching engine would find —
   // never a separate, possibly-diverging guess reimplemented client-side.
   ipcMain.handle("products:findMatch", (_e, args: { name: string }): ProductProfile | null => store.findMatchingProduct(args.name));
-  // Per explicit instruction — Dashboard's "Add product" popup now asks for
-  // confirmation 100% of the time, not just when a Database match exists:
-  // when products:findMatch above comes back empty, this is what supplies a
-  // reference photo to confirm against instead — the same web-image search
-  // lookupProduct itself uses (findProductImage: a real search + vision-
-  // verification pass, not a raw unverified image), just without the rest
-  // of lookupProduct's heavier AI-summary/category work, since all this
-  // needs is a picture for the popup, not a new Database entry. Returns
-  // null (never throws) if nothing panned out — the popup still shows in
-  // that case, just without a photo.
-  ipcMain.handle("products:findReferenceImage", (_e, args: { name: string }): Promise<string | null> => findProductImage(args.name));
   // Initial snapshot for whenever the Database screen (re)mounts after
   // research already started elsewhere — see activeResearch/
   // broadcastResearchStatus above for how this stays live afterward.
   ipcMain.handle("research:status", (): ActiveProductResearch[] => Array.from(activeResearch.values()));
+  // The Discovery tab's snapshot (live updates arrive as "discovery:entry", see the DiscoveryFeed above).
+  ipcMain.handle("discovery:list", () => discovery.list());
   // The Database screen's own client-side cache of folder-level thumbnails
   // (see ensureGroupThumbnail above) — fetched once up front since this
   // dataset stays small (one row per distinct sub-grouping actually seen),
@@ -2557,7 +3475,7 @@ app.whenReady().then(() => {
     const product = store.getProductById(args.id);
     if (!product) return null;
     store.setProductLoading(args.id, true);
-    runProductLookup(args.id, product.name);
+    runProductLookup(args.id, product.name, { source: "refresh" });
     return store.getProductById(args.id);
   });
 
@@ -2735,12 +3653,18 @@ app.whenReady().then(() => {
     try {
       const analysis = await fetchAndStoreEbayComps(args.id, product.name);
       sendToRenderer("products:updated", store.getProductById(args.id));
+      const rejectedParts = [
+        analysis.rejectedCount > 0 ? `${analysis.rejectedCount} didn't match this exact product` : null,
+        analysis.photoRejected > 0 ? `${analysis.photoRejected} had photos of a different product` : null,
+      ].filter((p): p is string => !!p);
+      const rejected = rejectedParts.length ? ` (ignored: ${rejectedParts.join(", ")})` : "";
+      const asks = analysis.activeSampleSize > 0 ? ` and ${analysis.activeSampleSize} active listing${analysis.activeSampleSize === 1 ? "" : "s"}` : "";
       return {
         ok: true,
         message:
-          analysis.sampleSize > 0
-            ? `Found ${analysis.sampleSize} matching sold comp(s) on WatchCount.`
-            : "Checked WatchCount but found no confidently-matching sold comps.",
+          analysis.sampleSize > 0 || analysis.estimatedValueUsd !== null
+            ? `Found ${analysis.sampleSize} matching sold comp${analysis.sampleSize === 1 ? "" : "s"}${asks}${rejected}.`
+            : `Checked WatchCount but found no confidently-matching sold comps${rejected}.`,
       };
     } catch (err) {
       return { ok: false, message: `eBay comps research failed: ${(err as Error).message}` };
@@ -2772,7 +3696,7 @@ app.whenReady().then(() => {
     "search:addProducts",
     async (
       _e,
-      args: { items: string[]; linkedProductId?: string | null; minPriceUsd?: number | null; maxPriceUsd?: number | null }
+      args: { items: string[]; linkedProductId?: string | null; minPriceUsd?: number | null; maxPriceUsd?: number | null; includeBroken?: boolean }
     ): Promise<{ ok: boolean; message: string }> => {
       const seen = new Set<string>();
       const names = args.items.filter((name) => {
@@ -2845,6 +3769,7 @@ app.whenReady().then(() => {
               linkedProductId: args.linkedProductId ?? null,
               minPriceUsd: args.minPriceUsd ?? null,
               maxPriceUsd: args.maxPriceUsd ?? null,
+              includeBroken: args.includeBroken === true,
             },
           },
           "dashboard"
@@ -2874,41 +3799,55 @@ app.whenReady().then(() => {
       _e,
       args: {
         name: string;
+        platform: WatchPlatform;
         searchPhrase: string;
         linkedProductId: string | null;
+        // A Facebook Watch looks out for several things; when given, these are the Watch's
+        // terms (searchPhrase/linkedProductId above are then just the first of them).
+        terms?: Array<{ phrase: string; linkedProductId?: string | null }>;
+        checkIntervalMinutes?: number;
+        accountIds?: string[];
         minPriceUsd: number | null;
         maxPriceUsd: number | null;
         minProfitUsd: number | null;
         minDiscountPercent: number | null;
         maxListingAgeMinutes: number | null;
+        minSellerRatingPercent: number | null;
         locationMode: "country" | "state" | "city";
         selectedState: string | null;
         selectedCityOrZip: string | null;
         searchRadiusMiles: number | null;
       }
     ): Promise<Watch> => {
+      const platform: WatchPlatform = args.platform === "ebay" ? "ebay" : "facebook";
       // Same keyword-expansion (abbreviations/variants) add_search_item's
       // own args already get from search:addProducts above — a Watch's
       // text-matching deserves the exact same breadth a Search For item's
       // does, not a narrower reimplementation.
-      const matchKeywords = await expandSearchKeywords(args.searchPhrase);
+      // An eBay Watch looks for exactly one thing.
+      const termInputs = args.terms?.length ? args.terms : [{ phrase: args.searchPhrase, linkedProductId: args.linkedProductId }];
+      const terms = (await buildWatchTerms(platform === "ebay" ? termInputs.slice(0, 1) : termInputs)).slice(0, platform === "ebay" ? 1 : MAX_WATCH_TERMS);
+      if (!terms.length) throw new Error("A Watch needs something to look for.");
       const watch = store.createWatch({
-        name: args.name.trim() || args.searchPhrase.trim(),
-        searchPhrase: args.searchPhrase.trim(),
-        matchKeywords,
-        linkedProductId: args.linkedProductId,
+        name: args.name.trim() || terms.map((t) => t.phrase).join(", ").slice(0, 60),
+        platform,
+        terms,
+        searchPhrase: terms[0].phrase,
+        matchKeywords: terms[0].matchKeywords,
+        linkedProductId: terms[0].linkedProductId,
+        checkIntervalMinutes: snapToWatchInterval(args.checkIntervalMinutes),
+        accountIds: platform === "facebook" ? cleanAccountIds(args.accountIds) : [],
         minPriceUsd: args.minPriceUsd,
         maxPriceUsd: args.maxPriceUsd,
         minProfitUsd: args.minProfitUsd,
         minDiscountPercent: args.minDiscountPercent,
         maxListingAgeMinutes: args.maxListingAgeMinutes,
-        locationMode: args.locationMode,
-        selectedState: args.selectedState,
-        selectedCityOrZip: args.selectedCityOrZip,
-        searchRadiusMiles: args.searchRadiusMiles,
+        minSellerRatingPercent: platform === "ebay" ? sanitizeSellerRating(args.minSellerRatingPercent) : null,
+        ...watchLocationFor(platform, args),
       });
+      startWatching();
       broadcastWatches();
-      const line: LogLine = { ts: Date.now(), level: "info", message: `Watch created: "${watch.name}"` };
+      const line: LogLine = { ts: Date.now(), level: "info", message: `${platform === "ebay" ? "eBay" : "Facebook"} Watch created: "${watch.name}"` };
       recordLog(line);
       sendToRenderer("engine:log", line);
       return watch;
@@ -2930,14 +3869,43 @@ app.whenReady().then(() => {
           minProfitUsd: number | null;
           minDiscountPercent: number | null;
           maxListingAgeMinutes: number | null;
+          minSellerRatingPercent: number | null;
           locationMode: "country" | "state" | "city";
           selectedState: string | null;
           selectedCityOrZip: string | null;
           searchRadiusMiles: number | null;
+          terms: Array<{ phrase: string; linkedProductId?: string | null }>;
+          checkIntervalMinutes: number;
+          accountIds: string[];
         }>;
       }
     ): Promise<Watch | null> => {
       const patch = { ...args.patch } as any;
+      const current = store.getWatchById(args.id);
+      if (!current) return null;
+      // The Watch's terms: phrases it already had keep their keywords; new ones get
+      // theirs worked out. When terms are given they replace the plain phrase/link fields.
+      if (Array.isArray(patch.terms)) {
+        const built = await buildWatchTerms(patch.terms, current.terms);
+        if (!built.length) return current;
+        patch.terms = current.platform === "ebay" ? built.slice(0, 1) : built;
+        delete patch.searchPhrase;
+        delete patch.linkedProductId;
+        delete patch.matchKeywords;
+      }
+      if (typeof patch.checkIntervalMinutes === "number") patch.checkIntervalMinutes = snapToWatchInterval(patch.checkIntervalMinutes);
+      if ("accountIds" in patch) patch.accountIds = current.platform === "facebook" ? cleanAccountIds(patch.accountIds) : [];
+      // The platform itself can't be edited (see types.ts's WatchPlatform), so
+      // the rules below key off the stored one, never the patch. An eBay Watch
+      // has no location and a Facebook one has no seller rating; both are
+      // forced here so a stale form value can't leave junk behind.
+      if (current.platform === "ebay") {
+        Object.assign(patch, watchLocationFor("ebay", patch));
+        if ("minSellerRatingPercent" in patch) patch.minSellerRatingPercent = sanitizeSellerRating(patch.minSellerRatingPercent);
+      } else {
+        patch.minSellerRatingPercent = null;
+        if (patch.searchRadiusMiles !== null && patch.searchRadiusMiles !== undefined) patch.searchRadiusMiles = snapToFacebookRadius(patch.searchRadiusMiles);
+      }
       // A search-phrase edit needs its match keywords re-expanded too —
       // otherwise an edited phrase would keep matching against the OLD
       // phrase's keyword set. Bug found live: WatchFormFlow.tsx's own
@@ -3076,8 +4044,7 @@ app.whenReady().then(() => {
             ensurePhotoDifferenceAnalysis(target.id);
             sendToRenderer("products:updated", store.getProductById(target.id));
           } else {
-            const newId = randomUUID();
-            store.addProductStub(newId, recon.actualSubject);
+            const newId = store.addProductStub(randomUUID(), recon.actualSubject);
             store.editProductProfile(newId, { imageUrl: args.imageDataUri, keepThumbnail: true });
             sendToRenderer("products:updated", store.getProductById(newId));
             runProductLookup(newId, recon.actualSubject);
@@ -3193,7 +4160,8 @@ app.whenReady().then(() => {
         // "Blacklist (0): none yet" in the system prompt regardless of
         // actual state would be actively misleading.
         const products = args.context === "database" || args.context === "dashboard" || args.context === "global" ? store.listProducts() : [];
-        const currentProduct = args.context === "product" && args.productId ? store.getProductById(args.productId) : null;
+        // The Discovery tab passes the product open on the right (context "database"): Clynx then talks about that one.
+        const currentProduct = (args.context === "product" || args.context === "database") && args.productId ? store.getProductById(args.productId) : null;
         const blacklistTerms =
           args.context === "database" || args.context === "dashboard" || args.context === "global" ? store.listBlacklistTerms() : [];
         const watches = args.context === "dashboard" || args.context === "global" ? store.listWatches() : [];

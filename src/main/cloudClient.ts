@@ -55,6 +55,13 @@ export interface CloudWatch {
   selectedState: string | null;
   selectedCityOrZip: string | null;
   searchRadiusMiles: number | null;
+  // Watch-platform fields. Optional because the cloud server's own schema
+  // predates them: it ignores them on a PUT (zod strips unknown keys) and
+  // doesn't send them back, in which case the local values are kept as they
+  // are (see Store.upsertWatchFromCloud). They start syncing as soon as the
+  // server's watches route is taught the two fields.
+  platform?: "facebook" | "ebay";
+  minSellerRatingPercent?: number | null;
   enabled: boolean;
   createdAt: number;
   updatedAt: number;
@@ -100,6 +107,8 @@ export function watchToCloud(w: Watch): CloudWatch {
     selectedState: w.selectedState,
     selectedCityOrZip: w.selectedCityOrZip,
     searchRadiusMiles: w.searchRadiusMiles,
+    platform: w.platform,
+    minSellerRatingPercent: w.minSellerRatingPercent,
     enabled: w.enabled,
     createdAt: w.createdAt,
     updatedAt: w.updatedAt,
@@ -285,6 +294,21 @@ export interface CloudResult<T = void> {
 
 const REQUEST_TIMEOUT_MS = 5000;
 
+// "localhost" is tried over IPv6 (::1) first on this machine, and the Docker/WSL port relay can
+// leave that address hanging (accepting nothing) while 127.0.0.1 answers instantly, which made
+// every request time out after 5s ("This operation was aborted") with the server healthy. A
+// local server is therefore always addressed as 127.0.0.1. Remote servers are left alone.
+export function useIpv4Loopback(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname !== "localhost") return url;
+    parsed.hostname = "127.0.0.1";
+    return parsed.toString().replace(/\/$/, url.endsWith("/") ? "/" : "");
+  } catch {
+    return url;
+  }
+}
+
 function getApiUrl(config: Config): string | null {
   const apiUrl = config.cloud?.apiUrl;
   if (!apiUrl) return null;
@@ -349,7 +373,7 @@ async function safeFetch(url: string, init?: RequestInit): Promise<CloudResult<a
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { ...init, signal: controller.signal });
+    const res = await fetch(useIpv4Loopback(url), { ...init, signal: controller.signal });
     let data: any = undefined;
     try {
       data = await res.json();
@@ -540,7 +564,7 @@ export class CloudClient {
     if (!this.accessToken) return { ok: false, error: "Not authenticated — no cloud session available yet" };
     const path = kind === "chat" ? "/ai/chat/completions" : "/ai/images/generations";
     try {
-      const response = await fetch(`${apiUrl}${path}`, {
+      const response = await fetch(useIpv4Loopback(`${apiUrl}${path}`), {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.accessToken}` },
         body: JSON.stringify(body),
@@ -883,7 +907,19 @@ export class CloudClient {
   // rotates the refresh token to get a fresh access token without ever
   // prompting for a password again. index.ts calls this from auth:getSession
   // before deciding whether to show the LoginScreen.
-  async restoreSession(): Promise<{ ok: boolean; userId: string | null; email: string | null; apiUrl: string | null }> {
+  private restoreInFlight: Promise<{ ok: boolean; userId: string | null; email: string | null; apiUrl: string | null }> | null = null;
+  restoreSession(): Promise<{ ok: boolean; userId: string | null; email: string | null; apiUrl: string | null }> {
+    // Single-flight: the refresh token is single-use, so two overlapping
+    // restores would make the second look like token reuse to the server.
+    if (!this.restoreInFlight) {
+      this.restoreInFlight = this.restoreSessionOnce().finally(() => {
+        this.restoreInFlight = null;
+      });
+    }
+    return this.restoreInFlight;
+  }
+
+  private async restoreSessionOnce(): Promise<{ ok: boolean; userId: string | null; email: string | null; apiUrl: string | null }> {
     try {
       const session = readSession(this.sessionPath);
       if (!session.refreshToken || !session.apiUrl || !session.userId) {

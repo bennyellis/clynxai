@@ -1,6 +1,6 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import type { ListingRecord, PhotoFlaw } from "../lib/api.js";
-import { FlameIcon, SOURCE_COLORS, SOURCE_NAMES, SourceLogo, isHotListing } from "./ListingSourceMarks.js";
+import { FlameIcon, HotRing, OUTLINE_WIDTH_PX, SOURCE_NAMES, SourceLogo, isHotListing, listingOutlineColor } from "./ListingSourceMarks.js";
 import { api } from "../lib/api.js";
 import { Modal } from "./Modal.js";
 
@@ -12,19 +12,6 @@ function timeAgo(ts: number): string {
   const hours = Math.floor(mins / 60);
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
-}
-
-// Per explicit instruction — Feed's own card should read like a simplified
-// version of the actual Facebook listing, not the app's internal
-// bookkeeping. locationText is scraped as "City, ST" (see scraper.ts); this
-// keeps just the state, matching the requested "12 weeks old | VA" shape
-// instead of the fuller "Fairfield, VA." Falls back to the whole string for
-// any listing whose location text doesn't have a comma in it, rather than
-// showing nothing.
-function stateFromLocationText(locationText: string | null): string | null {
-  if (!locationText) return null;
-  const parts = locationText.split(",");
-  return parts[parts.length - 1]?.trim() || null;
 }
 
 // Per explicit instruction — "1/10 of a star granularity" for the seller
@@ -66,10 +53,18 @@ function StarRating({ rating }: { rating: number }) {
 // see cardWidth's own comment.
 const DEFAULT_CARD_WIDTH = 300;
 const DEFAULT_IMAGE_HEIGHT = 260;
-const DEFAULT_CARD_HEIGHT = 620;
-// Roughly 4 lines at this card's width/font-size — not exact (that's what
-// the overflow check below is for), just the clamp height itself.
-const DESCRIPTION_CLAMP_LINES = 4;
+const DEFAULT_CARD_HEIGHT = 490;
+
+/** A card's height for a given card width (the Feed's size slider), so the Feed can lay cards out without rendering them. */
+export function listingCardHeight(cardWidth: number): number {
+  return Math.round(cardWidth * (DEFAULT_IMAGE_HEIGHT / DEFAULT_CARD_WIDTH)) + (DEFAULT_CARD_HEIGHT - DEFAULT_IMAGE_HEIGHT);
+}
+
+// The Feed only keeps the cards near the screen mounted (see Feed.tsx), so a card is rebuilt each
+// time it scrolls back into view. Which photo of the carousel the user was on is remembered here by
+// listing id, so a rebuilt card looks exactly as it was left. Capped, oldest forgotten first.
+const cardPhotoIndex = new Map<string, number>();
+const CARD_UI_STATE_LIMIT = 1500;
 
 const carouselArrowStyle: React.CSSProperties = {
   position: "absolute",
@@ -89,16 +84,28 @@ const carouselArrowStyle: React.CSSProperties = {
   lineHeight: 1,
 };
 
-export function ListingCard({
+// The small labels over a card's photo (Watch find, Just listed): readable on any photo.
+const CARD_PILL: React.CSSProperties = {
+  background: "rgba(15, 11, 30, 0.82)",
+  color: "#fff",
+  borderColor: "rgba(255, 255, 255, 0.35)",
+  fontSize: 11.5,
+  fontWeight: 600,
+  padding: "3px 8px",
+  whiteSpace: "nowrap",
+};
+
+function ListingCardImpl({
   record,
   onDelete,
   onGoToProduct,
   cardWidth = DEFAULT_CARD_WIDTH,
   delayMs = 0,
   justArrived = false,
+  animate = true,
 }: {
   record: ListingRecord;
-  onDelete?: () => void;
+  onDelete?: (id: string) => void;
   // Per explicit instruction — Research (and Interested, which reuses the
   // same backend call) now takes the user straight to that product's own
   // Database page. Optional so this component doesn't strictly require
@@ -117,16 +124,22 @@ export function ListingCard({
   // listing loaded from history just renders in its already-resolved
   // (no photo) state with no animation replay.
   justArrived?: boolean;
+  // Play the card's fade-in. The Feed turns this off for cards that are only being scrolled into
+  // view (they would otherwise fade in again every time), leaving it on for new arrivals.
+  animate?: boolean;
 }) {
   const imageHeight = Math.round(cardWidth * (DEFAULT_IMAGE_HEIGHT / DEFAULT_CARD_WIDTH));
   const cardHeight = imageHeight + (DEFAULT_CARD_HEIGHT - DEFAULT_IMAGE_HEIGHT);
   const [saving, setSaving] = useState(false);
   const [researching, setResearching] = useState(false);
   const [researchMsg, setResearchMsg] = useState<string | null>(null);
-  const [descExpanded, setDescExpanded] = useState(false);
-  const [descOverflows, setDescOverflows] = useState(false);
-  const descRef = useRef<HTMLDivElement>(null);
-  const [imgIndex, setImgIndex] = useState(0);
+  const [imgIndex, setImgIndex] = useState(() => cardPhotoIndex.get(record.id) ?? 0);
+  useEffect(() => {
+    cardPhotoIndex.delete(record.id); // re-insert so the most recently touched is last
+    if (imgIndex === 0) return;
+    cardPhotoIndex.set(record.id, imgIndex);
+    if (cardPhotoIndex.size > CARD_UI_STATE_LIMIT) cardPhotoIndex.delete(cardPhotoIndex.keys().next().value as string);
+  }, [record.id, imgIndex]);
   const [showInterestedDialog, setShowInterestedDialog] = useState(false);
   const [showNotInterestedDialog, setShowNotInterestedDialog] = useState(false);
   const [showBlacklistDialog, setShowBlacklistDialog] = useState(false);
@@ -197,42 +210,6 @@ export function ListingCard({
     setImgIndex((i) => (i + 1) % images.length);
   }
 
-  // Only decide whether the "show full description" toggle is worth
-  // showing while the text is actually clamped — once expanded the box no
-  // longer clips anything, so scrollHeight/clientHeight would trivially
-  // match and (wrongly) make the toggle disappear before the user could
-  // use it to collapse back. Skipping the re-check while expanded just
-  // keeps whatever was already measured.
-  useLayoutEffect(() => {
-    if (descExpanded) return;
-    const el = descRef.current;
-    if (!el) return;
-    setDescOverflows(el.scrollHeight > el.clientHeight + 1);
-  }, [record.description, descExpanded]);
-
-  // The Database only ever gets a new entry when the user actually asks for
-  // one — this button (and chat's research_product) are the only two ways
-  // that happens now, since scanning stopped auto-adding every product it
-  // came across. If this listing's product is already in the Database, the
-  // same click just reinforces that entry with this listing's details
-  // instead of creating a near-duplicate. Per explicit instruction, this
-  // now takes the user straight there afterward — convenient for someone
-  // who clicked Research specifically because they want to know more about
-  // this product right away, not just quietly reinforce it in the
-  // background (that's what Interested already does, without navigating —
-  // it's the fast-triage action, this is the "show me now" one).
-  async function research() {
-    setResearching(true);
-    setResearchMsg(null);
-    try {
-      const res = await api.researchListing(record.id);
-      setResearchMsg(res.message);
-      if (res.ok && res.productId) onGoToProduct?.(res.productId);
-    } finally {
-      setResearching(false);
-    }
-  }
-
   // Falls back through extractedAttributes → matched Search For item → raw
   // title — used as the default text/context offered in both reason
   // dialogs below (the user can edit or replace it before submitting) and
@@ -248,15 +225,25 @@ export function ListingCard({
   // click. The reason typed into the dialog becomes both this listing's
   // feedback note and a note on the Database entry itself, so there's a
   // real record of why this specific listing was worth buying.
-  async function submitInterested(reason: string) {
+  async function submitInterested(reason: string, goToProduct = false) {
     setSaving(true);
+    setResearching(goToProduct);
+    setResearchMsg(null);
     try {
       await api.setFeedback(record.id, "good", reason);
-      await api.researchListing(record.id, reason);
-      onDelete?.();
+      const res = await api.researchListing(record.id, reason || undefined);
+      // Research from the Interested dialog also takes the user to that product's Database page; if it
+      // couldn't be researched, stay put and say why instead of silently dropping the listing.
+      if (goToProduct && !res.ok) {
+        setResearchMsg(res.message);
+        return;
+      }
+      onDelete?.(record.id);
+      if (goToProduct && res.productId) onGoToProduct?.(res.productId);
+      setShowInterestedDialog(false);
     } finally {
       setSaving(false);
-      setShowInterestedDialog(false);
+      setResearching(false);
     }
   }
 
@@ -272,7 +259,7 @@ export function ListingCard({
     try {
       await api.setFeedback(record.id, "bad", reason);
       await api.notInterested(reason);
-      onDelete?.();
+      onDelete?.(record.id);
     } finally {
       setSaving(false);
       setShowNotInterestedDialog(false);
@@ -292,7 +279,7 @@ export function ListingCard({
       // visually-similar listings get caught by the Blacklisted Images
       // check too, not just by title text matching.
       if (shouldBlacklist) await api.addBlacklistTerm(categoryGuess, images[0] ?? null, record.title);
-      onDelete?.();
+      onDelete?.(record.id);
     } finally {
       setSaving(false);
       setShowBlacklistDialog(false);
@@ -306,75 +293,70 @@ export function ListingCard({
   // card's own flash-deal border/glow (see the className below), so a real
   // deal is still visually distinct — just not via text stamped on the photo.
 
-  // Per explicit instruction: the generic "Seller risk" text badge is
-  // replaced with a yellow clock icon specifically for the account-age
-  // signal (the one objective, easy-to-explain-at-a-glance risk) — other
-  // risk reasons no longer get a badge of their own. sellerRisk.ts's exact
-  // wording for this check always starts with this phrase.
+  // The yellow clock on the photo: the one objective seller-risk signal worth a glance (account age).
   const ageRisk = record.sellerRiskReasons.some((r) => r.startsWith("Facebook account is only"));
-  // Per explicit instruction: a low-rating-based risk shouldn't display any
-  // message for now (more specific handling to come) — filtered out here so
-  // only account-age and any other non-rating reasons (e.g. no profile
-  // photo) still show in the "potential risks" text below.
-  const riskReasons = record.sellerRiskReasons.filter((r) => !/rating/i.test(r));
 
-  // Per explicit instruction — "12 weeks old | VA," the listing's own age
-  // and state on one line, same shape Facebook itself shows (just without
-  // the city, and without this app's own "found N minutes ago" bookkeeping
-  // mixed in alongside it).
-  const ageStateLine = [record.listingAge, stateFromLocationText(record.locationText)].filter(Boolean).join(" | ") || null;
-
-  // Per explicit instruction — the old "est. $X-Y (unverified)" text was the
-  // general pathway's own AI guess, shown unconditionally even with nothing
-  // real behind it. Now: nothing shows here at all unless there's REAL data
-  // (the matched product's own average watchcount/eBay sold price — see
-  // store.ts's enrichWithMatchedProductPricing) AND this exact listing's
-  // price is within 10% of it, in which case it's worth calling out as a
-  // strong match against real comps, not just a discount off a typical
-  // list price.
-  const avgSoldPriceUsd = record.matchedProductAvgSoldPriceUsd;
-  const isNearAvgSoldPrice =
-    avgSoldPriceUsd !== null && avgSoldPriceUsd > 0 && record.price !== null && Math.abs(record.price - avgSoldPriceUsd) / avgSoldPriceUsd <= 0.1;
-
-  // Per explicit instruction — reported live with a screenshot: when a
-  // seller marks a listing down, Facebook shows the current price right
-  // next to the original in strikethrough — but plain text extraction
-  // (see scraper.ts's description capture) loses that styling, so the two
-  // numbers land back to back with nothing between them ("$600$700"),
-  // showing up as a broken-looking blob in the description text. Pulled
-  // out here into its own clean "$600 ~~$700~~" price-row treatment
-  // instead, and stripped from the description so it doesn't ALSO show up
-  // there raw. Math.min/max rather than trusting which one came first in
-  // the text, so this is right even if a future Facebook layout reorders
-  // them — "the lowest price the seller listed it at" is always the one
-  // actually shown as record.price, never the crossed-out original.
+  // A seller's mark-down shows as "$600$700" in the scraped text (current price, then the crossed-out
+  // original, with the strikethrough lost), so the original is pulled out of the description for the price row.
   const priceDropMatch = record.description.match(/\$\s?([\d,]+)\s*\$\s?([\d,]+)/);
   const priceDropOriginal = priceDropMatch
     ? Math.max(parseInt(priceDropMatch[1].replace(/,/g, ""), 10), parseInt(priceDropMatch[2].replace(/,/g, ""), 10))
     : null;
   const originalPriceUsd = priceDropOriginal !== null && priceDropOriginal !== record.price ? priceDropOriginal : null;
-  const cleanedDescription = priceDropMatch ? record.description.replace(priceDropMatch[0], "").trim() : record.description;
+
+  // eBay shows the item price plus what the seller charges to ship it; Facebook is just the price.
+  const shippingUsd = record.source === "ebay" ? record.shippingCostUsd : null;
+  const money = (n: number) => (Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`);
+
+  // Facebook sellers are rated in stars, eBay sellers in percent positive feedback.
+  const sellerRatingLine =
+    record.source === "facebook" && record.sellerRating !== null ? (
+      <>
+        <StarRating rating={record.sellerRating} />
+        <span>
+          {record.sellerRating.toFixed(1)}
+          {record.sellerRatingCount !== null ? ` (${record.sellerRatingCount})` : ""}
+        </span>
+      </>
+    ) : record.source === "ebay" && record.sellerFeedbackPercent != null ? (
+      <span>{record.sellerFeedbackPercent.toFixed(1)}% positive</span>
+    ) : null;
+  // Facebook shows where the item is; eBay doesn't (it ships).
+  const locationLine = record.source === "facebook" ? record.locationText : null;
+  const ageLocationLine = [record.listingAge, locationLine].filter(Boolean).join(" · ") || null;
 
   // Per explicit instruction — same marks as the Dashboard's listings:
   // Facebook = blue outline + small Facebook logo, eBay = green outline +
   // small eBay logo, and a really good listing also gets an orange flame and
   // a glow. The glow lives on a wrapper rather than the card itself so its
   // infinite pulse can't replace the card's own entrance animation.
+  // The outline is the source color (blue/green) unless Clynx judged the
+  // listing not of interest (red) or isn't sure about it (yellow) — see
+  // listingVerdict in ListingSourceMarks.tsx.
   const hot = isHotListing(record);
-  const sourceColor = SOURCE_COLORS[record.source];
+  const outlineColor = listingOutlineColor(record);
 
   return (
     <div className={hot ? "listing-hot" : undefined} style={{ borderRadius: "var(--radius-lg)" }}>
+    {hot && <HotRing color={outlineColor} />}
     <div
-      className={`card enter ${record.isDeal ? "flash-deal" : ""}`}
+      className={`card${animate ? " enter" : ""} ${record.isDeal ? "flash-deal" : ""}`}
       style={{
         height: cardHeight,
+        // A card that is scrolled off-screen skips layout and painting until it nears the
+        // viewport (it keeps its height, so the scroll bar doesn't jump).
+        contentVisibility: "auto",
+        containIntrinsicSize: `auto ${cardHeight}px`,
         display: "flex",
         flexDirection: "column",
         padding: 0,
         overflow: "hidden",
         animationDelay: `${delayMs}ms`,
-        border: `2px solid ${sourceColor}`,
+        // A hot card's border is transparent so its HotRing shows through.
+        border: `${OUTLINE_WIDTH_PX}px solid ${hot ? "transparent" : outlineColor}`,
+        backgroundClip: hot ? "padding-box" : undefined,
+        // A hot card's HotRing shimmers underneath it, so its fill stays solid.
+        backgroundColor: hot ? "var(--bg-card)" : undefined,
       }}
     >
       <div style={{ position: "relative", flexShrink: 0 }}>
@@ -384,6 +366,17 @@ export function ListingCard({
         >
           <SourceLogo source={record.source} size={20} />
           {hot && <FlameIcon size={24} />}
+          {/* A listing a Watch found, and Facebook's own "Just listed" badge. */}
+          {record.watchNames.length > 0 && (
+            <span className="pill" title={`Found by Watch: ${record.watchNames.join(", ")}`} style={CARD_PILL}>
+              👁 Watch
+            </span>
+          )}
+          {record.justListed && (
+            <span className="pill" style={CARD_PILL}>
+              Just listed
+            </span>
+          )}
         </div>
         {/* Per explicit instruction, this stays a real link to the actual
             Facebook listing on click — the one deliberate exception to
@@ -457,6 +450,7 @@ export function ListingCard({
               src={currentImage}
               alt=""
               loading="lazy"
+              decoding="async"
               className="tile-image"
               style={{ width: "100%", height: imageHeight, objectFit: "cover", display: "block", background: "var(--bg-elevated)" }}
               onError={(e) => {
@@ -552,7 +546,7 @@ export function ListingCard({
           <button
             className="icon ghost"
             title="Remove from feed"
-            onClick={onDelete}
+            onClick={() => onDelete(record.id)}
             style={{
               position: "absolute",
               top: 8,
@@ -608,149 +602,55 @@ export function ListingCard({
         )}
       </div>
 
-      <div style={{ padding: "14px 16px 0", display: "flex", flexDirection: "column", gap: 10, flex: 1, minHeight: 0, overflowY: "auto" }}>
-        <div>
-          <a
-            href={record.url}
-            target="_blank"
-            rel="noreferrer"
-            style={{ fontWeight: 700, fontSize: 15, lineHeight: 1.35, color: "var(--text)", textDecoration: "none", display: "block" }}
-          >
-            {record.title}
-          </a>
-        </div>
+      <div style={{ padding: "12px 14px 0", display: "flex", flexDirection: "column", gap: 6, flex: 1, minHeight: 0, overflow: "hidden" }}>
+        <a
+          href={record.url}
+          target="_blank"
+          rel="noreferrer"
+          title={record.title}
+          style={{
+            fontWeight: 700,
+            fontSize: 15,
+            lineHeight: 1.35,
+            color: "var(--text)",
+            textDecoration: "none",
+            display: "-webkit-box",
+            WebkitLineClamp: 3,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+            overflowWrap: "anywhere",
+          }}
+        >
+          {record.title}
+        </a>
 
-        <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
           <div style={{ fontSize: 24, fontWeight: 700, color: "var(--text)" }}>${record.price ?? "?"}</div>
           {originalPriceUsd !== null && (
-            <div style={{ fontSize: 15, color: "var(--text-dim)", textDecoration: "line-through" }}>${originalPriceUsd}</div>
+            <div style={{ fontSize: 14, color: "var(--text-dim)", textDecoration: "line-through" }}>${originalPriceUsd}</div>
           )}
-          {record.discountPercent !== null && (
-            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--success)" }}>
-              {record.discountPercent.toFixed(0)}% under ${record.referencePriceUsd}
-            </div>
-          )}
-          {isNearAvgSoldPrice && (
-            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--success)" }}>
-              🔥 within 10% of ${avgSoldPriceUsd?.toFixed(0)} avg. sale price
-            </div>
+          {shippingUsd != null && (
+            <div style={{ fontSize: 14, color: "var(--text-muted)" }}>+ {shippingUsd === 0 ? "free" : money(shippingUsd)} shipping</div>
           )}
         </div>
 
-        {/* Per explicit instruction — "12 weeks old | VA," the same shape
-            Facebook's own listing page shows just above Seller information,
-            not this app's own "found N minutes ago" bookkeeping (still
-            available on hover for anyone who wants it). */}
-        {ageStateLine && (
-          <div title={`Found by the scanner ${timeAgo(record.firstSeenAt)}`} style={{ fontSize: 12, color: "var(--text-dim)" }}>
-            {ageStateLine}
+        {ageLocationLine && (
+          <div title={`Found by the scanner ${timeAgo(record.firstSeenAt)}`} style={{ fontSize: 12.5, color: "var(--text-dim)" }}>
+            {ageLocationLine}
           </div>
         )}
-        {/* Per explicit instruction — multiple Facebook accounts: which
-            login actually has this listing open, so the user knows which
-            account to act from (message the seller, etc.) rather than
-            guessing. Null for anything found before multi-account existed. */}
-        {record.foundByAccountLabel && (
-          <div style={{ fontSize: 12, color: "var(--text-dim)" }}>via {record.foundByAccountLabel}</div>
+
+        {sellerRatingLine && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--text-muted)" }}>{sellerRatingLine}</div>
         )}
-
-        {record.matchedItem && (
-          <span className="pill" style={{ alignSelf: "flex-start" }}>
-            {record.matchedItem}
-          </span>
-        )}
-
-        {/* The seller's own listing text, in place of the AI's reasoning —
-            per explicit instruction, more directly useful for judging a
-            listing yourself than the AI's summary of why it scored it a
-            certain way. Clamped by default so one long-winded listing
-            doesn't blow past the others' height; "Show full description"
-            only appears when the text actually needs it. */}
-        <div>
-          <div
-            ref={descRef}
-            style={{
-              fontSize: 13.5,
-              color: "var(--text)",
-              lineHeight: 1.5,
-              whiteSpace: "pre-wrap",
-              display: descExpanded ? "block" : "-webkit-box",
-              WebkitLineClamp: descExpanded ? undefined : DESCRIPTION_CLAMP_LINES,
-              WebkitBoxOrient: descExpanded ? undefined : "vertical",
-              overflow: descExpanded ? "visible" : "hidden",
-            }}
-          >
-            {cleanedDescription.trim() ||
-              // Per explicit instruction — an instant-skip record (a car,
-              // an unrelated item, anything scrapeEngine.ts's
-              // recordInstantSkip catches before ever opening the detail
-              // page) has no real description to show at all; its own
-              // skip reasoning is far more useful here than a flat "no
-              // description" dead end.
-              (record.reasoning ? `Skipped — ${record.reasoning.replace(/^Skipped( without opening the listing)? — /i, "")}` : "(No description on the listing.)")}
-          </div>
-          {descOverflows && (
-            <button
-              className="icon ghost"
-              onClick={() => setDescExpanded((v) => !v)}
-              style={{ fontSize: 11, padding: "2px 4px", marginTop: 2, color: "var(--text-muted)" }}
-            >
-              {descExpanded ? "▴ Show less" : "▾ Show full description"}
-            </button>
-          )}
-        </div>
-
-        {/* Per explicit instruction — seller rating and "joined Facebook"
-            as their own two lines, the same order/shape as Facebook's own
-            "Seller information" section on the listing page. */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--text-muted)" }}>
-            {record.sellerName && <span>{record.sellerName}</span>}
-            {record.sellerRating !== null ? (
-              <>
-                <StarRating rating={record.sellerRating} />
-                <span>
-                  {record.sellerRating.toFixed(1)}
-                  {record.sellerRatingCount !== null ? ` (${record.sellerRatingCount})` : ""}
-                </span>
-              </>
-            ) : (
-              <span>no seller rating available</span>
-            )}
-          </div>
-          {record.sellerJoinedYear !== null && (
-            <div style={{ fontSize: 12, color: "var(--text-dim)" }}>Joined Facebook in {record.sellerJoinedYear}</div>
-          )}
-        </div>
-
-        {record.extractedAttributes && (
-          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Notes: {record.extractedAttributes}</div>
-        )}
-        {!record.sellerRiskPassed && riskReasons.length > 0 && (
-          <div style={{ fontSize: 12, color: "var(--warn)" }}>{riskReasons.join("; ")}</div>
-        )}
-
-        {researchMsg && <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{researchMsg}</div>}
       </div>
 
-      {/* Fixed footer, outside the scrollable content area above, so the
-          action buttons are always reachable without needing to scroll a
-          particular card to find them. A 2x2 CSS grid rather than a flex
-          row — per explicit instruction that Interested must match the
-          other buttons' size, a grid guarantees every button in a column is
-          exactly as wide as the one above/below it, which a flex row with
-          differing label lengths doesn't reliably give you. */}
-      <div style={{ flexShrink: 0, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, padding: 12 }}>
+      <div style={{ flexShrink: 0, display: "flex", gap: 8, padding: 12 }}>
         <button
           className="icon"
           disabled={saving}
           onClick={() => setShowInterestedDialog(true)}
-          style={{
-            width: "100%",
-            textAlign: "center",
-            borderColor: "var(--success)",
-            color: "var(--success)",
-          }}
+          style={{ flex: 1, textAlign: "center", borderColor: "var(--success)", color: "var(--success)" }}
         >
           Interested
         </button>
@@ -758,31 +658,9 @@ export function ListingCard({
           className="icon"
           disabled={saving}
           onClick={() => setShowNotInterestedDialog(true)}
-          style={{
-            width: "100%",
-            textAlign: "center",
-            borderColor: "var(--danger)",
-            color: "var(--danger)",
-          }}
+          style={{ flex: 1, textAlign: "center", borderColor: "var(--danger)", color: "var(--danger)" }}
         >
           Not interested
-        </button>
-        <button
-          className="icon"
-          disabled={saving}
-          onClick={() => setShowBlacklistDialog(true)}
-          style={{
-            width: "100%",
-            textAlign: "center",
-            borderColor: "var(--danger)",
-            color: "var(--danger)",
-            background: "rgba(248, 113, 113, 0.08)",
-          }}
-        >
-          🚫 Blacklist
-        </button>
-        <button className="icon" disabled={researching} onClick={research} style={{ width: "100%", textAlign: "center" }}>
-          {researching ? "Working..." : "🔎 Research"}
         </button>
       </div>
 
@@ -795,19 +673,37 @@ export function ListingCard({
             "Condition/photos looked good",
             `Exactly the "${categoryGuess}" I've been looking for`,
           ]}
-          onSubmit={submitInterested}
+          extra={{
+            label: researching ? "Researching…" : "Research this product",
+            icon: <MagnifierIcon />,
+            color: "var(--success)",
+            disabled: saving,
+            onClick: () => submitInterested("", true),
+          }}
+          message={researchMsg}
+          onSubmit={(reason) => submitInterested(reason)}
           onCancel={() => setShowInterestedDialog(false)}
         />
       )}
       {showNotInterestedDialog && (
         <ReasonDialog
           title="Why aren't you interested?"
-          helperText="This helps the AI show you less of this in the future — it won't blacklist anything, so a genuinely great deal like this can still slip through later."
+          helperText="This helps Clynx show you less of this in the future. Blacklisting skips this kind of listing automatically from now on."
           quickReasons={[
             `Not interested in "${categoryGuess}" in general`,
             "Wrong item — doesn't match what I'm looking for",
             "Price or condition wasn't good enough",
           ]}
+          extra={{
+            label: "Blacklist this kind of listing",
+            icon: <NoSignIcon />,
+            color: "var(--danger)",
+            disabled: saving,
+            onClick: () => {
+              setShowNotInterestedDialog(false);
+              setShowBlacklistDialog(true);
+            },
+          }}
           onSubmit={submitNotInterested}
           onCancel={() => setShowNotInterestedDialog(false)}
         />
@@ -848,6 +744,32 @@ export function ListingCard({
   );
 }
 
+const ICON_PROPS = { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2.4, strokeLinecap: "round" as const, "aria-hidden": true };
+
+function MagnifierIcon() {
+  return (
+    <svg {...ICON_PROPS}>
+      <circle cx="10.5" cy="10.5" r="6.5" />
+      <path d="M15.5 15.5 21 21" />
+    </svg>
+  );
+}
+
+function NoSignIcon() {
+  return (
+    <svg {...ICON_PROPS}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M5.6 5.6 18.4 18.4" />
+    </svg>
+  );
+}
+
+// Memoized: with a stable onDelete/onGoToProduct (Feed passes the same
+// functions every render) and unchanged listings keeping their identity (see
+// App.tsx's reconcileListings), a card now re-renders only when it actually
+// changed — not once per incoming scan event.
+export const ListingCard = React.memo(ListingCardImpl);
+
 // Shared by both the Interested and Not Interested flows — per explicit
 // instruction, Interested now prompts for a reason "just like the Not
 // Interested button" instead of the two diverging. Replaces the old
@@ -863,12 +785,17 @@ function ReasonDialog({
   title,
   helperText,
   quickReasons,
+  extra,
+  message,
   onSubmit,
   onCancel,
 }: {
   title: string;
   helperText: string;
   quickReasons: string[];
+  // A bigger, outlined action offered beside the reasons (Research under Interested, Blacklist under Not interested).
+  extra?: { label: string; icon: React.ReactNode; color: string; disabled?: boolean; onClick: () => void };
+  message?: string | null;
   onSubmit: (reason: string) => void;
   onCancel: () => void;
 }) {
@@ -877,6 +804,18 @@ function ReasonDialog({
   return (
     <Modal title={title} onClose={onCancel}>
       <p style={{ margin: 0, fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.5 }}>{helperText}</p>
+      {extra && (
+        <button
+          className="icon"
+          disabled={extra.disabled}
+          onClick={extra.onClick}
+          style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, borderColor: extra.color, color: extra.color, fontWeight: 600 }}
+        >
+          {extra.icon}
+          {extra.label}
+        </button>
+      )}
+      {message && <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{message}</div>}
       {quickReasons.map((reason) => (
         <button key={reason} className="icon ghost" style={{ textAlign: "left", border: "1px solid var(--border)" }} onClick={() => onSubmit(reason)}>
           {reason}

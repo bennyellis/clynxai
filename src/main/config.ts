@@ -182,6 +182,12 @@ export const DEFAULT_CONFIG: Config = {
   pollIntervalMinutesMin: 2,
   pollIntervalMinutesMax: 5,
   dealThresholdPercent: 35,
+  ebayNetPercent: 84,
+  minProfitMarginPercent: 20,
+  maxNegotiationPercent: 15,
+  lowAiMode: true,
+  recentSearches: [],
+  ebayStoreUsername: "",
   searchItems: [],
   customInstructions: "",
   generalDeal: {
@@ -210,7 +216,9 @@ export const DEFAULT_CONFIG: Config = {
   primaryColor: "#7c6cf6",
   accentColor: "#a855f7",
   rainbowEnabled: false,
+  panelTransparency: 20,
   soundEnabled: true,
+  desktopNotifications: true,
   particlesEnabled: true,
   // Per explicit instruction — a master on/off for the automatic WatchCount
   // comps lookup, separate from watchCountOncePerScan below (which only
@@ -333,6 +341,13 @@ export function loadConfig(configPath: string): Config {
     merged.accounts = merged.accounts.map((a) =>
       a.locationMode === "country" && looksLikeLegacyGuessedCountryUrls(a.browseUrls) ? { ...a, locationResolved: false } : a
     );
+
+    // One-time: a state account looks in the state's 10 biggest cities (see stateCities.ts). Ones that resolved their cities before that
+    // was a fixed list got whatever the AI happened to name, so they resolve again the next time they start.
+    if ((merged.stateCitiesVersion ?? 0) < 1) {
+      merged.accounts = merged.accounts.map((a) => (a.locationMode === "state" ? { ...a, locationResolved: false } : a));
+      merged.stateCitiesVersion = 1;
+    }
 
     // Migrate configs saved before the "Search For" rename/simplification
     // — old referencePrices entries (which had a since-removed activeSearch

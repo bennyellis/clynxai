@@ -8,17 +8,17 @@ import { api } from "../lib/api.js";
 // Dashboard's controls and Database's research_product). Rendered once in
 // App.tsx, outside the per-screen content, so its own conversation and
 // open/minimized state survive switching screens exactly like everything
-// else in this app already does. Not shown on Dashboard itself, which
-// already IS a full-page assistant — a second one floating on top of it
-// would just be a redundant, competing chat box.
+// else in this app already does. Not shown on Activity, which already IS a
+// full-page assistant — a second one floating on top of it would just be a
+// redundant, competing chat box.
 //
-// Deliberately its own small, self-contained chat implementation rather
-// than reusing Database.tsx's useDatabaseChat hook — that hook isn't
-// exported/shared, and this bar's needs (no greeting, no product scoping,
-// needs onSearchUpdate for add_search_item's deferred follow-up the way
-// Dashboard's own chat does) diverge enough that duplicating the ~30 lines
-// of streaming wiring was simpler and lower-risk than refactoring a hook
-// two other call sites already depend on.
+// The assistant here is Clynx itself (see clynxPersona.ts): a passionate
+// reselling expert with a personality, not a command console. This bar is
+// its own small, self-contained chat implementation rather than reusing
+// Database.tsx's useDatabaseChat hook (that hook isn't exported/shared, and
+// this bar's needs diverge enough that duplicating the ~30 lines of
+// streaming wiring was simpler and lower-risk than refactoring a hook two
+// other call sites already depend on).
 interface ChatEntry {
   id: string;
   role: "user" | "assistant";
@@ -28,6 +28,31 @@ interface ChatEntry {
 }
 
 const MINIMIZED_STORAGE_KEY = "globalAssistantMinimized";
+
+const WELCOME =
+  "Hey, I'm Clynx! I live in this app, so I can hunt for deals, change settings, look things up and talk flipping with you. What are you after?";
+
+const STARTERS = ["Is a used Series S worth flipping?", "What should I check before buying a used iPhone?", "What are you searching for right now?"];
+
+// A speech bubble drawn so its bounding box is exactly the viewBox (x 2..22, y 3..21 inside a 24x24 box), which is what makes it sit
+// dead center in a round button: the 💬 emoji it replaces has uneven built-in padding and always looked off to one side.
+function ClynxBubbleIcon({ size = 26 }: { size?: number }) {
+  return (
+    <svg
+      className="clynx-bubble-icon"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      style={{ display: "block", flexShrink: 0 }}
+    >
+      <path d="M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-8l-4 4v-4H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" fill="currentColor" />
+      <circle cx="8" cy="10" r="1.3" fill="rgba(0,0,0,0.38)" />
+      <circle cx="12" cy="10" r="1.3" fill="rgba(0,0,0,0.38)" />
+      <circle cx="16" cy="10" r="1.3" fill="rgba(0,0,0,0.38)" />
+    </svg>
+  );
+}
 
 export function GlobalAssistantBar() {
   // Per-viewer display preference (like ThumbnailSize's own localStorage
@@ -88,10 +113,10 @@ export function GlobalAssistantBar() {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [chat.length]);
+  }, [chat.length, chat[chat.length - 1]?.content]);
 
-  function send() {
-    const text = draft.trim();
+  function sendText(raw: string) {
+    const text = raw.trim();
     if (!text) return;
     setDraft("");
 
@@ -108,7 +133,8 @@ export function GlobalAssistantBar() {
     return (
       <button
         onClick={() => setMinimizedPersisted(false)}
-        title="Open the assistant"
+        title="Talk to Clynx"
+        aria-label="Talk to Clynx"
         style={{
           position: "fixed",
           bottom: 24,
@@ -116,20 +142,57 @@ export function GlobalAssistantBar() {
           width: 52,
           height: 52,
           borderRadius: "50%",
-          background: "var(--gradient)",
+          background: "var(--primary-fill)",
           backgroundSize: "200% auto",
           border: "none",
-          color: "white",
-          fontSize: 22,
+          color: "var(--on-primary-fill)",
+          // Flex-centered with no padding: the icon sits exactly in the middle of the circle.
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 0,
           boxShadow: "var(--shadow-glow)",
           cursor: "pointer",
           zIndex: 900,
         }}
       >
-        💬
+        <ClynxBubbleIcon size={26} />
       </button>
     );
   }
+
+  const bubble = (m: ChatEntry) => {
+    const mine = m.role === "user";
+    return (
+      <div key={m.id} style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start" }}>
+        <div
+          style={{
+            maxWidth: "88%",
+            padding: "8px 11px",
+            borderRadius: mine ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
+            background: mine ? "var(--primary-fill)" : "var(--bg-elevated)",
+            color: m.error ? "var(--danger)" : mine ? "var(--on-primary-fill)" : "var(--text)",
+            border: mine ? "none" : "1px solid var(--border)",
+            fontSize: 13,
+            lineHeight: 1.5,
+            whiteSpace: "pre-wrap",
+            overflowWrap: "anywhere",
+          }}
+        >
+          {m.content ||
+            (m.streaming ? (
+              <span className="typing-dots" aria-label="Clynx is typing">
+                <span />
+                <span />
+                <span />
+              </span>
+            ) : (
+              ""
+            ))}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div
@@ -145,6 +208,9 @@ export function GlobalAssistantBar() {
         flexDirection: "column",
         padding: 0,
         overflow: "hidden",
+        // Floats over the page, so it stays solid (a see-through chat window
+        // would show the page's text through its own).
+        background: "var(--bg-card)",
         border: "1px solid var(--border-strong)",
         boxShadow: "0 24px 60px rgba(0, 0, 0, 0.5)",
         zIndex: 900,
@@ -160,7 +226,29 @@ export function GlobalAssistantBar() {
           flexShrink: 0,
         }}
       >
-        <div style={{ fontWeight: 700, fontSize: 13 }}>💬 Assistant</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+          <div
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: "50%",
+              background: "var(--primary-fill)",
+              color: "var(--on-primary-fill)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <ClynxBubbleIcon size={16} />
+          </div>
+          <div style={{ lineHeight: 1.2 }}>
+            <div style={{ fontWeight: 800, fontSize: 14 }}>Clynx</div>
+            <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
+              <span style={{ color: "var(--success)" }}>●</span> your flipping partner
+            </div>
+          </div>
+        </div>
         <button
           className="icon ghost"
           title="Hide"
@@ -171,41 +259,39 @@ export function GlobalAssistantBar() {
         </button>
       </div>
 
-      {chat.length > 0 && (
-        <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "10px 14px", display: "flex", flexDirection: "column", gap: 10, minHeight: 0 }}>
-          {chat.map((m) => (
-            <div
-              key={m.id}
-              style={{
-                fontSize: 12.5,
-                lineHeight: 1.5,
-                color: m.error ? "var(--danger)" : "var(--text)",
-              }}
-            >
-              <span style={{ fontWeight: 700, color: "var(--text-dim)" }}>{m.role === "user" ? "You: " : "Assistant: "}</span>
-              {m.content || (m.streaming ? "..." : "")}
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8, minHeight: 0 }}>
+        {chat.length === 0 && (
+          <>
+            {bubble({ id: "welcome", role: "assistant", content: WELCOME })}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 2 }}>
+              {STARTERS.map((s) => (
+                <button key={s} className="pill" style={{ cursor: "pointer", fontSize: 12, padding: "5px 10px", background: "transparent" }} onClick={() => sendText(s)}>
+                  {s}
+                </button>
+              ))}
             </div>
-          ))}
-        </div>
-      )}
+          </>
+        )}
+        {chat.map(bubble)}
+      </div>
 
       <div
         style={{
           display: "flex",
           gap: 6,
           padding: 10,
-          borderTop: chat.length > 0 ? "1px solid var(--border)" : "none",
+          borderTop: "1px solid var(--border)",
           flexShrink: 0,
         }}
       >
         <input
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && send()}
-          placeholder="Ask or tell me to change anything..."
+          onKeyDown={(e) => e.key === "Enter" && sendText(draft)}
+          placeholder="Ask Clynx anything..."
           style={{ flex: 1, background: "var(--bg-elevated)" }}
         />
-        <button className="icon" disabled={!draft.trim()} onClick={send}>
+        <button className="icon" disabled={!draft.trim()} onClick={() => sendText(draft)}>
           Send
         </button>
       </div>

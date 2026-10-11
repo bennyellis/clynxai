@@ -1,15 +1,26 @@
 import { DatabaseSync } from "node:sqlite";
+import { colorsConflict, colorsIn, isColorWord, sameColors } from "./colors.js";
+import { compMatchesSpecs, hasSingleModelLetter, modelLettersConflict } from "./compFilter.js";
+import type { ProductSignals } from "./dealSummary.js";
 import path from "node:path";
 import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { timedSync, recordEvent } from "./metrics.js";
-import type { BlacklistedImage, BlacklistTerm, FeedbackExample, FeedbackVerdict, FlawFeedbackExample, ListingRecord, PhotoFlaw, ProductImage, ProductProfile, ScoredListing, SellerRiskResult, Watch, WatchMatch } from "./types.js";
+import type { BlacklistedImage, BlacklistTerm, FeedbackExample, FeedbackVerdict, FlawFeedbackExample, ListingRecord, MyStoreReference, PhotoFlaw, ProductImage, ProductProfile, ScoredListing, SellerRiskResult, Watch, WatchMatch, WatchPlatform, WatchSearchLink, WatchTerm } from "./types.js";
+import { brokenVariantName, isBrokenVariantName } from "./brokenVariant.js";
+
+// What a product is worth on eBay, as the total the BUYER pays (the sold item price plus the shipping they paid): the estimate when
+// there is one, else the sold average with its average shipping. The user keeps ~84% of that total (eBay's cut is on all of it).
+const EBAY_VALUE_SQL = "COALESCE(ebay_est_value_usd, ebay_avg_sold_price_usd + COALESCE(ebay_avg_shipping_usd, 0))";
 
 // Batch 2 Fix D — what Store.upsertWatchFromCloud actually accepts: a Watch
 // minus the 8 desktop-local-only operational/scheduler fields the cloud no
 // longer carries (see that method's own doc comment, and cloudClient.ts's
 // CloudWatch). watchSync.ts's cloudWatchToLocal is the one producer of this
-// shape.
+// shape. platform/minSellerRatingPercent are optional because a cloud server
+// that predates the Watch-platform feature doesn't carry them: absent means
+// "leave the local value alone" on an existing row and "facebook / no rating
+// requirement" on a brand-new one.
 export type CloudSyncedWatch = Omit<
   Watch,
   | "listingsSeenCount"
@@ -20,7 +31,15 @@ export type CloudSyncedWatch = Omit<
   | "resolvedLocationUrl"
   | "resolvedLocationLabel"
   | "resolvedLocationCheckedAt"
->;
+  | "resolvedLocationUrls"
+  | "ntfyTopic"
+  | "terms"
+  | "checkIntervalMinutes"
+  | "accountIds"
+  | "searchLinks"
+  | "platform"
+  | "minSellerRatingPercent"
+> & { platform?: WatchPlatform; minSellerRatingPercent?: number | null };
 
 export class Store {
   private db: DatabaseSync;
@@ -225,6 +244,8 @@ export class Store {
       ["seller_joined_year", "INTEGER"],
       ["seller_rating", "REAL"],
       ["seller_rating_count", "INTEGER"],
+      ["ebay_seller_feedback_percent", "REAL"],
+      ["ebay_shipping_usd", "REAL"],
       ["seller_has_profile_photo", "INTEGER"],
       ["seller_risk_passed", "INTEGER NOT NULL DEFAULT 1"],
       ["seller_risk_reasons", "TEXT"],
@@ -279,10 +300,60 @@ export class Store {
       // back as []) unless Config.researchCondition was on when this
       // listing was last analyzed.
       ["photo_flaws", "TEXT"],
+      // Facebook's "Just listed" badge on the search-results card.
+      ["just_listed", "INTEGER"],
     ];
     for (const [name, ddl] of migrations) {
       if (!cols.includes(name)) this.db.exec(`ALTER TABLE listings ADD COLUMN ${name} ${ddl}`);
     }
+
+    // Watch platform choice (Facebook or eBay). Every Watch that existed
+    // before this column was a Facebook Marketplace Watch, so the DEFAULT
+    // backfills them correctly with no explicit UPDATE needed.
+    // min_seller_rating_percent only means anything on an eBay Watch; NULL
+    // (no requirement) everywhere else.
+    const watchCols = (this.db.prepare("PRAGMA table_info(watches)").all() as any[]).map((c) => c.name);
+    if (!watchCols.includes("platform")) this.db.exec("ALTER TABLE watches ADD COLUMN platform TEXT NOT NULL DEFAULT 'facebook'");
+    if (!watchCols.includes("min_seller_rating_percent")) this.db.exec("ALTER TABLE watches ADD COLUMN min_seller_rating_percent REAL");
+    if (!watchCols.includes("ntfy_topic")) this.db.exec("ALTER TABLE watches ADD COLUMN ntfy_topic TEXT");
+    // Facebook Watches search for several things at once ("terms", JSON), on a
+    // chosen interval, with a chosen set of accounts (JSON list of account ids;
+    // empty = any). A row without terms_json is a pre-existing single-phrase Watch.
+    if (!watchCols.includes("terms_json")) this.db.exec("ALTER TABLE watches ADD COLUMN terms_json TEXT");
+    if (!watchCols.includes("check_interval_minutes")) this.db.exec("ALTER TABLE watches ADD COLUMN check_interval_minutes INTEGER NOT NULL DEFAULT 15");
+    if (!watchCols.includes("account_ids")) this.db.exec("ALTER TABLE watches ADD COLUMN account_ids TEXT");
+    this.db.exec(`
+      -- Every listing a Watch has already come across, so it is never looked at twice.
+      CREATE TABLE IF NOT EXISTS watch_seen_listings (
+        watch_id TEXT NOT NULL,
+        listing_id TEXT NOT NULL,
+        seen_at INTEGER NOT NULL,
+        PRIMARY KEY (watch_id, listing_id)
+      );
+      -- The exact Facebook search each Watch ran for each term at each place.
+      CREATE TABLE IF NOT EXISTS watch_searches (
+        watch_id TEXT NOT NULL,
+        term TEXT NOT NULL,
+        place_key TEXT NOT NULL,
+        place_label TEXT NOT NULL,
+        url TEXT NOT NULL,
+        checked_at INTEGER NOT NULL,
+        PRIMARY KEY (watch_id, term, place_key)
+      );
+      -- Where a place name or ZIP is (for the radius check). found = 0 means
+      -- "looked it up and there was no such place", remembered so it isn't asked again.
+      CREATE TABLE IF NOT EXISTS geocode_cache (
+        query TEXT PRIMARY KEY,
+        lat REAL,
+        lon REAL,
+        label TEXT,
+        found INTEGER NOT NULL,
+        fetched_at INTEGER NOT NULL
+      );
+    `);
+    // A state / whole-country Watch searches several places, so it caches a list
+    // of Marketplace URLs (JSON array) rather than the single resolved_location_url.
+    if (!watchCols.includes("resolved_location_urls")) this.db.exec("ALTER TABLE watches ADD COLUMN resolved_location_urls TEXT");
 
     // Clynx Cloud Phase 5 — feedbackSync.ts needs an updated_at to compare
     // for last-write-wins, same as watches.updated_at already does. Existing
@@ -357,6 +428,94 @@ export class Store {
     }
     if (!productCols.includes("ebay_avg_shipping_usd")) {
       this.db.exec("ALTER TABLE products ADD COLUMN ebay_avg_shipping_usd REAL");
+    }
+    for (const [column, type] of [
+      ["ebay_active_median_usd", "REAL"],
+      ["ebay_active_sample_size", "INTEGER"],
+      ["ebay_est_value_usd", "REAL"],
+      ["ebay_est_basis", "TEXT"],
+      ["parent_product_id", "TEXT"],
+      ["my_store_ref", "TEXT"],
+    ]) {
+      if (!productCols.includes(column)) this.db.exec(`ALTER TABLE products ADD COLUMN ${column} ${type}`);
+    }
+    // One-time: eBay prices researched before "Series S" and "Series X" could be told apart for the products whose names have such
+    // a letter (an Xbox Series S entry was averaging Series X sales, ~$500 instead of ~$280) are cleared, to be researched again
+    // (the Database page offers "Research now").
+    this.db.exec("CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY)");
+    const lettersFlag = "comps-model-letters-2026-10-06";
+    if (!this.db.prepare("SELECT 1 FROM schema_flags WHERE name = ?").get(lettersFlag)) {
+      const checked = this.db.prepare("SELECT id, name FROM products WHERE ebay_comps_checked_at IS NOT NULL").all() as Array<{ id: string; name: string }>;
+      for (const r of checked) {
+        if (!hasSingleModelLetter(r.name)) continue;
+        this.db
+          .prepare(
+            `UPDATE products SET ebay_avg_sold_price_usd = NULL, ebay_avg_run_time_days = NULL, ebay_avg_shipping_usd = NULL, ebay_comps_sample_size = NULL,
+               ebay_comps_checked_at = NULL, ebay_active_median_usd = NULL, ebay_active_sample_size = NULL, ebay_est_value_usd = NULL, ebay_est_basis = NULL WHERE id = ?`
+          )
+          .run(r.id);
+      }
+      this.db.prepare("INSERT INTO schema_flags (name) VALUES (?)").run(lettersFlag);
+    }
+    // One-time: eBay values that can't be right are cleared (to be researched again, which is now smarter: console products count
+    // only listings filed under a console category). Two kinds: (1) sold prices and asking prices that disagree wildly (a "Ps5" entry
+    // blended one $385 sale with 27 asking prices of games and accessories into $128); with a couple of sales the sold figure
+    // is kept instead; (2) a console priced under 40% of its brand's other consoles ("xbox", worth $20, sat next to Series S at $300).
+    const conflictFlag = "comps-conflict-2026-10-07";
+    if (!this.db.prepare("SELECT 1 FROM schema_flags WHERE name = ?").get(conflictFlag)) {
+      const clearComps = (id: string) =>
+        this.db
+          .prepare(
+            `UPDATE products SET ebay_avg_sold_price_usd = NULL, ebay_avg_run_time_days = NULL, ebay_avg_shipping_usd = NULL, ebay_comps_sample_size = NULL,
+               ebay_comps_checked_at = NULL, ebay_active_median_usd = NULL, ebay_active_sample_size = NULL, ebay_est_value_usd = NULL, ebay_est_basis = NULL WHERE id = ?`
+          )
+          .run(id);
+      const researched = this.db
+        .prepare(
+          "SELECT id, ebay_avg_sold_price_usd AS sold, ebay_comps_sample_size AS sn, ebay_active_median_usd AS act, ebay_active_sample_size AS an FROM products WHERE ebay_comps_checked_at IS NOT NULL"
+        )
+        .all() as Array<{ id: string; sold: number | null; sn: number | null; act: number | null; an: number | null }>;
+      for (const r of researched) {
+        if (!(r.sold && r.sold > 0) || !(r.act && r.act > 0) || (r.an ?? 0) < 3) continue;
+        const ratio = (r.act * 0.92) / r.sold;
+        if (ratio >= 0.6 && ratio <= 1.6) continue;
+        if ((r.sn ?? 0) >= 2) this.db.prepare("UPDATE products SET ebay_est_value_usd = ?, ebay_est_basis = 'sold' WHERE id = ?").run(r.sold, r.id);
+        else clearComps(r.id);
+      }
+      const consoles = this.db
+        .prepare(`SELECT id, name, family, ${EBAY_VALUE_SQL} AS v FROM products WHERE ebay_comps_checked_at IS NOT NULL AND family IS NOT NULL`)
+        .all() as Array<{ id: string; name: string; family: string; v: number | null }>;
+      const byBrand = new Map<string, Array<{ id: string; v: number; generic: boolean }>>();
+      for (const c of consoles) {
+        if (!/>\s*consoles?\s*$/i.test(c.family) || !(c.v && c.v > 0)) continue;
+        const brand = c.family.split(">")[0].trim().toLowerCase();
+        // Only generic one- or two-word names ("xbox", "Ps5") can be this kind of junk: an older console like "Xbox 360 S" is
+        // legitimately cheap.
+        byBrand.set(brand, [...(byBrand.get(brand) ?? []), { id: c.id, v: c.v, generic: c.name.trim().split(/\s+/).length <= 2 }]);
+      }
+      for (const group of byBrand.values()) {
+        if (group.length < 3) continue;
+        const sorted = group.map((g) => g.v).sort((a, b) => a - b);
+        const middle = sorted[Math.floor(sorted.length / 2)];
+        for (const g of group) if (g.generic && g.v < middle * 0.4) clearComps(g.id);
+      }
+      this.db.prepare("INSERT INTO schema_flags (name) VALUES (?)").run(conflictFlag);
+    }
+    // One-time: values used to be the sold ITEM price only; they are now what the buyer pays in total (item + shipping), since eBay's cut
+    // and the user's take-home percentage apply to all of it. Existing estimates get their average shipping added once.
+    const shippingFlag = "comps-shipping-2026-10-07";
+    if (!this.db.prepare("SELECT 1 FROM schema_flags WHERE name = ?").get(shippingFlag)) {
+      this.db.exec(
+        "UPDATE products SET ebay_est_value_usd = ebay_est_value_usd + ebay_avg_shipping_usd WHERE ebay_est_value_usd IS NOT NULL AND ebay_avg_shipping_usd > 0 AND ebay_comps_checked_at IS NOT NULL"
+      );
+      this.db.prepare("INSERT INTO schema_flags (name) VALUES (?)").run(shippingFlag);
+    }
+    // One-time: a state Watch looks in the state's 10 biggest cities (stateCities.ts). Ones that already resolved their places got
+    // whatever cities the AI had named, so those are cleared and resolved again at their next check.
+    const stateCitiesFlag = "state-top-cities-2026-10-07";
+    if (!this.db.prepare("SELECT 1 FROM schema_flags WHERE name = ?").get(stateCitiesFlag)) {
+      this.db.exec("UPDATE watches SET resolved_location_urls = NULL, resolved_location_checked_at = NULL WHERE location_mode = 'state'");
+      this.db.prepare("INSERT INTO schema_flags (name) VALUES (?)").run(stateCitiesFlag);
     }
     // Clynx Cloud Phase 6 — productSync.ts needs an updated_at to compare
     // for last-write-wins, same as watches.updated_at already does. Existing
@@ -458,11 +617,12 @@ export class Store {
            condition_impact, confidence, reasoning, extracted_attributes, shipping_mentioned,
            is_deal, deal_tier, estimated_value_range, notified, first_seen_at,
            seller_joined_year, seller_rating, seller_rating_count, seller_has_profile_photo,
-           seller_risk_passed, seller_risk_reasons, location_text, listing_age, seller_name, description, product_id, source)
+           seller_risk_passed, seller_risk_reasons, location_text, listing_age, seller_name, description, product_id, source, just_listed,
+           ebay_seller_feedback_percent, ebay_shipping_usd)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
            COALESCE((SELECT notified FROM listings WHERE id = ?), 0),
            COALESCE((SELECT first_seen_at FROM listings WHERE id = ?), ?),
-           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         listing.id,
@@ -500,13 +660,17 @@ export class Store {
         listing.seller?.name ?? null,
         listing.description ?? null,
         productId,
-        listing.source ?? "facebook"
+        listing.source ?? "facebook",
+        listing.justListed ? 1 : 0,
+        listing.seller?.ebayFeedbackPercentage ?? null,
+        listing.ebayShippingUsd ?? null
       );
     // Every saveScored call means this id is now definitively in the
     // listings table — remember it so a LATER hasSeenCached() check for the
     // same id (a duplicate found by this or another account) never needs
     // the DB round-trip at all, not just the first time it's checked.
     this.rememberSeen(listing.id);
+    this.lastSavedId = listing.id;
   }
 
   // Per explicit instruction — "avg. Facebook Marketplace price... this
@@ -599,7 +763,8 @@ export class Store {
   getById(id: string): ListingRecord | null {
     const row = this.db
       .prepare(
-        `SELECT l.*, f.verdict as feedback_verdict, f.note as feedback_note
+        `SELECT l.*, f.verdict as feedback_verdict, f.note as feedback_note,
+           (SELECT group_concat(w.name, char(31)) FROM watch_matches wm2 JOIN watches w ON w.id = wm2.watch_id WHERE wm2.listing_id = l.id) as watch_names
          FROM listings l LEFT JOIN feedback f ON f.listing_id = l.id WHERE l.id = ?`
       )
       .get(id) as any;
@@ -614,22 +779,280 @@ export class Store {
   // listing to its Database entry, so this stays correct even as products
   // get renamed/merged/re-researched after a listing was first saved.
   private enrichWithMatchedProductPricing(record: ListingRecord): ListingRecord {
-    if (!record.matchedItem) return record;
-    const product = this.findMatchingProduct(record.matchedItem);
-    return {
-      ...record,
-      matchedProductAvgSoldPriceUsd: product?.ebayAvgSoldPriceUsd ?? null,
-      matchedProductAvgRunTimeDays: product?.ebayAvgRunTimeDays ?? null,
+    return this.enrichManyWithMatchedProductPricing([record])[0];
+  }
+
+  // The same lookup for a whole page of listings at once. Feed's list used to run
+  // findMatchingProduct once PER LISTING, and a fuzzy miss loads every product row
+  // (each with its photo as a data: URI) — hundreds of those per refresh, ~600ms of
+  // blocked main thread for 266 listings. Here each distinct matched name is looked
+  // up once, and only the few columns needed (name + the two prices) are read, in
+  // the same order and with the same exact-then-fuzzy rule as findMatchingProduct.
+  private enrichManyWithMatchedProductPricing(records: ListingRecord[]): ListingRecord[] {
+    const byName = new Map<string, { sold: number | null; run: number | null } | null>();
+    let candidates: Array<{ name: string; sold: number | null; run: number | null }> | null = null;
+    // The estimate (sold comps, nudged by asking prices when sold data is thin) when there is one, else the plain sold average.
+    const columns = `name, ${EBAY_VALUE_SQL} AS sold, ebay_avg_run_time_days AS run`;
+    const lookup = (name: string) => {
+      if (byName.has(name)) return byName.get(name)!;
+      let found: { sold: number | null; run: number | null } | null = null;
+      const exact = this.db.prepare(`SELECT ${columns} FROM products WHERE LOWER(name) = LOWER(?)`).get(name) as any;
+      if (exact) found = { sold: exact.sold ?? null, run: exact.run ?? null };
+      else {
+        candidates ??= this.db.prepare(`SELECT ${columns} FROM products ORDER BY created_at DESC`).all() as any[];
+        const similar = candidates.find((p) => isSimilarProductName(name, p.name));
+        if (similar) found = { sold: similar.sold ?? null, run: similar.run ?? null };
+      }
+      byName.set(name, found);
+      return found;
     };
+    return records.map((record) => {
+      if (!record.matchedItem) return record;
+      // A listing titled "Xbox Series S" that was matched to the "Xbox Series X" entry must not show the Series X's price.
+      if (modelLettersConflict(record.matchedItem, record.title)) return { ...record, matchedProductAvgSoldPriceUsd: null, matchedProductAvgRunTimeDays: null };
+      const product = lookup(record.matchedItem);
+      return { ...record, matchedProductAvgSoldPriceUsd: product?.sold ?? null, matchedProductAvgRunTimeDays: product?.run ?? null };
+    });
+  }
+
+  // What eBay says a product is worth (the estimate, else the sold average), looked up by a product's name for the
+  // deal scoring that runs on every listing. Same exact-then-fuzzy rule as findMatchingProduct, but over just a name
+  // and a number (not whole product rows with their photos), kept for a few seconds between lookups.
+  private ebayValueCache: { at: number; rows: Array<{ name: string; value: number | null }> } | null = null;
+  getEbayValueForProductName(name: string, title?: string): number | null {
+    const now = Date.now();
+    if (!this.ebayValueCache || now - this.ebayValueCache.at > 10_000) {
+      const rows = this.db
+        .prepare(`SELECT name, ${EBAY_VALUE_SQL} AS value FROM products`)
+        .all() as Array<{ name: string; value: number | null }>;
+      this.ebayValueCache = { at: now, rows };
+    }
+    const rows = this.ebayValueCache.rows;
+    const lower = name.toLowerCase();
+    const found = rows.find((r) => r.name.toLowerCase() === lower) ?? rows.find((r) => isSimilarProductName(name, r.name));
+    // The listing's own title can name a more specific product than the tracked name ("xbox" tracked, "Xbox Series S" listed):
+    // that product's value is the right one, even when it has none yet (better no price than the generic entry's).
+    if (title && found) {
+      const specific = this.moreSpecificProductForTitle(rows, found.name, title);
+      if (specific) return specific.value !== null && specific.value > 0 ? specific.value : null;
+    }
+    return found && found.value !== null && found.value > 0 ? found.value : null;
+  }
+
+  // The Database product (value or not) whose whole name appears in the title and that has more words than `genericName`
+  // (the most words wins), or null.
+  private moreSpecificProductForTitle<T extends { name: string }>(rows: T[], genericName: string, title: string): T | null {
+    const wordsOf = (n: string) =>
+      n.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(" ").filter((w) => w.length > 1 && !["the", "and", "for", "with", "of"].includes(w));
+    const haystack = ` ${title.toLowerCase().replace(/[^a-z0-9]+/g, " ")} `;
+    const genericCount = wordsOf(genericName).length;
+    let best: { row: T; words: number } | null = null;
+    for (const r of rows) {
+      const words = wordsOf(r.name);
+      if (words.length < 2 || words.length <= genericCount || !words.every((w) => haystack.includes(w)) || !compMatchesSpecs(r.name, title)) continue;
+      if (!best || words.length > best.words) best = { row: r, words: words.length };
+    }
+    return best ? best.row : null;
+  }
+
+  // What the Database knows about the product a listing is (by its tracked/matched name, else by its title): its name, what
+  // it sells for on eBay, how fast, and from how many sales. Feeds the star rating in ntfy alerts (dealSummary.ts).
+  getProductSignals(matchedItem: string | null, title: string): ProductSignals | null {
+    const rows = this.db
+      .prepare(`SELECT id, name, ${EBAY_VALUE_SQL} AS value, ebay_avg_run_time_days AS run, ebay_comps_sample_size AS n, ebay_comps_checked_at AS at, my_store_ref AS store FROM products`)
+      .all() as Array<{ id: string; name: string; value: number | null; run: number | null; n: number | null; at: number | null; store: string | null }>;
+    const toSignals = (r: (typeof rows)[number]): ProductSignals => ({
+      id: r.id,
+      name: r.name,
+      valueUsd: r.value !== null && r.value > 0 ? r.value : null,
+      runTimeDays: r.run ?? null,
+      compSample: r.n ?? null,
+      checkedAt: r.at ?? null,
+      storeValueUsd: parseMyStore(r.store)?.medianUsd ?? null,
+    });
+    if (matchedItem) {
+      const lower = matchedItem.toLowerCase();
+      const hit = rows.find((r) => r.name.toLowerCase() === lower) ?? rows.find((r) => isSimilarProductName(matchedItem, r.name));
+      if (hit) return toSignals(this.moreSpecificProductForTitle(rows, hit.name, title) ?? hit);
+    }
+    const haystack = ` ${title.toLowerCase().replace(/[^a-z0-9]+/g, " ")} `;
+    let best: { row: (typeof rows)[number]; words: number } | null = null;
+    for (const r of rows) {
+      const words = r.name.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(" ").filter((w) => w.length > 1 && !["the", "and", "for", "with", "of"].includes(w));
+      if (words.length < 2 || !words.every((w) => haystack.includes(w)) || !compMatchesSpecs(r.name, title)) continue;
+      if (!best || words.length > best.words) best = { row: r, words: words.length };
+    }
+    return best ? toSignals(best.row) : null;
+  }
+
+  // A Database product the TITLE of a listing names (all of the product's words appear in it; the longest name wins) and
+  // what eBay says it is worth: lets the deal check use real numbers with no AI call. Null when nothing matches or
+  // the product has no eBay value yet. Hard facts and colors must agree, so a "White" listing isn't priced as the Black one.
+  getEbayValueForTitle(title: string): { name: string; value: number } | null {
+    this.getEbayValueForProductName(""); // makes sure the shared name/value list is loaded
+    const rows = this.ebayValueCache?.rows ?? [];
+    const haystack = ` ${title.toLowerCase().replace(/[^a-z0-9]+/g, " ")} `;
+    let best: { name: string; value: number; words: number } | null = null;
+    for (const r of rows) {
+      if (r.value === null || r.value <= 0) continue;
+      const words = r.name.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(" ").filter((w) => w.length > 1 && !["the", "and", "for", "with", "of"].includes(w));
+      if (words.length < 2 || !words.every((w) => haystack.includes(w))) continue;
+      if (!compMatchesSpecs(r.name, title)) continue;
+      if (!best || words.length > best.words) best = { name: r.name, value: r.value, words: words.length };
+    }
+    return best ? { name: best.name, value: best.value } : null;
+  }
+
+  // What BROKEN / for-parts copies of a product sell for: the value of its "(For Parts / Broken)" variant in the Database (see
+  // brokenVariant.ts), found by the product's name. Null when there is no such variant yet or it has no eBay value.
+  getBrokenVariantValue(itemName: string): { name: string; value: number } | null {
+    this.getEbayValueForProductName(""); // makes sure the shared name/value list is loaded
+    const rows = this.ebayValueCache?.rows ?? [];
+    const lower = itemName.toLowerCase();
+    const parent = rows.find((r) => r.name.toLowerCase() === lower) ?? rows.find((r) => !isBrokenVariantName(r.name) && isSimilarProductName(itemName, r.name));
+    const wanted = brokenVariantName(parent?.name ?? itemName).toLowerCase();
+    const variant = rows.find((r) => r.name.toLowerCase() === wanted);
+    return variant && variant.value !== null && variant.value > 0 ? { name: variant.name, value: variant.value } : null;
+  }
+
+  // The listing most recently written by saveScored. The engines announce a change to the
+  // Feed right after saving, and used to send "the newest listing by first-seen time",
+  // which is a different listing whenever another account saved one in between or an older
+  // listing was re-saved (so its card never updated until a full refetch).
+  private lastSavedId: string | null = null;
+  /**
+   * Listings whose stored photo list is heavy (a whole-size photo kept as a data: URI),
+   * a few at a time, for the one-off shrinking pass (see index.ts's shrinkStoredListingPhotos).
+   */
+  listHeavyListingPhotos(limit: number): Array<{ id: string; imageUrls: string[] }> {
+    const rows = this.db
+      .prepare("SELECT id, image_urls FROM listings WHERE length(image_urls) > 60000 AND image_urls LIKE '%data:image%' LIMIT ?")
+      .all(limit) as any[];
+    return rows.map((r) => ({ id: r.id, imageUrls: JSON.parse(r.image_urls) as string[] }));
+  }
+
+  setListingImageUrls(id: string, imageUrls: string[]): void {
+    this.db.prepare("UPDATE listings SET image_urls = ? WHERE id = ?").run(JSON.stringify(imageUrls), id);
+  }
+
+  getLastSavedListing(): ListingRecord | null {
+    return this.lastSavedId ? this.getById(this.lastSavedId) : null;
   }
 
   // --- Product database (Config-adjacent knowledge profiles) ------------
 
-  addProductStub(id: string, name: string): void {
+  // Two entries are the same product when their names reduce to the same words (case, punctuation and filler words
+  // like "new"/"edition" aside). Colors count as words, so the black and the white one stay apart.
+  private productDuplicateKey(name: string): string {
+    // Deliberately stricter than fuzzy matching's word list: "new" and "edition" can be part of a model's name
+    // ("New Nintendo 3DS XL" is a different console from "Nintendo 3DS XL"), so only grammar words are ignored.
+    const words = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .split(" ")
+      .filter((w) => w && !["the", "a", "an", "and", "or", "with", "for", "of"].includes(w));
+    return [...new Set(words)].sort().join(" ");
+  }
+
+  // Creates the entry, unless the Database already has one for this product: then nothing is inserted and the
+  // EXISTING entry's id is returned, so callers carry on with that one. (Two scans, accounts or lookups finding the same
+  // new product at nearly the same moment used to each make their own: two "Xbox Series X" entries.) The check and
+  // the insert are one synchronous step, so they can't interleave.
+  addProductStub(id: string, name: string): string {
+    const key = this.productDuplicateKey(name);
+    if (key) {
+      const rows = this.db.prepare("SELECT id, name FROM products").all() as Array<{ id: string; name: string }>;
+      const existing = rows.find((r) => this.productDuplicateKey(r.name) === key);
+      if (existing) return existing.id;
+    }
     const now = Date.now();
     this.db
       .prepare("INSERT INTO products (id, name, loading, created_at, updated_at) VALUES (?, ?, 1, ?, ?)")
       .run(id, name, now, now);
+    return id;
+  }
+
+  // Folds together entries that are already duplicates of each other (made before the check above existed, or
+  // arrived from another device through cloud sync): the fullest entry is kept, and everything that pointed at the
+  // others (reference photos, listings, Watches, specific models) is repointed to it. Returns removedId -> keptId
+  // so callers can repoint anything stored outside the database (the Search For list in config). Cheap when there
+  // are no duplicates: one query over names.
+  mergeDuplicateProducts(): Map<string, string> {
+    const merged = new Map<string, string>();
+    const names = this.db.prepare("SELECT id, name FROM products").all() as Array<{ id: string; name: string }>;
+    const groups = new Map<string, string[]>();
+    for (const row of names) {
+      const key = this.productDuplicateKey(row.name);
+      if (!key) continue;
+      const list = groups.get(key);
+      if (list) list.push(row.id);
+      else groups.set(key, [row.id]);
+    }
+    for (const ids of groups.values()) {
+      if (ids.length < 2) continue;
+      const rows = ids.map((id) => this.db.prepare("SELECT * FROM products WHERE id = ?").get(id) as any);
+      const imageCounts = this.countNormalImagesByProduct();
+      const score = (r: any) =>
+        (r.ebay_comps_checked_at ? 4 : 0) + (r.ebay_est_value_usd != null || r.ebay_avg_sold_price_usd != null ? 4 : 0) + (r.ai_summary ? 2 : 0) + (r.image_url ? 1 : 0) + Math.min(imageCounts.get(r.id) ?? 0, 10) * 0.2;
+      rows.sort((a, b) => score(b) - score(a) || a.created_at - b.created_at);
+      const winner = rows[0];
+      for (const loser of rows.slice(1)) {
+        // Fill what the kept entry lacks from the one being folded in.
+        const fill: Array<[string, boolean]> = [
+          ["ai_summary", !winner.ai_summary],
+          ["ai_summary_generated_at", winner.ai_summary_generated_at == null],
+          ["image_url", !winner.image_url],
+          ["family", !winner.family],
+          ["resale_price_usd", winner.resale_price_usd == null],
+          ["resale_time_to_sell", winner.resale_time_to_sell == null],
+          ["desired_price_usd", winner.desired_price_usd == null],
+          ["ebay_avg_sold_price_usd", winner.ebay_avg_sold_price_usd == null],
+          ["ebay_avg_run_time_days", winner.ebay_avg_run_time_days == null],
+          ["ebay_avg_shipping_usd", winner.ebay_avg_shipping_usd == null],
+          ["ebay_comps_sample_size", winner.ebay_comps_sample_size == null],
+          ["ebay_comps_checked_at", winner.ebay_comps_checked_at == null],
+          ["ebay_active_median_usd", winner.ebay_active_median_usd == null],
+          ["ebay_active_sample_size", winner.ebay_active_sample_size == null],
+          ["ebay_est_value_usd", winner.ebay_est_value_usd == null],
+          ["ebay_est_basis", winner.ebay_est_basis == null],
+        ];
+        for (const [column, empty] of fill) {
+          if (empty && loser[column] != null && loser[column] !== "") {
+            this.db.prepare(`UPDATE products SET ${column} = ? WHERE id = ?`).run(loser[column], winner.id);
+            winner[column] = loser[column];
+          }
+        }
+        if ((!winner.category || winner.category === "Other") && loser.category && loser.category !== "Other") {
+          this.db.prepare("UPDATE products SET category = ? WHERE id = ?").run(loser.category, winner.id);
+        }
+        if (loser.prioritized && !winner.prioritized) this.db.prepare("UPDATE products SET prioritized = 1 WHERE id = ?").run(winner.id);
+        const notes = [...(winner.observed_notes ? String(winner.observed_notes).split("\n---\n") : []), ...(loser.observed_notes ? String(loser.observed_notes).split("\n---\n") : [])];
+        if (notes.length) {
+          winner.observed_notes = notes.slice(-15).join("\n---\n");
+          this.db.prepare("UPDATE products SET observed_notes = ? WHERE id = ?").run(winner.observed_notes, winner.id);
+        }
+        // Watch notes use the same "\n---\n" entry separator as observed notes; identical entries are kept once.
+        const lookouts = [...new Set([...String(winner.lookout_notes ?? "").split("\n---\n"), ...String(loser.lookout_notes ?? "").split("\n---\n")].map((l) => l.trim()).filter(Boolean))];
+        if (lookouts.length) {
+          winner.lookout_notes = lookouts.slice(-15).join("\n---\n");
+          this.db.prepare("UPDATE products SET lookout_notes = ? WHERE id = ?").run(winner.lookout_notes, winner.id);
+        }
+
+        this.db.prepare("UPDATE product_images SET product_id = ? WHERE product_id = ?").run(winner.id, loser.id);
+        this.db.prepare("UPDATE listings SET product_id = ? WHERE product_id = ?").run(winner.id, loser.id);
+        this.db.prepare("UPDATE products SET parent_product_id = ? WHERE parent_product_id = ?").run(winner.id, loser.id);
+        this.db.prepare("UPDATE watches SET linked_product_id = ? WHERE linked_product_id = ?").run(winner.id, loser.id);
+        // A Watch's search terms carry their own linked product ids inside a JSON column.
+        const watchRows = this.db.prepare("SELECT id, terms_json FROM watches WHERE terms_json LIKE ?").all(`%${loser.id}%`) as Array<{ id: string; terms_json: string }>;
+        for (const w of watchRows) this.db.prepare("UPDATE watches SET terms_json = ? WHERE id = ?").run(w.terms_json.split(loser.id).join(winner.id), w.id);
+
+        this.deleteProduct(loser.id);
+        merged.set(loser.id, winner.id);
+      }
+      this.touchProduct(winner.id);
+    }
+    if (merged.size) this.ebayValueCache = null;
+    return merged;
   }
 
   // Per explicit instruction — the Library's own "+" button, for a product
@@ -664,14 +1087,85 @@ export class Store {
   // image fields that already succeeded moments earlier, and vice versa.
   updateProductEbayComps(
     id: string,
-    data: { avgSoldPriceUsd: number | null; avgRunTimeDays: number | null; avgShippingUsd: number | null; sampleSize: number }
+    data: {
+      avgSoldPriceUsd: number | null;
+      avgRunTimeDays: number | null;
+      avgShippingUsd: number | null;
+      sampleSize: number;
+      activeMedianUsd?: number | null;
+      activeSampleSize?: number | null;
+      estimatedValueUsd?: number | null;
+      estimateBasis?: "sold" | "blend" | "active" | null;
+    }
   ): void {
     const now = Date.now();
+    this.ebayValueCache = null;
     this.db
       .prepare(
-        "UPDATE products SET ebay_avg_sold_price_usd = ?, ebay_avg_run_time_days = ?, ebay_avg_shipping_usd = ?, ebay_comps_sample_size = ?, ebay_comps_checked_at = ?, updated_at = ? WHERE id = ?"
+        `UPDATE products SET ebay_avg_sold_price_usd = ?, ebay_avg_run_time_days = ?, ebay_avg_shipping_usd = ?, ebay_comps_sample_size = ?, ebay_comps_checked_at = ?,
+           ebay_active_median_usd = ?, ebay_active_sample_size = ?, ebay_est_value_usd = ?, ebay_est_basis = ?, updated_at = ? WHERE id = ?`
       )
-      .run(data.avgSoldPriceUsd, data.avgRunTimeDays, data.avgShippingUsd, data.sampleSize, now, now, id);
+      .run(
+        data.avgSoldPriceUsd,
+        data.avgRunTimeDays,
+        data.avgShippingUsd,
+        data.sampleSize,
+        now,
+        data.activeMedianUsd ?? null,
+        data.activeSampleSize ?? null,
+        data.estimatedValueUsd ?? null,
+        data.estimateBasis ?? null,
+        now,
+        id
+      );
+  }
+
+  // The user's own store's price for a product (see myStore.ts); null clears it.
+  setProductMyStore(id: string, ref: MyStoreReference | null): void {
+    this.db.prepare("UPDATE products SET my_store_ref = ? WHERE id = ?").run(ref ? JSON.stringify(ref) : null, id);
+  }
+
+  clearAllMyStoreRefs(): void {
+    this.db.exec("UPDATE products SET my_store_ref = NULL WHERE my_store_ref IS NOT NULL");
+  }
+
+  // --- Specific models filed under a more generic product -----------------
+  // Products that are the same thing as `name` apart from color: the black and the white Xbox Series S. Used to find
+  // the entry a differently-colored listing or photo belongs to.
+  listProductsSharingBase(name: string, excludeId?: string): ProductProfile[] {
+    const base = colorlessProductTokens(name);
+    if (!base.size) return [];
+    return this.listProducts().filter((p) => {
+      if (p.id === excludeId) return false;
+      const other = colorlessProductTokens(p.name);
+      return other.size === base.size && [...base].every((t) => other.has(t));
+    });
+  }
+
+  // The entry that is exactly this product in exactly this color, if there is one.
+  findColorVariant(name: string): ProductProfile | null {
+    const wanted = colorsIn(name);
+    return this.listProductsSharingBase(name).find((p) => sameColors(colorsIn(p.name), wanted)) ?? null;
+  }
+
+  // A "child" product is a more specific model of a generic entry (an EVGA XC card under the plain
+  // "RTX 3060 Ti" entry). Local-only: it isn't part of the cloud product sync, which leaves the column alone.
+  setProductParent(id: string, parentId: string | null): void {
+    this.db.prepare("UPDATE products SET parent_product_id = ?, updated_at = ? WHERE id = ?").run(parentId, Date.now(), id);
+  }
+
+  listProductChildren(parentId: string): ProductProfile[] {
+    const rows = this.db.prepare("SELECT * FROM products WHERE parent_product_id = ? ORDER BY name").all(parentId) as any[];
+    return rows.map(rowToProduct);
+  }
+
+  // Just the listing titles that photos in a product's gallery came from (no image data), newest first. Tells the
+  // identity check what kinds of listing have already been filed under a product.
+  listProductPhotoTitles(productId: string, limit: number): string[] {
+    const rows = this.db
+      .prepare("SELECT source_title FROM product_images WHERE product_id = ? AND source_title IS NOT NULL ORDER BY created_at DESC LIMIT ?")
+      .all(productId, limit * 3) as Array<{ source_title: string }>;
+    return [...new Set(rows.map((r) => r.source_title))].slice(0, limit);
   }
 
   // Per explicit instruction — lets a SECOND product landing in the same
@@ -683,6 +1177,16 @@ export class Store {
   // top-level segment (everything before the first " > ", or the whole
   // string for a single-level family) so a search under "Xbox > Games >
   // Xbox 360" still finds the logo already stored against plain "Xbox".
+  // Gives every product in a top-level family (and its sub-families) that has no logo yet this one.
+  setFamilyLogo(topLevelFamily: string, logo: string): void {
+    this.db
+      .prepare(
+        `UPDATE products SET family_logo_url = ?, updated_at = ?
+         WHERE (family_logo_url IS NULL OR family_logo_url = '') AND (LOWER(family) = LOWER(?) OR LOWER(family) LIKE LOWER(?) || ' >%')`
+      )
+      .run(logo, Date.now(), topLevelFamily, topLevelFamily);
+  }
+
   getFamilyLogoUrl(topLevelFamily: string): string | null {
     const row = this.db
       .prepare(
@@ -1126,7 +1630,12 @@ export class Store {
 
     const match = this.findMatchingProduct(trimmedName);
     if (!match) return null;
+    return this.appendProductObservation(match, trimmedName, trimmedNote);
+  }
 
+  // The same note, written to a product the caller already resolved (the identity check may have picked a more
+  // specific model than the one the name alone would fuzzy-match).
+  appendProductObservation(match: ProductProfile, trimmedName: string, trimmedNote: string): ProductProfile | null {
     const sameName = match.name.toLowerCase() === trimmedName.toLowerCase();
     const date = new Date().toISOString().slice(0, 10);
     const entry = sameName ? `[${date}] ${trimmedNote}` : `[${date}] (also seen listed as "${trimmedName}") ${trimmedNote}`;
@@ -1369,12 +1878,13 @@ export class Store {
   listRecent(limit = 200, offset = 0): ListingRecord[] {
     const rows = this.db
       .prepare(
-        `SELECT l.*, f.verdict as feedback_verdict, f.note as feedback_note
+        `SELECT l.*, f.verdict as feedback_verdict, f.note as feedback_note,
+           (SELECT group_concat(w.name, char(31)) FROM watch_matches wm2 JOIN watches w ON w.id = wm2.watch_id WHERE wm2.listing_id = l.id) as watch_names
          FROM listings l LEFT JOIN feedback f ON f.listing_id = l.id
          ORDER BY l.first_seen_at DESC LIMIT ? OFFSET ?`
       )
       .all(limit, offset) as any[];
-    return rows.map((row) => this.enrichWithMatchedProductPricing(rowToRecord(row)));
+    return this.enrichManyWithMatchedProductPricing(rows.map(rowToRecord));
   }
 
   // Per explicit instruction — "the Listings Evaluated caps at 500, make it
@@ -1521,8 +2031,16 @@ export class Store {
   // SQLite instead of Config. See types.ts's Watch/WatchMatch for the full
   // shape and reasoning.
 
+  // A Watch's own ntfy topic (see Watch.ntfyTopic); null or blank goes back to the topic in Config.
+  setWatchNtfyTopic(id: string, topic: string | null): Watch | null {
+    const clean = topic?.trim() || null;
+    this.db.prepare("UPDATE watches SET ntfy_topic = ?, updated_at = ? WHERE id = ?").run(clean, Date.now(), id);
+    return this.getWatchById(id);
+  }
+
   createWatch(data: {
     name: string;
+    platform?: WatchPlatform;
     searchPhrase: string;
     matchKeywords: string[];
     linkedProductId: string | null;
@@ -1531,37 +2049,54 @@ export class Store {
     minProfitUsd: number | null;
     minDiscountPercent: number | null;
     maxListingAgeMinutes: number | null;
+    minSellerRatingPercent?: number | null;
     locationMode: "country" | "state" | "city";
     selectedState: string | null;
     selectedCityOrZip: string | null;
     searchRadiusMiles: number | null;
+    // Facebook Watches: everything it looks out for (when given, the first term
+    // also becomes searchPhrase/matchKeywords/linkedProductId), how often it
+    // checks, and which accounts it may use.
+    terms?: WatchTerm[];
+    checkIntervalMinutes?: number;
+    accountIds?: string[];
   }): Watch {
     const id = randomUUID();
     const now = Date.now();
+    const first = data.terms?.[0];
+    const searchPhrase = first ? first.phrase : data.searchPhrase;
+    const matchKeywords = first ? first.matchKeywords : data.matchKeywords;
+    const linkedProductId = first ? first.linkedProductId : data.linkedProductId;
     this.db
       .prepare(
         `INSERT INTO watches (
-          id, name, search_phrase, match_keywords, linked_product_id,
-          min_price_usd, max_price_usd, min_profit_usd, min_discount_percent, max_listing_age_minutes,
+          id, name, platform, search_phrase, match_keywords, linked_product_id,
+          min_price_usd, max_price_usd, min_profit_usd, min_discount_percent, max_listing_age_minutes, min_seller_rating_percent,
           location_mode, selected_state, selected_city_or_zip, search_radius_miles,
+          terms_json, check_interval_minutes, account_ids,
           enabled, listings_seen_count, match_count, created_at, updated_at, next_check_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, ?, ?, ?)`
       )
       .run(
         id,
         data.name,
-        data.searchPhrase,
-        JSON.stringify(data.matchKeywords),
-        data.linkedProductId,
+        data.platform ?? "facebook",
+        searchPhrase,
+        JSON.stringify(matchKeywords),
+        linkedProductId,
         data.minPriceUsd,
         data.maxPriceUsd,
         data.minProfitUsd,
         data.minDiscountPercent,
         data.maxListingAgeMinutes,
+        data.minSellerRatingPercent ?? null,
         data.locationMode,
         data.selectedState,
         data.selectedCityOrZip,
         data.searchRadiusMiles,
+        data.terms?.length ? JSON.stringify(data.terms) : null,
+        data.checkIntervalMinutes ?? 15,
+        data.accountIds?.length ? JSON.stringify(data.accountIds) : null,
         now,
         now,
         // Due immediately — the active scheduler (once it exists) picks up
@@ -1585,15 +2120,32 @@ export class Store {
       minProfitUsd: number | null;
       minDiscountPercent: number | null;
       maxListingAgeMinutes: number | null;
+      minSellerRatingPercent: number | null;
       locationMode: "country" | "state" | "city";
       selectedState: string | null;
       selectedCityOrZip: string | null;
       searchRadiusMiles: number | null;
+      terms: WatchTerm[];
+      checkIntervalMinutes: number;
+      accountIds: string[];
     }>
   ): Watch | null {
     const existing = this.getWatchById(id);
     if (!existing) return null;
     const merged = { ...existing, ...patch };
+    // The first term is also the Watch's plain phrase/keywords/link (see types.ts).
+    if (patch.terms?.length) {
+      merged.searchPhrase = patch.terms[0].phrase;
+      merged.matchKeywords = patch.terms[0].matchKeywords;
+      merged.linkedProductId = patch.terms[0].linkedProductId;
+    } else {
+      // An edit of the plain phrase/keywords/link (the eBay form, an older caller)
+      // changes the first term with it, so the two never disagree.
+      merged.terms = [
+        { phrase: merged.searchPhrase, matchKeywords: merged.matchKeywords, linkedProductId: merged.linkedProductId },
+        ...existing.terms.slice(1),
+      ];
+    }
     // A location edit invalidates any cached resolution — the scheduler
     // (Phase 3) re-resolves on its own next check rather than this method
     // needing to know anything about Playwright/discoverLocation.
@@ -1617,9 +2169,10 @@ export class Store {
       .prepare(
         `UPDATE watches SET
           name = ?, search_phrase = ?, match_keywords = ?, linked_product_id = ?,
-          min_price_usd = ?, max_price_usd = ?, min_profit_usd = ?, min_discount_percent = ?, max_listing_age_minutes = ?,
+          min_price_usd = ?, max_price_usd = ?, min_profit_usd = ?, min_discount_percent = ?, max_listing_age_minutes = ?, min_seller_rating_percent = ?,
           location_mode = ?, selected_state = ?, selected_city_or_zip = ?, search_radius_miles = ?,
-          resolved_location_url = ?, resolved_location_label = ?, resolved_location_checked_at = ?,
+          resolved_location_url = ?, resolved_location_label = ?, resolved_location_checked_at = ?, resolved_location_urls = ?,
+          terms_json = ?, check_interval_minutes = ?, account_ids = ?,
           updated_at = ?
          WHERE id = ?`
       )
@@ -1633,6 +2186,7 @@ export class Store {
         merged.minProfitUsd,
         merged.minDiscountPercent,
         merged.maxListingAgeMinutes,
+        merged.minSellerRatingPercent ?? null,
         merged.locationMode,
         merged.selectedState,
         merged.selectedCityOrZip,
@@ -1640,9 +2194,21 @@ export class Store {
         locationChanged ? null : merged.resolvedLocationUrl,
         locationChanged ? null : merged.resolvedLocationLabel,
         locationChanged ? null : merged.resolvedLocationCheckedAt,
+        locationChanged || !merged.resolvedLocationUrls?.length ? null : JSON.stringify(merged.resolvedLocationUrls),
+        JSON.stringify(merged.terms),
+        merged.checkIntervalMinutes ?? 15,
+        merged.accountIds?.length ? JSON.stringify(merged.accountIds) : null,
         Date.now(),
         id
       );
+    // What the Watch looks for or where changed, so the searches it remembered no
+    // longer apply, and listings it had already passed over deserve a fresh look
+    // under the new rules (a wider radius, a higher price ceiling...).
+    const termsChanged = JSON.stringify(merged.terms.map((t) => t.phrase)) !== JSON.stringify(existing.terms.map((t) => t.phrase));
+    if (locationChanged || termsChanged) this.clearWatchSearchLinks(id);
+    if (locationChanged || termsChanged || merged.minPriceUsd !== existing.minPriceUsd || merged.maxPriceUsd !== existing.maxPriceUsd) {
+      this.db.prepare("DELETE FROM watch_seen_listings WHERE watch_id = ?").run(id);
+    }
     return this.getWatchById(id);
   }
 
@@ -1675,6 +2241,7 @@ export class Store {
           `UPDATE watches SET
             name = ?, search_phrase = ?, match_keywords = ?, linked_product_id = ?,
             min_price_usd = ?, max_price_usd = ?, min_profit_usd = ?, min_discount_percent = ?, max_listing_age_minutes = ?,
+            min_seller_rating_percent = ?, platform = ?,
             location_mode = ?, selected_state = ?, selected_city_or_zip = ?, search_radius_miles = ?,
             enabled = ?, updated_at = ?
            WHERE id = ?`
@@ -1689,6 +2256,11 @@ export class Store {
           watch.minProfitUsd,
           watch.minDiscountPercent,
           watch.maxListingAgeMinutes,
+          // A cloud row from a server that doesn't know these fields must not
+          // wipe the local values (that would turn an eBay Watch back into a
+          // Facebook one on the next pull).
+          watch.minSellerRatingPercent !== undefined ? watch.minSellerRatingPercent : existing.minSellerRatingPercent,
+          watch.platform ?? existing.platform,
           watch.locationMode,
           watch.selectedState,
           watch.selectedCityOrZip,
@@ -1704,9 +2276,10 @@ export class Store {
           `INSERT INTO watches (
             id, name, search_phrase, match_keywords, linked_product_id,
             min_price_usd, max_price_usd, min_profit_usd, min_discount_percent, max_listing_age_minutes,
+            min_seller_rating_percent, platform,
             location_mode, selected_state, selected_city_or_zip, search_radius_miles,
             enabled, listings_seen_count, match_count, next_check_at, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`
         )
         .run(
           watch.id,
@@ -1719,6 +2292,8 @@ export class Store {
           watch.minProfitUsd,
           watch.minDiscountPercent,
           watch.maxListingAgeMinutes,
+          watch.minSellerRatingPercent ?? null,
+          watch.platform ?? "facebook",
           watch.locationMode,
           watch.selectedState,
           watch.selectedCityOrZip,
@@ -1745,6 +2320,14 @@ export class Store {
       .run(data.url, data.label, data.checkedAt, id);
   }
 
+  // The state / whole-country counterpart of setWatchResolvedLocation: the
+  // list of places that Watch searches (see ScrapeEngine.resolveWatchPlaces).
+  setWatchResolvedLocations(id: string, data: { urls: string[]; label: string | null; checkedAt: number }): void {
+    this.db
+      .prepare("UPDATE watches SET resolved_location_urls = ?, resolved_location_label = ?, resolved_location_checked_at = ? WHERE id = ?")
+      .run(JSON.stringify(data.urls), data.label, data.checkedAt, id);
+  }
+
   // Per explicit instruction — a real due/overdue queue, not blind
   // per-watch polling: the active scheduler polls this on its own timer
   // and gets back only the single most-overdue enabled watch (or null when
@@ -1755,7 +2338,7 @@ export class Store {
   // scheduler itself is what defers those rather than busy-polling them.
   getDueWatch(now: number): Watch | null {
     const row = this.db
-      .prepare("SELECT * FROM watches WHERE enabled = 1 AND next_check_at IS NOT NULL AND next_check_at <= ? ORDER BY next_check_at ASC LIMIT 1")
+      .prepare("SELECT * FROM watches WHERE enabled = 1 AND platform = 'facebook' AND next_check_at IS NOT NULL AND next_check_at <= ? ORDER BY next_check_at ASC LIMIT 1")
       .get(now) as any;
     return row ? rowToWatch(row) : null;
   }
@@ -1778,6 +2361,8 @@ export class Store {
 
   deleteWatch(id: string): void {
     this.db.prepare("DELETE FROM watch_matches WHERE watch_id = ?").run(id);
+    this.db.prepare("DELETE FROM watch_seen_listings WHERE watch_id = ?").run(id);
+    this.db.prepare("DELETE FROM watch_searches WHERE watch_id = ?").run(id);
     this.db.prepare("DELETE FROM watches WHERE id = ?").run(id);
     // Batch 2 Fix B — recorded in the SAME method as the delete itself
     // (never left to a caller to remember) so watchSync.ts's next tick
@@ -1788,12 +2373,72 @@ export class Store {
 
   listWatches(): Watch[] {
     const rows = this.db.prepare("SELECT * FROM watches ORDER BY created_at DESC").all() as any[];
-    return rows.map(rowToWatch);
+    return rows.map((row) => this.withSearchLinks(rowToWatch(row)));
+  }
+
+  private withSearchLinks(watch: Watch): Watch {
+    watch.searchLinks = this.listWatchSearchLinks(watch.id);
+    return watch;
+  }
+
+  // --- Watch: seen listings, search links, geocoding --------------------------
+
+  /** True once this Watch has come across this listing (it is then skipped). */
+  hasWatchSeen(watchId: string, listingId: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM watch_seen_listings WHERE watch_id = ? AND listing_id = ?").get(watchId, listingId);
+  }
+
+  /** Remembers that this Watch has come across this listing. Returns false if it already had. */
+  markWatchSeen(watchId: string, listingId: string): boolean {
+    const result = this.db
+      .prepare("INSERT OR IGNORE INTO watch_seen_listings (watch_id, listing_id, seen_at) VALUES (?, ?, ?)")
+      .run(watchId, listingId, Date.now());
+    return Number(result.changes) > 0;
+  }
+
+  /** Takes a listing back off a Watch's seen list (its check couldn't finish, so it should be looked at again). */
+  unmarkWatchSeen(watchId: string, listingId: string): void {
+    this.db.prepare("DELETE FROM watch_seen_listings WHERE watch_id = ? AND listing_id = ?").run(watchId, listingId);
+  }
+
+  /** Remembers the exact Marketplace search a Watch ran for a term at a place (replacing the last one). */
+  recordWatchSearchLink(watchId: string, term: string, placeKey: string, placeLabel: string, url: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO watch_searches (watch_id, term, place_key, place_label, url, checked_at) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(watch_id, term, place_key) DO UPDATE SET place_label = excluded.place_label, url = excluded.url, checked_at = excluded.checked_at`
+      )
+      .run(watchId, term, placeKey, placeLabel, url, Date.now());
+  }
+
+  listWatchSearchLinks(watchId: string): WatchSearchLink[] {
+    const rows = this.db.prepare("SELECT term, place_label, url, checked_at FROM watch_searches WHERE watch_id = ? ORDER BY term, place_label").all(watchId) as any[];
+    return rows.map((r) => ({ term: r.term, place: r.place_label, url: r.url, checkedAt: r.checked_at }));
+  }
+
+  /** Drops a Watch's remembered searches (its terms or place changed, so they no longer apply). */
+  clearWatchSearchLinks(watchId: string): void {
+    this.db.prepare("DELETE FROM watch_searches WHERE watch_id = ?").run(watchId);
+  }
+
+  getGeocode(query: string): { found: boolean; lat: number; lon: number; label: string | null; fetchedAt: number } | null {
+    const row = this.db.prepare("SELECT lat, lon, label, found, fetched_at FROM geocode_cache WHERE query = ?").get(query) as any;
+    if (!row) return null;
+    return { found: !!row.found, lat: row.lat ?? 0, lon: row.lon ?? 0, label: row.label ?? null, fetchedAt: row.fetched_at };
+  }
+
+  setGeocode(query: string, result: { found: true; lat: number; lon: number; label: string | null } | { found: false }): void {
+    this.db
+      .prepare(
+        `INSERT INTO geocode_cache (query, lat, lon, label, found, fetched_at) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(query) DO UPDATE SET lat = excluded.lat, lon = excluded.lon, label = excluded.label, found = excluded.found, fetched_at = excluded.fetched_at`
+      )
+      .run(query, result.found ? result.lat : null, result.found ? result.lon : null, result.found ? result.label : null, result.found ? 1 : 0, Date.now());
   }
 
   getWatchById(id: string): Watch | null {
     const row = this.db.prepare("SELECT * FROM watches WHERE id = ?").get(id) as any;
-    return row ? rowToWatch(row) : null;
+    return row ? this.withSearchLinks(rowToWatch(row)) : null;
   }
 
   // Per explicit instruction — "listings seen" / "last checked" on a
@@ -1892,7 +2537,8 @@ export class Store {
            wm.discovery_mode as wm_discovery_mode, wm.price_at_match as wm_price_at_match,
            wm.discount_percent_at_match as wm_discount_percent_at_match, wm.profit_usd_at_match as wm_profit_usd_at_match,
            wm.notified as wm_notified, wm.notified_at as wm_notified_at,
-           l.*, f.verdict as feedback_verdict, f.note as feedback_note
+           l.*, f.verdict as feedback_verdict, f.note as feedback_note,
+           (SELECT group_concat(w.name, char(31)) FROM watch_matches wm2 JOIN watches w ON w.id = wm2.watch_id WHERE wm2.listing_id = l.id) as watch_names
          FROM watch_matches wm
          JOIN listings l ON l.id = wm.listing_id
          LEFT JOIN feedback f ON f.listing_id = l.id
@@ -1944,6 +2590,8 @@ export class Store {
 function rowToRecord(row: any): ListingRecord {
   return {
     id: row.id,
+    justListed: !!row.just_listed,
+    watchNames: typeof row.watch_names === "string" && row.watch_names ? row.watch_names.split("\u001f") : [],
     source: row.source === "ebay" ? "ebay" : "facebook",
     title: row.title,
     price: row.price,
@@ -1972,6 +2620,8 @@ function rowToRecord(row: any): ListingRecord {
     sellerJoinedYear: row.seller_joined_year ?? null,
     sellerRating: row.seller_rating ?? null,
     sellerRatingCount: row.seller_rating_count ?? null,
+    sellerFeedbackPercent: row.ebay_seller_feedback_percent ?? null,
+    shippingCostUsd: row.ebay_shipping_usd ?? null,
     sellerHasProfilePhoto: row.seller_has_profile_photo === null ? null : !!row.seller_has_profile_photo,
     sellerRiskPassed: row.seller_risk_passed === undefined ? true : !!row.seller_risk_passed,
     sellerRiskReasons: row.seller_risk_reasons ? JSON.parse(row.seller_risk_reasons) : [],
@@ -2049,9 +2699,13 @@ const DATABASE_VARIANT_QUALIFIER_WORDS = new Set(["pro", "slim", "max", "plus", 
 // that generally would need a per-brand alias table, which isn't worth the
 // maintenance burden here.
 function isSimilarProductName(a: string, b: string): boolean {
+  // A "(For Parts / Broken)" variant is never the same product as the working one (nor as another product's variant by fuzzy match).
+  if (isBrokenVariantName(a) !== isBrokenVariantName(b)) return false;
   const tokensA = productNameTokens(a);
   const tokensB = productNameTokens(b);
   if (!tokensA.size || !tokensB.size) return false;
+  // A black one and a white one are different entries (a name that names no color still matches any color).
+  if (colorsConflict(a, b)) return false;
 
   const baseA = new Set([...tokensA].filter((t) => !DATABASE_VARIANT_QUALIFIER_WORDS.has(t)));
   const baseB = new Set([...tokensB].filter((t) => !DATABASE_VARIANT_QUALIFIER_WORDS.has(t)));
@@ -2065,6 +2719,10 @@ function isSimilarProductName(a: string, b: string): boolean {
 
   const extra = [...larger].filter((t) => !smaller.has(t));
   return !extra.some((t) => /^\d+(gb|tb|mb)$/i.test(t));
+}
+
+function colorlessProductTokens(name: string): Set<string> {
+  return new Set([...productNameTokens(name)].filter((t) => !isColorWord(t)));
 }
 
 function rowToProduct(row: any): ProductProfile {
@@ -2090,10 +2748,26 @@ function rowToProduct(row: any): ProductProfile {
     ebayAvgShippingUsd: row.ebay_avg_shipping_usd ?? null,
     ebayCompsSampleSize: row.ebay_comps_sample_size ?? null,
     ebayCompsCheckedAt: row.ebay_comps_checked_at ?? null,
+    ebayActiveMedianUsd: row.ebay_active_median_usd ?? null,
+    ebayActiveSampleSize: row.ebay_active_sample_size ?? null,
+    ebayEstimatedValueUsd: row.ebay_est_value_usd ?? null,
+    ebayEstimateBasis: row.ebay_est_basis ?? null,
+    myStore: parseMyStore(row.my_store_ref),
+    parentProductId: row.parent_product_id ?? null,
     loading: !!row.loading,
     createdAt: row.created_at,
     updatedAt: row.updated_at ?? row.created_at,
   };
+}
+
+function parseMyStore(raw: unknown): MyStoreReference | null {
+  if (typeof raw !== "string" || !raw) return null;
+  try {
+    const ref = JSON.parse(raw) as MyStoreReference;
+    return ref && typeof ref.medianUsd === "number" ? ref : null;
+  } catch {
+    return null;
+  }
 }
 
 function rowToProductImage(row: any): ProductImage {
@@ -2107,10 +2781,36 @@ function rowToProductImage(row: any): ProductImage {
   };
 }
 
+function parseUrlList(raw: unknown): string[] {
+  if (typeof raw !== "string" || !raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((u): u is string => typeof u === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseTerms(raw: unknown): WatchTerm[] | null {
+  if (typeof raw !== "string" || !raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || !parsed.length) return null;
+    return parsed.map((t: any) => ({
+      phrase: String(t.phrase ?? ""),
+      matchKeywords: Array.isArray(t.matchKeywords) ? t.matchKeywords.map(String) : [],
+      linkedProductId: t.linkedProductId ?? null,
+    }));
+  } catch {
+    return null;
+  }
+}
+
 function rowToWatch(row: any): Watch {
   return {
     id: row.id,
     name: row.name,
+    platform: row.platform === "ebay" ? "ebay" : "facebook",
     searchPhrase: row.search_phrase,
     matchKeywords: JSON.parse(row.match_keywords || "[]"),
     linkedProductId: row.linked_product_id ?? null,
@@ -2119,6 +2819,14 @@ function rowToWatch(row: any): Watch {
     minProfitUsd: row.min_profit_usd ?? null,
     minDiscountPercent: row.min_discount_percent ?? null,
     maxListingAgeMinutes: row.max_listing_age_minutes ?? null,
+    minSellerRatingPercent: row.min_seller_rating_percent ?? null,
+    ntfyTopic: row.ntfy_topic ?? null,
+    terms: parseTerms(row.terms_json) ?? [
+      { phrase: row.search_phrase, matchKeywords: JSON.parse(row.match_keywords || "[]"), linkedProductId: row.linked_product_id ?? null },
+    ],
+    checkIntervalMinutes: row.check_interval_minutes ?? 15,
+    accountIds: parseUrlList(row.account_ids),
+    searchLinks: [],
     locationMode: row.location_mode,
     selectedState: row.selected_state ?? null,
     selectedCityOrZip: row.selected_city_or_zip ?? null,
@@ -2126,6 +2834,7 @@ function rowToWatch(row: any): Watch {
     resolvedLocationUrl: row.resolved_location_url ?? null,
     resolvedLocationLabel: row.resolved_location_label ?? null,
     resolvedLocationCheckedAt: row.resolved_location_checked_at ?? null,
+    resolvedLocationUrls: parseUrlList(row.resolved_location_urls),
     enabled: !!row.enabled,
     listingsSeenCount: row.listings_seen_count,
     matchCount: row.match_count,

@@ -13,6 +13,8 @@ import sharp from "sharp";
 import { verifyThumbnailCandidate } from "./vision.js";
 import { OPENAI_IMAGE_MODEL, callOpenAI } from "./openai.js";
 import { hasEbayCredentials, searchEbayItems } from "./ebayClient.js";
+import { titleLooksLikeProduct } from "./compFilter.js";
+import { isLowAiMode } from "./aiMode.js";
 
 const SEARCH_TIMEOUT_MS = 15_000;
 const PAGE_FETCH_TIMEOUT_MS = 12_000;
@@ -191,6 +193,41 @@ export async function researchProductOnWeb(productName: string, maxResults = DEF
   };
 }
 
+/**
+ * Clynx looking something up the way a person would: a web search, a skim of the top few pages, and the readable text handed back
+ * for Clynx to digest and explain in its own words in the chat. Nothing is saved anywhere (that is research_product's job).
+ * Never throws: a failure comes back as text Clynx can say out loud.
+ */
+export async function lookUpOnWeb(query: string): Promise<string> {
+  const q = query.trim().slice(0, 200);
+  if (!q) return "Failed: no search query given.";
+  try {
+    const results = await searchWeb(q, 5);
+    if (results.length === 0) return `I searched the web for "${q}" but nothing useful came back.`;
+    const pages = await Promise.all(
+      results.slice(0, 4).map(async (r) => {
+        const page = await fetchPage(r.url);
+        const text = page.text && page.text.length > r.snippet.length ? page.text : r.snippet;
+        let host = r.url;
+        try {
+          host = new URL(r.url).hostname.replace(/^www\./, "");
+        } catch {
+          // keep the raw url as the label
+        }
+        return { title: r.title, host, text: text.trim().slice(0, 1800) };
+      })
+    );
+    const usable = pages.filter((p) => p.text.length > 0);
+    if (usable.length === 0) return `I searched the web for "${q}" but couldn't read any of the pages.`;
+    return (
+      `Web results for "${q}". Read them and answer in your own words (don't paste them, and don't present anything here as certain if the sources disagree or look thin):\n\n` +
+      usable.map((p, i) => `[${i + 1}] ${p.title} (${p.host})\n${p.text}`).join("\n\n")
+    );
+  } catch (err) {
+    return `Failed: couldn't reach the web right now (${(err as Error).message}).`;
+  }
+}
+
 // Wikipedia's public REST summary API — tried FIRST because it's a real,
 // stable JSON endpoint meant for programmatic use (no bot-detection risk,
 // unlike scraping a search engine's result page), and it usually has a
@@ -288,6 +325,10 @@ async function findAndVerifyImage(candidateUrls: string[], subjectName: string, 
 // separate vision-verified search — still verified here just like every
 // other candidate, never blindly trusted.
 export async function findProductImage(productName: string, preferredCandidateUrl?: string | null, maxResults = 8): Promise<string | null> {
+  if (isLowAiMode()) {
+    const free = await findFreeReferencePhotos(productName, { want: 1 });
+    return free[0]?.imageData ?? null;
+  }
   const candidates: string[] = [];
   if (preferredCandidateUrl) candidates.push(preferredCandidateUrl);
   const wiki = await findImageViaWikipedia(productName);
@@ -318,6 +359,7 @@ export async function findProductImage(productName: string, preferredCandidateUr
 // (never throws) on no hit, so a failure here can't take down the rest of
 // product research.
 export async function findPoorConditionProductImage(productName: string, maxResults = 8): Promise<string | null> {
+  if (isLowAiMode()) return null;
   const candidates: string[] = [];
   try {
     const results = await searchWeb(`${productName} damaged broken cracked for parts`, maxResults);
@@ -344,6 +386,7 @@ export async function findPoorConditionProductImage(productName: string, maxResu
 // findProductImage — a "Games" folder showing the brand's own logo would
 // be exactly as wrong as a specific console showing it.
 export async function findGroupImage(query: string, maxResults = 8): Promise<string | null> {
+  if (isLowAiMode()) return findFreeGroupImage(query);
   const candidates: string[] = [];
   try {
     const results = await searchWeb(query, maxResults);
@@ -394,7 +437,7 @@ export async function findGroupImage(query: string, maxResults = 8): Promise<str
 // to the DuckDuckGo-based search either way, and whatever this DOES return
 // still has to clear findAndVerifyImage's own vision check before being
 // accepted, so a wrong pick here isn't the only safeguard.
-async function findBrandLogoViaWikidata(brand: string): Promise<string | null> {
+async function findBrandLogoViaWikidata(brand: string, exactOnly = false): Promise<string | null> {
   try {
     const searchRes = await fetchWithTimeout(
       `https://www.wikidata.org/w/api.php?action=wbsearchentities&search=${encodeURIComponent(brand)}&language=en&format=json&limit=8`,
@@ -407,7 +450,7 @@ async function findBrandLogoViaWikidata(brand: string): Promise<string | null> {
 
     const normalizedBrand = brand.trim().toLowerCase();
     const exactMatches = hits.filter((hit) => hit.label?.trim().toLowerCase() === normalizedBrand);
-    const candidateOrder = [...exactMatches, ...hits.filter((hit) => !exactMatches.includes(hit))];
+    const candidateOrder = exactOnly ? exactMatches : [...exactMatches, ...hits.filter((hit) => !exactMatches.includes(hit))];
 
     for (const hit of candidateOrder) {
       const entityRes = await fetchWithTimeout(`https://www.wikidata.org/wiki/Special:EntityData/${hit.id}.json`, PAGE_FETCH_TIMEOUT_MS);
@@ -442,6 +485,7 @@ async function findBrandLogoViaWikidata(brand: string): Promise<string | null> {
 // no match or any failure, which the caller already treats as "no logo
 // found yet" rather than an error.
 export async function findBrandLogoImage(brand: string, maxResults = 8): Promise<string | null> {
+  if (isLowAiMode()) return findFreeBrandLogo(brand);
   const candidates: string[] = [];
   const wikidataLogo = await findBrandLogoViaWikidata(brand);
   if (wikidataLogo) candidates.push(wikidataLogo);
@@ -493,6 +537,23 @@ export async function downloadImageBuffer(url: string): Promise<{ buffer: Buffer
     return { buffer, contentType };
   } catch {
     return null;
+  }
+}
+
+// A photo kept only to be SHOWN in a Feed card (not to be analysed): scaled down so its
+// longest side is at most maxSide px and re-encoded as a JPEG. A listing photo that was
+// stored whole is ~150-200 KB of base64 per card, which the Feed then had to ship over IPC,
+// hold in memory and decode again on every refresh. Returns the input unchanged if it is
+// already small or can't be processed.
+export async function shrinkImageDataUri(dataUri: string, maxSide = 640, quality = 78): Promise<string> {
+  const parsed = parseDataUri(dataUri);
+  if (!parsed || dataUri.length < 60_000) return dataUri;
+  try {
+    const out = await sharp(parsed.buffer).rotate().resize({ width: maxSide, height: maxSide, fit: "inside", withoutEnlargement: true }).jpeg({ quality }).toBuffer();
+    const shrunk = `data:image/jpeg;base64,${out.toString("base64")}`;
+    return shrunk.length < dataUri.length ? shrunk : dataUri;
+  } catch {
+    return dataUri;
   }
 }
 
@@ -579,6 +640,8 @@ const CATEGORY_IMAGE_TIMEOUT_MS = 60_000;
 // thumbnails, just keyed by the plain category name instead of a family
 // path).
 export async function generateCategoryImage(category: string): Promise<string | null> {
+  // An AI image-generation call per category folder: not worth credits. The folder shows its products' own photos.
+  if (isLowAiMode()) return null;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), CATEGORY_IMAGE_TIMEOUT_MS);
@@ -752,7 +815,7 @@ export interface ReferencePhoto {
   label: string;
 }
 
-interface ReferenceCandidate {
+export interface ReferenceCandidate {
   url: string;
   label: string;
 }
@@ -802,6 +865,91 @@ async function gatherReferenceCandidates(productName: string): Promise<Reference
   return candidates.slice(0, REFERENCE_CANDIDATE_LIMIT);
 }
 
+// Reference photos with NO AI involved (no OpenAI credits): a Wikipedia article image and the photos of eBay listings
+// whose titles pass plain text checks (every word of the product's name, same model number/capacity/tier/color, and no
+// "parts"/"case only"/"bundle" wording). Less thorough than the vision-verified search above (web image search is left
+// out entirely, since without vision nothing could vouch for it), but free, and reliable enough to give a blank-box
+// entry a real photo. Best-effort: never throws; returns whatever it found.
+export async function findFreeReferencePhotos(
+  productName: string,
+  // `candidates`: photos already in hand (eBay listings already confirmed to be this product); used instead of searching.
+  opts: { want: number; existingImages?: string[]; candidates?: ReferenceCandidate[] }
+): Promise<ReferencePhoto[]> {
+  const photos: ReferencePhoto[] = [];
+  try {
+    const candidates: ReferenceCandidate[] = opts.candidates ? [...opts.candidates] : [];
+    const seen = new Set<string>();
+    const add = (url: string, label: string) => {
+      if (!seen.has(url)) {
+        seen.add(url);
+        candidates.push({ url, label });
+      }
+    };
+    if (!opts.candidates) {
+      const wiki = await findImageViaWikipedia(productName);
+      if (wiki) add(wiki, "Stock photo — Wikipedia");
+    }
+    if (!opts.candidates && hasEbayCredentials()) {
+      try {
+        const items = await searchEbayItems(productName, { limit: 30 });
+        for (const item of items) {
+          if (!item.imageUrl || !titleLooksLikeProduct(productName, item.title)) continue;
+          add(item.imageUrl.replace(/s-l\d+(\.\w+)$/i, "s-l800$1"), `eBay listing: ${item.title.slice(0, 90)}`);
+        }
+      } catch {
+        // eBay being unavailable just means fewer candidates.
+      }
+    }
+    const hashes: string[] = [];
+    for (const uri of opts.existingImages ?? []) {
+      const parsed = parseDataUri(uri);
+      if (!parsed) continue;
+      try {
+        hashes.push(await averageHash(parsed.buffer));
+      } catch {
+        // an unreadable existing photo just can't be used for dedup
+      }
+    }
+    for (const candidate of candidates.slice(0, 14)) {
+      if (photos.length >= opts.want) break;
+      const download = await downloadImageBuffer(candidate.url);
+      if (!download) continue;
+      const normalized = await normalizeReferencePhoto(download.buffer);
+      if (!normalized || hashes.some((h) => hammingDistance(h, normalized.hash) <= NEAR_DUPLICATE_HAMMING)) continue;
+      hashes.push(normalized.hash);
+      photos.push({ imageData: normalized.dataUri, label: candidate.label });
+    }
+  } catch (err) {
+    console.error(`[freePhotos] "${productName}" failed: ${(err as Error).message}`);
+  }
+  console.log(`[freePhotos] "${productName}": kept ${photos.length}/${opts.want}`);
+  return photos;
+}
+
+// A folder's picture without AI: a brand's logo from Wikidata (only when the entity's name is exactly the brand), or the
+// Wikipedia article image for a grouping like "Xbox Games". Null when there is nothing trustworthy.
+export async function findFreeBrandLogo(brand: string): Promise<string | null> {
+  try {
+    const url = await findBrandLogoViaWikidata(brand, true);
+    return url ? await downloadImageAsDataUri(url) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function findFreeGroupImage(query: string): Promise<string | null> {
+  try {
+    const url = await findImageViaWikipedia(query);
+    if (!url) return null;
+    const download = await downloadImageBuffer(url);
+    if (!download) return null;
+    const normalized = await normalizeReferencePhoto(download.buffer);
+    return normalized?.dataUri ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // Finds up to `want` verified reference photos of one exact product.
 // `existingImages` (data URIs the product already has) are used only to skip
 // near-duplicates. Best-effort throughout: never throws, returns whatever it
@@ -810,12 +958,18 @@ async function gatherReferenceCandidates(productName: string): Promise<Reference
 // one is the natural thumbnail.
 export async function findReferencePhotos(
   productName: string,
-  opts: { want: number; existingImages?: string[] }
+  // `candidates`: photos already in hand (e.g. from eBay listings that were confirmed to be this product) to check
+  // instead of searching the web for some. They go through the same download, duplicate and vision checks.
+  opts: { want: number; existingImages?: string[]; candidates?: ReferenceCandidate[] }
 ): Promise<{ photos: ReferencePhoto[]; examined: number }> {
+  // Save-credits mode: no vision check of any candidate. See findFreeReferencePhotos.
+  if (isLowAiMode()) {
+    return { photos: await findFreeReferencePhotos(productName, opts), examined: 0 };
+  }
   const photos: Array<ReferencePhoto & { rank: number }> = [];
   let examined = 0;
   try {
-    const candidates = await gatherReferenceCandidates(productName);
+    const candidates = opts.candidates ?? (await gatherReferenceCandidates(productName));
     const hashes: string[] = [];
     for (const uri of opts.existingImages ?? []) {
       const parsed = parseDataUri(uri);

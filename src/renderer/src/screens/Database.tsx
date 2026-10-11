@@ -1,23 +1,23 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { ActiveProductResearch, BlacklistedImage, BlacklistTerm, ChatContext, ChatMessage, ProductImage, ProductProfile } from "../lib/api.js";
+import type { BlacklistedImage, BlacklistTerm, ChatContext, ChatMessage, ProductImage, ProductProfile } from "../lib/api.js";
 import { api } from "../lib/api.js";
 import { Modal } from "../components/Modal.js";
 import { useLightbox } from "../components/ImageLightbox.js";
 import { ThumbnailSizeSlider, useThumbnailSize } from "../components/ThumbnailSize.js";
 import { WatchFormFlow } from "../components/WatchFormFlow.js";
+import { DiscoveryTab } from "./DiscoveryTab.js";
+import { keepRangeUsd } from "../../../main/resaleMath.js";
+import { imageSource } from "../lib/imageSource.js";
 
 // Per explicit instruction — the Database screen is now three clearly
-// separated sections instead of one long scrolling page: Research (the
-// assistant chat), Library (researched products already in the Database),
+// separated sections instead of one long scrolling page: Discovery (a live
+// feed of what Clynx is researching), Library (researched products already in the Database),
 // and Blacklist (both the term list and the image gallery). Local to this
 // component, not App.tsx's own screen routing, and survives a switch away
 // to another top-level screen and back the same way every other bit of
 // this screen's own state already does (Database itself never unmounts —
 // see App.tsx).
-type DatabaseTab = "research" | "library" | "blacklist";
-
-const GREETING =
-  'This is the Database. Here, if you need information about a specific product or need the AI to learn more about a specific product (e.g. average sale price, special instructions for that specific product, etc.), type your inquiry into this box.';
+type DatabaseTab = "discovery" | "library" | "blacklist";
 
 // Mirrors chat.ts's PRODUCT_CATEGORIES — only used here to pick a stable,
 // sensible display order for section headers (real grouping just uses
@@ -143,6 +143,159 @@ function sameSet(a: Set<string>, b: Set<string>): boolean {
   return true;
 }
 
+// The product page's eBay value section: a secondary headline of the app (what is this worth?), so it gets a big
+// number and a tile per fact behind it instead of a line of small print.
+function EbayValuePanel({
+  product,
+  busy,
+  message,
+  onRefresh,
+}: {
+  product: ProductProfile;
+  busy: boolean;
+  message: string | null;
+  onRefresh: () => void;
+}) {
+  const checked = product.ebayCompsCheckedAt !== null;
+  const hasSold = product.ebayAvgSoldPriceUsd !== null && !!product.ebayCompsSampleSize;
+  const hasActive = product.ebayActiveMedianUsd !== null && !!product.ebayActiveSampleSize;
+  // Everything here is what the BUYER pays in total (the sold item price plus the shipping they paid): eBay's cut is taken from all
+  // of it, so that total is what "You'd keep" is worked out from.
+  const soldShipping = Math.max(0, product.ebayAvgShippingUsd ?? 0);
+  const soldTotal = hasSold ? (product.ebayAvgSoldPriceUsd as number) + soldShipping : null;
+  const headline = product.ebayEstimatedValueUsd ?? soldTotal;
+  const basisLabel =
+    product.ebayEstimateBasis === "active"
+      ? "from current asking prices (no sold comps found)"
+      : product.ebayEstimateBasis === "blend"
+        ? "from sold comps + current asking prices"
+        : "from sold comps";
+  const days = product.ebayAvgRunTimeDays;
+  const sellTime = days === null ? null : days < 1 ? `${(days * 24).toFixed(1)} hours` : `${days.toFixed(1)} days`;
+  // What the user keeps after eBay's cut varies sale to sale, so it's shown as a dollar range.
+  const { lowUsd: keepLow, highUsd: keepHigh } = keepRangeUsd(headline ?? 0);
+  const money = (n: number) => `$${n.toFixed(n >= 100 ? 0 : 2).replace(/\.00$/, "")}`;
+
+  const tile = (label: string, value: React.ReactNode, detail?: React.ReactNode, accent?: string) => (
+    <div
+      key={label}
+      style={{
+        background: "var(--bg-elevated)",
+        border: `1px solid ${accent ?? "var(--border)"}`,
+        borderRadius: 12,
+        padding: "12px 14px",
+        minWidth: 0,
+      }}
+    >
+      <div style={{ fontSize: 11.5, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase", color: "var(--text-dim)" }}>{label}</div>
+      <div style={{ fontSize: 26, fontWeight: 800, lineHeight: 1.15, marginTop: 4, color: accent ?? "var(--text)" }}>{value}</div>
+      {detail && <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 3 }}>{detail}</div>}
+    </div>
+  );
+
+  return (
+    <div style={{ padding: "18px 18px 16px", borderBottom: "1px solid var(--border)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 15, fontWeight: 800, letterSpacing: 0.4, color: "var(--text)" }}>📊 eBay VALUE</div>
+        <button className="icon" style={{ fontSize: 13.5, padding: "7px 14px" }} disabled={busy} onClick={onRefresh}>
+          {busy ? "Researching…" : checked ? "Research again" : "Research now"}
+        </button>
+      </div>
+
+      {headline !== null ? (
+        <>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 14, flexWrap: "wrap", marginTop: 8 }}>
+            <div style={{ fontSize: 52, fontWeight: 800, lineHeight: 1, color: "var(--text)" }}>{money(headline)}</div>
+            <div style={{ fontSize: 14, color: "var(--text-muted)" }}>estimated sale price · {basisLabel}</div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 12, marginTop: 14 }}>
+            {/* Order: what sellers are asking, what it actually sold for, what you'd keep, how fast it sells. */}
+            {hasActive
+              ? tile(
+                  "Asking median",
+                  money(product.ebayActiveMedianUsd as number),
+                  `${product.ebayActiveSampleSize} active listing${product.ebayActiveSampleSize === 1 ? "" : "s"} · shipping included`
+                )
+              : tile("Asking median", "—", "Not enough active listings")}
+            {hasSold
+              ? tile(
+                  "Sold average",
+                  money(soldTotal as number),
+                  <>
+                    {product.ebayCompsSampleSize} sold comp{product.ebayCompsSampleSize === 1 ? "" : "s"}
+                    {product.ebayAvgShippingUsd !== null &&
+                      (product.ebayAvgShippingUsd === 0
+                        ? " · free shipping"
+                        : ` · ${money(product.ebayAvgSoldPriceUsd as number)} + ${money(product.ebayAvgShippingUsd)} shipping`)}
+                  </>
+                )
+              : tile("Sold average", "—", "No sold comps found")}
+            {tile("You'd keep", `${money(keepLow)}–${money(keepHigh)}`, "after eBay's fees", "var(--success)")}
+            {sellTime !== null && tile("Sells in", sellTime, days !== null && days < 7 ? "fast mover" : undefined)}
+          </div>
+        </>
+      ) : (
+        <div style={{ marginTop: 10, fontSize: 14.5, color: "var(--text-muted)" }}>
+          {checked
+            ? "Checked eBay, but didn't find sold comps or active listings confidently matching this exact product (special editions, other colors and different bundles are filtered out, not counted)."
+            : "Not checked yet. Click \"Research now\" to find what this product sold for on eBay and what sellers are asking for it right now."}
+        </div>
+      )}
+
+      {days !== null && days < 7 && (
+        <div
+          style={{
+            marginTop: 12,
+            padding: "9px 14px",
+            borderRadius: 10,
+            background: "var(--success-bg)",
+            color: "var(--success)",
+            fontSize: 14,
+            fontWeight: 700,
+          }}
+        >
+          🔥 Sells in under a week on eBay — good resale velocity for this one.
+        </div>
+      )}
+      {product.myStore && (
+        <div
+          style={{
+            marginTop: 14,
+            padding: "12px 14px",
+            borderRadius: 12,
+            border: "1px solid var(--accent-1)",
+            background: "var(--bg-elevated)",
+          }}
+        >
+          <div style={{ fontSize: 11.5, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase", color: "var(--accent-1)" }}>
+            🏪 Your eBay store · <span style={{ textTransform: "none" }}>{product.myStore.seller}</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginTop: 4 }}>
+            <div style={{ fontSize: 26, fontWeight: 800, color: "var(--text)" }}>{money(product.myStore.medianUsd)}</div>
+            <div style={{ fontSize: 13, color: "var(--text-muted)" }}>
+              what you list it for · {product.myStore.sampleSize} of your listing{product.myStore.sampleSize === 1 ? "" : "s"}
+              {product.myStore.lowUsd !== product.myStore.highUsd && ` (${money(product.myStore.lowUsd)}–${money(product.myStore.highUsd)})`}
+            </div>
+          </div>
+          <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 2 }}>
+            {product.myStore.items.map((item) => (
+              <a key={item.url} href={item.url} target="_blank" rel="noreferrer" style={{ fontSize: 12.5, color: "var(--text-muted)", textDecoration: "none" }}>
+                {money(item.priceUsd)} · {item.title}
+              </a>
+            ))}
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 6 }}>Your own asking prices, kept separate from the market numbers above.</div>
+        </div>
+      )}
+      {message && <p style={{ fontSize: 13.5, color: "var(--text-muted)", margin: "10px 0 0" }}>{message}</p>}
+      <p style={{ fontSize: 11.5, color: "var(--text-dim)", margin: "10px 0 0" }}>
+        Sold comps are collected from Watchcount.com; asking prices come from eBay's current listings
+        {checked && product.ebayCompsCheckedAt !== null && ` — checked ${new Date(product.ebayCompsCheckedAt).toLocaleDateString()}, recomputed whenever research runs again`}
+      </p>
+    </div>
+  );
+}
+
 // Two products are "variants of each other" when they're the SAME base
 // product (identical base tokens once variant words are pulled out) but
 // DIFFERENT tiers (different variant-word membership) — "PlayStation 5" vs
@@ -153,11 +306,102 @@ function sameSet(a: Set<string>, b: Set<string>): boolean {
 function findVariantSiblings(product: ProductProfile, allProducts: ProductProfile[]): ProductProfile[] {
   const { base, variants } = nameTokenSets(product.name);
   if (!base.size) return [];
+  const seenNames = new Set<string>([normalizedName(product.name)]);
   return allProducts.filter((p) => {
     if (p.id === product.id || p.category !== product.category) return false;
     const other = nameTokenSets(p.name);
-    return sameSet(base, other.base) && !sameSet(variants, other.variants);
+    if (!(sameSet(base, other.base) && !sameSet(variants, other.variants))) return false;
+    // Never list the same product twice (the main process merges duplicate entries; this keeps one from showing in the
+    // meantime), and never list a twin of the page's own product.
+    const key = normalizedName(p.name);
+    if (seenNames.has(key)) return false;
+    seenNames.add(key);
+    return true;
   });
+}
+
+function normalizedName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+// Blank-box entries (no thumbnail) get researched the moment they are SEEN (shown on screen, not clicked): every
+// request is batched for a moment, then handed to the main process, which works through them a few at a time. An
+// entry is asked for at most once per half hour (the main process keeps its own cooldown too).
+const thumbnailsRequested = new Map<string, number>();
+let pendingThumbnailIds: string[] = [];
+let thumbnailFlushTimer: ReturnType<typeof setTimeout> | null = null;
+function queueThumbnailRequest(product: ProductProfile): void {
+  if (product.imageUrl || product.loading || product.keepThumbnail) return;
+  const last = thumbnailsRequested.get(product.id);
+  if (last !== undefined && Date.now() - last < 30 * 60_000) return;
+  thumbnailsRequested.set(product.id, Date.now());
+  pendingThumbnailIds.push(product.id);
+  if (thumbnailFlushTimer) return;
+  thumbnailFlushTimer = setTimeout(() => {
+    const ids = pendingThumbnailIds;
+    pendingThumbnailIds = [];
+    thumbnailFlushTimer = null;
+    void api.ensureThumbnails(ids);
+  }, 200);
+}
+function requestThumbnails(products: ProductProfile[]): void {
+  products.forEach(queueThumbnailRequest);
+}
+
+// A folder tile with no picture to show gets one when it is seen: the blank products inside it are researched (their
+// photos then fill the folder's collage), and its brand logo / group picture is looked up. The Database list is refreshed
+// when a logo was found (group pictures arrive through their own push).
+const foldersRequested = new Map<string, number>();
+function requestFolderImage(segments: string[]): void {
+  const key = segments.join(" > ").toLowerCase();
+  const last = foldersRequested.get(key);
+  if (last !== undefined && Date.now() - last < 30 * 60_000) return;
+  foldersRequested.set(key, Date.now());
+  void api.ensureFolderImage(segments).then((found) => {
+    if (found) window.dispatchEvent(new Event("clynx:products-stale"));
+  });
+}
+
+function useFolderImpression(items: ProductProfile[], segments: string[] | null, needsPicture: boolean) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!needsPicture || !el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        observer.disconnect();
+        items.filter((p) => !p.imageUrl).slice(0, 6).forEach(queueThumbnailRequest);
+        if (segments) requestFolderImage(segments);
+      },
+      { rootMargin: "200px" }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [needsPicture, items.length, segments?.join(" > ")]);
+  return ref;
+}
+
+// Reports a product as seen while it is on screen: a tile scrolling into view is an impression.
+function useImpression(product: ProductProfile) {
+  const ref = useRef<HTMLDivElement>(null);
+  const blank = !product.imageUrl && !product.loading && !product.keepThumbnail;
+  useEffect(() => {
+    const el = ref.current;
+    if (!blank || !el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          queueThumbnailRequest(product);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "200px" }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [blank, product.id]);
+  return ref;
 }
 
 // Every product under a node, at any depth — what a folder tile's own
@@ -250,7 +494,7 @@ export function Database({
   requestedProductId?: string | null;
   onRequestedProductHandled?: () => void;
 } = {}) {
-  const [tab, setTab] = useState<DatabaseTab>("research");
+  const [tab, setTab] = useState<DatabaseTab>("discovery");
   const [products, setProducts] = useState<ProductProfile[]>([]);
   // null = show every category (the old behavior). Clicking a category pill
   // below jumps straight to just that section instead of making the user
@@ -336,6 +580,9 @@ export function Database({
 
   useEffect(() => {
     api.listProducts().then(setProducts);
+    // A folder's brand logo was just found (see requestFolderImage): its products carry it, so reload them.
+    const refetch = () => void api.listProducts().then(setProducts);
+    window.addEventListener("clynx:products-stale", refetch);
     const off = api.onProductUpdated((updated) => {
       // Upsert, not update-only — a product created from chat (research_product)
       // never went through a local list-append, so its very first
@@ -345,6 +592,7 @@ export function Database({
     });
     return () => {
       off();
+      window.removeEventListener("clynx:products-stale", refetch);
     };
   }, []);
 
@@ -547,21 +795,22 @@ export function Database({
     );
   }
 
-  const TAB_LABELS: Record<DatabaseTab, string> = { research: "Research", library: "Library", blacklist: "Blacklist" };
+  const TAB_LABELS: Record<DatabaseTab, string> = { discovery: "Discovery", library: "Library", blacklist: "Blacklist" };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20, height: "100%" }}>
       <div>
-        <h1 style={{ margin: 0, fontSize: 30 }}>Database</h1>
+        <h1 style={{ margin: 0, fontSize: 28 }}>Database</h1>
         <p style={{ color: "var(--text-muted)", margin: "6px 0 0", fontSize: 15 }}>
           Build a knowledge profile for a product once, reuse it every time scoring runs into it.
         </p>
       </div>
 
       {/* Per explicit instruction — three clearly separated sections
-          instead of one long scrolling page: Research (talk to the
-          assistant about products), Library (products already researched),
-          Blacklist (both the term list and the image gallery). */}
+          instead of one long scrolling page: Discovery (a live feed of the
+          products Clynx is looking into, with its thoughts and a box to ask
+          it things), Library (products already researched), Blacklist (both
+          the term list and the image gallery). */}
       <div style={{ display: "flex", gap: 8, borderBottom: "1px solid var(--border)" }}>
         {(Object.keys(TAB_LABELS) as DatabaseTab[]).map((t) => (
           <button
@@ -578,19 +827,22 @@ export function Database({
               background: tab === t ? "var(--bg-card-hover)" : "transparent",
             }}
           >
-            {t === "research" ? "💬 " : t === "library" ? "📚 " : "🚫 "}
+            {t === "discovery" ? "🔭 " : t === "library" ? "📚 " : "🚫 "}
             {TAB_LABELS[t]}
             {t === "library" && products.length > 0 ? ` (${products.length})` : ""}
           </button>
         ))}
       </div>
 
-      {tab === "research" && (
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", gap: 14 }}>
-          <ResearchStatusPanel />
-          <div style={{ flex: 1, minHeight: 0 }}>
-            <ChatPanel />
-          </div>
+      {tab === "discovery" && (
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <DiscoveryTab
+            products={products}
+            onOpenProduct={(id) => {
+              setSelectedProductId(id);
+              setTab("library");
+            }}
+          />
         </div>
       )}
 
@@ -622,19 +874,23 @@ export function Database({
             <div style={{ display: "flex", gap: 8 }}>
               {(missingPhotos > 0 || photoBackfill.running) && (
                 <button
+                  className="icon ghost"
                   disabled={photoBackfill.running}
-                  title="Searches the web for stock photos of every product that has fewer than 5 reference photos, and uses the best one as its thumbnail if it doesn't have one yet. Runs in the background."
+                  title={`Searches the web for stock photos of the ${missingPhotos} product${missingPhotos === 1 ? "" : "s"} with fewer than 5 reference photos, and uses the best one as the thumbnail if there isn't one yet. Runs in the background.`}
                   onClick={() => api.backfillProductPhotos()}
                 >
-                  {photoBackfill.running
-                    ? `📸 Finding photos… ${photoBackfill.done}/${photoBackfill.total}`
-                    : `📸 Find photos for ${missingPhotos} product${missingPhotos === 1 ? "" : "s"}`}
+                  {photoBackfill.running ? `📸 Finding photos… ${photoBackfill.done}/${photoBackfill.total}` : `📸 Find photos (${missingPhotos})`}
                 </button>
               )}
               <button className="primary" onClick={() => setShowAddProductDialog(true)}>
                 + Add product
               </button>
-              <button className="danger" disabled={clearing || !products.length} onClick={() => setShowClearAllDialog(true)}>
+              <button
+                className="icon ghost"
+                style={{ color: "var(--danger)", fontSize: 12.5 }}
+                disabled={clearing || !products.length}
+                onClick={() => setShowClearAllDialog(true)}
+              >
                 {clearing ? "Clearing..." : "Clear all"}
               </button>
             </div>
@@ -642,8 +898,8 @@ export function Database({
 
           {products.length === 0 && (
             <div className="card" style={{ color: "var(--text-dim)" }}>
-              No products yet — ask the assistant on the Research tab to look one up, or it'll pick up products on
-              its own while scanning.
+              No products yet. Ask Clynx on the Discovery tab to look one up, or I'll pick up products on my own while
+              scanning.
             </div>
           )}
 
@@ -724,6 +980,7 @@ export function Database({
                             key={category}
                             category={category}
                             count={items.length}
+                            items={items}
                             generatedThumbnailUrl={groupThumbnails[category.toLowerCase()] ?? null}
                             onOpen={() => setActiveCategory(category)}
                           />
@@ -750,6 +1007,7 @@ export function Database({
                               family={node.segment}
                               items={collectAllItems(node)}
                               isTopLevel
+                              pathSegments={[node.segment]}
                               onOpen={() => setViewingPath({ category, segments: [node.segment] })}
                             />
                           ))}
@@ -797,7 +1055,7 @@ export function Database({
               }}
             >
               <p style={{ margin: 0, fontSize: 14.5, color: "var(--text-muted)", lineHeight: 1.5 }}>
-                For a product you already know — no AI research runs on it. Clicking Create opens a file picker for an
+                For a product you already know — Clynx doesn't research it. Clicking Create opens a file picker for an
                 optional photo.
               </p>
               <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 14, color: "var(--text-muted)" }}>
@@ -859,9 +1117,9 @@ export function Database({
 // reselling (real estate, rentals, job postings...), not just uninteresting
 // resalable items. Grows two ways: the user typing a term here (or telling
 // the Database chat to blacklist something), or the scanner auto-suggesting
-// one when the general-deal AI recognizes an off-topic listing — those show
-// a 🤖 marker so the user can tell which ones weren't their own doing and
-// remove any that turn out too broad.
+// one when the general-deal AI recognizes an off-topic listing. They look
+// like any other term (no marker, per explicit instruction) and can be
+// removed the same way if they turn out too broad.
 function BlacklistSection() {
   const [terms, setTerms] = useState<BlacklistTerm[]>([]);
   const [draft, setDraft] = useState("");
@@ -935,14 +1193,14 @@ function BlacklistSection() {
         </button>
       </form>
       {terms.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        // Terms flow left to right and wrap onto the next line; a term and its photo(s) stay together as one item.
+        <div data-testid="blacklist-terms" style={{ display: "flex", flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: "8px 14px" }}>
           {terms.map((t) => {
             const linkedImages = imagesByTerm.get(t.term) ?? [];
             return (
-              <div key={t.term} style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              <div key={t.term} data-testid="blacklist-term" style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "nowrap" }}>
                 <span className="pill" style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 4px 4px 10px" }}>
                   {t.term}
-                  {t.source === "ai" && <span title="Auto-added by the scanner">🤖</span>}
                   <button
                     className="icon ghost"
                     title="Remove"
@@ -1043,7 +1301,7 @@ function BlacklistedImagesSection() {
         </div>
       </div>
       <p style={{ fontSize: 14, color: "var(--text-muted)", margin: 0 }}>
-        Listings the AI skipped after recognizing the photo itself as an ineligible category (a vehicle, real estate,
+        Listings Clynx skipped after recognizing the photo itself as an ineligible category (a vehicle, real estate,
         furniture, etc.) — even when the title never said so. Review each one below.
       </p>
       <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(${imgSize}px, 1fr))`, gap: 12 }}>
@@ -1104,7 +1362,7 @@ function BlacklistedImagesSection() {
         <Modal title="Remove this image?" onClose={() => setPendingRemoveId(null)}>
           <img src={pending.imageData} alt="" style={{ width: "100%", height: 160, objectFit: "cover", borderRadius: 10, display: "block" }} />
           <p style={{ margin: 0, fontSize: 15, lineHeight: 1.5 }}>
-            The AI flagged this as "{pending.category ?? "unrecognized"}" — {pending.reason ?? "no reason given"}. Was it wrong?
+            Clynx flagged this as "{pending.category ?? "unrecognized"}" — {pending.reason ?? "no reason given"}. Was it wrong?
           </p>
           <div style={{ display: "flex", gap: 8 }}>
             <button className="icon" style={{ flex: 1 }} onClick={() => setPendingRemoveId(null)}>
@@ -1216,10 +1474,13 @@ function FamilyTile({
   items,
   isTopLevel = false,
   groupThumbnailUrl = null,
+  pathSegments = null,
   onOpen,
 }: {
   family: string;
   items: ProductProfile[];
+  // The folder's full path (["Xbox", "Games"]), for finding its picture when it has none.
+  pathSegments?: string[] | null;
   isTopLevel?: boolean;
   // A representative photo for THIS sub-grouping as a whole (e.g. a
   // generic "Xbox games" shot for the "Games" folder) — see
@@ -1248,8 +1509,10 @@ function FamilyTile({
         }
         return images;
       })();
+  const folderRef = useFolderImpression(items, pathSegments, previewImages.length === 0 || (isTopLevel && !logo));
   return (
     <div
+      ref={folderRef}
       onClick={onOpen}
       className="card enter"
       style={{
@@ -1325,16 +1588,22 @@ function FamilyTile({
 function CategoryTile({
   category,
   count,
+  items = [],
   generatedThumbnailUrl,
   onOpen,
 }: {
   category: string;
   count: number;
+  // The category's products: their own photos make the tile's picture (and blank ones get researched when it is seen).
+  items?: ProductProfile[];
   generatedThumbnailUrl: string | null;
   onOpen: () => void;
 }) {
+  const memberImages = items.filter((p) => p.imageUrl).slice(0, 4).map((p) => p.imageUrl as string);
+  const categoryRef = useFolderImpression(items, null, !generatedThumbnailUrl && memberImages.length === 0);
   return (
     <div
+      ref={categoryRef}
       onClick={onOpen}
       className="card enter"
       style={{
@@ -1357,6 +1626,8 @@ function CategoryTile({
             alt={category}
             style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
           />
+        ) : memberImages.length > 0 ? (
+          <CollageImage images={memberImages} isLogo={false} />
         ) : (
           <div
             style={{
@@ -1467,6 +1738,7 @@ function FolderView({
             family={child.segment}
             items={collectAllItems(child)}
             groupThumbnailUrl={groupThumbnails[child.path.toLowerCase()] ?? null}
+            pathSegments={[...segments, child.segment]}
             onOpen={() => onNavigate([...segments, child.segment])}
           />
         ))}
@@ -1564,6 +1836,7 @@ function ProductTile({
   // isolation.
   hot?: boolean;
 }) {
+  const tileRef = useImpression(product);
   const [searching, setSearching] = useState(false);
   // Per explicit instruction — themed popups only, never window.confirm.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -1616,6 +1889,7 @@ function ProductTile({
 
   return (
     <div
+      ref={tileRef}
       onClick={() => {
         // The confirm modals below are React children of this card even
         // though they portal elsewhere in the DOM — React still bubbles
@@ -1679,7 +1953,7 @@ function ProductTile({
         <button
           className="icon"
           onClick={handleTogglePrioritized}
-          title={product.prioritized ? "Prioritized — click to unmark" : "Mark as prioritized (noteworthy to the AI)"}
+          title={product.prioritized ? "Prioritized — click to unmark" : "Mark as prioritized (noteworthy to Clynx)"}
           style={{
             position: "absolute",
             top: 6,
@@ -2014,6 +2288,32 @@ function ReferencePhotoCarousel({
           <span className="floaty">📦</span>
         </div>
       )}
+      {images.length > 0 && !hovering && (
+        <div
+          title={imageSource(images[index % images.length]?.sourceTitle).detail ?? undefined}
+          style={{
+            position: "absolute",
+            left: 8,
+            bottom: 8,
+            maxWidth: "calc(100% - 16px)",
+            padding: "3px 9px",
+            borderRadius: 999,
+            background: "rgba(15, 11, 30, 0.82)",
+            border: "1px solid rgba(255, 255, 255, 0.3)",
+            color: "#fff",
+            fontSize: 11.5,
+            fontWeight: 600,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            pointerEvents: "none",
+            opacity: visible ? 1 : 0,
+            transition: "opacity 0.5s ease",
+          }}
+        >
+          Source: {imageSource(images[index % images.length]?.sourceTitle).name}
+        </div>
+      )}
       {hovering && images.length > 0 && (
         <div
           style={{
@@ -2081,7 +2381,7 @@ function ReferencePhotosModal({
       ) : (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {images.map((img) => (
-            <div key={img.id} style={{ position: "relative", width: 64, height: 64 }} title={img.sourceTitle ?? undefined}>
+            <div key={img.id} style={{ position: "relative", width: 64 }} title={img.sourceTitle ?? undefined}>
               <img
                 src={img.imageData}
                 alt=""
@@ -2097,6 +2397,9 @@ function ReferencePhotosModal({
                 }
                 style={{ width: 64, height: 64, borderRadius: 8, objectFit: "cover", border: "1px solid var(--border)", cursor: "zoom-in" }}
               />
+              <div style={{ fontSize: 10, color: "var(--text-dim)", textAlign: "center", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {imageSource(img.sourceTitle).name}
+              </div>
               <button
                 className="icon"
                 title="Delete this reference photo"
@@ -2253,7 +2556,7 @@ function ProductDetailPage({
   // product (see chat.ts's buildProductSystemPrompt) — the AI knows which
   // product it's talking about without being told every message, and gets
   // access to add_product_watch_note, which only makes sense here.
-  const { chat, draft, setDraft, send, scrollRef, textareaRef } = useDatabaseChat({ showGreeting: false, context: "product", productId: product.id });
+  const { chat, draft, setDraft, send, scrollRef, textareaRef } = useDatabaseChat({ context: "product", productId: product.id });
   // Per explicit instruction — "the thumbnail in the top left should cycle
   // through all the reference photos automatically... when the user clicks
   // the thumbnail, it'll bring up all Reference Photos": one shared list
@@ -2288,6 +2591,17 @@ function ProductDetailPage({
   // (cheap — a handful of token-set comparisons), so a brand-new variant
   // researched elsewhere shows up here the moment products:updated adds it.
   const variants = useMemo(() => findVariantSiblings(product, allProducts), [product, allProducts]);
+  // A specific model (an EVGA XC card) is filed under the general entry it was found as (the plain RTX 3060 Ti):
+  // this page shows the specific models under a general entry, and the general entry above a specific model.
+  const specificModels = useMemo(() => allProducts.filter((p) => p.parentProductId === product.id), [product.id, allProducts]);
+  // What this page shows (itself, its variants, its specific models) shouldn't sit there as blank boxes.
+  useEffect(() => {
+    requestThumbnails([product, ...variants, ...specificModels]);
+  }, [product.id, product.imageUrl, variants, specificModels]);
+  const parentProduct = useMemo(
+    () => (product.parentProductId ? (allProducts.find((p) => p.id === product.parentProductId) ?? null) : null),
+    [product.parentProductId, allProducts]
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
@@ -2432,6 +2746,49 @@ function ProductDetailPage({
             </div>
           </div>
 
+          {parentProduct && (
+            <div style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)", fontSize: 13.5, color: "var(--text-muted)" }}>
+              🔬 A specific model of{" "}
+              <button className="icon ghost" style={{ padding: "2px 6px", fontWeight: 700 }} onClick={() => onSelectProduct(parentProduct.id)}>
+                {parentProduct.name}
+              </button>
+            </div>
+          )}
+
+          {specificModels.length > 0 && (
+            <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>
+              <div style={{ fontWeight: 600, fontSize: 14, color: "var(--text)", marginBottom: 8 }}>🔬 Specific models ({specificModels.length})</div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                {specificModels.map((m) => {
+                  const value = m.ebayEstimatedValueUsd ?? (m.ebayAvgSoldPriceUsd !== null ? m.ebayAvgSoldPriceUsd + Math.max(0, m.ebayAvgShippingUsd ?? 0) : null);
+                  return (
+                    <button
+                      key={m.id}
+                      className="card"
+                      onClick={() => onSelectProduct(m.id)}
+                      style={{ display: "flex", alignItems: "center", gap: 10, padding: 8, width: 260, textAlign: "left", cursor: "pointer", background: "var(--bg-elevated)" }}
+                    >
+                      <div style={{ width: 48, height: 48, borderRadius: 8, overflow: "hidden", flexShrink: 0, background: "var(--bg)" }}>
+                        {m.imageUrl ? (
+                          <img src={m.imageUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                        ) : (
+                          <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>📦</div>
+                        )}
+                      </div>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.name}</div>
+                        <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{value !== null ? `~$${value.toFixed(0)}` : "No comps yet"}</div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+              <p style={{ fontSize: 12, color: "var(--text-dim)", margin: "8px 0 0" }}>
+                Listings that turn out to be a particular brand or model of this product are filed as their own entry, with their own photos and prices.
+              </p>
+            </div>
+          )}
+
           {variants.length > 0 && (
             <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>
               <div style={{ fontWeight: 600, fontSize: 14, color: "var(--text)", marginBottom: 8 }}>
@@ -2509,74 +2866,7 @@ function ProductDetailPage({
             </div>
           )}
 
-          <div style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-              <div style={{ fontSize: 14, color: "var(--text)" }}>
-                {product.ebayCompsCheckedAt !== null && product.ebayAvgSoldPriceUsd !== null && product.ebayCompsSampleSize ? (
-                  <>
-                    📊 Avg. eBay Sales Price: <strong>${product.ebayAvgSoldPriceUsd.toFixed(0)}</strong>
-                    {product.ebayAvgShippingUsd !== null && (
-                      <span style={{ color: "var(--text-dim)" }}>
-                        {" "}
-                        {product.ebayAvgShippingUsd === 0 ? "+ free shipping" : `+ $${product.ebayAvgShippingUsd.toFixed(2)} shipping`}
-                      </span>
-                    )}
-                    <span style={{ color: "var(--text-dim)" }}>
-                      {" "}
-                      • Based on {product.ebayCompsSampleSize} sold comp{product.ebayCompsSampleSize === 1 ? "" : "s"}
-                      {product.ebayAvgRunTimeDays !== null &&
-                        ` • sells in ${product.ebayAvgRunTimeDays < 1 ? `${(product.ebayAvgRunTimeDays * 24).toFixed(1)}h` : `${product.ebayAvgRunTimeDays.toFixed(1)}d`}`}
-                    </span>
-                  </>
-                ) : (
-                  <span style={{ fontWeight: 600 }}>📊 eBay sold comps (watchcount.com)</span>
-                )}
-              </div>
-              <button className="icon" style={{ fontSize: 12.5 }} disabled={ebayCompsBusy} onClick={refreshEbayComps}>
-                {ebayCompsBusy ? "Researching…" : product.ebayCompsCheckedAt !== null ? "Research again" : "Research now"}
-              </button>
-            </div>
-            <p style={{ fontSize: 11, color: "var(--text-dim)", margin: "3px 0 0" }}>
-              *This data is collected from Watchcount.com
-              {product.ebayCompsCheckedAt !== null &&
-                ` — checked ${new Date(product.ebayCompsCheckedAt).toLocaleDateString()}, recomputed automatically whenever research runs again`}
-            </p>
-            {ebayCompsMessage && <p style={{ fontSize: 12.5, color: "var(--text-muted)", margin: "6px 0 0" }}>{ebayCompsMessage}</p>}
-            {product.ebayCompsCheckedAt === null
-              ? !ebayCompsMessage && (
-                  <p style={{ fontSize: 12.5, color: "var(--text-dim)", margin: "4px 0 0" }}>
-                    Not checked yet — click "Research now" to search WatchCount.com for this product's sold eBay comps.
-                  </p>
-                )
-              : (product.ebayAvgSoldPriceUsd === null || !product.ebayCompsSampleSize) && (
-                  <p style={{ fontSize: 12.5, color: "var(--text-dim)", margin: "4px 0 0" }}>
-                    Checked eBay's sold listings but didn't find any comps confidently matching this exact product (special
-                    editions/different bundles get filtered out, not counted).
-                  </p>
-                )}
-            {/* Per explicit instruction — "sells fairly quickly (<7 days
-                ideally), that's a great sign." Deliberately just this one
-                factual signal (not also comparing against a specific
-                Facebook listing's price, which this general product page
-                has no single one of) — the fuller "underpriced AND sells
-                fast" call already happens per-listing via the app's normal
-                deal scoring. */}
-            {product.ebayAvgRunTimeDays !== null && product.ebayAvgRunTimeDays < 7 && (
-              <div
-                style={{
-                  marginTop: 8,
-                  padding: "6px 10px",
-                  borderRadius: 8,
-                  background: "var(--success-bg)",
-                  color: "var(--success)",
-                  fontSize: 12.5,
-                  fontWeight: 600,
-                }}
-              >
-                🔥 Sells in under a week on eBay — good resale velocity for this one.
-              </div>
-            )}
-          </div>
+          <EbayValuePanel product={product} busy={ebayCompsBusy} message={ebayCompsMessage} onRefresh={refreshEbayComps} />
 
           {/* Per explicit instruction — reordered to match the redesigned
               layout: price limit now comes AFTER the two comp/price
@@ -2619,7 +2909,7 @@ function ProductDetailPage({
               </label>
             </div>
             <p style={{ fontSize: 11.5, color: "var(--text-dim)", margin: "4px 0 0" }}>
-              What YOU consider worth paying for this specific product — trains the AI toward it, and (with Hard cap)
+              What YOU consider worth paying for this specific product — trains Clynx toward it, and (with Hard cap)
               can enforce it directly.
             </p>
           </div>
@@ -2634,7 +2924,7 @@ function ProductDetailPage({
           setDraft={setDraft}
           onSend={send}
           textareaRef={textareaRef}
-          placeholder={`e.g. 'be on the lookout for games' or 'refresh the research on this'`}
+          placeholder={`Ask Clynx about this one: 'what should I check before buying?', 'be on the lookout for games', 'refresh the research'`}
         />
       </div>
       {photosModalOpen && (
@@ -2677,10 +2967,8 @@ function ProductDetailPage({
 // products:updated event Database() already listens for — the moment the
 // backend creates or refreshes the stub, not after a full round trip back
 // through this chat reply.
-function useDatabaseChat(opts: { showGreeting: boolean; context: ChatContext; productId?: string }) {
-  const [chat, setChat] = useState<ChatEntry[]>(
-    opts.showGreeting ? [{ id: "greeting", role: "assistant", content: GREETING, ts: Date.now() }] : []
-  );
+function useDatabaseChat(opts: { context: ChatContext; productId?: string }) {
+  const [chat, setChat] = useState<ChatEntry[]>([]);
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -2715,7 +3003,7 @@ function useDatabaseChat(opts: { showGreeting: boolean; context: ChatContext; pr
     if (textareaRef.current) textareaRef.current.style.height = "auto";
 
     const history: ChatMessage[] = chat
-      .filter((m) => m.id !== "greeting" && !m.streaming && !m.error)
+      .filter((m) => !m.streaming && !m.error)
       .map((m) => ({ role: m.role, content: m.content }));
 
     const userMsg: ChatEntry = { id: crypto.randomUUID(), role: "user", content: text, ts: Date.now() };
@@ -2778,87 +3066,6 @@ function ChatComposer({
   );
 }
 
-function useResearchStatus(): ActiveProductResearch[] {
-  const [active, setActive] = useState<ActiveProductResearch[]>([]);
-  useEffect(() => {
-    api.getResearchStatus().then(setActive);
-    const off = api.onResearchStatus(setActive);
-    return () => {
-      off();
-    };
-  }, []);
-  return active;
-}
-
-// Per explicit instruction — the Research tab should show what the AI is
-// CURRENTLY researching, live, and "relay its emotional feedback instead
-// of its hyper-analysis": the full aiSummary write-up still lands on the
-// product's own Library page once research finishes, same as always — this
-// is the same short, human, first-person reaction Dashboard's Live panel
-// already shows for photo analysis (see vision.ts's expertTake), just
-// applied here to product research instead. A whole panel of bubbles
-// rather than a single one, since research_product genuinely runs for
-// several products at once — a user-requested lookup racing an
-// auto-discovered sibling, or a handful of siblings discovered together
-// (see index.ts's activeResearch/discoverAndCreateSiblingProducts) —
-// rather than assuming there's only ever one thing to show. Renders
-// nothing at all once nothing's actively being researched.
-function ResearchStatusPanel() {
-  const active = useResearchStatus();
-  if (!active.length) return null;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {active.map((entry) => (
-        <div key={entry.id} className="card enter" style={{ padding: "24px 28px", display: "flex", flexDirection: "column", gap: 10 }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              fontSize: 13,
-              fontWeight: 700,
-              textTransform: "uppercase",
-              letterSpacing: 0.5,
-              color: "var(--text-dim)",
-            }}
-          >
-            <span className="spinner-gear">⚙️</span>
-            Researching {entry.name}
-          </div>
-          <div style={{ fontSize: 20, lineHeight: 1.55, color: "var(--text)" }}>
-            {entry.reaction ?? (
-              <>
-                Digging in
-                <span className="typing-dots" style={{ marginLeft: 4 }}>
-                  <span />
-                  <span />
-                  <span />
-                </span>
-              </>
-            )}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// The main Database screen's standalone chat card — greeting included.
-function ChatPanel() {
-  const { chat, draft, setDraft, send, scrollRef, textareaRef } = useDatabaseChat({ showGreeting: true, context: "database" });
-
-  return (
-    <div className="card" style={{ display: "flex", flexDirection: "column", padding: 0, overflow: "hidden", height: 440 }}>
-      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
-        {chat.map((entry) => (
-          <ChatRow key={entry.id} entry={entry} />
-        ))}
-      </div>
-      <ChatComposer draft={draft} setDraft={setDraft} onSend={send} textareaRef={textareaRef} />
-    </div>
-  );
-}
-
 // Matches the deterministic "Searching..." acknowledgment chat.ts returns
 // the moment add_search_item succeeds — no AI-authored text, so it gets its
 // own look here too, same as the Dashboard's chat panel, since the same
@@ -2894,7 +3101,7 @@ function ChatRow({ entry }: { entry: ChatEntry }) {
           color: isUser ? "var(--text)" : "var(--text-muted)",
         }}
       >
-        {isUser ? "Y" : isSearchAck ? "🔍" : "AI"}
+        {isUser ? "Y" : isSearchAck ? "🔍" : "C"}
       </div>
       <div style={{ flex: 1, fontSize: 15, lineHeight: 1.5, color: entry.error ? "var(--danger)" : "var(--text)", paddingTop: 2 }}>
         {isSearchAck ? (

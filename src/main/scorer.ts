@@ -1,4 +1,9 @@
 import type { EngineConfig, ExtractionResult, FeedbackExample, ListingDetail, SearchItem, ScoredListing } from "./types.js";
+import { CLYNX_VOICE } from "./voice.js";
+import { looksBroken } from "./brokenVariant.js";
+import { withinNegotiationReach } from "./profitGate.js";
+import { modelLettersConflict } from "./compFilter.js";
+import { DEFAULT_RESALE_SETTINGS, isGoodResale, keepRangeUsd, resaleOutcome, resaleSettingsFrom, type ResaleSettings } from "./resaleMath.js";
 import { OPENAI_MODEL, callOpenAI } from "./openai.js";
 
 // If you didn't separately fill in match keywords, fall back to the item
@@ -44,7 +49,7 @@ function escapeRegExp(s: string): string {
 // Word-boundary matched (not a plain substring test) so a short token like
 // the "x" in "series x" only matches itself, not any word that happens to
 // contain an x.
-function titleContainsAllWords(lowerTitle: string, phrase: string): boolean {
+export function titleContainsAllWords(lowerTitle: string, phrase: string): boolean {
   const words = phrase.toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return false;
   return words.every((w) => new RegExp(`\\b${escapeRegExp(w)}\\b`).test(lowerTitle));
@@ -104,9 +109,21 @@ const ACCESSORY_ONLY_TITLE_SIGNALS: Array<{ phrase: string; concept: string | nu
   { phrase: "box empty", concept: null },
 ];
 
-function isAccessoryOnlyMismatch(lowerTitle: string, itemTerms: string[]): boolean {
+// A signal phrase counts only when its words appear TOGETHER and in order, as
+// the phrase itself ("case only", "no console"). The plain all-the-words test
+// used for search terms would also fire on "Console ONLY - NO CONTROLLERS"
+// (it contains "no" and "console" somewhere), throwing out a genuine
+// console-only listing.
+function titleContainsPhrase(lowerTitle: string, phrase: string): boolean {
+  const pattern = phrase.split(/\s+/).filter(Boolean).map(escapeRegExp).join("\\s+");
+  return new RegExp(`\\b${pattern}\\b`).test(lowerTitle);
+}
+
+function isAccessoryOnlyMismatch(lowerTitle: string, itemTerms: string[], allowBroken = false): boolean {
   return ACCESSORY_ONLY_TITLE_SIGNALS.some(({ phrase, concept }) => {
-    if (!titleContainsAllWords(lowerTitle, phrase)) return false;
+    // "for parts only" is how sellers say the item itself is broken: wanted when the search includes broken listings.
+    if (allowBroken && (phrase === "parts only" || phrase === "for parts only")) return false;
+    if (!titleContainsPhrase(lowerTitle, phrase)) return false;
     if (concept === null) return true;
     const conceptRe = new RegExp(`\\b${concept}\\b`, "i");
     return !itemTerms.some((kw) => conceptRe.test(kw));
@@ -177,10 +194,10 @@ export function matchSearchItem(title: string, searchItems: SearchItem[]): Searc
   let bestLen = 0;
   for (const ref of searchItems) {
     const terms = getSearchTerms(ref);
-    if (isAccessoryOnlyMismatch(lower, terms)) continue;
+    if (isAccessoryOnlyMismatch(lower, terms, !!ref.includeBroken)) continue;
     if (hasUnrequestedVariant(lower, terms)) continue;
     for (const kw of terms) {
-      if (titleContainsAllWords(lower, kw) && kw.length > bestLen) {
+      if (titleContainsAllWords(lower, kw) && !modelLettersConflict(kw, lower) && kw.length > bestLen) {
         best = ref;
         bestLen = kw.length;
       }
@@ -204,7 +221,7 @@ export function isRelevantToSearchItems(title: string, searchItems: SearchItem[]
   return searchItems.some((ref) => {
     const terms = getSearchTerms(ref);
     if (hasUnrequestedVariant(lower, terms)) return false;
-    return terms.some((kw) => titleContainsAllWords(lower, kw));
+    return terms.some((kw) => titleContainsAllWords(lower, kw) && !modelLettersConflict(kw, lower));
   });
 }
 
@@ -310,7 +327,7 @@ export function detectConditionImpact(text: string): ConditionImpact {
 // 60%. A steep enough price can still clear the bar; a merely-decent price
 // on flagged goods correctly won't anymore either, which is the actual
 // improvement over just ignoring condition entirely.
-const CONDITION_VALUE_MULTIPLIER: Record<ConditionImpact, number> = {
+export const CONDITION_VALUE_MULTIPLIER: Record<ConditionImpact, number> = {
   none: 1,
   minor: 0.6,
   major: 0.25,
@@ -320,6 +337,19 @@ export interface SearchItemPricing {
   referencePriceUsd: number;
   discountPercent: number | null;
   isDeal: boolean;
+  // What the user would keep from reselling it (after eBay's cut) and the profit that leaves after paying for it.
+  // null when there is no reference value to work from.
+  keepUsd: number | null;
+  profitUsd: number | null;
+}
+
+// What goes into the profit math besides the listing's own price.
+export interface ResalePricingInput {
+  // A real eBay value from the Database (sold comps + asking prices); wins over the Search For item's own typicalResaleUsd.
+  valueUsd?: number | null;
+  // eBay listings: what the seller charges to ship it; part of what the purchase costs.
+  shippingUsd?: number | null;
+  settings?: ResaleSettings;
 }
 
 // The actual "is this a deal" math for a confirmed Search For match —
@@ -332,7 +362,6 @@ export function evaluateSearchItemPricing(
   candidate: SearchItem,
   price: number,
   conditionImpact: ConditionImpact,
-  dealThresholdPercent: number,
   // This SAME candidate SearchItem's own maxPriceUsd (per-product now, not
   // a single global "max I'll pay" — see types.ts's SearchItem doc
   // comment). Anything priced above it is already skipped before ever
@@ -343,9 +372,11 @@ export function evaluateSearchItemPricing(
   // scaled down by the condition multiplier just like the discount bar, so
   // "I'll pay up to $100 for a working one" doesn't also greenlight a
   // "parts only" one at the same $100.
-  maxPriceUsd: number | null
+  maxPriceUsd: number | null,
+  resale: ResalePricingInput = {}
 ): SearchItemPricing {
-  const referencePriceUsd = candidate.typicalResaleUsd;
+  const settings = resale.settings ?? DEFAULT_RESALE_SETTINGS;
+  const referencePriceUsd = resale.valueUsd != null && resale.valueUsd > 0 ? resale.valueUsd : candidate.typicalResaleUsd;
   // Only meaningful when a real reference price is actually set —
   // referencePriceUsd of 0 (very common: the chat tool defaults to 0
   // whenever the AI isn't confident of an actual resale value) makes this
@@ -359,17 +390,29 @@ export function evaluateSearchItemPricing(
 
   const multiplier = CONDITION_VALUE_MULTIPLIER[conditionImpact];
   // "Within price range" has two independent ways to qualify, either is
-  // sufficient: at/under your global max price, OR clearing the
-  // resale-value discount threshold when a real reference price exists.
-  // Both scaled by the same condition multiplier — equivalent to comparing
-  // against a condition-adjusted expected value, just expressed as a
-  // tighter bar instead of a smaller number.
+  // sufficient: at/under the max price set for this product, OR a profitable
+  // resale when a real reference value exists. The profit math is the user's
+  // own: eBay takes ~13.75%, so they keep roughly 84% of what an item sells
+  // for; a purchase is a deal when what it costs (price + shipping) leaves a
+  // healthy margin under that. A flagged condition scales the value down
+  // first (the same multiplier as the budget), so "parts only" has to be far
+  // cheaper than a working one.
   const withinBudget = maxPriceUsd != null && maxPriceUsd > 0 && price <= maxPriceUsd * multiplier;
-  const effectiveThresholdPercent = 100 - (100 - dealThresholdPercent) * multiplier;
-  const withinDiscountThreshold = discountPercent !== null && discountPercent >= effectiveThresholdPercent;
-  const isDeal = withinBudget || withinDiscountThreshold;
+  let keepUsd: number | null = null;
+  let profitUsd: number | null = null;
+  let profitable = false;
+  if (referencePriceUsd > 0) {
+    const outcome = resaleOutcome(referencePriceUsd * multiplier, price + (resale.shippingUsd ?? 0), settings.netPercent);
+    keepUsd = outcome.keepUsd;
+    profitUsd = outcome.profitUsd;
+    profitable = isGoodResale(outcome, settings.minMarginPercent);
+  }
+  // Being under the max price set for the product used to be enough by itself, even when the resale loses money after fees.
+  // Now it only counts when a good deal is within reach (negotiating at most 25% below the asking price; see profitGate.ts).
+  const reachable = referencePriceUsd > 0 ? withinNegotiationReach(referencePriceUsd * multiplier, price, resale.shippingUsd ?? 0, settings) : true;
+  const isDeal = (withinBudget && reachable) || profitable;
 
-  return { referencePriceUsd, discountPercent, isDeal };
+  return { referencePriceUsd, discountPercent, isDeal, keepUsd, profitUsd };
 }
 
 function buildCustomInstructionsBlock(instructions: string): string {
@@ -389,7 +432,7 @@ const OPENAI_TIMEOUT_MS = 30_000;
 // Single paid provider (see openai.ts) — no more Groq/Gemini dual-provider
 // fallback chain, since that existed specifically to route around scarce
 // free-tier quotas a paid OpenAI account doesn't have.
-async function callAI(prompt: string): Promise<string> {
+export async function callAI(prompt: string): Promise<string> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
   let res: Response;
@@ -468,8 +511,12 @@ async function extractGeneralDeal(listing: ListingDetail, customInstructions: st
   // so this needed fixing from the first phase eBay listings could reach
   // scoreListing at all, not later.
   const platformLabel = listing.source === "ebay" ? "eBay" : "Facebook Marketplace";
-  const prompt = `You are scanning a ${platformLabel} listing that does NOT match anything in the reseller's Search For list. Your only job is to flag it if it looks like an unusually good deal in general — priced well below what this type of item typically sells for used, in typical condition. Be conservative: the large majority of listings should NOT be flagged, because most things AREN'T deals — but "conservative" means skeptical of a WEAK case, not skeptical of a steep discount itself. This whole business exists to find items priced well below their real value — a big gap between price and typical value is the SIGNAL you're looking for, never a reason on its own to doubt the listing or lower confidence. Verified live miss: a genuine Xbox Series S at $150 (a real, great price for it) got skipped with reasoning citing the price itself as suspicious — that's exactly the wrong instinct. Only treat a price as actually implausible (more likely a placeholder, scam, or joke listing than a real deal) when it's asking something like 5% or less of typical value — a near-total markdown, not just a steep one. A 50-80%-off price is a legitimately great, very plausible deal for a motivated seller — flag it normally, don't second-guess it for looking "too good to be true."
+  const prompt = `${CLYNX_VOICE}
+
+You are scanning a ${platformLabel} listing that does NOT match anything in the reseller's Search For list. Your only job is to flag it if it looks like an unusually good deal in general — priced well below what this type of item typically sells for used, in typical condition. Be conservative: the large majority of listings should NOT be flagged, because most things AREN'T deals — but "conservative" means skeptical of a WEAK case, not skeptical of a steep discount itself. This whole business exists to find items priced well below their real value — a big gap between price and typical value is the SIGNAL you're looking for, never a reason on its own to doubt the listing or lower confidence. Verified live miss: a genuine Xbox Series S at $150 (a real, great price for it) got skipped with reasoning citing the price itself as suspicious — that's exactly the wrong instinct. Only treat a price as actually implausible (more likely a placeholder, scam, or joke listing than a real deal) when it's asking something like 5% or less of typical value — a near-total markdown, not just a steep one. A 50-80%-off price is a legitimately great, very plausible deal for a motivated seller — flag it normally, don't second-guess it for looking "too good to be true."
 ${buildCustomInstructionsBlock(customInstructions)}${buildFeedbackExamplesBlock(feedbackExamples)}
+Resale math, since the reseller flips on eBay: eBay's fees take about 16% of a sale, so they keep roughly 84% of what an item sells for. A deal means the asking price (plus shipping, if any) is comfortably below that 84% of the item's typical eBay selling price, leaving a real profit. An item merely priced a little under its eBay value is NOT a deal once fees are taken out.
+
 Judge this listing using only whatever the seller actually provided in the text below — do NOT lower your confidence or hold it against the listing that a model/serial number, battery/functional condition details, specific hardware variant, or photos aren't spelled out in the text; most real sellers never type that level of detail (and photos are a separate step you don't get here anyway), so its absence means nothing about whether this is a real deal — confidence should track how sure you are about the PRICE-VS-VALUE call itself, not how many extra specs happened to be typed out. Verified live miss: a used Nintendo 3DS XL in "like new" condition bundled with a game at a price well under typical resale got its OWN reasoning correctly concluding it should be flagged as a deal, then got skipped anyway purely because confidence landed at "medium" over exactly this kind of missing cosmetic detail — the deal call was right, the confidence label just shouldn't have cost it the flag. Likewise, cash-only or local-pickup-only listings (or any listing that just doesn't mention shipping either way) get judged exactly the same as any other — never let that push isPotentialDeal toward false or lower your confidence; arranging shipping directly with the seller is the buyer's job, not something to screen for here.
 
 Per explicit instruction — real damage (cracked screen, water damage, "for parts," doesn't power on, etc.) should NEVER by itself make you say isPotentialDeal is false. Damaged electronics and other goods still hold real resale value, sometimes a lot of it. Instead, weigh the damage into your own read of what the item is actually worth in ITS current condition, then judge the asking price against THAT reduced value, same as you would for anything else — a "for parts" phone at $20 can be every bit as good a deal as a working one at $200, and a merely-scuffed item at a so-so price is not. Set conditionImpact to reflect what you found either way; it's informational context for the reasoning, not a separate veto on top of your own isPotentialDeal call.
@@ -512,7 +559,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
       estimatedValueRangeUsd: "",
       confidence: "low",
       conditionImpact: "unknown",
-      reasoning: "Failed to parse AI response",
+      reasoning: "Clynx couldn't read its own analysis of this listing",
       offTopicSuggestion: null,
     };
   }
@@ -538,7 +585,16 @@ export async function scoreListing(
   // dismissedCategories above: only meaningful for the general (unverified)
   // pathway, since a Search For match is deterministic and never asks the
   // AI for a judgment call in the first place.
-  feedbackExamples: FeedbackExample[] = []
+  feedbackExamples: FeedbackExample[] = [],
+  // What eBay says a product is worth (Database comps), by the Search For item's name: the real value to run the
+  // profit math against, in place of the item's own typicalResaleUsd, when the Database has one.
+  valueFor?: (item: string, title?: string) => number | null,
+  // Same idea for a listing that matched NO Search For item: if its title names a Database product that has an eBay
+  // value, the deal check is plain resale math (no AI call, no credits).
+  valueForTitle?: (title: string) => { name: string; value: number } | null,
+  // What BROKEN / for-parts copies of a Search For item sell for (its Database "(For Parts / Broken)" variant), used for items searched
+  // with "include broken" when the listing text says the item is broken.
+  brokenValueFor?: (item: string) => { name: string; value: number } | null
 ): Promise<ScoredListing> {
   const candidate = matchSearchItem(listing.title, config.searchItems);
 
@@ -605,7 +661,15 @@ export async function scoreListing(
     // (Database, chat, or asking the AI to look up a price), it goes back
     // to the fast, free, deterministic path below with no further AI calls
     // needed at all.
-    if (candidate.typicalResaleUsd <= 0) {
+    // With "include broken" on, a broken / for-parts listing is worth what broken ones of it sell for (the Database variant),
+    // not a quarter of the working price.
+    const broken = candidate.includeBroken && looksBroken(`${listing.title} ${listing.description}`) ? (brokenValueFor?.(candidate.item) ?? null) : null;
+    const databaseValueUsd = broken ? broken.value : (valueFor?.(candidate.item, listing.title) ?? null);
+    if (broken) {
+      extraction.brokenVariant = broken.name;
+      extraction.reasoning = `Matches your "${candidate.item}" search as a broken / for-parts copy, so it is priced from the Database's "${broken.name}" variant (what broken ones sell for) instead of the working product.`;
+    }
+    if (candidate.typicalResaleUsd <= 0 && !(databaseValueUsd !== null && databaseValueUsd > 0)) {
       const general = await extractGeneralDeal(listing, config.customInstructions, feedbackExamples);
       const confidenceOk = CONFIDENCE_RANK[general.confidence] >= CONFIDENCE_RANK[config.generalDeal.minConfidence];
       // Per explicit instruction — a flagged condition no longer vetoes this
@@ -623,7 +687,7 @@ export async function scoreListing(
           extractedAttributes: general.category,
           conditionImpact: effectiveConditionImpact,
           confidence: general.confidence,
-          reasoning: `Matches your "${candidate.item}" search — no reference price set yet, so judged on the AI's own read of the price: ${general.reasoning}`,
+          reasoning: `Matches your "${candidate.item}" search — no reference price set yet, so judged on Clynx's own read of the price: ${general.reasoning}`,
         },
         referencePriceUsd: null,
         discountPercent: null,
@@ -634,7 +698,17 @@ export async function scoreListing(
       };
     }
 
-    const pricing = evaluateSearchItemPricing(candidate, listing.price, conditionImpact, config.dealThresholdPercent, candidate.maxPriceUsd);
+    const settings = resaleSettingsFrom(config);
+    const shippingUsd = listing.ebayShippingUsd ?? 0;
+    const pricing = evaluateSearchItemPricing(candidate, listing.price, broken ? "none" : conditionImpact, candidate.maxPriceUsd, {
+      valueUsd: databaseValueUsd,
+      shippingUsd,
+      settings,
+    });
+    if (pricing.keepUsd !== null && pricing.profitUsd !== null) {
+      const keepRange = keepRangeUsd(pricing.referencePriceUsd);
+      extraction.reasoning += ` Sells for about $${pricing.referencePriceUsd.toFixed(0)} on eBay, so you'd keep roughly $${keepRange.lowUsd.toFixed(0)}-$${keepRange.highUsd.toFixed(0)} after fees; buying it for $${(listing.price + shippingUsd).toFixed(0)}${shippingUsd > 0 ? " with shipping" : ""} leaves ${pricing.profitUsd >= 0 ? "about $" + pricing.profitUsd.toFixed(0) + " profit" : "a loss of about $" + Math.abs(pricing.profitUsd).toFixed(0)}.`;
+    }
 
     return {
       listing,
@@ -679,12 +753,48 @@ export async function scoreListing(
         extractedAttributes: dismissedMatch,
         conditionImpact: "unknown",
         confidence: "low",
-        reasoning: `Skipped without an AI call — you've consistently marked "${dismissedMatch}"-type listings as not interesting.`,
+        reasoning: `Skipped without a closer look — you've consistently marked "${dismissedMatch}"-type listings as not interesting.`,
       },
       referencePriceUsd: null,
       discountPercent: null,
       isDeal: false,
       dealTier: null,
+      estimatedValueRange: null,
+      offTopicSuggestion: null,
+    };
+  }
+
+  const known = valueForTitle?.(listing.title) ?? null;
+  if (known) {
+    const knownCondition = detectConditionImpact(`${listing.title} ${listing.description}`);
+    const knownSettings = resaleSettingsFrom(config);
+    const knownShipping = listing.ebayShippingUsd ?? 0;
+    // A broken / for-parts copy of a Database product is priced from its "(For Parts / Broken)" variant when there is one (the
+    // variant only exists once the user has included broken listings for that product).
+    const knownBroken = looksBroken(`${listing.title} ${listing.description}`) ? (brokenValueFor?.(known.name) ?? null) : null;
+    const knownValue = knownBroken ? knownBroken.value : known.value;
+    const pricing = evaluateSearchItemPricing(
+      { item: known.name, matchKeywords: [], typicalResaleUsd: knownValue, minPriceUsd: null, maxPriceUsd: null, linkedProductId: null },
+      listing.price,
+      knownBroken ? "none" : knownCondition,
+      null,
+      { shippingUsd: knownShipping, settings: knownSettings }
+    );
+    const keepRange = keepRangeUsd(knownValue);
+    return {
+      listing,
+      extraction: {
+        matchedItem: known.name,
+        extractedAttributes: "",
+        conditionImpact: knownCondition,
+        confidence: "high",
+        ...(knownBroken ? { brokenVariant: knownBroken.name } : {}),
+        reasoning: `Recognised from the Database as "${known.name}"${knownBroken ? ` (a broken / for-parts copy, priced from its "${knownBroken.name}" variant)` : ""} (sells for about $${knownValue.toFixed(0)} on eBay, so you'd keep roughly $${keepRange.lowUsd.toFixed(0)}-$${keepRange.highUsd.toFixed(0)} after fees); buying it for $${(listing.price + knownShipping).toFixed(0)} leaves ${pricing.profitUsd !== null && pricing.profitUsd >= 0 ? "about $" + pricing.profitUsd.toFixed(0) + " profit" : "a loss"}.`,
+      },
+      referencePriceUsd: pricing.referencePriceUsd,
+      discountPercent: pricing.discountPercent,
+      isDeal: pricing.isDeal,
+      dealTier: pricing.isDeal ? "search" : null,
       estimatedValueRange: null,
       offTopicSuggestion: null,
     };

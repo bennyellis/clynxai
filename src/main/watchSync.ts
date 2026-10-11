@@ -51,6 +51,10 @@ function cloudWatchToLocal(cw: CloudWatch): CloudSyncedWatch {
     selectedState: cw.selectedState,
     selectedCityOrZip: cw.selectedCityOrZip,
     searchRadiusMiles: cw.searchRadiusMiles,
+    // Absent when the cloud server predates these fields — the store then
+    // keeps whatever the local row already has.
+    platform: cw.platform,
+    minSellerRatingPercent: cw.minSellerRatingPercent,
     enabled: cw.enabled,
     createdAt: cw.createdAt,
     updatedAt: cw.updatedAt,

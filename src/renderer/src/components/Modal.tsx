@@ -23,10 +23,14 @@ export function Modal({
   onClose,
   children,
   aboveLightbox,
+  width,
 }: {
   title: string;
   onClose: () => void;
   children: React.ReactNode;
+  // Wider than the default 380px card, for forms with side-by-side fields.
+  // Still capped to the window by the card's own max-width.
+  width?: number;
   // Only for a Modal opened FROM inside an already-open ImageLightbox (its
   // feedback popup) — ordinary Modals sit below the lightbox now, so a
   // photo opened from inside a Modal (e.g. Database's Reference Photos
@@ -35,7 +39,7 @@ export function Modal({
 }) {
   return createPortal(
     <div className={`modal-backdrop${aboveLightbox ? " modal-backdrop-top" : ""}`} onClick={onClose}>
-      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-card" style={width ? { width } : undefined} onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <strong style={{ fontSize: 16 }}>{title}</strong>
           <button

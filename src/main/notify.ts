@@ -1,4 +1,5 @@
-import type { Config, ScoredListing, SellerSignals, Watch } from "./types.js";
+import type { Config, ScoredListing, Watch } from "./types.js";
+import type { AlertSummary } from "./dealSummary.js";
 import { downloadImageBuffer } from "./webResearch.js";
 
 // eBay Browse API integration — narrowed from EngineConfig (Config minus
@@ -9,28 +10,6 @@ import { downloadImageBuffer } from "./webResearch.js";
 // EngineConfig to pass in at all (eBay has no per-account model). This is
 // the honest fix, not a workaround: the real, narrower requirement.
 type NotifyConfig = Pick<Config, "ntfy">;
-
-// Per explicit instruction — "build the notification gracefully based on
-// available information": prefers Facebook's own rating/joined-year line
-// when present, falls back to eBay's feedbackScore/feedbackPercentage line
-// when THOSE are set instead (never both — an eBay listing never has
-// rating/joinedFacebookYear, and a Facebook listing never has the eBay
-// fields, see types.ts's SellerSignals), and omits the line entirely when
-// neither platform's signals are available. Shared by sendDealAlert and
-// sendWatchMatchAlert below so both alert formats stay consistent.
-function buildSellerTrustLine(seller: SellerSignals): string | null {
-  if (seller.rating !== null || seller.joinedFacebookYear !== null) {
-    const ratingLabel = seller.rating !== null ? `${seller.rating.toFixed(1)}★${seller.ratingCount !== null ? ` (${seller.ratingCount})` : ""}` : "No rating";
-    const joinedLabel = seller.joinedFacebookYear !== null ? `Joined ${seller.joinedFacebookYear}` : "Joined date unknown";
-    return `${ratingLabel} • ${joinedLabel}`;
-  }
-  if (seller.ebayFeedbackPercentage !== undefined || seller.ebayFeedbackScore !== undefined) {
-    const pct = seller.ebayFeedbackPercentage !== undefined ? `${seller.ebayFeedbackPercentage.toFixed(1)}% positive` : null;
-    const count = seller.ebayFeedbackScore !== undefined ? `${seller.ebayFeedbackScore} rating${seller.ebayFeedbackScore === 1 ? "" : "s"}` : null;
-    return [pct, count].filter((p): p is string => !!p).join(" • ") || null;
-  }
-  return null;
-}
 
 // HTTP header values are restricted to Latin-1 (fetch enforces this and
 // throws otherwise), but listing titles/our own formatting can contain
@@ -82,8 +61,9 @@ async function postNtfyMessage(
       Message: encodeHeader(opts.message),
       Click: encodeHeader(opts.click),
       Priority: opts.priority,
-      Tags: opts.tags,
     };
+    // ntfy turns each tag into an emoji; an unverified deal gets none (it used to get a thinking face).
+    if (opts.tags) headers.Tags = opts.tags;
     // Presence of Filename is what tells ntfy the request body is a file
     // attachment rather than the message text — with no photo, the body is
     // left empty and Title/Message above carry the whole notification, same
@@ -119,83 +99,41 @@ async function postNtfyMessage(
   }
 }
 
-export async function sendDealAlert(config: NotifyConfig, scored: ScoredListing): Promise<void> {
-  const { listing, extraction, dealTier } = scored;
-
+// Per explicit instruction — the two-line format (see dealSummary.ts for how each part is worked out):
+//   🟦 $300 - Xbox Series X - Listed 2 hours ago      (🟦 Facebook, 🟩 eBay)
+//   About $120 profit, sells in 1 day - ⭐⭐⭐⭐
+// The product is the focal point of the listing, not its full title; the stars are Clynx's own verdict.
+export async function sendDealAlert(config: NotifyConfig, scored: ScoredListing, summary: AlertSummary): Promise<void> {
+  const { listing, dealTier } = scored;
   const isSearchMatch = dealTier === "search";
-  // Per explicit instruction — "DEAL! {Product} • $xxx • {Listing age}" as
-  // the notification's own title, with seller trust signals right below it
-  // as the message body — Title/Message map naturally onto ntfy's own
-  // two-part shape (bold heading + body text below), replacing the earlier
-  // single-line "[listed product] * {price} * {age}" format. matchedItem is
-  // the clean tracked-item name for a search-tier deal; a general
-  // (unverified) deal has no matchedItem, so it falls back to the listing's
-  // own raw title.
-  const productName = extraction.matchedItem ?? listing.title;
-  const titleLine = `DEAL! ${productName} • $${listing.price} • ${listing.listingAge ?? "age unknown"}`;
-  const sellerLine = buildSellerTrustLine(listing.seller) ?? "No seller info available";
-
   await postNtfyMessage(config, {
-    title: titleLine,
-    message: sellerLine,
+    title: summary.title,
+    message: summary.message,
     click: listing.url,
-    priority: isSearchMatch ? "high" : "default",
-    tags: isSearchMatch ? "moneybag" : "thinking",
+    priority: summary.stars >= 4 || isSearchMatch ? "high" : "default",
+    tags: isSearchMatch ? "moneybag" : "",
     photoUrl: listing.imageUrls[0] ?? listing.thumbnailUrl,
     photoFilenamePrefix: "deal",
   });
 }
 
-// Per explicit instruction — Watch's own recognizable notification, format:
-//   WATCH MATCH
-//   {Product}
-//   $price • distance • age
-//   Typical resale: $X
-//   Est. profit: ~$Y
-//   Z% below market
-//   Seller: ★rating • Joined year
-// "Do not require every optional field to exist — build the notification
-// gracefully based on available information": every line below the
-// product/price line is independently omitted when its underlying data
-// isn't available (no reference price, no discount, no seller rating, ...)
-// rather than showing a blank or a placeholder. `distance` is left out
-// entirely for a PASSIVE match (see scrapeEngine.ts's discoveryMode) —
-// passive matching has no reliable per-listing distance to report (only
-// the active scheduler, Phase 3, navigates to the watch's own resolved
-// location, at which point a real distance figure becomes meaningful).
+// A Watch match uses the same two-line format as a deal alert (above); only the tag and priority differ.
 export async function sendWatchMatchAlert(
   config: NotifyConfig,
   watch: Watch,
   scored: ScoredListing,
-  match: { discoveryMode: "passive" | "active"; discountPercentAtMatch: number | null; profitUsdAtMatch: number | null },
-  referencePriceUsd: number | null
+  _match: { discoveryMode: "passive" | "active"; discountPercentAtMatch: number | null; profitUsdAtMatch: number | null },
+  _referencePriceUsd: number | null,
+  summary: AlertSummary
 ): Promise<void> {
   const { listing } = scored;
   if (listing.price === null) return; // shouldn't happen — recordWatchMatchesIfAny already guards this, defensive only
+  // A Watch can have its own ntfy topic (e.g. one run for a friend's area): its matches go there instead of the main topic.
+  const target: NotifyConfig = watch.ntfyTopic?.trim() ? { ntfy: { ...config.ntfy, topic: watch.ntfyTopic.trim() } } : config;
 
-  const priceParts = [`$${listing.price}`, listing.listingAge ?? null].filter((p): p is string => !!p);
-  const titleLine = `WATCH MATCH`;
-  const trustLine = buildSellerTrustLine(listing.seller);
-  const bodyLines = [
-    watch.name,
-    priceParts.join(" • "),
-    referencePriceUsd !== null ? `Typical resale: $${referencePriceUsd.toFixed(0)}` : null,
-    match.profitUsdAtMatch !== null ? `Est. profit: ~$${match.profitUsdAtMatch.toFixed(0)}` : null,
-    match.discountPercentAtMatch !== null ? `${match.discountPercentAtMatch.toFixed(0)}% below market` : null,
-    trustLine !== null ? `Seller: ${trustLine}` : null,
-  ].filter((line): line is string => !!line);
-
-  await postNtfyMessage(config, {
-    // Literal two-character "\n" (not an actual newline byte): ntfy's server
-    // converts this to a real line break on display (verified live), but a
-    // real embedded newline is invalid inside a fetch() header value and
-    // throws — Headers.append rejects it outright — unless encodeHeader's
-    // non-ASCII check happens to trigger base64-wrapping first. A plain-ASCII
-    // match (no age, no seller rating — nothing non-ASCII in any line) would
-    // otherwise skip that wrapping and crash the whole send. The literal
-    // escape is safe unconditionally, regardless of what else is in the body.
-    title: titleLine,
-    message: bodyLines.join("\\n"),
+  await postNtfyMessage(target, {
+    title: summary.title,
+    message: summary.message,
     click: listing.url,
     priority: "high",
     tags: "eye",

@@ -7,6 +7,10 @@
 // OPENAI_API_KEY originally had — see openai.ts.
 const EBAY_TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token";
 const EBAY_BROWSE_URL = "https://api.ebay.com/buy/browse/v1";
+// Taxonomy API — used only to ask "which eBay category does this product
+// query belong in" (see getEbayCategorySuggestions). Same application token
+// and scope as Browse; no extra credentials.
+const EBAY_TAXONOMY_URL = "https://api.ebay.com/commerce/taxonomy/v1";
 // The plain public-data scope — covers item_summary/search and the Get Item
 // call below. Not the wider buy.item.bulk scope, which this app never uses.
 const EBAY_SCOPE = "https://api.ebay.com/oauth/api_scope";
@@ -54,9 +58,9 @@ async function getAccessToken(): Promise<string> {
   }
 }
 
-async function ebayGet<T>(path: string, params: Record<string, string>): Promise<T> {
+async function ebayGet<T>(path: string, params: Record<string, string>, baseUrl: string = EBAY_BROWSE_URL): Promise<T> {
   const token = await getAccessToken();
-  const url = new URL(`${EBAY_BROWSE_URL}${path}`);
+  const url = new URL(`${baseUrl}${path}`);
   for (const [key, value] of Object.entries(params)) {
     if (value) url.searchParams.set(key, value);
   }
@@ -98,7 +102,28 @@ export interface EbayRawItem {
   sellerUsername: string | null;
   sellerFeedbackScore: number | null;
   sellerFeedbackPercentage: number | null;
+  // The seller's own shipping charge for the cheapest option, in USD (0 = free shipping). null when eBay doesn't say
+  // (local pickup only, or calculated shipping that depends on the buyer's address).
+  shippingCostUsd: number | null;
   buyingOptions: string[];
+  // The eBay categories this listing is filed under, leaf first then its
+  // parents (e.g. Video Game Consoles > Video Games & Consoles). Present on
+  // search results; empty on a Get Item response.
+  categories: EbayCategory[];
+}
+
+export interface EbayCategory {
+  id: string;
+  name: string;
+}
+
+function cheapestShippingUsd(options: unknown): number | null {
+  if (!Array.isArray(options)) return null;
+  const costs = options
+    .filter((o: any) => o?.shippingCost?.currency === "USD" && o.shippingCost.value != null)
+    .map((o: any) => Number(o.shippingCost.value))
+    .filter((n) => Number.isFinite(n) && n >= 0);
+  return costs.length ? Math.min(...costs) : null;
 }
 
 function mapRawItem(raw: any): EbayRawItem {
@@ -116,7 +141,13 @@ function mapRawItem(raw: any): EbayRawItem {
     sellerFeedbackScore: typeof raw.seller?.feedbackScore === "number" ? raw.seller.feedbackScore : null,
     // eBay returns this as a numeric-looking string ("99.2"), not a number.
     sellerFeedbackPercentage: raw.seller?.feedbackPercentage != null ? Number(raw.seller.feedbackPercentage) : null,
+    shippingCostUsd: cheapestShippingUsd(raw.shippingOptions),
     buyingOptions: Array.isArray(raw.buyingOptions) ? raw.buyingOptions : [],
+    categories: Array.isArray(raw.categories)
+      ? raw.categories
+          .filter((c: any) => c && c.categoryId != null)
+          .map((c: any) => ({ id: String(c.categoryId), name: String(c.categoryName ?? "") }))
+      : [],
   };
 }
 
@@ -128,9 +159,11 @@ function mapRawItem(raw: any): EbayRawItem {
 // current asking price per listing.
 export async function searchEbayItems(
   query: string,
-  opts: { minPriceUsd?: number | null; maxPriceUsd?: number | null; limit?: number } = {}
+  opts: { minPriceUsd?: number | null; maxPriceUsd?: number | null; limit?: number; conditionIds?: string[] } = {}
 ): Promise<EbayRawItem[]> {
   const filters: string[] = ["buyingOptions:{FIXED_PRICE}"];
+  // eBay's own condition ids (7000 = "For parts or not working").
+  if (opts.conditionIds?.length) filters.push(`conditionIds:{${opts.conditionIds.join("|")}}`);
   if (opts.minPriceUsd != null || opts.maxPriceUsd != null) {
     const min = opts.minPriceUsd != null ? Math.max(0, Math.floor(opts.minPriceUsd)) : "";
     const max = opts.maxPriceUsd != null ? Math.ceil(opts.maxPriceUsd) : "";
@@ -141,6 +174,17 @@ export async function searchEbayItems(
     filter: filters.join(","),
     limit: String(Math.min(Math.max(opts.limit ?? 25, 1), 200)),
     fieldgroups: "EXTENDED",
+  });
+  return (data.itemSummaries ?? []).map(mapRawItem);
+}
+
+// One seller's own active Buy-It-Now listings that match a keyword search. eBay silently ignores the seller filter when the
+// username doesn't exist (and returns everyone's listings), so callers must check each item's sellerUsername.
+export async function searchEbaySellerItems(seller: string, query: string, limit = 50): Promise<EbayRawItem[]> {
+  const data = await ebayGet<{ itemSummaries?: any[] }>("/item_summary/search", {
+    q: query,
+    filter: `sellers:{${seller}},buyingOptions:{FIXED_PRICE}`,
+    limit: String(Math.min(Math.max(limit, 1), 200)),
   });
   return (data.itemSummaries ?? []).map(mapRawItem);
 }
@@ -172,5 +216,26 @@ export async function getEbayItemDetail(itemId: string): Promise<EbayItemDetailR
     };
   } catch {
     return null;
+  }
+}
+
+// Which category would eBay itself file this product query under? Best match
+// first (e.g. "xbox series x" -> Video Game Consoles, then Video Games,
+// Controllers & Attachments...). The product-only filter (ebayProductFilter.ts)
+// uses the top suggestion as "where the real product lives" so games, parts and
+// accessories that merely mention the product can be told apart from it. Returns
+// [] on any failure — callers treat that as "category unknown".
+export async function getEbayCategorySuggestions(query: string): Promise<EbayCategory[]> {
+  try {
+    const data = await ebayGet<{ categorySuggestions?: any[] }>(
+      "/category_tree/0/get_category_suggestions",
+      { q: query },
+      EBAY_TAXONOMY_URL
+    );
+    return (data.categorySuggestions ?? [])
+      .map((s) => ({ id: String(s?.category?.categoryId ?? ""), name: String(s?.category?.categoryName ?? "") }))
+      .filter((c) => c.id);
+  } catch {
+    return [];
   }
 }

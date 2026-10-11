@@ -10,6 +10,28 @@ import { api } from "../lib/api.js";
 // email + password after that, same as any other login/register form.
 // Matches Config.tsx's existing dark-card design language (.card, Field,
 // button.primary/ghost) rather than inventing a new look.
+// "fetch failed" / "ECONNREFUSED" is what a failed network request looks like
+// when the Clynx server simply isn't running (most often: Docker Desktop
+// isn't open, so the cloud containers are down). Raw, it reads like the app
+// is broken; this says what's actually wrong and what to do.
+function friendlyLoginError(raw: string, apiUrl: string): { message: string; unreachable: boolean } {
+  if (/fetch failed|failed to fetch|econnrefused|enotfound|network|timed out|timeout|socket/i.test(raw)) {
+    return {
+      message: `Can't reach the Clynx server at ${apiUrl}. If you run it with Docker, make sure Docker Desktop is open and its containers are running, then try again.`,
+      unreachable: true,
+    };
+  }
+  return { message: raw, unreachable: false };
+}
+
+function readLastEmail(): string {
+  try {
+    return localStorage.getItem("clynx.lastEmail") ?? "";
+  } catch {
+    return "";
+  }
+}
+
 export function LoginScreen({
   defaultApiUrl,
   onAuthenticated,
@@ -19,7 +41,10 @@ export function LoginScreen({
 }) {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [apiUrl, setApiUrl] = useState(defaultApiUrl);
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(readLastEmail);
+  // The server address is a technical detail most people never touch, so it
+  // stays tucked away — and opens itself if the server can't be reached.
+  const [showServer, setShowServer] = useState(false);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,12 +62,21 @@ export function LoginScreen({
           ? await api.auth.login(trimmedUrl, trimmedEmail, password)
           : await api.auth.register(trimmedUrl, trimmedEmail, password);
       if (!result.ok) {
-        setError(result.error ?? (mode === "login" ? "Login failed." : "Registration failed."));
+        const friendly = friendlyLoginError(result.error ?? (mode === "login" ? "Login failed." : "Registration failed."), trimmedUrl);
+        setError(friendly.message);
+        if (friendly.unreachable) setShowServer(true);
         return;
+      }
+      try {
+        localStorage.setItem("clynx.lastEmail", trimmedEmail);
+      } catch {
+        // not remembered — fine
       }
       onAuthenticated();
     } catch (err) {
-      setError((err as Error).message || "Something went wrong.");
+      const friendly = friendlyLoginError((err as Error).message || "Something went wrong.", apiUrl.trim() || defaultApiUrl);
+      setError(friendly.message);
+      if (friendly.unreachable) setShowServer(true);
     } finally {
       setBusy(false);
     }
@@ -62,18 +96,10 @@ export function LoginScreen({
           </p>
         </div>
 
-        <Field label="Server URL">
-          <input
-            value={apiUrl}
-            onChange={(e) => setApiUrl(e.target.value)}
-            placeholder={defaultApiUrl}
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </Field>
         <Field label="Email">
           <input
             type="email"
+            autoFocus={!email}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             autoComplete="username"
@@ -86,10 +112,26 @@ export function LoginScreen({
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             autoComplete={mode === "login" ? "current-password" : "new-password"}
+            autoFocus={!!email}
             required
             minLength={8}
           />
         </Field>
+
+        {showServer ? (
+          <Field label="Server URL">
+            <input value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} placeholder={defaultApiUrl} autoComplete="off" spellCheck={false} />
+          </Field>
+        ) : (
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => setShowServer(true)}
+            style={{ alignSelf: "flex-start", fontSize: 12.5, padding: "2px 6px", color: "var(--text-dim)" }}
+          >
+            Advanced: server address
+          </button>
+        )}
 
         {error && (
           <p

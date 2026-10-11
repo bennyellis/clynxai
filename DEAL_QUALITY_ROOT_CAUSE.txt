@@ -1,0 +1,452 @@
+CLYNX DEAL QUALITY: ROOT-CAUSE INVESTIGATION
+============================================
+Read-only. No project code was modified. Everything below was traced in the current source (line numbers as of 2026-10-11)
+and the main defects were REPRODUCED against the real modules with a throwaway script kept outside the project (output in
+Appendix A). A small read-only copy of one account's listings database (22 rows) is used as supporting evidence only.
+
+Companion document: DEAL_QUALITY_AUDIT.txt (broader audit). This one goes deeper on root causes, with code excerpts,
+and on the canWithhold:false Watch path and post-scoring revalidation.
+
+
+0. SUMMARY
+----------
+Poor-margin, months-old and low-quality listings reach BOTH the Feed and the phone for four independent reasons:
+
+  (1) The age filter does not understand common Facebook phrasing ("a day ago", "a week ago", "a month ago",
+      "about an hour ago") and treats anything it cannot parse, or cannot find, as FRESH. Two Facebook Watch routes
+      skip the age gate altogether.
+  (2) Several routes decide "deal" WITHOUT the deterministic margin rule: an AI opinion (Search For item with no
+      reference price; General AI), a Watch match, and the photo-based hidden-gem estimate.
+  (3) The only check just before a push is "could you haggle it down far enough?" It ignores margin, stars,
+      evidence quality and age, treats "no data" as a pass, and is switched OFF for every Watch match
+      (canWithhold:false).
+  (4) There is no final gate and no revalidation. isDeal is decided once, is never revoked (not even when the push is
+      withheld), and every screen reads it raw. A Watch match recorded early can never be retracted.
+
+Fix in one sentence: one pure Deal Quality Gate, called at every producer of a "deal" or a profit-based alert, whose
+verdict (deal / worth_a_look / pass, with reasons and evidence) is PERSISTED and used by the Feed, Best Deals and
+notifications; Watch-match notifications stay a separate, explicitly labelled kind.
+
+
+1. ROUTES: DISCOVERY -> FEED -> NTFY
+------------------------------------
+Everything saved by store.saveScored appears in Feed "All" (by earlier explicit request, including instant skips).
+Feed "Deals", Dashboard Best Deals, "deals today", flame/glow styling and deal narration all key off isDeal.
+
+Producer routes (file : function):
+
+  A  Search For match            scrapeEngine.evaluateListing -> scorer.scoreListing (search branch)
+  A2 Search For match, no value  same branch, falls into extractGeneralDeal (AI), still tier "search"
+  B  Database title match        scoreListing (valueForTitle branch), tier "search"
+  C  General AI                  scoreListing (extractGeneralDeal), tier "general"
+  D  Facebook Watch, passive     evaluateListing -> recordWatchMatchesIfAny  (called BEFORE vision and again after)
+  E  Facebook Watch, active      runWatchCheck -> evaluateWatchCandidate -> scoreListing -> recordWatchMatchesIfAny
+  F  eBay (A/B/C scoring)        ebayEngine main loop -> scoreListing
+  G  eBay Watch                  ebayEngine.recordWatchMatches
+  H  Post-score promotions       runPostScoringPipeline: green-flag promotion, hidden gem / bundle (can set isDeal)
+
+Notification routes (3 call sites; all go through preAlert.prepareAlert, but with different settings):
+
+  deal alert (main)    scrapeEngine.ts:2350-2372  if (scored.isDeal) -> prepareAlert(canWithhold:true) -> sendDealAlert
+  deal alert (eBay)    ebayEngine.ts:361-382      same, canWithhold:true
+  Watch alert (FB)     scrapeEngine.ts:1063-1135  recordWatchMatchesIfAny -> prepareAlert(canWithhold:FALSE) -> sendWatchMatchAlert
+  Watch alert (eBay)   ebayEngine.ts:406-455      same, canWithhold:FALSE
+
+The two kinds are not distinguishable in content: both use summary.title ("<square> $price - product - Listed X ago")
+and "reason - stars". The Watch alert differs only by an ntfy tag ("eye" vs "moneybag") and, for a Watch with its own
+ntfy topic, the destination. A listing that is both a deal and a Watch match is pushed twice.
+
+
+2. WHERE EACH RULE CAN BE BYPASSED
+----------------------------------
+Rule: MINIMUM PROFIT MARGIN (default 20% of what the user keeps)
+  - A2 (AI, no reference value)          never computed                          [D6]
+  - C  General AI                        never computed                          [D7]
+  - D/E/G Watch                          never computed; Watch has its own optional $/% conditions  [D4, D5]
+  - H  hidden gem via photo lump         computed, but on an AI-guessed, uncapped extras value  [D9]
+  - preAlert                             not re-checked (reach test only)       [D10]
+  - A/B (priced)                         enforced, except "within max price AND reachable" counts at asking margin < min  [D13]
+
+Rule: MAXIMUM LISTING AGE (default 24 h)
+  - any route, unparseable phrase        fail-open                               [D1]
+  - any route, no age text               fail-open                               [D2]
+  - E Facebook Watch, active             no post-detail age check at all         [D3]
+  - D Facebook Watch, passive            a Watch with no age limit "rescues" an old listing into normal deal scoring  [D3]
+  - eBay                                 enforced with a reliable timestamp (not a bypass)
+
+Rule: NEGOTIATION LIMIT (default 15% off asking)
+  - A2, C, Watch routes                  not applied
+  - everywhere else                      applied only as "reachable" in A and in preAlert; null (no data) passes  [D10]
+
+Rule: VALUATION CONFIDENCE / EVIDENCE
+  - store value SQL has no minimum sample, no staleness check, no basis check; scorer hard-codes confidence "high"  [D8]
+  - Watch reference price may be other sellers' asking prices                       [D5]
+  - extras valued by one AI guess                                                    [D9]
+
+
+3. CONFIRMED DEFECTS
+--------------------
+
+D1. AGE PARSER FAILS OPEN FOR "a day ago", "a week ago", "a month ago", "about an hour ago"      [CRITICAL]
+  File/function: src/main/listingAge.ts : estimateListingAgeHours (14-33) and isListingTooOld (46-54)
+                 text source: src/main/scraper.ts : extractListingAge (1272)
+  Code:
+      const match = text.match(/^(\d+)\s*(minute|min|hour|hr|day|week|month|year)s?\b/);
+      if (!match) return null;                       // "a week ago" lands here
+      ...
+      export function isListingTooOld(ageText, maxHours = 24) {
+        if (!ageText || maxHours === null) return false;
+        const hours = estimateListingAgeHours(ageText);
+        return hours !== null && hours >= maxHours;   // null => "not too old"
+      }
+  Pathway: Facebook detail page text ("Listed a week ago in Dover, DE") -> extractListingAge -> evaluateListing
+           (scrapeEngine.ts:1572-1577) -> isListingTooOld -> false -> the listing is scored as fresh.
+  Root cause: the regex requires a digit; Facebook also writes "a/an <unit> ago" and "about/over/almost ...". The
+           function then deliberately treats "can't tell" as "keep".
+  Evidence: Appendix A R1 (a day / a week / a month / about an hour / over a year ago all return "too old? false").
+           In the sample DB: 8 of 22 listings had such a phrase, 4 of them saved as deals (one an Xbox "a week ago").
+  Fix: accept a/an/one/about/over/almost/more than + unit (and "x and a half" forms); return a three-state result
+       (fresh | stale | unknown) instead of a boolean; never let "unknown" qualify a listing as a deal (see gate).
+
+D2. A MISSING AGE IS TREATED AS FRESH                                                                [HIGH]
+  File/function: listingAge.ts : isListingTooOld (line 47 "if (!ageText ...) return false"); scraper.ts : extractListingAge
+                 returns null when no "Listed ... ago" is on the page.
+  Pathway: any Facebook listing whose page layout/text differs -> listingAge null -> gate skipped.
+  Evidence: 2 of 22 sample listings have no age; one is a saved general-tier deal.
+  Fix: unknown age is a first-class state; persist parsed hours (listing_age_hours) and the parse source; unknown
+       can be shown ("worth a look") but never promoted to a deal or pushed as one.
+
+D3. FACEBOOK WATCH ROUTES DO NOT ENFORCE THE GLOBAL AGE CAP; A WATCH CAN "RESCUE" AN OLD LISTING INTO NORMAL SCORING   [HIGH]
+  File/function: scrapeEngine.ts : evaluateListing (1573-1577) and evaluateWatchCandidate (3294-3340)
+  Code (passive route D):
+      const ageQualifiedRescueWatches = priceQualifiedWatches.filter((w) => {
+        if (w.maxListingAgeMinutes === null) return true;          // a Watch with NO age condition always rescues
+        return listingAgeHours !== null && listingAgeHours < w.maxListingAgeMinutes / 60;
+      });
+      if (isListingTooOld(detail.listingAge, config.maxListingAgeHours) && ageQualifiedRescueWatches.length === 0) { ...skip... }
+      // a rescued listing falls through to seller risk, scoreListing, hidden gem, deal alert...
+  Code (active route E): evaluateWatchCandidate never calls isListingTooOld. The only age control is Facebook's own
+      "Date listed" filter applied best-effort inside searchMarketplace (scraper.ts:278; runWatchCheck passes
+      watch.maxListingAgeMinutes or the global value at scrapeEngine.ts:3213). If the control cannot be clicked, the
+      engine logs and continues unfiltered; there is no post-detail backstop for Watches.
+  Root cause: the rescue was written so a Watch with a LOOSER window than the global one could still be evaluated, but
+      the rescued listing then continues through the ordinary deal pipeline, where nothing re-checks age (the code
+      comment says so). Route E has no age check.
+  Evidence: the sample DB contains a saved deal "Xbox series X, 4 days ago" under a 24 h cap (no watches remain in
+      that copy, so I cannot prove which of D/E produced it; no other route skips the gate).
+  Fix: let the Watch evaluate the listing AS A WATCH MATCH only; the standard deal path must still require the global
+       age rule (the gate). Add the post-detail age check to route E (Watch-specific window, else global).
+
+D4. WATCH ALERTS ARE UNCONDITIONAL (canWithhold:false), AND A WATCH MATCH IS NEVER REVALIDATED                [HIGH]
+  File/function: scrapeEngine.ts : recordWatchMatchesIfAny (1063-1135); ebayEngine.ts : recordWatchMatches (406-455);
+                 watchMatching.ts : evaluateWatchConditions (133-162); store.ts : recordWatchMatch (2466)
+  Code:
+      const result = evaluateWatchConditions(watch, price, referencePrice, listingAgeHours, {...});
+      if (!result.satisfied) continue;
+      const match = this.opts.store.recordWatchMatch({...});     // INSERT OR IGNORE INTO watch_matches
+      if (!match) continue;                                      // already recorded: no new alert, and no revocation
+      const prepared = await prepareAlert({ ..., canWithhold: false, ... });
+      await sendWatchMatchAlert(config, watch, scored, {...}, referencePrice, prepared.summary);
+
+      // watchMatching.ts
+      if (watch.minProfitUsd !== null && (...)) return { satisfied: false };
+      if (watch.minDiscountPercent !== null && (...)) return { satisfied: false };
+      if (watch.maxListingAgeMinutes !== null) { ... }
+      return { satisfied: true, ... };                           // a Watch with no conditions matches everything
+  Pathway: any title-matching, price-qualified listing -> satisfied=true -> push, regardless of age, margin, loss,
+           evidence, stars. prepareAlert still runs, but canWithhold:false means its verdict is only used to write the
+           message.
+  Root cause: Watch was designed as "tell me about this product", so every quality rule was bypassed rather than
+           being labelled. The alert is formatted exactly like a deal alert (stars included), so a 1-star loss reads
+           as a recommendation.
+  Revalidation gap: recordWatchMatchesIfAny runs at TWO points (before vision, scrapeEngine.ts:1739, and after bundle
+           handling, :2348). The second call is a no-op for an existing match (INSERT OR IGNORE returns null), so a
+           photo/title mismatch, hard price cap or any other post-scoring demotion can never retract a Watch match or
+           the alert already sent.
+  Evidence: Appendix A R2 and R6: a no-condition Watch matches a "3 months ago" listing priced at a $148 loss and
+           pushes it; a later demotion produces no revocation.
+  Fix: keep Watch notifications (that is their purpose) but as their own kind with the gate verdict attached (see
+       section 5); evaluate Watch matches AFTER the final scoring step, once, so the stars/age/evidence attached are
+       the final ones; allow a stored match to be downgraded (not deleted) when a later step demotes the listing.
+
+D5. WATCH REFERENCE PRICE CAN BE OTHER SELLERS' ASKING PRICES; WATCH PROFIT IGNORES THE USER'S RULES    [HIGH]
+  File/function: watchMatching.ts : deriveWatchReferencePrice (99-111), evaluateWatchConditions (143)
+  Code:
+      const ebayValue = product.ebayEstimatedValueUsd ?? (product.ebayAvgSoldPriceUsd !== null ? ... : null);
+      if (ebayValue !== null && ebayValue > 0) return ebayValue;
+      if (product.resalePriceUsd !== null && product.resalePriceUsd > 0) return product.resalePriceUsd;
+      const fbStats = store.getFacebookPriceStats(linkedProductId);
+      if (fbStats && fbStats.avgPriceUsd > 0) return fbStats.avgPriceUsd;     // asking prices, not resale value
+      ...
+      const profitUsd = referencePrice !== null ? (referencePrice * netPercent) / 100 - (price + shipping) : null;
+  Root cause: the fallback chain keeps a Watch useful with no eBay data, but it feeds an ASKING average through the
+      resale formula; the formula also ignores condition scaling, the minimum margin % and the negotiation cap.
+  Fix: reference must carry its basis ("eBay value" / "your resale price" / "other listings"); only eBay-based
+       references may produce a profit figure; label the rest ("priced vs other listings").
+
+D6. A SEARCH FOR ITEM WITH NO REFERENCE VALUE BECOMES A "search"-TIER DEAL ON AN AI OPINION                    [HIGH]
+  File/function: scorer.ts : scoreListing, search branch (672-699)
+  Code:
+      if (candidate.typicalResaleUsd <= 0 && !(databaseValueUsd !== null && databaseValueUsd > 0)) {
+        const general = await extractGeneralDeal(listing, config.customInstructions, feedbackExamples);
+        const confidenceOk = CONFIDENCE_RANK[general.confidence] >= CONFIDENCE_RANK[config.generalDeal.minConfidence];
+        const isDeal = general.isPotentialDeal && confidenceOk;
+        return { ..., referencePriceUsd: null, discountPercent: null, isDeal, dealTier: isDeal ? "search" : null, ... };
+  Root cause: a convenience fallback so an item added without a price still produces results; the result is labelled
+      with the TRUSTED tier ("DEAL", ntfy priority "high") and no profit math is possible (no reference value).
+      It also ignores generalDeal.enabled.
+  Evidence: Appendix A R4 (isDeal=true, tier=search, referencePrice=null, confidence=medium).
+  Fix: this branch can only return worth_a_look until a real value exists; enqueue Database research for the item so
+       the next listing is priced deterministically (converts discovery into a verified deal later, no recall lost).
+
+D7. GENERAL AI DEALS HAVE NO MARGIN RULE AND CAN BE PUSHED WITH NO SALES DATA                                  [HIGH]
+  File/function: scorer.ts : scoreListing general path (803-827); extractGeneralDeal (505); preAlert.ts : prepareAlert
+  Code:
+      const isDeal = general.isPotentialDeal && confidenceOk;      // medium confidence is enough by default
+      return { ..., referencePriceUsd: null, isDeal, dealTier: isDeal ? "general" : null, estimatedValueRange: ... };
+  Pathway: AI says deal -> scrapeEngine.ts:2350 -> prepareAlert -> market check finds nothing -> rateDeal returns
+      { stars: 3, reachable: null } -> preAlert.ts:69 "skip = canWithhold && summary.reachable === false" is false for
+      null -> pushed as "No sales data yet to judge the price".
+  Evidence: Appendix A R3 (last line) and R4. In the sample DB two general-tier deals rest only on the model's own
+      "typical resale" ranges.
+  Fix: a General AI find is a deal only if the market check returned real evidence that clears the margin; otherwise
+       worth_a_look (visible in Feed, no push), and the market check result is stored for next time.
+
+D8. VALUATION IS EVIDENCE-BLIND: ONE SALE, ASK-ONLY OR STALE COMPS ARE SCORED AT FULL CONFIDENCE                [HIGH]
+  File/function: store.ts : EBAY_VALUE_SQL (line 14), getEbayValueForProductName (822), getEbayValueForTitle (891),
+                 getProductSignals (860); scorer.ts lines 633 and 789 (confidence: "high")
+  Code:
+      const EBAY_VALUE_SQL = "COALESCE(ebay_est_value_usd, ebay_avg_sold_price_usd + COALESCE(ebay_avg_shipping_usd, 0))";
+      // used as a bare number everywhere; nothing here reads ebay_comps_sample_size, ebay_estimate_basis or
+      // ebay_comps_checked_at when scoring.
+      extraction: { ..., confidence: "high", ... }                // search and Database branches, hard-coded
+  Root cause: the value was originally a single number; sample size, basis ("sold"/"blend"/"active") and age were added
+      to the table later but never plumbed into scoring. The 3-day refresh exists only in the pre-alert market check.
+  Evidence: Appendix A R4 (Database value of $600 of unknown quality -> isDeal=true, confidence=high).
+  Fix: return a ValueEvidence object {valueUsd, basis, sampleSize, ageDays, matchQuality}; the gate decides the tier
+       from it (thin/stale/ask-only/low-match -> worth_a_look, and refresh before a push).
+
+D9. HIDDEN-GEM PHOTO ESTIMATE IS UNCAPPED AND UNCORROBORATED, AND CAN FLIP A WEAK LISTING INTO A DEAL           [HIGH]
+  File/function: scrapeEngine.ts : runPostScoringPipeline (hiddenGem 1884; vision fallback 2106; lot 2121-2145);
+                 profitGate.ts : isHiddenGemCandidate (62-69), repriceWithExtras (72-82)
+  Code:
+      if (!bundleExtras && !extrasSeparate && photoResult?.hasValuableBundle && photoResult.bundleEstimatedValueUsd) {
+        bundleExtras = { valueUsd: photoResult.bundleEstimatedValueUsd, phrase: ... };      // one model guess
+      }
+      const lot = repriceWithExtras({ baseValueUsd, extrasValueUsd: bundleExtras.valueUsd, ... });
+      if (lot.isGood && !scored.isDeal) { ... scored = { ...scored, isDeal: true, dealTier: "search", ... } }
+  Root cause: isHiddenGemCandidate's "price within 1.6x of the base value" test decides only WHETHER vision runs; the
+      resulting lump value has no cap relative to the base item, no requirement that the extras be named in the text,
+      and no confidence requirement. (The newer item-by-item bundle breakdown IS capped at ~30% of the focal item, but
+      it is used only when the text mentions extras and the AI breakdown call succeeds; otherwise this fallback runs.)
+  Evidence: Appendix A R5: a Switch worth $200 listed at $300, text only "with games", vision guesses extras = $400 ->
+      isDeal=true, tier "search", pushed as 4 stars "Hidden gem: extras add ~$400".
+  Fix: keep the path (it finds real hidden gems) but require: extras named in text OR vision confidence high;
+       lump capped (for example <= 40% of base value); base value evidence solid (D8); extras counted only when priced
+       and non-estimated; otherwise "worth a look: possible hidden gem".
+
+D10. THE PRE-PUSH GATE CHECKS ONLY "REACHABLE BY HAGGLING"                                                     [HIGH]
+  File/function: preAlert.ts : prepareAlert (28-74), line 68-69; dealSummary.ts : rateDeal (75-178)
+  Code:
+      const skip = args.canWithhold && summary.reachable === false;
+      ...
+      return { send: !skip, summary, market };
+  Root cause: the gate was added to stop "needs a 20% cut" alerts. It does not look at margin at asking price, stars,
+      evidence, or age; reachable is null without data, and null passes; canWithhold:false disables it for Watches.
+  Evidence: Appendix A R3: price $230 vs value $300 (margin 8.7% < 20% minimum) -> send=true, stars=2, cut needed 12%
+      (within the 15% limit); price $400 vs $300 -> withheld only because cut needed is 50%.
+  Fix: replace with the universal gate (section 4); prepareAlert becomes a thin wrapper around it.
+
+D11. isDeal IS NEVER REVOKED: THE FEED AND DASHBOARD CONTRADICT THE NOTIFICATIONS                                [MEDIUM-HIGH]
+  File/function: scrapeEngine.ts:2350-2372 and ebayEngine.ts:361-382 (alert block); Feed.tsx:62-63; Dashboard.tsx:71,
+                 219 (BestDealsCard); ListingSourceMarks.tsx : isHotListing / listingVerdict; ListingCard.tsx:343
+  Code:
+      if (scored.isDeal) { log "DEAL ..."; const prepared = await prepareAlert({...}); if (prepared.send) {...} onNarrate({kind:"deal"...}) }
+      // Feed.tsx:  listings.filter((l) => l.isDeal)
+  Root cause: the verdict is computed in prepareAlert but written nowhere; the record keeps is_deal=1 saved before the
+      market check. Narration also fires for withheld deals.
+  Fix: persist deal_status/gate_reasons/gate_stars from the gate; every consumer reads those.
+
+D12. POST-SCORING CHANGES ARE ONLY PARTLY REVALIDATED                                                            [MEDIUM-HIGH]
+  File/function: scrapeEngine.ts : runPostScoringPipeline (1849-2373)
+  Inventory of what can change a verdict after scoreListing, and what is re-checked:
+      step                                   can change      re-runs margin   re-runs age   re-runs evidence
+      green-flag promotion (~1966)           promote         yes (pricing)    no            no
+      photo/title mismatch (2035)            demote only     n/a              n/a           n/a
+      hidden gem / bundle (2077-2145)        promote         lot margin only  no            no
+      hard price cap (2184)                  demote only     n/a              n/a           n/a
+      Watch re-evaluation (2348)             add matches     Watch's own      Watch's own   no  (cannot revoke)
+      prepareAlert market refresh            nothing stored  reach only       no            no
+  Also: evaluateListing returns a PROVISIONAL result (isDeal: scored.isDeal, scrapeEngine.ts:1827) used for batch
+      recaps and counters before vision finishes.
+  Root cause: each block was added independently; nothing runs after the last one.
+  Fix: the gate runs once, after the last block, on the final scored state (and again at alert time with the fresh
+       market value, writing any demotion back).
+
+D13. "WITHIN BUDGET AND REACHABLE" CAN QUALIFY BELOW THE MINIMUM MARGIN AT ASKING PRICE                          [MEDIUM, by design]
+  File/function: scorer.ts : evaluateSearchItemPricing (413)
+  Code:  const isDeal = (withinBudget && reachable) || profitable;
+  Effect: a listing under the user's max price that needs up to 15% off asking is a deal even though the margin at
+      asking is below 20%. This is the main source of "poor margin" cards, and the card does not say "needs N% off".
+  Fix: keep as an option (default: deal only with strong evidence), always show "needs N% off" and why.
+
+D14. VISION CHECKS FAIL OPEN AND SKIP GENERAL FINDS                                                              [LOW-MEDIUM]
+  File/function: scrapeEngine.ts : runPostScoringPipeline (2030-2050)
+  Code:  if (scored.extraction.matchedItem && photoResult?.matchesClaim === false) { ...demote... }
+  Effect: unavailable/failed vision (matchesClaim null) is no veto; General AI finds have no claimed item, so photos
+      never veto them. Vision only demotes; it cannot be the reason a thin listing is trusted (keep it that way).
+  Fix: vision-unavailable must not upgrade a thin-evidence listing; add a photo sanity check for general finds.
+
+D15. WATCH MATCHES AND QUALIFIED DEALS ARE NOT SEPARATED AS NOTIFICATION KINDS                                  [MEDIUM]
+  File/function: notify.ts : sendDealAlert (106) and sendWatchMatchAlert (121); dealSummary.ts : composeAlert
+  Effect: same title format and stars; a loss-making Watch match looks like a recommendation; a listing that is both is
+      pushed twice with no cross-reference.
+  Fix: see section 5.
+
+Not defects (checked): the early deterministic rejections (blacklist, placeholder price, non-round price, unshippable,
+seller risk, scam bot, official shipping/eBay mention) return before scoring, so AI/vision/hidden gem/bundle/Watch
+cannot override them; the hard price cap runs after every promotion. (Age is the exception, see D1-D3.)
+
+
+4. THE CENTRAL DEAL QUALITY GATE (PROPOSED, NOT IMPLEMENTED)
+-----------------------------------------------------------
+One pure function, no I/O (suggested file: src/main/dealGate.ts):
+
+    qualifyListing({
+      scored,                  // final scored listing (after all promotions)
+      evidence,                // ValueEvidence: valueUsd, basis, sampleSize, ageDays, matchQuality (null if none)
+      age,                     // { state: "fresh" | "stale" | "unknown", hours | null }
+      settings,                // net %, min margin %, max cut %, max age hours, strictness
+      extras,                  // counted extras: { usd, corroborated, estimated }
+      vision,                  // { matchesClaim: true | false | null, confidence }
+      pathway,                 // "search" | "database" | "general" | "ebay"
+    }) -> {
+      status: "deal" | "worth_a_look" | "pass",
+      stars: 1..5 | null,
+      reasons: [{ code, severity, text }],
+      facts: { valueUsd, basis, sampleSize, compAgeDays, ageHours, ageState,
+               profitAtAskUsd, marginAtAskPct, cutNeededPct, extrasUsd, extrasEstimated }
+    }
+
+Decision rules (all deterministic; thresholds configurable, suggested defaults):
+
+  PASS (hard):    placeholder price; age stale (>= max age); photo mismatch confirmed; hard price cap exceeded;
+                  margin below minimum AND cut needed above the limit (existing rule).
+  WORTH A LOOK:   age unknown; no value evidence (AI-only finds: D6, D7); evidence thin (fewer than 3 sales, or
+                  ask-only basis, or comps older than 14 days: refresh first, then re-evaluate); match quality low;
+                  extras uncorroborated/estimated/uncapped (D9); stars below 3; margin at asking below minimum
+                  but within the haggling limit with weak evidence.
+  DEAL:           fresh age, solid evidence, margin at asking >= minimum (or within haggling limit with strong evidence,
+                  shown as "needs N% off"), stars >= 3, vision not contradicting.
+
+Everything that decides "deal" or sends a profit-based alert must call it:
+  1. scrapeEngine.runPostScoringPipeline  after the hard-cap block (about line 2209) and before the alert (2350).
+  2. ebayEngine main loop before its alert (361).
+  3. preAlert.prepareAlert  with the FRESH market value; if the fresh value demotes the listing, write it back (D11).
+  4. Watch evaluation (scrapeEngine.recordWatchMatchesIfAny, ebayEngine.recordWatchMatches), to attach the verdict.
+
+Persistence: add columns deal_status, gate_reasons (JSON), gate_stars, listing_age_hours, value_basis, value_sample.
+Feed "Deals" = deal_status = 'deal'; add a "Worth a look" filter; Best Deals, counters, flame styling, narration read
+deal_status. Show the reason on the card ("Needs 12% off asking", "Only 2 sales to go on", "Age unknown").
+
+5. KEEPING WATCH-MATCH NOTIFICATIONS SEPARATE FROM QUALIFIED-DEAL NOTIFICATIONS
+-------------------------------------------------------------------------------
+  - Two explicit notification kinds:
+      QUALIFIED DEAL   only when gate.status = deal. Title prefixed clearly; stars and "why".
+      WATCH MATCH      always delivered (that is what a Watch is for), titled "Watch match: <name>", carrying the
+                       gate verdict as plain text ("Not a qualified deal: age unknown, only 2 sales"). canWithhold:false
+                       stays, but its meaning becomes "deliver", not "deliver as if recommended".
+  - A listing that is both: ONE push ("Watch match + qualified deal") instead of two.
+  - Watch matches count as "Deals" in the Feed/Best Deals only if they also pass the gate.
+  - Watch matches are evaluated once, after the final scoring step, so the age/stars/evidence attached are final; a
+    later demotion downgrades the stored match (does not delete it).
+  - Watch profit figures use only eBay-based references (D5).
+
+6. PROTECTING DISCOVERY OF UNUSUAL / UNDERVALUED PRODUCTS (RECALL)
+-----------------------------------------------------------------
+  - "Worth a look" is a visible Feed state, not a discard: thin evidence, unknown age, AI-only finds and uncorroborated
+    extras stay discoverable; only the push and the "Deal" label are withheld.
+  - AI-only finds trigger Database research for that product so the next listing is priced deterministically.
+  - Hidden gems keep their path (item-by-item breakdown, then lump fallback) with caps/corroboration; failing that they
+    show as "worth a look: possible hidden gem".
+  - Unknown-age listings are shown, not hidden.
+  - A "Strict quality gate" setting (default on) lets power users loosen evidence rules (for example accept 2 sales).
+  - Existing early filters are not duplicated (note: isNonRoundPrice skips every price not ending in 0 or 5, e.g. $149,
+    before scoring; that is an existing recall cost, left to your decision).
+
+7. TESTS TO WRITE BEFORE SHIPPING (golden cases)
+------------------------------------------------
+  Age: "a day/week/month ago", "about an hour ago", "over a year ago", "4 days ago", "yesterday", missing, empty.
+  Watch: no-condition Watch with old/loss listing; Watch rescue must not create a deal; late demotion downgrades.
+  AI-only: A2 and C with and without market data; general find confirmed by market check.
+  Evidence: 1 sale, ask-only, stale comps, low match quality; refresh then re-evaluate.
+  Hidden gem: corroborated vs uncorroborated extras; cap; the Appendix A R5 case must become worth_a_look.
+  Alert time: fresh value demotes -> write-back; Feed/Best Deals show the same status as the push.
+  Notifications: Watch+deal sends one push; Watch-only labelled; deal-only unchanged.
+
+8. SUGGESTED ORDER OF WORK
+--------------------------
+  1. D1, D2, D3 (age parser, three-state age, Watch age gate): small, isolated, fixes the months-old symptom.
+  2. D8 (ValueEvidence), then dealGate.ts with persistence (D6, D7, D10, D11, D12, D13).
+  3. D9 (hidden-gem caps), D4/D5/D15 (Watch labelling, single combined push).
+  4. UI: "Worth a look" filter, reasons on cards, Best Deals source.
+
+9. DECISIONS NEEDED FROM YOU
+----------------------------
+  1. May an unknown age ever count as a deal? (recommended: no, worth a look)
+  2. Must a Watch match pass the gate to be called a "Deal" in Feed/Best Deals? (recommended: yes for the label,
+     no for delivery)
+  3. May an AI-only (General) find be pushed to the phone before a market check confirms margin? (recommended: no)
+  4. Minimum evidence for a deal: 3 sales? allow ask-only if 8+ asks? maximum comp age 14 days?
+  5. "Needs N% off" listings (margin below minimum at asking, within the 15% limit): deal, or worth a look?
+  6. Should worth_a_look be pushed silently (low priority) or Feed-only?
+
+
+APPENDIX A. REPRODUCTION OUTPUT (real modules; stubs only for network/AI; project code untouched)
+------------------------------------------------------------------------------------------------
+== R1  AGE FILTER (listingAge.ts) with the default 24h window ==
+  "5 hours ago"          parsed hours=5      -> too old (24h)? false
+  "1 day ago"            parsed hours=24     -> too old (24h)? true
+  "4 days ago"           parsed hours=96     -> too old (24h)? true
+  "2 weeks ago"          parsed hours=336    -> too old (24h)? true
+  "yesterday"            parsed hours=30     -> too old (24h)? true
+  "a day ago"            parsed hours=null   -> too old (24h)? false
+  "a week ago"           parsed hours=null   -> too old (24h)? false
+  "a month ago"          parsed hours=null   -> too old (24h)? false
+  "about an hour ago"    parsed hours=null   -> too old (24h)? false
+  "about 3 hours ago"    parsed hours=null   -> too old (24h)? false
+  "over a year ago"      parsed hours=null   -> too old (24h)? false
+  "2 months ago"         parsed hours=1440   -> too old (24h)? true
+  ""                     parsed hours=null   -> too old (24h)? false
+  null                   parsed hours=null   -> too old (24h)? false
+
+== R2  WATCH CONDITIONS (watchMatching.ts) ==
+  Watch with no conditions, price $400 vs value $300 (a $148 LOSS after fees), age unknown -> satisfied=true, profit=-148
+  Watch minProfit $20, price $230 vs value $300 (margin 8.7%, user minimum is 20%) -> satisfied=true, profit=22
+
+== R3  prepareAlert (preAlert.ts): canWithhold true vs false ==
+  canWithhold=true  price $400, value $300 -> send=false, stars=1, reason="Typically sells for $240-$258 after eBay fees", cutNeeded=50%
+  canWithhold=false price $400, value $300 -> send=true, stars=1, reason="Typically sells for $240-$258 after eBay fees", cutNeeded=50%
+  canWithhold=true  price $230, value $300 (margin 8.7% < 20% minimum) -> send=true, stars=2, "Thin margin, about $22 profit after fees", cutNeeded=12% (limit 15%)
+  canWithhold=true  General-AI deal, NO sales data at all -> send=true, stars=3, reachable=null, "No sales data yet to judge the price"
+
+== R4  scoring with no deterministic value (scorer.ts) ==
+  Search For item with no reference value: isDeal=true, dealTier=search, referencePrice=null, confidence=medium (AI opinion only, no profit math)
+  General AI (no match, no Database value): isDeal=true, dealTier=general, referencePrice=null, confidence=medium
+  Database title match with a value of $600 (could be 1 sale, or asking prices only): isDeal=true, dealTier=search, confidence=high  <- no evidence quality is consulted
+
+== R5  hidden gem: the photo-based lump estimate (scrapeEngine.ts runPostScoringPipeline) ==
+  Switch worth $200 on its own, listed at $300 (a 50% premium), text says only "with games"; vision guesses extras = $400:
+  -> isDeal=true, tier=search; log: Hidden gem: "Nintendo Switch with games" comes with extras (some games, worth an estimated $400). The whole lot resells for about $600, so you'd keep roughly $504 after fees against $300 asking.
+  alert sent: 🟦 $300 - Nintendo Switch - Listed 1 hour ago | Hidden gem: extras add ~$400, about $204 profit - ⭐⭐⭐⭐
+
+== R6  Watch alert (scrapeEngine.ts recordWatchMatchesIfAny, canWithhold:false) and revalidation ==
+  Watch with no conditions, listing "3 months ago", $400 vs $300 value (loss) -> alert pushed: 🟦 $400 - Xbox Series S - Listed 3 months ago | Typically sells for $240-$258 after eBay fees - ⭐
+  Same listing re-evaluated after a post-scoring demotion (photo mismatch): extra alerts=0, match revoked=false (INSERT OR IGNORE: the first match is final, nothing retracts the alert already sent)
+
+APPENDIX B. SAMPLE DATABASE EVIDENCE (read-only copy, 22 listings, Facebook)
+-----------------------------------------------------------------------
+Age phrases that the parser cannot read: "a day ago" x4 (3 saved as deals), "a week ago" x3 (1 saved as a deal),
+"about an hour ago" x1; no age text at all: 2 listings (1 saved as a deal). A listing "4 days ago" is saved as a deal
+under a 24h limit. Two general-tier deals are backed only by the model's own typical-resale ranges.
+Caveat: small sample, and it predates some recent fixes (for example it contains a $0 listing saved as a deal).

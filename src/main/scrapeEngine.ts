@@ -1,7 +1,8 @@
 import { powerSaveBlocker } from "electron";
+import { isLowAiMode } from "./aiMode.js";
 import type { BrowserContext, Page } from "playwright";
 import { openPersistentContext, isLoggedIn, politeDelay } from "./browser.js";
-import { browseListings, searchMarketplace, fetchListingDetail, diagnoseEmptyPage, verifyOrSetRadius, readCurrentLocationLabel } from "./scraper.js";
+import { buildWatchSearchUrl, browseListings, searchMarketplace, fetchListingDetail, diagnoseEmptyPage, verifyOrSetRadius, readCurrentLocationLabel } from "./scraper.js";
 import {
   scoreListing,
   getSearchTerms,
@@ -11,13 +12,26 @@ import {
   findGreenFlagCandidate,
   evaluateSearchItemPricing,
   detectConditionImpact,
+  CONDITION_VALUE_MULTIPLIER,
 } from "./scorer.js";
-import { evaluateSellerRisk } from "./sellerRisk.js";
+import { detectScamBot, evaluateSellerRisk } from "./sellerRisk.js";
 import { sendDealAlert, sendWatchMatchAlert } from "./notify.js";
-import { watchAsSearchItem, passesWatchPriceGate, deriveWatchReferencePrice, evaluateWatchConditions } from "./watchMatching.js";
+import { prepareAlert, type MarketChecker } from "./preAlert.js";
+import { isSuspiciousPrice } from "./placeholderPrice.js";
+import { looksBroken } from "./brokenVariant.js";
+import { watchAsSearchItems, matchWatchTerm, passesWatchPriceGate, deriveWatchReferencePrice, evaluateWatchConditions } from "./watchMatching.js";
+import { resaleSettingsFrom } from "./resaleMath.js";
+import { extrasPricedSeparately, isHiddenGemCandidate, repriceWithExtras } from "./profitGate.js";
+import { looksLikeBundle, type BundleValuation } from "./bundleBreakdown.js";
 import { analyzeListingPhotos, classifyThumbnailImage, matchesReferenceProduct, type PhotoAnalysisResult } from "./vision.js";
-import { downloadImageAsDataUri } from "./webResearch.js";
-import { discoverLocation, discoverLocations as discoverLocationsViaBrowser, type LocationDiscoveryResult } from "./locationDiscovery.js";
+import { resolveIdentityTarget } from "./productIdentity.js";
+import { downloadImageAsDataUri, shrinkImageDataUri } from "./webResearch.js";
+import { DEFAULT_COUNTRY_CITIES } from "./config.js";
+import { prefilterWatchListing } from "./watchFacebook.js";
+import { checkWatchBounds } from "./watchGeo.js";
+import { isConfidentMatch, verifyWatchProduct } from "./watchVerify.js";
+import { DEFAULT_WATCH_RADIUS_MILES as DEFAULT_WATCH_RADIUS_MILES_SHARED } from "./watchOptions.js";
+import { discoverLocation, discoverLocations as discoverLocationsViaBrowser, lookupTopCitiesInState, type LocationDiscoveryResult } from "./locationDiscovery.js";
 import { searchSoldComps, type EbayComp } from "./watchcount.js";
 import { listingStateMatches } from "./usStates.js";
 import { Store } from "./store.js";
@@ -39,29 +53,13 @@ import type {
   SearchItem,
   SellerRiskResult,
   Watch,
+  WatchTerm,
 } from "./types.js";
 import type { NarrationContext } from "./chat.js";
 
-// $0/$1 and 4+-digit repeated-or-sequential prices ($1111, $1234, $9999)
-// are a well-known Facebook Marketplace placeholder pattern — usually a
-// listing with no real price set yet, or a setup for an off-platform scam
-// conversation, not a genuine price. Skipped before ever visiting the
-// detail page, not just scored low, since there's nothing real to
-// evaluate. The 4-digit floor matters: 2-3 digit repeats ($99, $555,
-// $999) are extremely common, deliberate real price points (verified via
-// a quick test — $999 was a false positive before this floor was added),
-// not placeholders. Ordinary round prices ($100, $250, $500) were never
-// caught by this and still aren't.
-export function isSuspiciousPrice(price: number): boolean {
-  if (price <= 1) return true;
-  const digits = String(Math.round(price));
-  if (digits.length < 4) return false;
-  if (/^(\d)\1+$/.test(digits)) return true; // 1111, 9999, 5555, ...
-  const nums = digits.split("").map(Number);
-  const ascending = nums.every((d, i) => i === 0 || d === nums[i - 1] + 1);
-  const descending = nums.every((d, i) => i === 0 || d === nums[i - 1] - 1);
-  return ascending || descending; // 1234, 4321, ...
-}
+// Placeholder prices ($0, $1, $1234...) are skipped before ever visiting the detail page: see placeholderPrice.ts, shared with
+// Watches, the eBay scanner and the notification gate.
+export { isSuspiciousPrice };
 
 // Per explicit instruction, tightened after a live miss: a listing titled
 // "Xbox Series X" that was actually just a controller got flagged as an
@@ -298,7 +296,13 @@ export interface ScrapeEngineOptions {
   // index.ts can set it as a trusted ("kept") thumbnail the background web
   // research is never allowed to overwrite; null means no listing photo was
   // available, so the normal generic web-image search is the only source.
-  onNewProductFound: (name: string, imageDataUri: string | null, sourceListingTitle: string) => void;
+  onNewProductFound: (
+    name: string,
+    imageDataUri: string | null,
+    sourceListingTitle: string,
+    // A specific model/color of an existing entry (see productIdentity.ts), as opposed to a brand-new product.
+    relation?: { parentId: string | null; familyFromId: string }
+  ) => void;
   // Per explicit instruction — Watch's own persistent-monitoring alert,
   // fired once store.recordWatchMatch has actually written a NEW row (its
   // own UNIQUE(watch_id, listing_id) + INSERT OR IGNORE already guarantees
@@ -308,6 +312,27 @@ export interface ScrapeEngineOptions {
   // onReferencePhotoAdded is — index.ts is the only caller with the
   // renderer-broadcast + ntfy access this needs.
   onWatchMatch?: (watch: Watch, match: { listingId: string }) => void;
+  // Looks the product up on WatchCount and eBay (and files what it finds in the Database) before an alert goes out; see preAlert.ts.
+  checkMarket?: MarketChecker;
+  // For a Search For item that includes broken listings: makes sure its "(For Parts / Broken)" Database variant exists and knows what
+  // broken ones sell for, before a broken listing is priced (see index.ts's ensureBrokenVariant).
+  ensureBrokenVariant?: (itemName: string, listingTitle: string) => Promise<void>;
+  // A listing that holds several products ("PS5 Pro with 2 controllers and a 2TB drive"): break it into items, price each one on its
+  // own and value the lot with the main item as the focal point (see bundleBreakdown.ts and index.ts's valueListingBundle). Null when
+  // it turns out to be one product, or the breakdown wasn't possible.
+  valueBundle?: (args: { title: string; description: string; mainName: string; mainValueUsd: number }) => Promise<BundleValuation | null>;
+}
+
+// A readable name for a Marketplace place address ("…/marketplace/richmond/" ->
+// "Richmond"); the fallback when the address is just an id.
+function placeLabelFromUrl(url: string, fallback: string): string {
+  try {
+    const slug = new URL(url).pathname.split("/").filter(Boolean)[1] ?? "";
+    if (!/^[a-z-]+$/i.test(slug)) return fallback;
+    return slug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  } catch {
+    return fallback;
+  }
 }
 
 interface ListingEvalResult {
@@ -361,6 +386,10 @@ export class ScrapeEngine {
   private pageQueue: Promise<void> = Promise.resolve();
   private running = false;
   private stopRequested = false;
+  // True between beginStarting() and start(): the account has been told to start but is still looking up its saved
+  // location on Facebook (which can take minutes for a state). It counts as running (so the Dashboard shows "Scanning" and
+  // Stop works) and stop() cancels it.
+  private starting = false;
   // Set right before every deliberate context/page close this class does
   // itself (stop(), login()'s reopen-for-manual-login) so the close
   // listeners wired up below (see wireContextCloseDetection/
@@ -379,6 +408,10 @@ export class ScrapeEngine {
   // reported live. The user's own request should never have to wait behind
   // the scanner's own agenda.
   private priorityRequested = false;
+  // Set when a Watch has finished with this account's browser while its scan was
+  // sitting out the wait between cycles: the wait ends early so the scan resumes
+  // now instead of after the rest of the interval (see runWatchCheck).
+  private wakeRequested = false;
   private loopPromise: Promise<void> | null = null;
   // Per explicit instruction — a long unattended scan shouldn't get cut off
   // because Windows decided the machine was idle and suspended it (network
@@ -486,7 +519,7 @@ export class ScrapeEngine {
   // (per spec, every condition but the search phrase is optional) — this is
   // what runWatchCheck falls back to in that case, matching the existing
   // city-mode account default, rather than inheriting arbitrary leftover state.
-  private static readonly DEFAULT_WATCH_RADIUS_MILES = 20;
+  private static readonly DEFAULT_WATCH_RADIUS_MILES = DEFAULT_WATCH_RADIUS_MILES_SHARED;
   // Per explicit redefinition of the search order — set once the scan has
   // done its one-time per-scan setup (a plain radius check, no dedicated
   // "starting city" anchor — a Richmond-specific version of this existed
@@ -546,10 +579,10 @@ export class ScrapeEngine {
   // run out its own timeout before a cycle can finish unwinding — that's
   // bounded (tens of seconds, not minutes), not literally instant, but no
   // longer able to hang indefinitely either.
-  private async sleep(minMs: number, maxMs: number): Promise<void> {
+  private async sleep(minMs: number, maxMs: number, wakeable = false): Promise<void> {
     const ms = minMs + Math.random() * (maxMs - minMs);
     const deadline = Date.now() + ms;
-    while (!this.stopRequested) {
+    while (!this.stopRequested && !(wakeable && this.wakeRequested)) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) return;
       await new Promise((resolve) => setTimeout(resolve, Math.min(250, remaining)));
@@ -936,7 +969,7 @@ export class ScrapeEngine {
           .map((img) => img.imageData)
       : [];
     this.log("info", `Analyzing ${imageUrls.length} photo(s) for "${title}"...`);
-    const result = await analyzeListingPhotos(imageUrls, { title, description, price }, 8, {
+    const result = await analyzeListingPhotos(imageUrls, { title, description, price }, isLowAiMode() ? 4 : 8, {
       claimedItem,
       watchFor,
       referenceProducts,
@@ -1009,7 +1042,7 @@ export class ScrapeEngine {
       estimatedValueRange: null,
       offTopicSuggestion: null,
     });
-    const record = this.opts.store.listRecent(1, 0)[0];
+    const record = this.opts.store.getLastSavedListing();
     if (record) this.opts.onListing(record);
     return NOT_COUNTED;
   }
@@ -1031,14 +1064,33 @@ export class ScrapeEngine {
     watches: Watch[],
     scored: ScoredListing,
     config: EngineConfig,
-    discoveryMode: "passive" | "active"
+    discoveryMode: "passive" | "active",
+    // The term already known to be what this listing is (the active check worked it out).
+    knownTerm?: WatchTerm
   ): Promise<void> {
     if (watches.length === 0 || scored.listing.price === null) return;
     const price = scored.listing.price;
     const listingAgeHours = scored.listing.listingAge ? estimateListingAgeHours(scored.listing.listingAge) : null;
     for (const watch of watches) {
-      const referencePrice = deriveWatchReferencePrice(watch, this.opts.store);
-      const result = evaluateWatchConditions(watch, price, referencePrice, listingAgeHours);
+      const term = knownTerm ?? matchWatchTerm(watch, scored.listing.title);
+      if (!term) continue;
+      // A match the scanner happened across (passive) gets the same two checks an
+      // active one already went through: inside the Watch's area, and a confident
+      // yes that it really is the product.
+      if (discoveryMode === "passive") {
+        const bounds = await checkWatchBounds(watch, scored.listing.locationText, { store: this.opts.store });
+        if (!bounds.ok) {
+          this.log("info", `Watch "${watch.name}": skip — ${scored.listing.title}: out of bounds: ${bounds.reason}`, scored.listing.url);
+          continue;
+        }
+        const verdict = await verifyWatchProduct(term.phrase, { id: scored.listing.id, title: scored.listing.title, description: scored.listing.description, price });
+        if (!verdict.unavailable && !isConfidentMatch(verdict)) {
+          this.log("info", `Watch "${watch.name}": skip — ${scored.listing.title}: not confident it's "${term.phrase}" (${verdict.reason})`, scored.listing.url);
+          continue;
+        }
+      }
+      const referencePrice = deriveWatchReferencePrice(watch, this.opts.store, term.linkedProductId ?? watch.linkedProductId);
+      const result = evaluateWatchConditions(watch, price, referencePrice, listingAgeHours, { netPercent: resaleSettingsFrom(config).netPercent });
       if (!result.satisfied) continue;
       const match = this.opts.store.recordWatchMatch({
         watchId: watch.id,
@@ -1056,7 +1108,25 @@ export class ScrapeEngine {
       // push is logged, not thrown, and markWatchMatchNotified is skipped so
       // it isn't silently lost — the match row itself is already durable.
       try {
-        await sendWatchMatchAlert(config, watch, scored, { discoveryMode, discountPercentAtMatch: result.discountPercent, profitUsdAtMatch: result.profitUsd }, referencePrice);
+        const prepared = await prepareAlert({
+          check: this.opts.checkMarket,
+          source: this.opts.store,
+          scored,
+          netPercent: resaleSettingsFrom(config).netPercent,
+          minMarginPercent: resaleSettingsFrom(config).minMarginPercent,
+          maxCutPercent: resaleSettingsFrom(config).maxCutPercent,
+          referencePriceUsd: referencePrice,
+          canWithhold: false,
+          log: (m) => this.log("info", m, scored.listing.url),
+        });
+        await sendWatchMatchAlert(
+          config,
+          watch,
+          scored,
+          { discoveryMode, discountPercentAtMatch: result.discountPercent, profitUsdAtMatch: result.profitUsd },
+          referencePrice,
+          prepared.summary
+        );
         this.opts.store.markWatchMatchNotified(match.id);
       } catch (err) {
         this.log("error", `Watch notification failed: ${(err as Error).message}`, scored.listing.url);
@@ -1191,6 +1261,8 @@ export class ScrapeEngine {
     // while broadening what the scanner will look at, rather than having to
     // clear it out to see past it.
     const blacklistMatch = config.ignoreBlacklist ? null : this.opts.store.isBlacklisted(listing.title);
+    // NOTE: the renderer's red "not of interest" outline (ListingSourceMarks.tsx's
+    // listingVerdict) recognizes the word "blacklisted" in the reasoning saved here.
     if (blacklistMatch) {
       this.log("info", `skip (blacklisted: "${blacklistMatch}"): ${listing.title}`, listing.url);
       return this.recordInstantSkip(listing, `Skipped without opening the listing — title matches blacklisted term "${blacklistMatch}".`, cheapFilterStart);
@@ -1243,7 +1315,7 @@ export class ScrapeEngine {
       // listing just falls through to the ordinary instant-skip, same as
       // before this feature existed, rather than stalling rotation to keep
       // trying.
-      if (this.imageMatchAttemptsThisLocation < ScrapeEngine.MAX_IMAGE_MATCH_ATTEMPTS_PER_LOCATION) {
+      if (!isLowAiMode() && this.imageMatchAttemptsThisLocation < ScrapeEngine.MAX_IMAGE_MATCH_ATTEMPTS_PER_LOCATION) {
         for (const ref of config.searchItems) {
           if (!ref.linkedProductId) continue;
           const referenceImages = this.opts.store.listProductImages(ref.linkedProductId).slice(0, 3).map((img) => img.imageData);
@@ -1282,9 +1354,11 @@ export class ScrapeEngine {
     // pause/resume or a per-watch pause takes effect on the very next
     // listing, same responsiveness posture as every other config read in
     // this function.
-    const activeWatches: Watch[] = config.watch.globallyPaused ? [] : this.opts.store.listWatches().filter((w) => w.enabled);
+    // Facebook Watches only — an eBay Watch is EbayEngine's job and never
+    // matches a Marketplace listing.
+    const activeWatches: Watch[] = config.watch.globallyPaused ? [] : this.opts.store.listWatches().filter((w) => w.enabled && w.platform === "facebook");
     const matchingWatches = activeWatches.filter((w) => {
-      const asItems = [watchAsSearchItem(w)];
+      const asItems = watchAsSearchItems(w);
       return matchSearchItem(listing.title, asItems) !== null || findGreenFlagCandidate(listing.title, asItems) !== null;
     });
     for (const w of matchingWatches) this.opts.store.recordWatchCandidateSeen(w.id);
@@ -1413,7 +1487,16 @@ export class ScrapeEngine {
     // invocation, not just the ones that got rejected.
     recordStage("cheap_filters", Date.now() - cheapFilterStart, true);
 
-    if (config.photoAnalysis.enabled && !config.ignoreBlacklist && listing.thumbnailUrl) {
+    // Per explicit instruction — "Clynx should be prioritizing the listing
+    // title, not what's in the background": a PS5 photographed on a couch was
+    // skipped as "furniture". The photo check below exists to catch listings
+    // whose TITLE gives nothing away (a boat titled "must sell fast"); when the
+    // title already names something being tracked — a Search For item, a near
+    // miss on one, or a Watch — the title has answered the question, and the
+    // photo is not allowed to veto it, however cluttered or badly framed it is.
+    // (This also saves the AI call.)
+    const titleNamesTrackedItem = !!strictTextMatch || !!greenFlagCandidate || matchingWatches.length > 0;
+    if (!isLowAiMode() && config.photoAnalysis.enabled && !config.ignoreBlacklist && listing.thumbnailUrl && !titleNamesTrackedItem) {
       const thumbnailDataUri = await downloadImageAsDataUri(listing.thumbnailUrl);
       if (thumbnailDataUri) {
         const referenceImages = this.opts.store
@@ -1509,7 +1592,7 @@ export class ScrapeEngine {
         estimatedValueRange: null,
         offTopicSuggestion: null,
       });
-      const staleRecord = this.opts.store.listRecent(1, 0)[0];
+      const staleRecord = this.opts.store.getLastSavedListing();
       if (staleRecord) this.opts.onListing(staleRecord);
       await this.sleep(600, 1500); // trimmed from 1000-2500ms, see the sleep() call above
       return { ...NOT_COUNTED, counted: true, visitedDetailPage: true, title: listing.title, price: listing.price, reasoning: `too old — ${detail.listingAge}`, notable: false };
@@ -1549,10 +1632,37 @@ export class ScrapeEngine {
         estimatedValueRange: null,
         offTopicSuggestion: null,
       });
-      const shippingRecord = this.opts.store.listRecent(1, 0)[0];
+      const shippingRecord = this.opts.store.getLastSavedListing();
       if (shippingRecord) this.opts.onListing(shippingRecord);
       await this.sleep(600, 1500);
       return { ...NOT_COUNTED, counted: true, visitedDetailPage: true, title: listing.title, price: listing.price, reasoning: reason, notable: false };
+    }
+
+    // Scam bots (see sellerRisk.ts's detectScamBot): skipped right away, before any risk check or AI call, and
+    // deliberately NOT blacklisted: only this listing is dropped, the product itself stays welcome.
+    const scamReason = detectScamBot(`${detail.title} ${detail.description}`, detail.seller);
+    if (scamReason) {
+      this.log("info", `skip (${scamReason}): ${listing.title}`, listing.url);
+      this.opts.store.saveScored({
+        listing: detail,
+        extraction: {
+          matchedItem: null,
+          extractedAttributes: "",
+          conditionImpact: "unknown",
+          confidence: "low",
+          reasoning: `Skipped — ${scamReason}.`,
+        },
+        referencePriceUsd: null,
+        discountPercent: null,
+        isDeal: false,
+        dealTier: null,
+        estimatedValueRange: null,
+        offTopicSuggestion: null,
+      });
+      const scamRecord = this.opts.store.getLastSavedListing();
+      if (scamRecord) this.opts.onListing(scamRecord);
+      await this.sleep(600, 1500);
+      return { ...NOT_COUNTED, counted: true, visitedDetailPage: true, title: listing.title, price: listing.price, reasoning: scamReason, notable: false };
     }
 
     const sellerRisk = evaluateSellerRisk(detail.seller, config.sellerRisk);
@@ -1577,7 +1687,7 @@ export class ScrapeEngine {
         },
         sellerRisk
       );
-      const record = this.opts.store.listRecent(1, 0)[0];
+      const record = this.opts.store.getLastSavedListing();
       if (record) this.opts.onListing(record);
       await this.sleep(900, 2400); // trimmed from 1500-4000ms, see the sleep() call above
       return {
@@ -1599,16 +1709,23 @@ export class ScrapeEngine {
     // handful of DB rows) so feedback given mid-scan takes effect on the
     // very next evaluation, same responsiveness posture as config filters.
     const feedbackExamples = this.opts.store.getFeedbackExamples();
+    // A broken / for-parts listing of an item that includes broken ones gets its own Database variant (made and researched on first
+    // sight) so it is priced as what it is, not as a working one at a quarter of the price.
+    const brokenCandidate = matchSearchItem(detail.title, config.searchItems);
+    if (brokenCandidate?.includeBroken && looksBroken(`${detail.title} ${detail.description}`)) {
+      this.log("info", `Broken / for-parts listing of "${brokenCandidate.item}": checking what broken ones sell for...`, listing.url);
+      await this.opts.ensureBrokenVariant?.(brokenCandidate.item, detail.title).catch(() => undefined);
+    }
     let scored;
     try {
-      scored = await timed("scoring_ai", () => scoreListing(detail, config, dismissedCategories, feedbackExamples));
+      scored = await timed("scoring_ai", () => scoreListing(detail, config, dismissedCategories, feedbackExamples, (item, title) => this.opts.store.getEbayValueForProductName(item, title), (title) => this.opts.store.getEbayValueForTitle(title), (item) => this.opts.store.getBrokenVariantValue(item)));
     } catch (err) {
       this.log("error", `Scoring failed for "${listing.title}": ${(err as Error).message}`, listing.url);
       return { ...NOT_COUNTED, counted: true, visitedDetailPage: true };
     }
 
     this.opts.store.saveScored(scored, sellerRisk);
-    const record = this.opts.store.listRecent(1, 0)[0];
+    const record = this.opts.store.getLastSavedListing();
     if (record) this.opts.onListing(record);
 
     // Per explicit instruction — Watch condition evaluation runs
@@ -1760,7 +1877,23 @@ export class ScrapeEngine {
     // so both the bundle-value check below and the research step after it
     // can use ONE real look at the photos instead of trusting the text.
     let photoResult: PhotoAnalysisResult | null = null;
-    if (config.photoAnalysis.enabled && detail.imageUrls.length > 0) {
+    // Save-credits mode: the (expensive, multi-photo) vision look is only for listings worth it: a deal, a near-match on
+    // something tracked, or a Watch candidate.
+    // A hidden gem: a tracked item priced too high on its own (needing more than a 25% cut) but whose listing suggests extras come with
+    // it (a console with an expansion card): worth a look at what the whole lot is worth, even in save-credits mode.
+    const hiddenGem =
+      !scored.isDeal &&
+      !!scored.extraction.matchedItem &&
+      (scored.referencePriceUsd ?? 0) > 0 &&
+      isHiddenGemCandidate({
+        priceUsd: listing.price,
+        shippingUsd: detail.ebayShippingUsd ?? 0,
+        baseValueUsd: (scored.referencePriceUsd ?? 0) * (scored.extraction.brokenVariant ? 1 : CONDITION_VALUE_MULTIPLIER[detectConditionImpact(`${listing.title} ${detail.description}`)]),
+        settings: resaleSettingsFrom(config),
+        text: `${listing.title} ${detail.description}`,
+      });
+    if (hiddenGem) this.log("info", `"${listing.title}" is pricey on its own, but may come with extras: looking at what the whole lot is worth...`, listing.url);
+    if (config.photoAnalysis.enabled && detail.imageUrls.length > 0 && (!isLowAiMode() || scored.isDeal || !!greenFlagCandidate || priceQualifiedWatches.length > 0 || hiddenGem)) {
       // A green-flag candidate (see above) takes priority over the raw
       // title as the thing to check photos against — "Xbox X" itself isn't
       // a real product to compare against, but "Xbox Series S" is, and
@@ -1816,12 +1949,14 @@ export class ScrapeEngine {
     // re-broadcasts so the corrected photo becomes the default the moment
     // it's known, without waiting on whichever of the conditional blocks
     // below happens to fire next (most listings hit none of them).
-    if (detail.hasVideo && photoResult?.titleMatchPhoto && detail.imageUrls[0] !== photoResult.titleMatchPhoto) {
+    if (detail.hasVideo && photoResult?.titleMatchPhoto && !detail.imageUrls.some((u) => u.startsWith("data:image"))) {
       const titleMatchPhoto = photoResult.titleMatchPhoto;
-      detail = { ...detail, imageUrls: [titleMatchPhoto, ...detail.imageUrls.filter((u) => u !== titleMatchPhoto)] };
+      // Only shown on the Feed card, so a card-sized copy is stored (see shrinkImageDataUri).
+      const cardPhoto = await shrinkImageDataUri(titleMatchPhoto);
+      detail = { ...detail, imageUrls: [cardPhoto, ...detail.imageUrls.filter((u) => u !== titleMatchPhoto)] };
       scored = { ...scored, listing: detail };
       this.opts.store.saveScored(scored, sellerRisk);
-      const thumbFixed = this.opts.store.listRecent(1, 0)[0];
+      const thumbFixed = this.opts.store.getLastSavedListing();
       if (thumbFixed) this.opts.onListing(thumbFixed);
     }
 
@@ -1835,7 +1970,10 @@ export class ScrapeEngine {
     // confirmation counts as a real matchedItem for both of those too.
     if (greenFlagCandidate && !scored.extraction.matchedItem && photoResult?.matchesClaim === true) {
       const conditionImpact = detectConditionImpact(`${listing.title} ${detail.description}`);
-      const pricing = evaluateSearchItemPricing(greenFlagCandidate, listing.price, conditionImpact, config.dealThresholdPercent, greenFlagCandidate.maxPriceUsd);
+      const pricing = evaluateSearchItemPricing(greenFlagCandidate, listing.price, conditionImpact, greenFlagCandidate.maxPriceUsd, {
+        valueUsd: this.opts.store.getEbayValueForProductName(greenFlagCandidate.item),
+        settings: resaleSettingsFrom(config),
+      });
       this.log(
         "info",
         `Green flag confirmed: "${listing.title}" is actually a "${greenFlagCandidate.item}" — photos match, ${
@@ -1859,7 +1997,7 @@ export class ScrapeEngine {
         dealTier: greenFlagDealTier,
       };
       this.opts.store.saveScored(scored, sellerRisk);
-      const updated = this.opts.store.listRecent(1, 0)[0];
+      const updated = this.opts.store.getLastSavedListing();
       if (updated) this.opts.onListing(updated);
     }
 
@@ -1891,6 +2029,9 @@ export class ScrapeEngine {
     // ever read once matchesClaim is confirmed false, so it's always the
     // real pre-mismatch value here, never the already-nulled one.
     let mismatchCorrection: { claimedAs: string; reason: string | null } | null = null;
+    // NOTE: the renderer's outline colors (ListingSourceMarks.tsx's
+    // listingVerdict) recognize this reasoning wording to show a yellow
+    // "not sure" outline — keep the two in sync if the text below changes.
     if (scored.extraction.matchedItem && photoResult?.matchesClaim === false) {
       mismatchCorrection = { claimedAs: scored.extraction.matchedItem, reason: photoResult.mismatchReason };
       this.log(
@@ -1909,7 +2050,7 @@ export class ScrapeEngine {
         },
       };
       this.opts.store.saveScored(scored, sellerRisk);
-      const updated = this.opts.store.listRecent(1, 0)[0];
+      const updated = this.opts.store.getLastSavedListing();
       if (updated) this.opts.onListing(updated);
     }
 
@@ -1927,35 +2068,83 @@ export class ScrapeEngine {
     // there's something to add the bundle value TO) and photos that
     // actually match the claimed item to begin with (see the mismatch
     // override above).
+    // The listing's own words come first: extras the seller prices separately ("Also have a 1tb storage card for 120$", a parted-out
+    // list with a price per item) are NOT part of the asking price, so they add nothing to what this purchase is worth.
+    const extrasSeparate = extrasPricedSeparately(`${listing.title}\n${detail.description}`);
+    if (extrasSeparate && photoResult?.hasValuableBundle) {
+      this.log("info", `"${listing.title}": the seller prices the extras separately, so they are not counted towards this price.`, listing.url);
+    }
+    // Several products in one listing: each is priced on its own first, then the lot is valued with the main item as the focal point
+    // (extras add only part of what they'd fetch alone, and slow or bulky ones are left out), never as one long sum. Only for
+    // listings that matter (a deal, a near-miss that might be a hidden gem, or a Watch candidate) so ordinary listings cost nothing.
+    // When the breakdown is there it replaces the photo-based lump estimate below, which stays as the fallback.
+    const baseValueForLot =
+      scored.referencePriceUsd !== null && scored.referencePriceUsd > 0
+        ? scored.referencePriceUsd * (scored.extraction.brokenVariant ? 1 : CONDITION_VALUE_MULTIPLIER[detectConditionImpact(`${listing.title} ${detail.description}`)])
+        : 0;
+    let bundleExtras: { valueUsd: number; phrase: string } | null = null;
     if (
+      !extrasSeparate &&
+      this.opts.valueBundle &&
       photoResult?.matchesClaim !== false &&
       scored.extraction.matchedItem &&
-      photoResult?.hasValuableBundle &&
-      photoResult.bundleEstimatedValueUsd &&
-      scored.referencePriceUsd !== null &&
-      scored.referencePriceUsd > 0 &&
+      baseValueForLot > 0 &&
+      listing.price !== null &&
+      (hiddenGem || scored.isDeal || priceQualifiedWatches.length > 0) &&
+      looksLikeBundle(`${listing.title}\n${detail.description}`)
+    ) {
+      try {
+        const valuation = await this.opts.valueBundle({ title: listing.title, description: detail.description, mainName: scored.extraction.matchedItem, mainValueUsd: baseValueForLot });
+        if (valuation) {
+          this.log("info", `Bundle breakdown for "${listing.title}": ${valuation.summary}. The lot is worth about $${valuation.totalValueUsd} (simply adding everything up would say $${valuation.naiveSumUsd}).`, listing.url);
+          bundleExtras = { valueUsd: valuation.addedUsd, phrase: valuation.summary };
+        }
+      } catch (err) {
+        this.log("warn", `Couldn't break down the bundle in "${listing.title}": ${(err as Error).message}`, listing.url);
+      }
+    }
+    if (!bundleExtras && !extrasSeparate && photoResult?.hasValuableBundle && photoResult.bundleEstimatedValueUsd) {
+      bundleExtras = { valueUsd: photoResult.bundleEstimatedValueUsd, phrase: `${photoResult.bundleDescription}, worth an estimated $${photoResult.bundleEstimatedValueUsd}` };
+    }
+    if (
+      bundleExtras &&
+      bundleExtras.valueUsd > 0 &&
+      photoResult?.matchesClaim !== false &&
+      scored.extraction.matchedItem &&
+      baseValueForLot > 0 &&
       listing.price !== null
     ) {
-      const totalValueUsd = scored.referencePriceUsd + photoResult.bundleEstimatedValueUsd;
-      const bundleDiscountPercent = ((totalValueUsd - listing.price) / totalValueUsd) * 100;
-      if (bundleDiscountPercent >= config.dealThresholdPercent) {
+      // The whole lot is judged with eBay's cut and the user's minimum margin (profitGate.ts): the base item's value (reduced for
+      // condition, unless it is already priced as a broken copy) plus what the extras add. (This used to be a plain discount
+      // percentage that ignored eBay's cut, which could call a losing lot a deal.)
+      const baseValueUsd = baseValueForLot;
+      const lot = repriceWithExtras({
+        baseValueUsd,
+        extrasValueUsd: bundleExtras.valueUsd,
+        priceUsd: listing.price,
+        shippingUsd: detail.ebayShippingUsd ?? 0,
+        settings: resaleSettingsFrom(config),
+      });
+      // Remembered either way: the alert rates the whole lot, not just the base item.
+      scored = { ...scored, bundleValueUsd: bundleExtras.valueUsd, bundleDescription: bundleExtras.phrase };
+      if (lot.isGood && !scored.isDeal) {
         this.log(
           "deal",
-          `Bundle value spotted in photos for "${listing.title}": ${photoResult.bundleDescription} (~$${photoResult.bundleEstimatedValueUsd} extra) — total value ~$${totalValueUsd.toFixed(0)} vs $${listing.price} asking, ${bundleDiscountPercent.toFixed(0)}% under.`,
+          `Hidden gem: "${listing.title}" comes with extras (${bundleExtras.phrase}). The whole lot resells for about $${lot.totalValueUsd.toFixed(0)}, so you'd keep roughly $${lot.keepUsd.toFixed(0)} after fees against $${listing.price} asking.`,
           listing.url
         );
         scored = {
           ...scored,
           isDeal: true,
           dealTier: "search" as const,
-          discountPercent: bundleDiscountPercent,
+          discountPercent: lot.discountPercent,
           extraction: {
             ...scored.extraction,
-            reasoning: `${scored.extraction.reasoning} Also, the photos show bundled extras not mentioned in the listing text (${photoResult.bundleDescription}, worth an estimated $${photoResult.bundleEstimatedValueUsd}) — total value ~$${totalValueUsd.toFixed(0)} vs $${listing.price} asking is a ${bundleDiscountPercent.toFixed(0)}% discount.`,
+            reasoning: `${scored.extraction.reasoning} Also, the listing comes with extras (${bundleExtras.phrase}): the whole lot resells for about $${lot.totalValueUsd.toFixed(0)}, so you'd keep roughly $${lot.keepUsd.toFixed(0)} after eBay's fees against $${listing.price} asking.`,
           },
         };
         this.opts.store.saveScored(scored, sellerRisk);
-        const updated = this.opts.store.listRecent(1, 0)[0];
+        const updated = this.opts.store.getLastSavedListing();
         if (updated) this.opts.onListing(updated);
       }
     }
@@ -2012,7 +2201,7 @@ export class ScrapeEngine {
             },
           };
           this.opts.store.saveScored(scored, sellerRisk);
-          const updated = this.opts.store.listRecent(1, 0)[0];
+          const updated = this.opts.store.getLastSavedListing();
           if (updated) this.opts.onListing(updated);
           break;
         }
@@ -2071,6 +2260,9 @@ export class ScrapeEngine {
     }
 
     for (const subject of researchSubjects) {
+      // Save-credits mode: a listing that wasn't worth a vision look (not a deal) doesn't get filed into the Database either:
+      // that would cost an identity check and possibly a whole product research for something nobody is buying.
+      if (isLowAiMode() && !photoResult) continue;
       const subjectImageDataUri = photoResult?.productPhotos[subject] ?? (await fallbackImage());
       const existingProduct = this.opts.store.findMatchingProduct(subject);
       // Condition-awareness — most of this correction mechanism already
@@ -2087,6 +2279,36 @@ export class ScrapeEngine {
           ? `Originally listed/matched as "${mismatchCorrection.claimedAs}" — photos indicate this is actually "${subject}"${mismatchCorrection.reason ? `: ${mismatchCorrection.reason}` : ""}.`
           : null;
       if (existingProduct) {
+        // The name matched an existing entry, but is this listing really that exact product? A listing carrying
+        // details the entry's name doesn't (a brand, a model line) gets a second look: confident matches carry on
+        // as before, a different specific model gets its own entry under the generic one, and an unsure one keeps
+        // its note but doesn't put its photo in an entry's gallery. See productIdentity.ts.
+        const { action, verdict } = await resolveIdentityTarget(this.opts.store, existingProduct, {
+          title: listing.title,
+          description: detail.description,
+          imageDataUri: subjectImageDataUri,
+        });
+        if (action.kind === "create" && config.autoResearchListings) {
+          this.log(
+            "info",
+            `"${listing.title}" isn't the same product as "${existingProduct.name}" — it's a more specific model (${action.name}). Adding it to the Database under "${existingProduct.name}".${verdict?.reason ? ` ${verdict.reason}` : ""}`,
+            undefined,
+            action.name
+          );
+          this.opts.onNewProductFound(action.name, subjectImageDataUri, listing.title, { parentId: action.parentId, familyFromId: action.familyFromId });
+          continue;
+        }
+        const target =
+          action.kind === "attach" ? (this.opts.store.getProductById(action.productId) ?? existingProduct) : existingProduct;
+        const photoAllowed = action.kind === "attach";
+        if (action.kind !== "attach") {
+          this.log(
+            "info",
+            `Not sure "${listing.title}" is exactly "${existingProduct.name}"${verdict?.reason ? ` (${verdict.reason})` : ""} — noted it, but kept its photo out of the Database.`,
+            undefined,
+            existingProduct.name
+          );
+        }
         const noteParts = [
           listing.price !== null ? `$${listing.price}` : null,
           scored.extraction.matchedItem ? scored.extraction.extractedAttributes || null : null,
@@ -2094,12 +2316,12 @@ export class ScrapeEngine {
           correctionNote,
         ].filter((p): p is string => !!p);
         if (noteParts.length) {
-          const updatedProduct = this.opts.store.recordProductObservation(subject, noteParts.join(" — "));
+          const updatedProduct = this.opts.store.appendProductObservation(target, subject, noteParts.join(" — "));
           if (updatedProduct) this.opts.onProductUpdated(updatedProduct);
         }
-        if (subjectImageDataUri) {
-          this.opts.store.addProductImage(existingProduct.id, subjectImageDataUri, listing.title);
-          this.opts.onReferencePhotoAdded?.(existingProduct.id);
+        if (subjectImageDataUri && photoAllowed) {
+          this.opts.store.addProductImage(target.id, subjectImageDataUri, listing.title);
+          this.opts.onReferencePhotoAdded?.(target.id);
         }
       } else if (specificSubjects.has(subject) && config.autoResearchListings) {
         this.log(
@@ -2135,8 +2357,20 @@ export class ScrapeEngine {
         listing.url
       );
       try {
-        await sendDealAlert(config, scored);
-        this.opts.store.markNotified(listing.id);
+        const prepared = await prepareAlert({
+          check: this.opts.checkMarket,
+          source: this.opts.store,
+          scored,
+          netPercent: resaleSettingsFrom(config).netPercent,
+          minMarginPercent: resaleSettingsFrom(config).minMarginPercent,
+          maxCutPercent: resaleSettingsFrom(config).maxCutPercent,
+          canWithhold: true,
+          log: (m) => this.log("info", m, listing.url),
+        });
+        if (prepared.send) {
+          await sendDealAlert(config, scored, prepared.summary);
+          this.opts.store.markNotified(listing.id);
+        }
       } catch (err) {
         this.log("error", `Notification failed: ${(err as Error).message}`, listing.url);
       }
@@ -2927,25 +3161,32 @@ export class ScrapeEngine {
   // discoverLocations() above already establishes this exact precedent for
   // a one-off priority action — no stopRequested checks anywhere in it either.
   async runWatchCheck(watch: Watch): Promise<{ evaluated: number; error?: string }> {
-    // V1 scope decision (per the approved plan's own §3/§4 — "state/
-    // nationwide as stretch goals if straightforward," not required):
-    // resolved_location_url/label are single columns, not a city list, so
-    // only a specific city/ZIP watch has one concrete place to actively
-    // search. A state/country-mode watch still gets full passive-path
-    // coverage (Phase 2, location-unenforced there already) — it just
-    // never gets an active, radius-precise check of its own. The scheduler
-    // (watchScheduler.ts) is what defers these rather than calling in here
-    // at all; this check is just a defensive backstop.
-    if (watch.locationMode !== "city") {
-      return {
-        evaluated: 0,
-        error: "Active checking currently only supports a specific city/ZIP watch location — state/nationwide watches still get full passive-path coverage.",
-      };
-    }
+    // All three location modes are checked actively, each against Facebook
+    // places the Watch resolved for itself:
+    //   * a ZIP/city Watch searches that one place (radius as the user set it);
+    //   * a state Watch searches the state's biggest cities (40-mile radius, the
+    //     same as an account in state mode);
+    //   * a whole-country Watch searches a spread of cities across the US
+    //     (500-mile radius, the same as an account in country mode).
+    // The places are resolved once and cached on the Watch (see
+    // resolveWatchPlaces), and a state/country Watch looks at a few of them per
+    // check, rotating, so one check never spends minutes on a single Watch.
+    // At each place it searches for EACH of the things the Watch is waiting for,
+    // runs every result through the free checks (watchFacebook.ts: seen before,
+    // price, title, area) and only then opens the few that pass.
     const cityOrZip = (watch.selectedCityOrZip ?? "").trim();
-    if (!cityOrZip) return { evaluated: 0, error: "No city/ZIP set for this watch." };
+    if (watch.locationMode === "city" && !cityOrZip) return { evaluated: 0, error: "No city/ZIP set for this watch." };
+    if (watch.locationMode === "state" && !watch.selectedState) return { evaluated: 0, error: "No state set for this watch." };
 
+    // The Watch overrides the scanner. If this account is in the middle of a scan,
+    // asking for priority makes the scan's cycle step aside at its next checkpoint
+    // and hand over the browser; the Watch takes it for the length of the check and
+    // the scan picks back up straight afterwards (see wakeRequested below).
+    const scannerWasRunning = this.running && !this.stopRequested;
     this.priorityRequested = true;
+    if (scannerWasRunning) {
+      this.log("info", `Watch "${watch.name}" is taking over this account's browser from the scanner for a moment — the scanner resumes as soon as it's done.`);
+    }
     return this.withPage(async () => {
       this.priorityRequested = false;
       this.setStatus({ currentSearch: `watch: "${watch.name}"` });
@@ -2962,61 +3203,73 @@ export class ScrapeEngine {
           }
         }
 
-        // Resolved once, cached — never re-driven on a routine check (see
-        // types.ts's Watch.resolvedLocationUrl doc comment). store.
-        // updateWatch already nulls this cache out on a genuine location
-        // edit, so "not cached" here means either a brand-new watch or an
-        // edit since the last successful resolution — both correctly
-        // trigger exactly one fresh resolve.
-        let locationUrl = watch.resolvedLocationUrl;
-        let locationLabel = watch.resolvedLocationLabel;
-        if (!locationUrl) {
-          this.log("info", `Watch "${watch.name}": resolving location "${cityOrZip}"...`);
-          const result = await discoverLocation(page, cityOrZip, watch.searchRadiusMiles ?? ScrapeEngine.DEFAULT_WATCH_RADIUS_MILES);
-          if (!result.url) {
-            this.log("warn", `Watch "${watch.name}": couldn't resolve "${cityOrZip}" (${result.error ?? "no matching suggestion"}) — will retry on the next scheduled check.`);
-            return { evaluated: 0, error: result.error ?? "Could not resolve location." };
-          }
-          locationUrl = result.url;
-          locationLabel = result.resolvedLocationLabel;
-          this.opts.store.setWatchResolvedLocation(watch.id, { url: result.url, label: result.resolvedLocationLabel, checkedAt: Date.now() });
-        }
+        const resolved = await this.resolveWatchPlaces(page, watch);
+        if (!resolved.places.length) return { evaluated: 0, error: resolved.error ?? "Could not resolve location." };
+        const places = this.nextWatchPlaces(watch.id, resolved.places, watch.terms.length);
 
-        const query = getSearchQuery(watchAsSearchItem(watch));
         // Minutes -> hours, same unit searchMarketplace's own param expects;
         // falls back to the account's general freshness setting when this
         // watch has no age condition of its own.
         const maxAgeHours = watch.maxListingAgeMinutes !== null ? watch.maxListingAgeMinutes / 60 : config.maxListingAgeHours;
         this.setStatus({ currentActionNote: `Actively checking Watch "${watch.name}"...` });
-        this.log("info", `Watch "${watch.name}": active check at ${locationLabel ?? cityOrZip} (query: "${query}")...`);
-
-        let results: ListingSummary[];
-        try {
-          results = await searchMarketplace(page, locationUrl, query, 8, (reason, level) => this.log(level ?? "warn", reason), maxAgeHours, watch.minPriceUsd, watch.maxPriceUsd);
-        } catch (err) {
-          const message = (err as Error).message;
-          this.log("error", `Watch "${watch.name}": active check failed at ${locationLabel ?? cityOrZip} — ${message}`);
-          return { evaluated: 0, error: message };
-        }
 
         let evaluated = 0;
-        for (const listing of results) {
-          const idx = results.indexOf(listing);
-          this.setStatus({
-            currentListing: toPreview(listing),
-            currentActionNote: null,
-            currentReaction: null,
-            upcomingListings: results.slice(idx + 1, idx + 6).map(toPreview),
-          });
-          const result = await this.evaluateListing(page, listing, config, "active");
-          if (result.visitedDetailPage) {
-            await page.goBack({ waitUntil: "domcontentloaded" }).catch(() => {});
+        let searches = 0;
+        let firstError: string | undefined;
+        for (let p = 0; p < places.length; p++) {
+          const place = places[p];
+          for (let t = 0; t < watch.terms.length; t++) {
+            const term = watch.terms[t];
+            if (searches > 0) await politeDelay(2500, 5000);
+            searches++;
+            this.log("info", `Watch "${watch.name}": searching ${place.label} for "${term.phrase}"...`);
+
+            let results: ListingSummary[];
+            try {
+              results = await searchMarketplace(page, place.url, term.phrase, 8, (reason, level) => this.log(level ?? "warn", reason), maxAgeHours, watch.minPriceUsd, watch.maxPriceUsd);
+            } catch (err) {
+              const message = (err as Error).message;
+              this.log("error", `Watch "${watch.name}": search for "${term.phrase}" at ${place.label} failed — ${message}`);
+              firstError ??= message;
+              continue;
+            }
+
+            // Remember the exact search that was just run, so it can be opened later.
+            // The page's own address is the truest record of it; if that can't be read
+            // back as a search, the same search is rebuilt from the place and term.
+            const live = page.url();
+            const searchUrl = /\/marketplace\//.test(live) && /[?&]query=/.test(live) ? live : buildWatchSearchUrl(place.url, term.phrase, watch.minPriceUsd, watch.maxPriceUsd);
+            this.opts.store.recordWatchSearchLink(watch.id, term.phrase, place.url, place.label, searchUrl);
+
+            let counted = 0;
+            let skipped = 0;
+            for (let i = 0; i < results.length; i++) {
+              const listing = results[i];
+              this.setStatus({
+                currentListing: toPreview(listing),
+                currentActionNote: null,
+                currentReaction: null,
+                upcomingListings: results.slice(i + 1, i + 6).map(toPreview),
+              });
+              const pre = await prefilterWatchListing(watch, listing, { store: this.opts.store, ignoreBlacklist: config.ignoreBlacklist, geo: { store: this.opts.store } });
+              // A listing whose title is one of the things being watched for counts as seen by the
+              // Watch (the "listings seen" figure on its card), whether or not it then passes.
+              if (pre.ok || !pre.quiet) this.opts.store.recordWatchCandidateSeen(watch.id);
+              if (!pre.ok) {
+                skipped++;
+                if (!pre.quiet) this.log("info", `Watch "${watch.name}": skip — ${listing.title}: ${pre.reason}`, listing.url);
+                continue;
+              }
+              if (await this.evaluateWatchCandidate(page, watch, pre.term, listing, config)) counted++;
+            }
+            evaluated += counted;
+            this.log("info", `Watch "${watch.name}": "${term.phrase}" at ${place.label} — ${results.length} result(s), ${counted} looked at closely, ${skipped} passed over.`);
           }
-          if (result.counted) evaluated++;
         }
 
-        this.log("info", `Watch "${watch.name}": active check done — ${results.length} listing(s) found, ${evaluated} evaluated.`);
-        return { evaluated };
+        // An error only counts when nothing at all could be searched, so one
+        // flaky city in a state doesn't make the scheduler retry the whole Watch early.
+        return evaluated === 0 && firstError && searches > 0 ? { evaluated, error: firstError } : { evaluated };
       } finally {
         this.setStatus({
           currentSearch: null,
@@ -3026,14 +3279,193 @@ export class ScrapeEngine {
           analyzingPhotos: false,
           upcomingListings: [],
         });
+        // Hand the browser back: if a scan was running here it is sitting out the
+        // rest of its between-cycle wait, so wake it to start a fresh cycle now.
+        if (scannerWasRunning && this.running && !this.stopRequested) this.wakeRequested = true;
       }
     });
   }
 
-  start(): void {
+  /**
+   * A listing that passed the Watch's free checks: open it, make sure it is really the
+   * product (a confident AI yes), score and save it, and record the match when the
+   * Watch's conditions hold. Returns true when the listing was actually looked at.
+   */
+  private async evaluateWatchCandidate(page: Page, watch: Watch, term: WatchTerm, listing: ListingSummary, config: EngineConfig): Promise<boolean> {
+    let detail: ListingDetail;
+    try {
+      detail = await fetchListingDetail(page, listing);
+    } catch (err) {
+      this.log("warn", `Watch "${watch.name}": couldn't open "${listing.title}" (${(err as Error).message}) — will look again next time.`, listing.url);
+      this.opts.store.unmarkWatchSeen(watch.id, listing.id);
+      return false;
+    }
+
+    const scamReason = detectScamBot(`${detail.title} ${detail.description}`, detail.seller);
+    if (scamReason) {
+      this.log("info", `Watch "${watch.name}": skip — ${listing.title}: ${scamReason}`, listing.url);
+      return true;
+    }
+
+    const sellerRisk = evaluateSellerRisk(detail.seller, config.sellerRisk);
+    if (!sellerRisk.passed) {
+      this.log("info", `Watch "${watch.name}": skip — ${listing.title}: seller risk (${sellerRisk.reasons.join("; ")})`, listing.url);
+      return true;
+    }
+
+    // "High-confidence items only": a confident AI yes that it is the product itself.
+    const verdict = await verifyWatchProduct(term.phrase, { id: listing.id, title: detail.title, description: detail.description, price: detail.price });
+    if (verdict.unavailable) {
+      // The check couldn't run (no key, timeout). The strict title match already held,
+      // so it carries on rather than the Watch going silent whenever the API is down.
+      this.log("warn", `Watch "${watch.name}": couldn't double-check "${listing.title}" (${verdict.reason}) — going on the title match alone.`, listing.url);
+    } else if (!isConfidentMatch(verdict)) {
+      this.log("info", `Watch "${watch.name}": skip — ${listing.title}: not confident it's "${term.phrase}" (${verdict.confidence}${verdict.match ? "" : ", no"}: ${verdict.reason})`, listing.url);
+      return true;
+    }
+
+    let scored: ScoredListing;
+    try {
+      scored = await scoreListing(detail, config, this.opts.store.getDismissedCategories(), this.opts.store.getFeedbackExamples(), (item, title) => this.opts.store.getEbayValueForProductName(item, title), (title) => this.opts.store.getEbayValueForTitle(title));
+    } catch (err) {
+      this.log("error", `Scoring failed for "${listing.title}": ${(err as Error).message}`, listing.url);
+      this.opts.store.unmarkWatchSeen(watch.id, listing.id);
+      return false;
+    }
+    this.opts.store.saveScored(scored, sellerRisk);
+    const record = this.opts.store.getLastSavedListing();
+    if (record) this.opts.onListing(record);
+    await this.recordWatchMatchesIfAny([watch], scored, config, "active", term);
+    return true;
+  }
+
+  // How many of a state/country Watch's places one check looks at.
+  private static readonly WATCH_PLACES_PER_CHECK = 3;
+  // A state Watch rotates through the state's 10 biggest cities (a few per check), same as a scanner account in state mode.
+  private static readonly WATCH_STATE_CITY_COUNT = 10;
+  private static readonly WATCH_STATE_RADIUS_MILES = 40;
+  private static readonly WATCH_COUNTRY_CITY_COUNT = 8;
+  private static readonly WATCH_COUNTRY_RADIUS_MILES = 500;
+  // Where each state/country Watch's rotation is up to (in memory only: after
+  // a restart it just starts again from the first place).
+  private watchPlaceCursor = new Map<string, number>();
+
+  // The most searches (terms x places) one check runs, so a Watch with many terms
+  // looks at fewer places per check rather than keeping the browser for ages.
+  private static readonly WATCH_MAX_SEARCHES_PER_CHECK = 12;
+
+  /** The next few places in this Watch's rotation (all of them, for a single-place Watch). */
+  private nextWatchPlaces(watchId: string, places: Array<{ url: string; label: string }>, termCount: number): Array<{ url: string; label: string }> {
+    const affordable = Math.max(1, Math.floor(ScrapeEngine.WATCH_MAX_SEARCHES_PER_CHECK / Math.max(1, termCount)));
+    const take = Math.min(places.length, ScrapeEngine.WATCH_PLACES_PER_CHECK, affordable);
+    const start = (this.watchPlaceCursor.get(watchId) ?? 0) % places.length;
+    this.watchPlaceCursor.set(watchId, start + take);
+    return Array.from({ length: take }, (_, i) => places[(start + i) % places.length]);
+  }
+
+  /**
+   * Works out which Facebook Marketplace places a Watch should search, resolving
+   * them through Facebook's own location dialog the first time (the same
+   * mechanism accounts use) and caching them on the Watch after that.
+   */
+  private async resolveWatchPlaces(page: Page, watch: Watch): Promise<{ places: Array<{ url: string; label: string }>; error?: string }> {
+    if (watch.locationMode === "city") {
+      const cityOrZip = (watch.selectedCityOrZip ?? "").trim();
+      // Resolved once, cached — never re-driven on a routine check (see
+      // types.ts's Watch.resolvedLocationUrl doc comment). store.
+      // updateWatch already nulls this cache out on a genuine location
+      // edit, so "not cached" here means either a brand-new watch or an
+      // edit since the last successful resolution — both correctly
+      // trigger exactly one fresh resolve.
+      if (watch.resolvedLocationUrl) return { places: [{ url: watch.resolvedLocationUrl, label: watch.resolvedLocationLabel ?? cityOrZip }] };
+      this.log("info", `Watch "${watch.name}": resolving location "${cityOrZip}"...`);
+      const result = await discoverLocation(page, cityOrZip, watch.searchRadiusMiles ?? ScrapeEngine.DEFAULT_WATCH_RADIUS_MILES);
+      if (!result.url) {
+        this.log("warn", `Watch "${watch.name}": couldn't resolve "${cityOrZip}" (${result.error ?? "no matching suggestion"}) — will retry on the next scheduled check.`);
+        return { places: [], error: result.error ?? "Could not resolve location." };
+      }
+      this.opts.store.setWatchResolvedLocation(watch.id, { url: result.url, label: result.resolvedLocationLabel, checkedAt: Date.now() });
+      return { places: [{ url: result.url, label: result.resolvedLocationLabel ?? cityOrZip }] };
+    }
+
+    const scope = watch.locationMode === "state" ? (watch.selectedState ?? "") : "the whole country";
+    if (watch.resolvedLocationUrls.length) {
+      return { places: watch.resolvedLocationUrls.map((url) => ({ url, label: placeLabelFromUrl(url, scope) })) };
+    }
+
+    let cities: string[];
+    let radius: number;
+    if (watch.locationMode === "state") {
+      try {
+        cities = await lookupTopCitiesInState(watch.selectedState ?? "", ScrapeEngine.WATCH_STATE_CITY_COUNT);
+      } catch (err) {
+        const message = `Couldn't look up cities for ${watch.selectedState}: ${(err as Error).message}`;
+        this.log("warn", `Watch "${watch.name}": ${message} — will retry on the next scheduled check.`);
+        return { places: [], error: message };
+      }
+      radius = ScrapeEngine.WATCH_STATE_RADIUS_MILES;
+    } else {
+      // Evenly spaced through the nationwide list (it runs state by state, so
+      // this lands on cities all across the country) rather than the first few.
+      const all = DEFAULT_COUNTRY_CITIES;
+      const count = Math.min(ScrapeEngine.WATCH_COUNTRY_CITY_COUNT, all.length);
+      cities = Array.from({ length: count }, (_, i) => all[Math.floor((i * all.length) / count)]);
+      radius = ScrapeEngine.WATCH_COUNTRY_RADIUS_MILES;
+    }
+
+    this.log("info", `Watch "${watch.name}": resolving ${cities.length} places for ${scope} (one-time)...`);
+    const results = await discoverLocationsViaBrowser(
+      page,
+      cities,
+      (r) => {
+        if (!r.url) this.log("warn", `Watch "${watch.name}": couldn't resolve ${r.city}: ${r.error}`);
+      },
+      radius
+    );
+    const urls = results.flatMap((r) => (r.url ? [r.url] : []));
+    if (!urls.length) {
+      return { places: [], error: `Couldn't resolve any of ${cities.length} places for ${scope} on Facebook Marketplace.` };
+    }
+    // Only remembered when most of them resolved; a poor result is used for this
+    // check but tried again properly next time, instead of being stuck with a
+    // couple of places for good.
+    if (urls.length * 2 >= cities.length) {
+      this.opts.store.setWatchResolvedLocations(watch.id, { urls, label: scope, checkedAt: Date.now() });
+    } else {
+      this.log("warn", `Watch "${watch.name}": only ${urls.length}/${cities.length} places resolved — searching those now and retrying the rest on the next check.`);
+    }
+    this.log("info", `Watch "${watch.name}": ${urls.length}/${cities.length} places ready for ${scope}.`);
+    return { places: urls.map((url) => ({ url, label: placeLabelFromUrl(url, scope) })) };
+  }
+
+  /** The account is starting but not scanning yet (it is resolving its location): show it as running, and let Stop cancel it. */
+  beginStarting(note: string): void {
     if (this.running) return;
+    this.starting = true;
     this.running = true;
     this.stopRequested = false;
+    this.setStatus({ running: true, currentActionNote: note });
+  }
+
+  /** The location lookup failed or was cancelled: back to stopped. */
+  cancelStarting(): void {
+    if (!this.starting) return;
+    this.starting = false;
+    this.running = false;
+    this.setStatus({ running: false, currentActionNote: null });
+  }
+
+  /** Stop was clicked since beginStarting() (so the caller must not go on to start scanning). */
+  get stopWasRequested(): boolean {
+    return this.stopRequested;
+  }
+
+  start(): void {
+    if (this.running && !this.starting) return;
+    this.starting = false;
+    this.running = true;
+    this.stopRequested = false;
+    this.setStatus({ currentActionNote: null });
     this.scanSetupDone = false;
     this.setStatus({ running: true });
     // Fresh scan, fresh watchcount allowance — see watchCountOncePerScan.
@@ -3056,6 +3488,11 @@ export class ScrapeEngine {
   // runOnce() itself doesn't do since it's also reused internally by the
   // continuous loop, where that reset would race against loop()'s own
   // stop check.
+  /** Ends the wait between passes early (the Dashboard's "Skip wait"). Does nothing when the scanner isn't sleeping. */
+  skipWait(): void {
+    if (this.status.sleepingUntil) this.wakeRequested = true;
+  }
+
   async triggerOnce(): Promise<void> {
     this.stopRequested = false;
     this.scanSetupDone = false;
@@ -3071,15 +3508,32 @@ export class ScrapeEngine {
         this.log("error", `Cycle failed: ${(err as Error).message}`);
       }
       if (this.stopRequested) break;
+      // The wait between passes (Config > "Wait between passes"; 0 = none). While it lasts the Dashboard's Live panel says so
+      // and counts down (status.sleepingUntil), and its "Skip wait" button ends it early (skipWait()).
       const config = this.opts.getConfig();
-      const waitMin =
-        config.pollIntervalMinutesMin +
-        Math.random() * (config.pollIntervalMinutesMax - config.pollIntervalMinutesMin);
-      this.log("info", `Cycle done. Sleeping ~${waitMin.toFixed(1)} min.`);
-      await this.sleep(waitMin * 60_000, waitMin * 60_000);
+      const lowMin = Math.max(0, config.pollIntervalMinutesMin);
+      const highMin = Math.max(lowMin, config.pollIntervalMinutesMax);
+      const waitMin = lowMin + Math.random() * (highMin - lowMin);
+      if (waitMin > 0) {
+        this.log("info", `Cycle done. Sleeping ~${waitMin.toFixed(1)} min.`);
+        // A wake request from a Watch that finished DURING the cycle just ended is
+        // stale (the cycle already ran after it); only one arriving mid-wait counts.
+        this.wakeRequested = false;
+        this.setStatus({
+          sleepingUntil: Date.now() + waitMin * 60_000,
+          currentListing: null,
+          currentActionNote: null,
+          currentReaction: null,
+          analyzingPhotos: false,
+          upcomingListings: [],
+        });
+        await this.sleep(waitMin * 60_000, waitMin * 60_000, true);
+        this.setStatus({ sleepingUntil: null });
+        this.wakeRequested = false;
+      }
     }
     this.running = false;
-    this.setStatus({ running: false, currentSearch: null });
+    this.setStatus({ running: false, currentSearch: null, sleepingUntil: null });
   }
 
   // Stops the loop AND actually closes the browser window this engine
@@ -3116,6 +3570,7 @@ export class ScrapeEngine {
     // show something the instant Stop is clicked, not only once the browser
     // has actually finished closing (up to a few seconds later).
     this.log("info", "Stopping scanner...");
+    this.starting = false;
     this.stopRequested = true;
     this.closingIntentionally = true;
     if (this.context) {

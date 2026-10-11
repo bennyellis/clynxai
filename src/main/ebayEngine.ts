@@ -15,9 +15,13 @@ import { getEbayItemDetail, hasEbayCredentials, searchEbayItems } from "./ebayCl
 import { normalizeEbayListing } from "./ebayNormalize.js";
 import { evaluateSellerRisk } from "./sellerRisk.js";
 import { matchSearchItem, scoreListing } from "./scorer.js";
+import { EbayProductFilter, summarizeDropped } from "./ebayProductFilter.js";
 import { sendDealAlert, sendWatchMatchAlert } from "./notify.js";
+import { prepareAlert, type MarketChecker } from "./preAlert.js";
+import { isSuspiciousPrice, placeholderPriceReason } from "./placeholderPrice.js";
 import { estimateListingAgeHours, isListingTooOld } from "./listingAge.js";
-import { deriveWatchReferencePrice, evaluateWatchConditions, passesWatchPriceGate, watchAsSearchItem } from "./watchMatching.js";
+import { deriveWatchReferencePrice, evaluateWatchConditions, passesWatchPriceGate, passesWatchSellerRating, watchAsSearchItem } from "./watchMatching.js";
+import { resaleSettingsFrom } from "./resaleMath.js";
 import type { Account, Config, EngineConfig, ListingDetail, ListingPreview, ListingRecord, LogLine, ScoredListing, ScrapeStatus, SearchItem, Watch } from "./types.js";
 import type { Store } from "./store.js";
 import type { NarrationContext } from "./chat.js";
@@ -73,6 +77,8 @@ export interface EbayEngineOptions {
   // (locationIndex, analyzingPhotos, currentReaction, loggedIn) are just
   // left at inert defaults; LiveAccountTile already tolerates that.
   onStatus: (status: ScrapeStatus) => void;
+  // Looks the product up on WatchCount and eBay (and files what it finds in the Database) before an alert goes out; see preAlert.ts.
+  checkMarket?: MarketChecker;
 }
 
 function idleEbayStatus(): ScrapeStatus {
@@ -114,6 +120,19 @@ export class EbayEngine {
   // reset back to false the moment there's something to search again.
   private loggedIdleState = false;
   private lastSearchAt = 0;
+  // Listings whose scoring threw (OpenAI down, a timeout...) are NOT saved —
+  // so without this, the very next tick would see them as brand new and
+  // spend another eBay detail call and another AI call on each one, over and
+  // over for as long as the outage lasts. They're parked for a while instead.
+  private scoringFailedAt = new Map<string, number>();
+  private static readonly SCORING_RETRY_AFTER_MS = 20 * 60_000;
+  // Per explicit instruction — a search for a product should only surface that
+  // product, not every game/controller/SSD/part that mentions it. See
+  // ebayProductFilter.ts. Listings it drops are never saved (so they never
+  // reach the Feed); this remembers which ones were already reported in the
+  // Activity log so the same lines aren't repeated every 90s search.
+  private productFilter = new EbayProductFilter();
+  private reportedDrops = new Set<string>();
   private status: ScrapeStatus = idleEbayStatus();
 
   constructor(private opts: EbayEngineOptions) {}
@@ -198,21 +217,64 @@ export class EbayEngine {
   }
 
   // Per explicit instruction (Config.ebay's own doc comment) — "searched
-  // automatically for every Search For item and enabled Watch," mirroring
-  // exactly what already drives Facebook's own passive matching (see
-  // scrapeEngine.ts's evaluateListing, which checks both the same way).
+  // automatically for every Search For item and enabled Watch". Only Watches
+  // that were created for eBay: a Facebook Watch is the Facebook scanner's
+  // job (scrapeEngine.ts / watchScheduler.ts), and an eBay Watch is only ever
+  // searched here.
   private buildTargets(config: Config): SearchItem[] {
-    const watches = config.watch.globallyPaused ? [] : this.opts.store.listWatches().filter((w) => w.enabled);
-    return [...config.searchItems, ...watches.map(watchAsSearchItem)];
+    return [...config.searchItems, ...this.activeEbayWatches(config).map(watchAsSearchItem)];
+  }
+
+  private activeEbayWatches(config: Config): Watch[] {
+    if (config.watch.globallyPaused) return [];
+    return this.opts.store.listWatches().filter((w) => w.enabled && w.platform === "ebay");
   }
 
   private async searchTarget(target: SearchItem, config: Config): Promise<void> {
     let raws;
     try {
-      raws = await searchEbayItems(target.item, { minPriceUsd: target.minPriceUsd, maxPriceUsd: target.maxPriceUsd, limit: 25 });
+      // 50, not 25: roughly half of a keyword search's results are typically
+      // games/accessories/parts that the product filter below throws away, so
+      // asking for more keeps a full set of real candidates (still one API call).
+      raws = await searchEbayItems(target.item, { minPriceUsd: target.minPriceUsd, maxPriceUsd: target.maxPriceUsd, limit: 50 });
     } catch (err) {
       this.log(`eBay search failed for "${target.item}": ${(err as Error).message}`, "error");
       this.pushStatus({ lastError: (err as Error).message });
+      return;
+    }
+
+    // An eBay Watch with a minimum seller rating: drop sellers below it right
+    // away, before spending the product-filter's AI call on listings that
+    // could never match. (A Search For item has no such requirement.)
+    if (target.minSellerRatingPercent != null) {
+      const min = target.minSellerRatingPercent;
+      const lowRated = raws.filter((r) => !passesWatchSellerRating(min, r.sellerFeedbackPercentage));
+      if (lowRated.length) {
+        raws = raws.filter((r) => passesWatchSellerRating(min, r.sellerFeedbackPercentage));
+        // Same once-per-listing reporting as the product filter's drops below,
+        // so the same low-rated listing isn't announced on every 90s search.
+        const fresh = lowRated.filter((r) => !this.reportedDrops.has(r.itemId));
+        if (fresh.length) {
+          for (const r of fresh) this.reportedDrops.add(r.itemId);
+          this.log(`eBay "${target.item}": left out ${fresh.length} result${fresh.length === 1 ? "" : "s"} from sellers rated under ${min}%`);
+        }
+      }
+    }
+
+    // Only the product itself goes any further — everything else (games,
+    // controllers, storage, parts, other models) is dropped here, before it
+    // can show up in the live queue or be saved.
+    try {
+      const { kept, dropped } = await this.productFilter.filter(target, raws, (itemId) => this.opts.store.hasSeenCached(`ebay-${itemId}`));
+      const fresh = dropped.filter((d) => d.reason !== "unverified" && !this.reportedDrops.has(d.raw.itemId));
+      if (fresh.length) {
+        for (const d of fresh) this.reportedDrops.add(d.raw.itemId);
+        if (this.reportedDrops.size > 5000) this.reportedDrops.clear();
+        this.log(`eBay "${target.item}": left out ${fresh.length} result${fresh.length === 1 ? "" : "s"} that aren't the product itself — ${summarizeDropped(fresh)}`);
+      }
+      raws = kept;
+    } catch (err) {
+      this.log(`eBay product filter failed for "${target.item}": ${(err as Error).message}`, "error");
       return;
     }
 
@@ -228,7 +290,7 @@ export class EbayEngine {
     });
 
     const engineConfig: EngineConfig = { ...config, ...EBAY_PSEUDO_ACCOUNT };
-    const activeWatches = config.watch.globallyPaused ? [] : this.opts.store.listWatches().filter((w) => w.enabled);
+    const activeWatches = this.activeEbayWatches(config);
 
     for (const raw of raws) {
       const id = `ebay-${raw.itemId}`;
@@ -240,7 +302,19 @@ export class EbayEngine {
       // second real API request) for anything already in the DB, same
       // dedup-before-cost ordering evaluateListing already uses.
       if (this.opts.store.hasSeenCached(id)) continue;
+      const failedAt = this.scoringFailedAt.get(id);
+      if (failedAt !== undefined && Date.now() - failedAt < EbayEngine.SCORING_RETRY_AFTER_MS) continue;
       if (!config.ignoreBlacklist && this.opts.store.isBlacklisted(raw.title)) continue;
+      // $0, $1, $1234...: not a price anyone can flip from (see placeholderPrice.ts). Skipped before the second API call, and
+      // mentioned in the log once per item rather than on every pass.
+      const rawPrice = Number(raw.priceValue);
+      if (raw.priceValue !== null && isSuspiciousPrice(rawPrice)) {
+        if (!this.reportedDrops.has(raw.itemId)) {
+          this.reportedDrops.add(raw.itemId);
+          this.log(`skip: "${raw.title}": ${placeholderPriceReason(rawPrice)}`, "info", raw.itemWebUrl);
+        }
+        continue;
+      }
 
       const detail = await getEbayItemDetail(raw.itemId);
       if (!detail) continue; // ended/deleted between search and detail fetch, or a transient error — getEbayItemDetail already swallows it
@@ -263,19 +337,24 @@ export class EbayEngine {
       const feedbackExamples = this.opts.store.getFeedbackExamples();
       let scored: ScoredListing;
       try {
-        scored = await scoreListing(listing, engineConfig, dismissedCategories, feedbackExamples);
+        scored = await scoreListing(listing, engineConfig, dismissedCategories, feedbackExamples, (item, title) => this.opts.store.getEbayValueForProductName(item, title), (title) => this.opts.store.getEbayValueForTitle(title));
       } catch (err) {
         this.log(`Scoring failed for "${listing.title}": ${(err as Error).message}`, "error", listing.url);
+        this.scoringFailedAt.set(id, Date.now());
         continue;
       }
+      this.scoringFailedAt.delete(id);
 
       this.opts.store.saveScored(scored, sellerRisk);
       this.opts.store.setListingFoundBy(listing.id, "ebay", "eBay");
-      const record = this.opts.store.listRecent(1, 0)[0];
+      const record = this.opts.store.getById(listing.id);
       if (record) this.opts.onListing(record);
 
       const priceQualifiedWatches = activeWatches.filter(
-        (w) => matchSearchItem(listing.title, [watchAsSearchItem(w)]) !== null && passesWatchPriceGate(w, listing.price!)
+        (w) =>
+          matchSearchItem(listing.title, [watchAsSearchItem(w)]) !== null &&
+          passesWatchPriceGate(w, listing.price!) &&
+          passesWatchSellerRating(w.minSellerRatingPercent, listing.seller.ebayFeedbackPercentage)
       );
       await this.recordWatchMatches(priceQualifiedWatches, scored, engineConfig);
 
@@ -287,8 +366,20 @@ export class EbayEngine {
           listing.url
         );
         try {
-          await sendDealAlert(engineConfig, scored);
-          this.opts.store.markNotified(listing.id);
+          const prepared = await prepareAlert({
+            check: this.opts.checkMarket,
+            source: this.opts.store,
+            scored,
+            netPercent: resaleSettingsFrom(engineConfig).netPercent,
+            minMarginPercent: resaleSettingsFrom(engineConfig).minMarginPercent,
+            maxCutPercent: resaleSettingsFrom(engineConfig).maxCutPercent,
+            canWithhold: true,
+            log: (m) => this.log(m, "info", listing.url),
+          });
+          if (prepared.send) {
+            await sendDealAlert(engineConfig, scored, prepared.summary);
+            this.opts.store.markNotified(listing.id);
+          }
         } catch (err) {
           this.log(`Notification failed: ${(err as Error).message}`, "error", listing.url);
         }
@@ -318,7 +409,10 @@ export class EbayEngine {
     const listingAgeHours = scored.listing.listingAge ? estimateListingAgeHours(scored.listing.listingAge) : null;
     for (const watch of watches) {
       const referencePrice = deriveWatchReferencePrice(watch, this.opts.store);
-      const result = evaluateWatchConditions(watch, price, referencePrice, listingAgeHours);
+      const result = evaluateWatchConditions(watch, price, referencePrice, listingAgeHours, {
+        netPercent: resaleSettingsFrom(config).netPercent,
+        shippingUsd: scored.listing.ebayShippingUsd ?? 0,
+      });
       if (!result.satisfied) continue;
       const match = this.opts.store.recordWatchMatch({
         watchId: watch.id,
@@ -333,7 +427,25 @@ export class EbayEngine {
       if (!match) continue;
       this.log(`WATCH MATCH: "${watch.name}" — ${scored.listing.title} — $${price}`, "deal", scored.listing.url);
       try {
-        await sendWatchMatchAlert(config, watch, scored, { discoveryMode: "active", discountPercentAtMatch: result.discountPercent, profitUsdAtMatch: result.profitUsd }, referencePrice);
+        const prepared = await prepareAlert({
+          check: this.opts.checkMarket,
+          source: this.opts.store,
+          scored,
+          netPercent: resaleSettingsFrom(config).netPercent,
+          minMarginPercent: resaleSettingsFrom(config).minMarginPercent,
+          maxCutPercent: resaleSettingsFrom(config).maxCutPercent,
+          referencePriceUsd: referencePrice,
+          canWithhold: false,
+          log: (m) => this.log(m, "info", scored.listing.url),
+        });
+        await sendWatchMatchAlert(
+          config,
+          watch,
+          scored,
+          { discoveryMode: "active", discountPercentAtMatch: result.discountPercent, profitUsdAtMatch: result.profitUsd },
+          referencePrice,
+          prepared.summary
+        );
         this.opts.store.markWatchMatchNotified(match.id);
       } catch (err) {
         this.log(`Watch notification failed: ${(err as Error).message}`, "error", scored.listing.url);
@@ -363,7 +475,7 @@ export class EbayEngine {
       sellerRiskReasons ? { passed: false, reasons: sellerRiskReasons } : undefined
     );
     this.opts.store.setListingFoundBy(listing.id, "ebay", "eBay");
-    const record = this.opts.store.listRecent(1, 0)[0];
+    const record = this.opts.store.getById(listing.id);
     if (record) this.opts.onListing(record);
   }
 }

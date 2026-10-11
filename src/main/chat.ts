@@ -1,4 +1,7 @@
 import type { BlacklistTerm, Config, ListingRecord, LogLine, ProductProfile, Watch } from "./types.js";
+import { CLYNX_PERSONA, whereYouAre } from "./clynxPersona.js";
+import { CLYNX_VOICE } from "./voice.js";
+import { isLowAiMode } from "./aiMode.js";
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 
 export interface ChatMessage {
@@ -28,6 +31,7 @@ export interface ToolCall {
     | "remove_search_item"
     | "add_custom_instruction"
     | "research_product"
+    | "web_research"
     | "add_product_watch_note"
     | "add_blacklist_term"
     | "remove_blacklist_term"
@@ -89,11 +93,13 @@ const DASHBOARD_TOOL_NAMES = new Set<ToolCall["name"]>([
   "resume_watch",
   "delete_watch",
   "list_watch_matches",
+  // Clynx looking something up on its own, like a person googling: every chat has it.
+  "web_research",
 ]);
 
-const DATABASE_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_blacklist_term", "remove_blacklist_term"]);
+const DATABASE_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "web_research", "add_blacklist_term", "remove_blacklist_term"]);
 
-const PRODUCT_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_product_watch_note"]);
+const PRODUCT_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "web_research", "add_product_watch_note"]);
 
 // Per explicit instruction — everything Dashboard can do, plus
 // research_product (Database's own product-research tool). Deliberately
@@ -142,6 +148,10 @@ const TOOLS = [
             type: ["number", "null"],
             description: "This product's own price ceiling — listings above it are skipped. Only set if the user actually stated one for this product; otherwise omit (no ceiling).",
           },
+          includeBroken: {
+            type: "boolean",
+            description: "true = ALSO look for broken / for-parts / not-working copies of this product and price them as their own Database variant (they often resell well). Only set it when the user asks for broken or for-parts items.",
+          },
         },
         required: ["item", "matchKeywords"],
       },
@@ -165,9 +175,28 @@ const TOOLS = [
   {
     type: "function",
     function: {
+      name: "web_research",
+      description:
+        "Look something up on the web yourself, the way a person would with a search engine: you get back the text of the top few pages to read and then explain in your own words. Use it whenever facts matter and you're not sure or they may have changed: specs and model differences, common faults and what to check before buying, rough going rates and what sells, scam patterns, how an eBay or Marketplace rule works, whether something is worth flipping. You can call it more than once (e.g. one search per product you're comparing). It does NOT save anything to the Database and doesn't touch any app setting; use research_product when the user wants a profile saved. Don't use it for questions about the app itself (you already know how it works) or for chit-chat.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "What to search for, worded like a search-engine query, e.g. 'Xbox Series S common problems buying used', 'PS5 Slim disc vs digital resale value', 'iPhone 13 battery health what to check before buying'.",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "research_product",
       description:
-        "Build (or refresh) a persistent Database profile for a product — an AI-written writeup from a real live web search, plus a reference photo, saved so it's there for next time instead of re-researched from scratch. Use this whenever the user asks you to learn about, research, or build a profile for a product, or when a conversation makes clear they're seriously interested in one you don't already have solid info on. A broad, family-level request (\"research iPhones\", \"look into Nintendo Switch\") is normal and should NOT be refused or narrowed down — call this once with the general family name, and the writeup itself is expected to cover the real variants within it (storage sizes, generations, OLED vs base, etc.), same as one product having multiple sub-models in real life. Only ask a clarifying question if the request could mean genuinely different, unrelated products (not just \"which variant of the same thing\"). This is separate from add_search_item (which starts actively searching Facebook Marketplace for it) — call both if the user wants both.",
+        "Build (or refresh) a persistent Database profile for a product — a writeup Clynx writes from a real live web search, plus a reference photo, saved so it's there for next time instead of re-researched from scratch. Use this whenever the user asks you to learn about, research, or build a profile for a product, or when a conversation makes clear they're seriously interested in one you don't already have solid info on. A broad, family-level request (\"research iPhones\", \"look into Nintendo Switch\") is normal and should NOT be refused or narrowed down — call this once with the general family name, and the writeup itself is expected to cover the real variants within it (storage sizes, generations, OLED vs base, etc.), same as one product having multiple sub-models in real life. Only ask a clarifying question if the request could mean genuinely different, unrelated products (not just \"which variant of the same thing\"). This is separate from add_search_item (which starts actively searching Facebook Marketplace for it) — call both if the user wants both.",
       parameters: {
         type: "object",
         properties: {
@@ -204,7 +233,7 @@ const TOOLS = [
     function: {
       name: "add_blacklist_term",
       description:
-        "Add a term/phrase to the scanning blacklist — any listing whose title contains it gets skipped automatically, before it's ever opened or scored, with no further AI call spent on it. Only for things categorically unrelated to a mail-order resale business — real estate (a house/apartment for sale OR rent), job postings, service offerings, event tickets, personals — NOT for resalable items that are just uninteresting (that's a different, separate mechanism). Call this whenever the user says to blacklist/ignore/stop showing something like that. Keep the term general enough to catch the whole category, not just one exact listing's wording.",
+        "Add a term/phrase to the scanning blacklist — any listing whose title contains it gets skipped automatically, before it's ever opened or scored, with no further credits spent on it. Only for things categorically unrelated to a mail-order resale business — real estate (a house/apartment for sale OR rent), job postings, service offerings, event tickets, personals — NOT for resalable items that are just uninteresting (that's a different, separate mechanism). Call this whenever the user says to blacklist/ignore/stop showing something like that. Keep the term general enough to catch the whole category, not just one exact listing's wording.",
       parameters: {
         type: "object",
         properties: {
@@ -233,7 +262,7 @@ const TOOLS = [
     function: {
       name: "set_general_deal_detection",
       description:
-        "Turn general (unverified) deal flagging on or off — the AI's own broad guessing at whether ANY listing looks underpriced, independent of the Search For list. Turn this OFF when the user expresses they want the scraper focused only on specific item(s) they're tracking and nothing else — e.g. 'I only want PS5s, don't show me anything unrelated', 'just focus on what I asked for', 'stop flagging random stuff'. Turn it back ON if they later say they want to see other possible deals again.",
+        "Turn general (unverified) deal flagging on or off — Clynx's own broad guessing at whether ANY listing looks underpriced, independent of the Search For list. Turn this OFF when the user expresses they want the scraper focused only on specific item(s) they're tracking and nothing else — e.g. 'I only want PS5s, don't show me anything unrelated', 'just focus on what I asked for', 'stop flagging random stuff'. Turn it back ON if they later say they want to see other possible deals again.",
       parameters: {
         type: "object",
         properties: {
@@ -267,9 +296,11 @@ const TOOLS = [
         type: "object",
         properties: {
           dealThresholdPercent: { type: "number", description: "% under reference price to count as a deal" },
+          ebayNetPercent: { type: "number", description: "What the user keeps of an eBay sale, as a % of the sold price (default 84, after eBay's ~13.75% cut)" },
+          minProfitMarginPercent: { type: "number", description: "How much of the money kept from reselling a purchase must be profit for it to count as a deal (default 20)" },
           listingsPerLocation: { type: "number", description: "How many listings to evaluate at one location before rotating to the next" },
-          pollIntervalMinutesMin: { type: "number" },
-          pollIntervalMinutesMax: { type: "number" },
+          pollIntervalMinutesMin: { type: "number", description: "Shortest wait between scanner passes, in minutes (0 = no wait)" },
+          pollIntervalMinutesMax: { type: "number", description: "Longest wait between scanner passes, in minutes" },
           headless: { type: "boolean", description: "true = browser runs invisibly, false = visible window" },
           customInstructions: { type: "string", description: "Replaces the ENTIRE custom-instructions text" },
           photoAnalysisEnabled: { type: "boolean" },
@@ -356,6 +387,26 @@ const TOOLS = [
               "Lowercase keywords/phrases likely to appear in a matching listing title, e.g. ['ps5 slim', 'playstation 5 slim'] — used to recognize a match once a listing's already been found, NOT what gets searched for (that's `searchPhrase`, above). Same idea as add_search_item's own matchKeywords.",
           },
           name: { type: "string", description: "Short display name for the Watch card. Falls back to searchPhrase if omitted." },
+          alsoWatchFor: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Facebook Watches only: other products the SAME Watch should also look out for (each a short product name, e.g. ['PS5', 'Nintendo Switch']). A Facebook Watch waits for any of its products to turn up; only list ones the user actually named.",
+          },
+          checkIntervalMinutes: {
+            type: ["number", "null"],
+            description: "Facebook Watches only: how often to check, in minutes (5, 10, 15, 30, 60, 120 or 240; other numbers are rounded to the nearest). Only set if the user said how often; 15 is used otherwise.",
+          },
+          platform: {
+            type: "string",
+            enum: ["facebook", "ebay"],
+            description:
+              "Which marketplace this Watch looks on. Default to 'facebook' unless the user says eBay. An 'ebay' Watch has no location (eBay is searched nationwide) — leave locationMode, selectedCityOrZip, selectedState and searchRadiusMiles out for it.",
+          },
+          minSellerRatingPercent: {
+            type: ["number", "null"],
+            description: "eBay Watches only: skip sellers whose positive-feedback rating is below this percent (0-100), e.g. 98. Only set if the user stated one.",
+          },
           minPriceUsd: { type: ["number", "null"], description: "Only set if the user stated a price floor." },
           maxPriceUsd: { type: ["number", "null"], description: "Only set if the user stated a price ceiling." },
           minProfitUsd: {
@@ -372,11 +423,11 @@ const TOOLS = [
             type: "string",
             enum: ["city", "state", "country"],
             description:
-              "How this Watch picks its OWN search location — deliberately separate from wherever the Scanner itself is currently browsing. 'city' actively, proactively checks Facebook on a schedule at one specific place; 'state'/'country' currently only get passive coverage (matched against whatever the Scanner happens to see while browsing), not a proactive check of their own — mention that tradeoff if the user asks for broad coverage. Default to 'city' unless they clearly want something broader.",
+              "How this Watch picks its OWN search location — deliberately separate from wherever the Scanner itself is currently browsing. 'city' (a ZIP code or city) searches Facebook around one specific place; 'state' searches the state's biggest cities; 'country' searches a spread of cities across the US. All three are actively checked on a schedule. Default to 'city' unless they clearly want something broader.",
           },
           selectedCityOrZip: { type: ["string", "null"], description: "Required when locationMode is 'city' — a city name or ZIP, e.g. 'Richmond, Virginia'." },
           selectedState: { type: ["string", "null"], description: "Required when locationMode is 'state' — the full state name." },
-          searchRadiusMiles: { type: ["number", "null"], description: "Miles around the location above. Only set if the user stated one; a sensible default is used otherwise." },
+          searchRadiusMiles: { type: ["number", "null"], description: "Miles around the ZIP/city (locationMode 'city' only; state and country Watches use a fixed radius). Facebook only offers 1, 2, 5, 10, 20, 40, 60, 80, 100, 250 or 500 miles, so any other number is rounded to the nearest of those. Only set if the user stated one; 20 is used otherwise." },
         },
         required: ["searchPhrase", "matchKeywords"],
       },
@@ -476,28 +527,26 @@ function buildDashboardSystemPrompt(
 
   const watchTail = watches.length
     ? watches
-        .map((w) => `"${w.name}"${w.enabled ? "" : " (paused)"} — ${w.matchCount} match${w.matchCount === 1 ? "" : "es"} so far`)
+        .map((w) => `"${w.name}" (${w.platform === "ebay" ? "eBay" : "Facebook"})${w.enabled ? "" : " (paused)"} — ${w.matchCount} match${w.matchCount === 1 ? "" : "es"} so far`)
         .join(", ")
     : "none yet";
 
-  return `You are ${isGlobal ? "the assistant built into Clynx" : "the Dashboard assistant inside Clynx"}, a desktop tool that browses Facebook Marketplace and screens listings for resale deals. ${isGlobal ? "You're available from a small bar at the bottom of every screen in the app — Feed, Database, Config, wherever the user currently is — not just one page." : ""} You're talking directly with the person who owns and runs this tool, in an ordinary back-and-forth chat — not a scripted command console. Hold context across the conversation and respond conversationally to whatever they bring up, the same as you would anywhere else, while staying useful specifically for their reselling work.
+  return `${CLYNX_PERSONA}
 
-You should understand the WHOLE app well enough to explain any part of it${isGlobal ? "" : ", even the parts you can't directly control from here"}:
-- Feed screen: a grid of every listing that turned out to be a deal or otherwise worth a look (a plain uninteresting skip never shows up there at all, by design). Each card has a photo carousel, the seller's own description with a show-more toggle, a seller-rating line, and Interested/Not interested/Research buttons. A small yellow clock icon on a card's photo means that seller's Facebook account is under a year old — that's the only seller-risk signal currently shown there.
-- Database screen${
+${whereYouAre(isGlobal ? "global" : "dashboard")} It's an ordinary back-and-forth chat with the person who owns and runs you, not a command console: keep the thread of the conversation and respond to whatever they bring up, whether that's a reselling question, a listing they found, or a setting they want changed.
+
+Two extra things about the app that matter when you act:
+- The Database has its own separate conversation (the Discovery tab) with its own history${
     isGlobal
-      ? " (its own separate conversation with its own history, but you have the SAME research_product tool it does — no need to send the user there just to look something up)"
-      : " (its own separate assistant/conversation, with its own tools — you can't do what it does and don't share history with it; point the user there for in-depth product research)"
-  }: holds researched product profiles, a reference-photo library built automatically from confirmed deals (used to visually recognize that product in future listings), and the full Blacklist list with add/remove — you ${
-    isGlobal ? "have" : "now also have your own"
-  } add_blacklist_term/remove_blacklist_term tools below, so the user doesn't need to switch tabs just for that.
-- Seller risk filter (config.sellerRisk below): screens out sellers by account age/rating before a listing counts as a deal.
-- Blacklist: any listing whose title matches a blacklisted term/phrase is skipped before it's ever opened, no AI call spent on it. Terms come from the user directly or get auto-suggested by the AI when a listing looks categorically unrelated to reselling (real estate, job postings, services...) — never from a listing just being uninteresting or cash/pickup-only.
+      ? ", but you have the same research_product tool it does, so there's no need to send the user there just to save a product"
+      : "; you can't do what it does and don't share its history, so point the user there when they want a product researched and saved"
+  }. You also have add_blacklist_term/remove_blacklist_term here, so they don't need to switch tabs for that.
+- The seller risk filter (shown in the setup below) screens sellers by account age/rating before a listing counts as a deal; the Blacklist skips any listing whose title matches a term before it's even opened (terms come from the user, or are auto-added when a listing is clearly unrelated to reselling: real estate, jobs, services; never just because a listing is uninteresting or cash/pickup-only).
 
-You have full admin access to this app's own settings and controls — whatever the user asks for, look for a tool that does it before telling them to go do it themselves in Config:
+You have full admin access to this app's own settings and controls. Whatever the user asks you to change, look for a tool that does it before telling them to go do it themselves in Config. When they ask you something instead (what should I flip, is this a good price, how does X work), just answer like the expert you are, and use web_research when you'd otherwise be guessing at facts that matter. Your tools:
 - add_search_item / remove_search_item — add or remove a well-defined product on the Search For list, so the scraper actively searches for it at every location. Call this as soon as they ask — price range is per-product now (add_search_item's own minPriceUsd/maxPriceUsd args), so only set those if the user actually stated a range for this specific product in the same request; otherwise leave them out rather than asking as a separate follow-up. The Dashboard's own Search For Products section lists everything currently on the list (with each item's price range shown right on its pill) and has a one-click × to remove any of them.
 - add_custom_instruction — append looser deal-finding guidance that isn't one specific trackable product (use update_config's customInstructions field instead if they want to replace/clear the whole thing rather than add one more line).
-- set_general_deal_detection — turn off (or back on) the AI's own broad "maybe this is a deal" guessing on things outside the Search For list. Use this whenever the user expresses exclusive/focused intent — "only", "just", "nothing else", "don't show me unrelated stuff" — paired with a specific item. E.g. if they say "find me PS5s, I don't want to see t-shirts or random junk", call add_search_item for the PS5 AND set_general_deal_detection(enabled: false) in the same turn, so the scraper actually stops surfacing unrelated general-tier guesses instead of just adding the tracked item on top of everything else it was already flagging.
+- set_general_deal_detection — turn off (or back on) Clynx's own broad "maybe this is a deal" guessing on things outside the Search For list. Use this whenever the user expresses exclusive/focused intent — "only", "just", "nothing else", "don't show me unrelated stuff" — paired with a specific item. E.g. if they say "find me PS5s, I don't want to see t-shirts or random junk", call add_search_item for the PS5 AND set_general_deal_detection(enabled: false) in the same turn, so the scraper actually stops surfacing unrelated general-tier guesses instead of just adding the tracked item on top of everything else it was already flagging.
 - update_config — change any other setting directly: deal threshold, listings per location, poll interval, headless mode, photo-analysis toggle, general-deal confidence, seller-risk filters, ntfy topic.
 - start_scanner / stop_scanner — start or stop continuous scanning. The Activity page logs the instant either one is clicked/called, so the user can always see it actually happened, not just the button's own label changing.
 - clear_feed — permanently wipes every listing in the Feed. Only call this on a clear, specific request to clear/wipe/empty the feed — never as a guess or a side effect of something else, and if it's at all ambiguous whether they mean it, ask in plain text first instead of calling it.
@@ -514,6 +563,8 @@ The user can attach photos to a message (an 📎 button next to the text box) �
 
 Current setup:
 - Deal threshold: ${config.dealThresholdPercent}% under reference price
+- Resale math: the user keeps ${config.ebayNetPercent}% of what an eBay buyer pays in total (item + shipping); a listing is a deal when buying it leaves at least ${config.minProfitMarginPercent}% of that as profit, and listings that would need more than ${config.maxNegotiationPercent ?? 15}% off the asking price to get there are skipped
+- Linked eBay store: ${config.ebayStoreUsername?.trim() ? config.ebayStoreUsername.trim() : "not linked"}
 - Search For list: ${searchList}
 - General (unverified) deal detection: ${config.generalDeal.enabled ? "on, checking listings at any price" : "off"}
 - Custom instructions in effect: ${config.customInstructions.trim() || "none"}
@@ -523,7 +574,8 @@ Current setup:
           return `"${a.label}"${a.enabled ? "" : " (disabled)"} — ${where}`;
         })
         .join("; ")}, rotating every ${config.listingsPerLocation} listings per account
-- Poll interval: ${config.pollIntervalMinutesMin}-${config.pollIntervalMinutesMax} min between cycles
+- The scanner has no wait between cycles: it starts the next pass as soon as one finishes
+- Wait between scanner passes: ${config.pollIntervalMinutesMin}-${config.pollIntervalMinutesMax} min (0 = no wait; the Dashboard has a Skip wait button)
 - Headless browser: ${config.headless}
 - Never skip or discount a listing for being cash/local-pickup-only, or for not spelling out model/serial numbers in the text — that's expected, not a red flag
 - Photo analysis auto-check: ${config.photoAnalysis.enabled}
@@ -539,10 +591,10 @@ ${logTail || "(none yet)"}
 Recent evaluated listings:
 ${listingTail || "(none yet)"}
 
-This renders in a normal chat window, so write like a person chatting, not a report. Keep every reply to 1-2 sentences, no exceptions — say the one thing that's actually useful and stop, don't pad it out with extra context or caveats. After using a tool, confirm what you did/found in that same 1-2 sentences, not a rundown.`;
+This renders in a normal chat window, so write like a person chatting, not a report, and stay in character as Clynx. After you use a tool, say what you did in a line or two in your own words (e.g. "Done, I'll hunt for Series S under $250 next time I scan" beats "Added to Search For list"), and mention anything the tool result says they still need to do (like starting the scanner).`;
 }
 
-function buildDatabaseSystemPrompt(products: ProductProfile[], blacklistTerms: BlacklistTerm[]): string {
+function buildDatabaseSystemPrompt(products: ProductProfile[], blacklistTerms: BlacklistTerm[], focus: ProductProfile | null = null): string {
   const blacklistList = blacklistTerms.length ? blacklistTerms.map((t) => `- "${t.term}"${t.source === "ai" ? " (auto-added)" : ""}`).join("\n") : "(none yet)";
   const productList = products.length
     ? products
@@ -567,13 +619,27 @@ function buildDatabaseSystemPrompt(products: ProductProfile[], blacklistTerms: B
         .join("\n")
     : "(none yet)";
 
-  return `You are the assistant on the Database screen of Clynx — a SEPARATE assistant from the one on the Dashboard, with your own conversation. Your only job is researching and maintaining product knowledge profiles; you have NO ability to control the scanner, change app settings, manage the Search For list, or do anything else the Dashboard assistant does — those tools genuinely aren't available to you here, so never claim to have started/stopped scanning or changed a setting. If the user asks for that kind of thing, tell them plainly this chat can't do it and point them to the Dashboard's own assistant.
+  const attachNote = "They may attach photos or the text of files (receipts, spec sheets, notes) to learn about a product, even one that isn't in the Database yet: read them carefully, say what you can tell from them, and use research_product when they want it looked into.";
+  const focusSection = focus
+    ? `The user has "${focus.name}" selected in the feed, so unless they clearly mean something else, their questions are about it. What the Database knows about it:
+${productFactLines(focus)}
+${attachNote}
+
+`
+    : `${attachNote}
+
+`;
+
+  return `${CLYNX_PERSONA}
+
+${whereYouAre("database")} This chat has its own conversation and its own tools, separate from the Clynx chat on the Activity screen and the bubble on other screens. From here your job is product knowledge: talking products through with the user, researching them, saving profiles and maintaining the blacklist. You genuinely can't start or stop the scanner, change settings or manage the Search For list from this chat (those tools aren't available here), so never claim you did. If they ask for that kind of thing, say so plainly and point them to the Clynx bubble or the Activity chat.
 
 Your tools:
+- web_research — look something up on the web yourself, like a person with a search engine, and explain what you found in your own words. Use it for questions and opinions ("is the Series S worth flipping?", "what breaks on these?"); it doesn't save anything.
 - research_product — build (or refresh) an in-depth product profile from a real live web search for specs/variants/common issues (not just your own training knowledge), saved to the Database so it's there for next time. Call this whenever the user asks you to learn about/research/build a profile for a product. A broad, family-level request ("research iPhones", "look into Nintendo Switch") is completely normal — call this once with the general family name and let the writeup itself cover the real variants (storage sizes, generations, OLED vs base, etc.); don't refuse it or demand they narrow it down to one exact SKU first. Only ask a clarifying question if the request could genuinely mean different, unrelated products. Pass ONLY the general, canonical product name as the product argument — e.g. "Xbox Series X", "iPhone", "Nintendo Switch" — never a parenthetical qualifier or variant/bundle/accessory list tacked onto it (NOT "Xbox Series X (console, all variants/bundles/accessories)"); that kind of detail belongs in the writeup itself, not the title.
-- add_blacklist_term / remove_blacklist_term — manage the scanning blacklist: any listing whose title matches a blacklisted term gets skipped automatically before it's ever opened, with no AI call spent on it. Only for things categorically unrelated to reselling (real estate, rentals, job postings, services, event tickets), not just uninteresting resalable items. Call add_blacklist_term whenever the user says to blacklist/ignore/stop showing something like that.
+- add_blacklist_term / remove_blacklist_term — manage the scanning blacklist: any listing whose title matches a blacklisted term gets skipped automatically before it's ever opened, with no credits spent on it. Only for things categorically unrelated to reselling (real estate, rentals, job postings, services, event tickets), not just uninteresting resalable items. Call add_blacklist_term whenever the user says to blacklist/ignore/stop showing something like that.
 
-Existing products in the Database:
+${focusSection}Existing products in the Database:
 ${productList}
 
 Current blacklist:
@@ -581,15 +647,12 @@ ${blacklistList}
 
 The user can also edit any stat by hand (an Edit button on each product's page) if something turns out wrong or goes stale — you're a starting point, not the final word, so don't be defensive if they correct you. They can also log their own real sales history there (what they actually sold it for on eBay, and how long it took) — that's the "user has sold this for..." line above when it's set; treat it as more trustworthy than your own web-sourced estimate if the two disagree. A "★ prioritized" product was starred directly on its Library tile — a manual "this one's noteworthy" flag, not something you set yourself; it never changes the Search For list or any filter on its own, it's purely context for you to weigh interest/attention toward. The blacklist above also grows on its own sometimes — the scanner auto-adds a term when it recognizes a listing as clearly unrelated to reselling (marked "(auto-added)") — the user may ask you to remove one of those if it was too broad or wrong.
 
-This renders in a normal chat window, so write like a person chatting, not a report. Keep every reply to 1-2 sentences, no exceptions — the full research itself lives on the product card, not in this chat, so don't restate it here. After using a tool, confirm what you did in that same 1-2 sentences.`;
+This renders in a normal chat window, so write like a person chatting, not a report, and stay in character as Clynx. When you've researched and saved a product the full writeup lives on its card, so don't paste it here: tell them what stood out in a couple of lines. After using a tool, say what you did in your own words.`;
 }
 
-// The chat on one specific product's own Database page — per explicit
-// instruction, this needs to actually understand it's scoped to that one
-// product (not require the user to keep re-naming it) and be able to log
-// practical "watch for X" instructions that affect live scanning
-// immediately, not just future research.
-function buildProductSystemPrompt(product: ProductProfile): string {
+// What the Database knows about one product, as prompt lines: shared by the product page's chat and the Discovery tab's
+// chat when a product is open there.
+function productFactLines(product: ProductProfile): string {
   const resale =
     product.resalePriceUsd !== null
       ? `User's own sales history: sold for ~$${product.resalePriceUsd}${product.resaleTimeToSell ? `, typically in ${product.resaleTimeToSell}` : ""}.`
@@ -600,19 +663,46 @@ function buildProductSystemPrompt(product: ProductProfile): string {
       : "No desired price set yet.";
   const priority = product.prioritized ? "★ Prioritized by the user — noteworthy, worth extra attention when it comes up." : "";
 
-  return `You are the assistant on the Database page for ONE specific product in Clynx — "${product.name}". Everything in this conversation is about this product specifically; the user doesn't need to keep naming it.
-
-Current research summary: ${product.aiSummary || "(none yet)"}
+  // What the Database already knows about its eBay value (what the buyer pays in total: sold item price + shipping).
+  const money = (n: number) => `$${Math.round(n)}`;
+  const shipping = Math.max(0, product.ebayAvgShippingUsd ?? 0);
+  const soldTotal = product.ebayAvgSoldPriceUsd !== null && (product.ebayCompsSampleSize ?? 0) > 0 ? product.ebayAvgSoldPriceUsd + shipping : null;
+  const ebayValue =
+    product.ebayEstimatedValueUsd !== null || soldTotal !== null
+      ? `eBay value in the Database: about ${money(product.ebayEstimatedValueUsd ?? (soldTotal as number))} (what a buyer pays in total)${soldTotal !== null ? `; sold average ${money(soldTotal)} from ${product.ebayCompsSampleSize} sale${product.ebayCompsSampleSize === 1 ? "" : "s"}` : ""}${
+          product.ebayActiveMedianUsd !== null ? `; asking median ${money(product.ebayActiveMedianUsd)} from ${product.ebayActiveSampleSize ?? 0} listing${product.ebayActiveSampleSize === 1 ? "" : "s"}` : ""
+        }${product.ebayAvgRunTimeDays !== null ? `; sells in about ${product.ebayAvgRunTimeDays < 1 ? "under a day" : `${product.ebayAvgRunTimeDays.toFixed(1)} days`}` : ""}.`
+      : "No eBay value researched for it yet.";
+  const store = product.myStore ? `The user's own eBay store (${product.myStore.seller}) lists it for about ${money(product.myStore.medianUsd)}.` : "";
+  return `Current research summary: ${product.aiSummary || "(none yet)"}
 Watch-for notes already logged: ${product.lookoutNotes || "(none yet)"}
+${ebayValue}
+${store}
 ${resale}
 ${desired}
-${priority}
+${priority}`;
+}
+
+// The chat on one specific product's own Database page — per explicit
+// instruction, this needs to actually understand it's scoped to that one
+// product (not require the user to keep re-naming it) and be able to log
+// practical "watch for X" instructions that affect live scanning
+// immediately, not just future research.
+function buildProductSystemPrompt(product: ProductProfile): string {
+  const facts = productFactLines(product);
+
+  return `${CLYNX_PERSONA}
+
+${whereYouAre("product", product.name)} This chat has its own conversation and tools: from here you can talk about this product, look things up, refresh its research and log watch-for notes. You can't start/stop the scanner or change settings from this chat; if they ask, say so and point them to the Clynx bubble or the Activity chat.
+
+${facts}
 
 Your tools:
+- web_research — look something up on the web yourself, like a person with a search engine, and explain what you found in your own words (specs, faults, what it really sells for, what to check). It doesn't save anything.
 - research_product — refresh this product's research from a fresh live web search. Call it with "${product.name}" as the product argument unless the user is clearly now asking about a genuinely different product.
 - add_product_watch_note — log something to actively check for in real listings of this product: a commonly bundled extra that adds resale value and that sellers often photograph without mentioning in the title (games with a console, a lens with a camera, cables/accessories), or a condition red flag. Call this whenever the user describes something like that. If they mention something bundle- or condition-related but haven't given you a clear, actionable instruction yet, ask a short clarifying question first (e.g. "should I flag listings that mention games, or just check photos for game cases?").
 
-This renders in a normal chat window, so write like a person chatting, not a report. Keep every reply to 1-2 sentences, no exceptions. After using a tool, confirm what you did in that same 1-2 sentences.`;
+This renders in a normal chat window, so write like a person chatting, not a report, and stay in character as Clynx. After using a tool, say what you did in your own words.`;
 }
 
 interface AccumulatedToolCall {
@@ -645,7 +735,7 @@ async function streamOnce(
       {
         model: OPENAI_MODEL,
         messages,
-        max_completion_tokens: 600,
+        max_completion_tokens: 900,
         // gpt-5-mini is a reasoning model — verified live it silently burns
         // the whole completion-token budget on invisible reasoning tokens
         // without this (see openai.ts).
@@ -759,7 +849,7 @@ export async function streamChat(
       ? buildDashboardSystemPrompt(config, recentLogs, recentListings, blacklistTerms, products.length, watches, context === "global")
       : context === "product" && currentProduct
         ? buildProductSystemPrompt(currentProduct)
-        : buildDatabaseSystemPrompt(products, blacklistTerms);
+        : buildDatabaseSystemPrompt(products, blacklistTerms, currentProduct);
   const tools = toolsForContext(context);
   const userContent: unknown = attachments.length
     ? [
@@ -774,45 +864,39 @@ export async function streamChat(
   ];
 
   let fullContent = "";
-  // Once add_search_item actually succeeds, the reply the user sees for
-  // this turn is always this deterministic line, not whatever text the
-  // model wrote — per explicit instruction, starting a search doesn't need
-  // a prompted response from the model at all, just an immediate
-  // "Searching..." confirmation, with nothing from the model itself ever
-  // reaching the screen. Every round below that can still decide to call a
-  // tool is buffered (not streamed live) for exactly that reason: forwarding
-  // tokens to onChunk as they arrive would let the model's own preamble
-  // text flash on screen for the second or two before the round finishes
-  // and we find out it was actually a search request — buffering and only
-  // releasing the text once we know it's safe closes that gap completely.
-  // (add_search_item is Dashboard-only anyway, so this is a no-op on the
-  // Database side — searchStartedItem simply never gets set there.)
-  let searchStartedItem: string | null = null;
-  // Set once research_product succeeds — per explicit instruction, every
-  // research reply ends with a deterministic prompt asking whether the user
-  // has sold this item before, so they're actually invited to log their
-  // real sales history (see ProductProfile's resalePriceUsd/
-  // resaleTimeToSell) instead of that feature going unused because nothing
-  // ever mentions it. Deterministic rather than left to the model to
-  // remember to ask every single time, same reasoning as searchStartedItem
-  // above. (research_product is Database-only, so this never fires
-  // alongside searchStartedItem, which is Dashboard-only.)
+  // add_search_item used to be answered with a fixed "Searching..." line, from when adding an item started a search right away.
+  // Adding only queues it now (the scanner picks it up on its next pass), and Clynx confirms in its own words using what the
+  // tool result says. Everything the model says is streamed live, including a lead-in before a tool call ("Let me dig into
+  // that."), so it reads like a person thinking out loud; text from separate rounds is separated by a blank line.
+  const streamRound = async (roundTools: typeof tools | null) => {
+    const needsGap = fullContent.length > 0;
+    let started = false;
+    const result = await streamOnce(messages, roundTools, (delta) => {
+      if (!started) {
+        if (!delta.trim()) return;
+        started = true;
+        if (needsGap) onChunk("\n\n");
+      }
+      onChunk(delta);
+    });
+    const text = result.content.trim();
+    if (text) fullContent += (fullContent ? "\n\n" : "") + text;
+    return result;
+  };
+  // Set once research_product succeeds — per explicit instruction, every research reply ends with a prompt asking whether the
+  // user has sold this item before, so they're invited to log their real sales history (see ProductProfile's
+  // resalePriceUsd/resaleTimeToSell) instead of that feature going unused. Deterministic rather than left to the model to
+  // remember to ask every single time.
   let researchedProduct = false;
-  const RESOLD_PROMPT = " Have you sold this item before? If so, add the average price and how long it took to sell on this product's page.";
+  const RESOLD_PROMPT = " By the way, have you sold one of these before? If you add what it went for and how long it took on this product's page, I'll use it to judge deals better.";
   const withResoldPrompt = (content: string) => (researchedProduct ? `${content}${RESOLD_PROMPT}` : content);
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    let buffered = "";
-    const result = await streamOnce(messages, tools, (delta) => {
-      buffered += delta;
-    });
-    fullContent += result.content;
+    const result = await streamRound(tools);
 
-    // No tool call this round means nothing to hide — release the buffered
-    // text now.
+    // No tool call this round: that was the answer.
     if (!result.toolCalls.length) {
-      onChunk(buffered);
-      return searchStartedItem ? "Searching..." : withResoldPrompt(fullContent);
+      return withResoldPrompt(fullContent);
     }
 
     messages.push({
@@ -830,9 +914,6 @@ export async function streamChat(
       try {
         const args = tc.args ? JSON.parse(tc.args) : {};
         toolResult = await executeTool({ name: tc.name as ToolCall["name"], args });
-        if (tc.name === "add_search_item" && !toolResult.startsWith("Failed:")) {
-          searchStartedItem = typeof args.item === "string" && args.item.trim() ? args.item.trim() : "that";
-        }
         if (tc.name === "research_product" && !toolResult.startsWith("Failed:")) {
           researchedProduct = true;
         }
@@ -841,33 +922,12 @@ export async function streamChat(
       }
       messages.push({ role: "tool", tool_call_id: tc.id, content: toolResult });
     }
-
-    // The common case — "find me X" with nothing else going on this turn —
-    // needs no further AI round just to produce an acknowledgment: the
-    // reply is already decided, so return immediately instead of spending
-    // another call asking the model what to say next. A round that also did
-    // something else (e.g. also turning off general-deal detection) still
-    // gets its normal follow-up round, since the model may have more to
-    // decide there.
-    if (searchStartedItem && result.toolCalls.length === 1) {
-      onChunk("Searching...");
-      return "Searching...";
-    }
-  }
-
-  // Already know the reply is a deterministic "Searching..." regardless of
-  // what a further round would say — skip the final call entirely rather
-  // than spending it on text that's about to be discarded.
-  if (searchStartedItem) {
-    onChunk("Searching...");
-    return "Searching...";
   }
 
   // Hit the round cap with the model still wanting to call tools — force a
   // final text-only reply so the user gets a wrap-up instead of nothing.
-  // Nothing left to hide at this point, so this one streams live as normal.
-  const final = await streamOnce(messages, null, onChunk);
-  return withResoldPrompt(fullContent + final.content);
+  await streamRound(null);
+  return withResoldPrompt(fullContent);
 }
 
 export interface DealNarrationContext {
@@ -896,7 +956,9 @@ function buildNarrationPrompt(ctx: NarrationContext): string {
       ctx.dealTier === "search"
         ? `Asking $${ctx.price}, about ${ctx.discountPercent?.toFixed(0)}% under its typical resale price.`
         : `Asking $${ctx.price}. Rough unverified estimate of typical value: $${ctx.estimatedValueRange}.`;
-    return `You're narrating your own activity live to the person running you, like a quick aside while you work — not a formal report. You just flagged a potential deal while scanning Facebook Marketplace. React in ONE short, natural sentence: what it is, the price, and why it caught your eye. Sound like a person noticing something, not a template.
+    return `${CLYNX_VOICE}
+
+You're narrating your own activity live to the person running you, like a quick aside while you work — not a formal report. You just flagged a potential deal while scanning Facebook Marketplace. React in ONE short, natural sentence: what it is, the price, and why it caught your eye. Sound like a person noticing something, not a template.
 
 Item: ${ctx.title}
 ${priceLine}
@@ -905,7 +967,9 @@ Your reasoning: ${ctx.reasoning}`;
 
   const dealLines = ctx.deals.map((d) => `- "${d.title}" for $${d.price}`).join("\n") || "(none)";
   const skipLines = ctx.notableSkips.map((s) => `- "${s.title}": ${s.reason}`).join("\n") || "(nothing notable)";
-  return `You're narrating your own activity live to the person running you, like a quick aside while you work — not a formal report. You just finished looking through a batch of ${ctx.evaluatedCount} listings at "${ctx.locationLabel}". Give a brief, natural 1-2 sentence recap. If nothing stood out, it's fine to say so plainly and briefly — don't manufacture excitement. Mention specific items only if they're actually worth mentioning.
+  return `${CLYNX_VOICE}
+
+You're narrating your own activity live to the person running you, like a quick aside while you work — not a formal report. You just finished looking through a batch of ${ctx.evaluatedCount} listings at "${ctx.locationLabel}". Give a brief, natural 1-2 sentence recap. If nothing stood out, it's fine to say so plainly and briefly — don't manufacture excitement. Mention specific items only if they're actually worth mentioning.
 
 Deals found this batch:
 ${dealLines}
@@ -1152,6 +1216,7 @@ export async function discoverSiblingProducts(params: {
   count: number;
   alreadyTracked: string[];
 }): Promise<string[]> {
+  if (isLowAiMode()) return []; // auto-creating five more researched products per product: not worth credits
   const { brand, generation, category, count, alreadyTracked } = params;
   const prompt = `You track a Database of resalable products. It already has "${generation}" (a specific hardware generation/model within the "${brand}" product line, category "${category}") on file, filed under a "Games" sub-group specific to that generation — meaning cartridge/disc-based games made for that exact hardware, which look and are packaged differently across generations.
 
@@ -1201,6 +1266,7 @@ export async function discoverProductVariants(params: {
   alreadyTracked: string[];
   count: number;
 }): Promise<string[]> {
+  if (isLowAiMode()) return [];
   const { productName, category, alreadyTracked, count } = params;
   const prompt = `A reseller's product Database just researched "${productName}" (category "${category}").
 

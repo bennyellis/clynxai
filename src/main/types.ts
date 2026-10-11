@@ -5,6 +5,16 @@
 // cycle) and matches it passively if encountered during normal browsing.
 // typicalResaleUsd is the only source of pricing truth for it — the AI
 // never substitutes its own guess.
+// A product the user searched for before, with the price range it was searched with (Dashboard > "Recent searches").
+export interface RecentSearch {
+  item: string;
+  minPriceUsd: number | null;
+  maxPriceUsd: number | null;
+  includeBroken?: boolean;
+  linkedProductId?: string | null;
+  at: number;
+}
+
 export interface SearchItem {
   item: string;
   typicalResaleUsd: number;
@@ -36,7 +46,24 @@ export interface SearchItem {
   // floor/ceiling for this item.
   minPriceUsd: number | null;
   maxPriceUsd: number | null;
+  // INCLUDE broken / "for parts" listings (checkbox when adding it). It does not search for anything extra: the normal search
+  // for this product is the only search. It means a broken listing that shows up in that search (an "Xbox Series X (Broken HDMI)"
+  // under a plain "xbox" search) is taken seriously: priced against a "(For Parts / Broken)" variant of the product in the
+  // Database (see brokenVariant.ts) that Clynx creates and researches, instead of being written off at a quarter of the working
+  // price, and "for parts" titles are not rejected as mismatches.
+  includeBroken?: boolean;
+  // eBay only — set when this search target is an eBay Watch with a minimum
+  // seller rating (see Watch.minSellerRatingPercent). Search For items never
+  // carry one. Read by ebayEngine.ts, which drops results from sellers below
+  // it before they go any further.
+  minSellerRatingPercent?: number | null;
 }
+
+// Where a Watch looks. Chosen once, when the Watch is created, and not
+// changeable afterward: the two platforms ask for different things (Facebook
+// needs a location, eBay a seller rating), so switching would silently orphan
+// half the Watch's settings.
+export type WatchPlatform = "facebook" | "ebay";
 
 // Per explicit instruction — "Watch: keep an eye out for this over time and
 // alert me when it appears," persistent across app/scanner/account
@@ -61,11 +88,54 @@ export interface SearchItem {
 // elsewhere in this app — that's a pre-existing, unrelated AI-only
 // per-product observation log. Pure English collision, not a code
 // relationship.
+// One thing a Watch looks out for. A Facebook Watch has several of these (it
+// "waits" for any of them to turn up in its area); an eBay Watch has exactly one.
+export interface WatchTerm {
+  // What gets typed into Marketplace's search box.
+  phrase: string;
+  // Lowercase title keywords a listing has to contain to count as this product.
+  matchKeywords: string[];
+  // The Database product this term is, when it matched one (used for the
+  // profit/discount conditions' reference price). Null otherwise.
+  linkedProductId: string | null;
+}
+
+// The exact Facebook Marketplace search a Facebook Watch ran for one term at one
+// place, kept so the user can open that very search in their browser. A state or
+// whole-country Watch searches several places, so it has one per term and place.
+export interface WatchSearchLink {
+  term: string;
+  place: string;
+  url: string;
+  checkedAt: number;
+}
+
 export interface Watch {
+  // Send THIS Watch's notifications to a different ntfy topic than the one in Config (null: the Config topic). For a
+  // Watch run for somebody else, e.g. a friend's area, so their finds go to their own phone only. Local-only (not cloud-synced).
+  ntfyTopic: string | null;
   id: string;
   name: string;
+  // Which marketplace this Watch looks on. Watches created before this field
+  // existed were all Facebook Marketplace Watches, so the store defaults them
+  // to "facebook". A "facebook" Watch is only ever checked by the Facebook
+  // scanner/scheduler, an "ebay" one only by EbayEngine.
+  platform: WatchPlatform;
+  // The Watch's first term, kept as plain fields because the eBay engine, the
+  // cloud mirror and older code all read a Watch as "one phrase". For a Facebook
+  // Watch the full list is `terms` below, and that is what the Facebook side uses.
   searchPhrase: string;
   matchKeywords: string[];
+  // Everything this Watch looks out for (see WatchTerm). Always at least one.
+  terms: WatchTerm[];
+  // Facebook Watches only: how often Clynx checks, in minutes (one of
+  // watchOptions.ts's WATCH_INTERVAL_OPTIONS_MINUTES).
+  checkIntervalMinutes: number;
+  // Facebook Watches only: which of the user's Facebook accounts this Watch may
+  // use. Empty = any account that is logged in.
+  accountIds: string[];
+  // Facebook Watches only: the searches it has run (see WatchSearchLink).
+  searchLinks: WatchSearchLink[];
   // Optional link to a confirmed Database product — set via the same
   // "is this what you meant?" popup add_search_item's own linkedProductId
   // uses. When set, watchMatching.ts prefers this product's own
@@ -80,6 +150,11 @@ export interface Watch {
   // finer-grained since a Watch condition like "30 minutes" is a common,
   // meaningful ask that an hour-only field couldn't express.
   maxListingAgeMinutes: number | null;
+  // eBay Watches only — skip listings from sellers whose positive-feedback
+  // percentage (0-100) is below this. Null = no seller-rating requirement.
+  // A seller eBay reports no percentage for (brand new, no feedback yet) does
+  // not satisfy a set minimum.
+  minSellerRatingPercent: number | null;
   // Per explicit instruction — "a Watch needs its own desired location
   // rather than blindly inheriting whatever location the Scanner currently
   // happens to be using." Mirrors Account's own location shape exactly
@@ -98,6 +173,12 @@ export interface Watch {
   resolvedLocationUrl: string | null;
   resolvedLocationLabel: string | null;
   resolvedLocationCheckedAt: number | null;
+  // The same cache for a state or whole-country Watch, which search several
+  // places instead of one: the Facebook Marketplace URL of each city that was
+  // resolved (see ScrapeEngine.resolveWatchPlaces). Empty until resolved, and
+  // cleared whenever the Watch's location is edited. A city/ZIP Watch uses
+  // resolvedLocationUrl above and leaves this empty.
+  resolvedLocationUrls: string[];
   // Per-watch pause, independent of the global config.watch.globallyPaused
   // "Pause All" switch — see Config's own watch field below for how the
   // two combine (effectiveEnabled = enabled && !globallyPaused).
@@ -260,6 +341,24 @@ export interface Config {
   pollIntervalMinutesMin: number;
   pollIntervalMinutesMax: number;
   dealThresholdPercent: number;
+  // What the user keeps of an eBay sale after eBay's cut (~13.75%) and other costs, as a percent of the sold price.
+  // The user's own rule of thumb is 84% (their range 80-86%). See resaleMath.ts.
+  ebayNetPercent: number;
+  // A purchase is a deal when (money kept - what it costs) is at least this share of the money kept.
+  minProfitMarginPercent: number;
+  // A deal that would need negotiating more than this many percent below the asking price to reach that margin is skipped (not
+  // flagged, no notification). Default 15.
+  maxNegotiationPercent: number;
+  // Bookkeeping for a one-time re-resolution of state accounts' cities (see config.ts); 1 once done.
+  stateCitiesVersion?: number;
+  // "Save OpenAI credits" (on by default): everything that isn't a core function runs without AI or doesn't run. See aiMode.ts.
+  lowAiMode: boolean;
+  // The last products searched for (newest first) with their price ranges, kept across restarts so they can be added again in one
+  // click (the Search For list itself resets every launch).
+  recentSearches: RecentSearch[];
+  // The user's own eBay seller username, once they link their store (Config > Your eBay store); empty when not linked. Their
+  // own listings become a separate price reference on each product (ProductProfile.myStore).
+  ebayStoreUsername: string;
   searchItems: SearchItem[];
   generalDeal: GeneralDealConfig;
   // Free-text guidance appended to every AI scoring prompt (both the
@@ -312,11 +411,22 @@ export interface Config {
   // accentColor are kept untouched underneath, so turning this off returns
   // to exactly the colors that were picked. Defaults off.
   rainbowEnabled: boolean;
+  // Per explicit instruction — "make the background on every panel slightly
+  // transparent... I want the background to be visible at all times": how much
+  // of the animated space background shows through the app's panels (cards,
+  // the sidebar), as a percentage from 0 (solid panels) to 90 (nearly clear).
+  // Applied live as the `--panel-opacity` CSS variable — see the renderer's
+  // lib/colorScheme.ts applyPanelTransparency. Modals, the assistant chat and
+  // small inner chips always stay solid so text over other content stays legible.
+  panelTransparency: number;
   // Per explicit instruction — a single on/off switch for every app sound
   // (start/stop bloops, tab-switch tick, the deal-alert chime), not a
   // per-sound toggle. Defaults true — existing behavior unchanged until
   // someone deliberately turns it off. See lib/sound.ts's setSoundEnabled.
   soundEnabled: boolean;
+  // A Windows notification when a Watch finds something (on by default). The phone
+  // push (ntfy) is separate and only happens when a topic is set.
+  desktopNotifications: boolean;
   // Per explicit instruction — a Config "No particles" switch that turns
   // off BOTH the cursor-reactive starfield background (see
   // StarfieldBackground.tsx) and the per-click particle bursts (see
@@ -499,6 +609,9 @@ export interface ListingSummary {
   price: number | null;
   thumbnailUrl: string | null;
   locationText: string | null;
+  // Facebook shows a "Just listed" badge on a freshly posted listing's card. Captured
+  // from the search results (see scraper.ts's parseListingCard) so it can be shown.
+  justListed?: boolean;
   // Which marketplace this listing came from. Optional and undefined at
   // every existing Facebook Marketplace construction site (scraper.ts) —
   // undefined means "facebook" everywhere this is read, so adding eBay as a
@@ -532,6 +645,8 @@ export interface SellerSignals {
 }
 
 export interface ListingDetail extends ListingSummary {
+  // eBay only: the seller's shipping charge in USD (0 = free). null/undefined = not stated.
+  ebayShippingUsd?: number | null;
   description: string;
   shippingMentioned: boolean;
   seller: SellerSignals;
@@ -588,6 +703,9 @@ export interface ExtractionResult {
   conditionImpact: "none" | "minor" | "major" | "unknown";
   confidence: "low" | "medium" | "high";
   reasoning: string;
+  // Set when this broken / for-parts listing was priced from a Database "(For Parts / Broken)" variant (its name): the alert and
+  // the pre-alert market check then use that variant instead of the working product.
+  brokenVariant?: string;
 }
 
 // "search" = matched one of your Search For items; the discount math is
@@ -599,6 +717,10 @@ export type DealTier = "search" | "general" | null;
 
 export interface ScoredListing {
   listing: ListingDetail;
+  // Extras that come with the item (a bundled game, an expansion card) and what they add to its eBay value, when Clynx spotted some:
+  // the whole lot is judged against the price, not just the base item (see profitGate.ts).
+  bundleValueUsd?: number | null;
+  bundleDescription?: string | null;
   extraction: ExtractionResult;
   referencePriceUsd: number | null;
   discountPercent: number | null;
@@ -663,6 +785,10 @@ export interface FlawFeedbackExample {
 
 export interface ListingRecord {
   id: string;
+  // Facebook's "Just listed" badge was on this listing when it was found.
+  justListed: boolean;
+  // The Watches that matched this listing (by name), so Feed can flag a Watch's finds.
+  watchNames: string[];
   // Which marketplace this listing came from — Feed's source filter and the
   // Dashboard's Facebook/eBay badges read this. Rows saved before eBay
   // existed have no source and are all Facebook (store.ts's rowToRecord).
@@ -701,6 +827,10 @@ export interface ListingRecord {
   sellerJoinedYear: number | null;
   sellerRating: number | null;
   sellerRatingCount: number | null;
+  // eBay only: the seller's positive-feedback percentage (0-100) and the listing's shipping charge in USD (0 = free).
+  // null on Facebook listings and on eBay listings saved before these were recorded.
+  sellerFeedbackPercent: number | null;
+  shippingCostUsd: number | null;
   sellerHasProfilePhoto: boolean | null;
   sellerRiskPassed: boolean;
   sellerRiskReasons: string[];
@@ -749,6 +879,16 @@ export interface ListingRecord {
 // counts as verified). Matched into scoring prompts by name against Search
 // For items to give the AI more to work with when judging genuine-match/
 // condition.
+export interface MyStoreReference {
+  seller: string;
+  medianUsd: number;
+  lowUsd: number;
+  highUsd: number;
+  sampleSize: number;
+  items: Array<{ title: string; priceUsd: number; url: string }>;
+  checkedAt: number;
+}
+
 export interface ProductProfile {
   id: string;
   name: string;
@@ -881,6 +1021,21 @@ export interface ProductProfile {
   ebayAvgShippingUsd: number | null;
   ebayCompsSampleSize: number | null;
   ebayCompsCheckedAt: number | null;
+  // What eBay sellers are asking right now for this product (median of the active Buy-It-Now listings that are
+  // really this product), and how many listings that is. null/0 until a comps pass finds at least 3.
+  ebayActiveMedianUsd: number | null;
+  ebayActiveSampleSize: number | null;
+  // Clynx's overall estimate of what this product sells for: the sold average, nudged toward the asking prices
+  // when there are few sold comps. ebayEstimateBasis says what it rests on: "sold", "blend" (sold + asking) or
+  // "active" (no sold comps, asking prices only). null until researched.
+  ebayEstimatedValueUsd: number | null;
+  ebayEstimateBasis: "sold" | "blend" | "active" | null;
+  // What the user's own linked eBay store lists this product for (separate from the market numbers above). null when no
+  // store is linked or none of its listings is this product.
+  myStore: MyStoreReference | null;
+  // A specific model filed under a more generic Database entry (e.g. "EVGA GeForce RTX 3060 Ti XC" under
+  // "NVIDIA GeForce RTX 3060 Ti"). null for an ordinary top-level entry.
+  parentProductId: string | null;
   loading: boolean;
   createdAt: number;
   // Clynx Cloud Phase 6 — bumped on every mutating product write (see
@@ -1018,6 +1173,8 @@ export interface ScrapeStatus {
   // to null the moment a new currentListing is set, same as
   // currentActionNote.
   currentReaction: string | null;
+  // While the scanner sits out its wait between passes: when that wait ends (ms since epoch). null/absent otherwise.
+  sleepingUntil?: number | null;
 }
 
 // Per explicit instruction — the Database Research tab should show what

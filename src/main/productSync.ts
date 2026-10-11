@@ -67,6 +67,13 @@ function cloudProductToLocal(cp: CloudProduct): ProductProfile {
     ebayAvgShippingUsd: cp.ebayAvgShippingUsd,
     ebayCompsSampleSize: cp.ebayCompsSampleSize,
     ebayCompsCheckedAt: cp.ebayCompsCheckedAt,
+    // Local-only fields (not part of the cloud product sync; upsertProductFromCloud leaves them alone).
+    ebayActiveMedianUsd: null,
+    ebayActiveSampleSize: null,
+    ebayEstimatedValueUsd: null,
+    ebayEstimateBasis: null,
+    myStore: null,
+    parentProductId: null,
     loading: false,
     createdAt: cp.createdAt,
     updatedAt: cp.updatedAt,

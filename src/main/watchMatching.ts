@@ -3,8 +3,10 @@
 // this never calls back out to it, to avoid a circular import — see
 // evaluateWatchConditions' own listingAgeHours param for why that one
 // value is passed in rather than computed here).
-import type { ScoredListing, SearchItem, Watch } from "./types.js";
+import type { ScoredListing, SearchItem, Watch, WatchTerm } from "./types.js";
+import { DEFAULT_EBAY_NET_PERCENT } from "./resaleMath.js";
 import type { Store } from "./store.js";
+import { matchSearchItem } from "./scorer.js";
 
 // Per explicit instruction — Watch reuses the EXACT SAME matching
 // primitives a SearchItem already does (matchSearchItem/
@@ -22,7 +24,51 @@ export function watchAsSearchItem(watch: Watch): SearchItem {
     linkedProductId: watch.linkedProductId,
     minPriceUsd: watch.minPriceUsd,
     maxPriceUsd: watch.maxPriceUsd,
+    minSellerRatingPercent: watch.minSellerRatingPercent,
   };
+}
+
+// eBay Watch's optional minimum seller rating (percent positive feedback).
+// No requirement set -> always passes. A requirement with no rating to check
+// it against (a brand-new seller eBay reports no percentage for) does NOT
+// pass: same posture as the profit/discount conditions below, where a
+// condition that can't be confirmed counts as unmet rather than guessed.
+export function passesWatchSellerRating(minPercent: number | null | undefined, sellerPercent: number | null | undefined): boolean {
+  if (minPercent === null || minPercent === undefined) return true;
+  if (sellerPercent === null || sellerPercent === undefined || Number.isNaN(sellerPercent)) return false;
+  return sellerPercent >= minPercent;
+}
+
+// One of a Facebook Watch's terms as the SearchItem shape the matching
+// primitives read (same idea as watchAsSearchItem above, but for any term).
+export function termAsSearchItem(watch: Watch, term: WatchTerm): SearchItem {
+  return {
+    item: term.phrase,
+    matchKeywords: term.matchKeywords,
+    typicalResaleUsd: 0,
+    linkedProductId: term.linkedProductId,
+    minPriceUsd: watch.minPriceUsd,
+    maxPriceUsd: watch.maxPriceUsd,
+    minSellerRatingPercent: watch.minSellerRatingPercent,
+  };
+}
+
+/** Every term of the Watch as a SearchItem (a Facebook Watch looks for several things). */
+export function watchAsSearchItems(watch: Watch): SearchItem[] {
+  return watch.terms.map((term) => termAsSearchItem(watch, term));
+}
+
+/**
+ * Which of the Watch's terms a listing title is clearly about, or null. This is the
+ * strict title match (every keyword of the term present, accessory-only and
+ * wrong-variant titles rejected) — the first of the Watch's "high confidence" checks.
+ * When several terms match, the one with the longest (most specific) keyword wins.
+ */
+export function matchWatchTerm(watch: Watch, title: string): WatchTerm | null {
+  const items = watchAsSearchItems(watch);
+  const hit = matchSearchItem(title, items);
+  if (!hit) return null;
+  return watch.terms.find((t) => t.phrase === hit.item) ?? null;
 }
 
 // Cheap price pre-check — same posture as evaluateListing's existing
@@ -48,13 +94,18 @@ export function passesWatchPriceGate(watch: Watch, price: number): boolean {
 // linked or the linked product has no pricing data yet; see
 // evaluateWatchConditions below for what that means for a profit/discount
 // condition.
-export function deriveWatchReferencePrice(watch: Watch, store: Store): number | null {
-  if (!watch.linkedProductId) return null;
-  const product = store.getProductById(watch.linkedProductId);
+// `linkedProductId` is the matched term's own link (a Facebook Watch has several
+// terms); it defaults to the Watch's first term's.
+export function deriveWatchReferencePrice(watch: Watch, store: Store, linkedProductId: string | null = watch.linkedProductId): number | null {
+  if (!linkedProductId) return null;
+  const product = store.getProductById(linkedProductId);
   if (!product) return null;
+  // Real eBay data (the estimate, else the sold average) outranks the AI's own resale guess.
+  // What a buyer pays in total (item + shipping): the estimate, else the sold average with its average shipping.
+  const ebayValue = product.ebayEstimatedValueUsd ?? (product.ebayAvgSoldPriceUsd !== null ? product.ebayAvgSoldPriceUsd + Math.max(0, product.ebayAvgShippingUsd ?? 0) : null);
+  if (ebayValue !== null && ebayValue > 0) return ebayValue;
   if (product.resalePriceUsd !== null && product.resalePriceUsd > 0) return product.resalePriceUsd;
-  if (product.ebayAvgSoldPriceUsd !== null && product.ebayAvgSoldPriceUsd > 0) return product.ebayAvgSoldPriceUsd;
-  const fbStats = store.getFacebookPriceStats(watch.linkedProductId);
+  const fbStats = store.getFacebookPriceStats(linkedProductId);
   if (fbStats && fbStats.avgPriceUsd > 0) return fbStats.avgPriceUsd;
   return null;
 }
@@ -79,8 +130,17 @@ export interface WatchConditionResult {
 // estimateListingAgeHours, to avoid a circular import between the two
 // files (scrapeEngine.ts already calls that for its own stale-listing
 // gate — same value, just handed down instead of recomputed).
-export function evaluateWatchConditions(watch: Watch, price: number, referencePrice: number | null, listingAgeHours: number | null): WatchConditionResult {
-  const profitUsd = referencePrice !== null ? referencePrice - price : null;
+export function evaluateWatchConditions(
+  watch: Watch,
+  price: number,
+  referencePrice: number | null,
+  listingAgeHours: number | null,
+  // The user resells on eBay and keeps ~84% of the sale price, so a Watch's profit is that, not the full reference
+  // price, minus what the purchase costs (price + any shipping charge). See resaleMath.ts.
+  resale: { netPercent?: number; shippingUsd?: number } = {}
+): WatchConditionResult {
+  const netPercent = resale.netPercent ?? DEFAULT_EBAY_NET_PERCENT;
+  const profitUsd = referencePrice !== null ? (referencePrice * netPercent) / 100 - (price + (resale.shippingUsd ?? 0)) : null;
   const discountPercent = referencePrice !== null && referencePrice > 0 ? ((referencePrice - price) / referencePrice) * 100 : null;
 
   if (watch.minProfitUsd !== null && (profitUsd === null || profitUsd < watch.minProfitUsd)) {

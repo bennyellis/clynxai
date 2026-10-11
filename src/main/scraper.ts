@@ -916,6 +916,17 @@ function buildSearchUrl(browseUrl: string, query: string): string {
   return url.toString();
 }
 
+// The Marketplace search address for a query at a place, with the price filter
+// the Watch applies. What a Facebook Watch remembers as "the search it is
+// running" when the live page's own address can't be read back (see
+// ScrapeEngine.runWatchCheck).
+export function buildWatchSearchUrl(browseUrl: string, query: string, minPriceUsd: number | null, maxPriceUsd: number | null): string {
+  const url = new URL(buildSearchUrl(browseUrl, query));
+  if (minPriceUsd !== null) url.searchParams.set("minPrice", String(Math.max(0, Math.round(minPriceUsd))));
+  if (maxPriceUsd !== null) url.searchParams.set("maxPrice", String(Math.max(0, Math.round(maxPriceUsd))));
+  return url.toString();
+}
+
 // Verified live miss #3, the actual root cause: page.waitForSelector's
 // DEFAULT `state` is "visible" (attached to the DOM AND actually painted —
 // non-zero size, not display:none/visibility:hidden/opacity:0), not just
@@ -1034,7 +1045,9 @@ async function extractListingsFromCurrentPage(page: Page, maxScrolls: number): P
   return raw.map((r) => parseListingCard(r));
 }
 
-function parseListingCard(r: {
+const CARD_BADGE_LINE = /^(just listed|price dropped?|pending|sold|new)$/i;
+
+export function parseListingCard(r: {
   id: string;
   url: string;
   ariaLabel: string | null;
@@ -1047,10 +1060,17 @@ function parseListingCard(r: {
     .map((l) => l.trim())
     .filter(Boolean);
 
-  const priceLine = lines.find((l) => /\$\s?[\d,]+/.test(l));
+  // Badges Facebook lays over a card ("Just listed", "Price dropped"...) are lines of
+  // their own, but they are not the title or the location. They used to be mistaken for
+  // the location (the shortest leftover line) whenever the town's name was longer than
+  // the badge, which made a just-listed item look like it had no real location.
+  const justListed = lines.some((l) => /^just listed$/i.test(l));
+  const contentLines = lines.filter((l) => !CARD_BADGE_LINE.test(l));
+
+  const priceLine = contentLines.find((l) => /\$\s?[\d,]+/.test(l));
   const price = priceLine ? parsePrice(priceLine) : null;
 
-  const nonPriceLines = lines.filter((l) => l !== priceLine);
+  const nonPriceLines = contentLines.filter((l) => l !== priceLine);
   // A single leftover line that's shaped exactly like "City, State"/"City,
   // ST" is almost certainly the card's location with no real title text
   // available at all (see looksLikeBareLocation's own doc comment) — that
@@ -1059,8 +1079,16 @@ function parseListingCard(r: {
   // of discarding it.
   const soleLine = nonPriceLines.length === 1 ? nonPriceLines[0] : null;
   const soleLineIsLocation = soleLine !== null && looksLikeBareLocation(soleLine);
-  const title = soleLineIsLocation ? "(untitled listing)" : nonPriceLines.sort((a, b) => b.length - a.length)[0] ?? "(untitled listing)";
-  const locationText = soleLineIsLocation ? soleLine : nonPriceLines.length > 1 ? nonPriceLines[nonPriceLines.length - 1] : null;
+  // A leftover line shaped like "City, ST" is the location, so it can never be taken for the
+  // title however short the title is (a short title next to a long town name — "iPhone 12" /
+  // "Waynesboro, VA" — used to swap the two, because the title was simply the longest line).
+  const locationLine = nonPriceLines.length > 1 ? (nonPriceLines.find((l) => looksLikeBareLocation(l)) ?? null) : null;
+  const titleCandidates = nonPriceLines.filter((l) => l !== locationLine).sort((a, b) => b.length - a.length);
+  const title = soleLineIsLocation ? "(untitled listing)" : titleCandidates[0] ?? "(untitled listing)";
+  // No line reads like a location: the shortest leftover line, as before.
+  const locationText = soleLineIsLocation
+    ? soleLine
+    : locationLine ?? (nonPriceLines.length > 1 ? (titleCandidates.length > 1 ? titleCandidates[titleCandidates.length - 1] : null) : null);
 
   return {
     id: r.id,
@@ -1069,6 +1097,7 @@ function parseListingCard(r: {
     price,
     thumbnailUrl: r.thumbnailUrl,
     locationText,
+    ...(justListed ? { justListed: true } : {}),
   };
 }
 

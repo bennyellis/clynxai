@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatAttachment, ChatMessage, EventStats, LogLine, MetricsSnapshot, ProductProfile, ScrapeStatus, StageStats } from "../lib/api.js";
 import { api } from "../lib/api.js";
 
@@ -59,6 +59,27 @@ type FeedItem = { kind: "log"; ts: number; line: LogLine } | { kind: "chat"; ts:
 // Start/Stop/Filters controls are completely unaffected by which screen is
 // currently in front — this page just no longer shows them alongside the
 // feed.
+// Stable, collision-free React keys for log lines. The old key was the
+// timestamp plus the first 20 characters of the message, which two lines in
+// the same millisecond (a burst of identical skips) could share — React then
+// drops or mis-reuses rows. LogLine objects keep their identity for as long
+// as they sit in the log, so a WeakMap hands each one a permanent id.
+const logKeys = new WeakMap<LogLine, number>();
+let nextLogKey = 1;
+function logKey(line: LogLine): number {
+  let key = logKeys.get(line);
+  if (key === undefined) {
+    key = nextLogKey++;
+    logKeys.set(line, key);
+  }
+  return key;
+}
+
+// The routine, per-listing "skip (reason): title" chatter.
+function isRoutineSkip(line: LogLine): boolean {
+  return line.level === "info" && /^skip\b/i.test(line.message);
+}
+
 export function Activity({
   status,
   logs,
@@ -101,10 +122,15 @@ export function Activity({
     };
   }, []);
 
-  function goToProductByName(name: string) {
-    const match = products.find((p) => p.name.toLowerCase() === name.toLowerCase());
-    if (match) onGoToProduct(match.id);
-  }
+  // Stable identity (reads the latest products/callback through a ref) so the
+  // memoized log rows below don't all re-render whenever this component does.
+  const goToProductRef = useRef({ products, onGoToProduct });
+  goToProductRef.current = { products, onGoToProduct };
+  const goToProductByName = useCallback((name: string) => {
+    const { products: list, onGoToProduct: go } = goToProductRef.current;
+    const match = list.find((p) => p.name.toLowerCase() === name.toLowerCase());
+    if (match) go(match.id);
+  }, []);
 
   async function handleFilesSelected(files: FileList | null) {
     if (!files || !files.length) return;
@@ -202,21 +228,54 @@ export function Activity({
     };
   }, []);
 
-  useEffect(() => {
-    feedScrollRef.current?.scrollTo({ top: feedScrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [logs.length, chat]);
+  // Follow new lines only while the reader is parked at the bottom. It used to
+  // scroll on every single new line, which yanked the view away from anything
+  // the reader had scrolled up to read — and with a busy scan that is several
+  // times a second.
+  const stickToBottomRef = useRef(true);
+  function onFeedScroll() {
+    const el = feedScrollRef.current;
+    if (!el) return;
+    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }
+
+  // Routine "skip (...)" lines are by far the most common thing in the log and
+  // rarely worth reading; this hides them while keeping deals, warnings,
+  // errors, research and chat. Remembered across launches.
+  const [showRoutine, setShowRoutine] = useState(() => {
+    try {
+      return localStorage.getItem("clynx.activity.showRoutine") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  function toggleRoutine() {
+    setShowRoutine((v) => {
+      try {
+        localStorage.setItem("clynx.activity.showRoutine", v ? "0" : "1");
+      } catch {
+        // not persisted — fine
+      }
+      return !v;
+    });
+  }
 
   // Chronological merge — chat messages, AI narration, and raw activity
   // log lines all interleaved in the order they actually happened, rather
   // than split across two panels.
   const feed: FeedItem[] = useMemo(() => {
     const items: FeedItem[] = [
-      ...logs.map((line): FeedItem => ({ kind: "log", ts: line.ts, line })),
+      ...logs.filter((line) => showRoutine || !isRoutineSkip(line)).map((line): FeedItem => ({ kind: "log", ts: line.ts, line })),
       ...chat.map((entry): FeedItem => ({ kind: "chat", ts: entry.ts, entry })),
     ];
     items.sort((a, b) => a.ts - b.ts);
     return items;
-  }, [logs, chat]);
+  }, [logs, chat, showRoutine]);
+
+  useEffect(() => {
+    if (!stickToBottomRef.current) return;
+    feedScrollRef.current?.scrollTo({ top: feedScrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [feed.length, chat]);
 
   // Per explicit instruction — "add animations for when the ai is
   // Analyzing something, maybe a spinning gear." An "Analyzing..." line is
@@ -270,10 +329,9 @@ export function Activity({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20, height: "100%" }}>
       <div>
-        <h1 style={{ margin: 0, fontSize: 22 }}>Activity</h1>
+        <h1 style={{ margin: 0, fontSize: 28 }}>Activity</h1>
         <p style={{ color: "var(--text-muted)", margin: "4px 0 0" }}>
-          Everything the scanner finds, plus the same assistant from Dashboard — ask it to search for something, change a
-          setting, or anything else, right from here.
+          The live scan log, plus Clynx: ask it anything about flipping, or tell it to search for something or change a setting.
         </p>
       </div>
 
@@ -298,25 +356,35 @@ export function Activity({
               </span>
             )}
           </div>
-          {status.currentSearch && (
-            <span className="pill">
-              {status.currentSearch} · location {status.locationIndex + 1} · {status.listingsThisCycle} checked
-            </span>
-          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {status.currentSearch && (
+              <span className="pill">
+                {status.currentSearch} · location {status.locationIndex + 1} · {status.listingsThisCycle} checked
+              </span>
+            )}
+            <button
+              className="icon ghost"
+              onClick={toggleRoutine}
+              title={showRoutine ? "Hide the routine \"skip\" lines and keep deals, warnings and research" : "Show every line, including routine skips"}
+              style={{ fontSize: 12.5 }}
+            >
+              {showRoutine ? "Hide skips" : "Show skips"}
+            </button>
+          </div>
         </div>
 
-        <div ref={feedScrollRef} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+        <div ref={feedScrollRef} onScroll={onFeedScroll} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
           {feed.length === 0 && (
             <div style={{ color: "var(--text-dim)", padding: "16px 18px" }}>
-              No activity yet. Start the scanner from Dashboard, or ask the assistant below to track down a specific item,
-              look up what something sells for, or anything else about reselling — it'll chime in here as it finds things
-              too.
+              No activity yet. Start the scanner from Dashboard, or just talk to me below: I can track down a specific item,
+              dig into what something really sells for, or help with anything else about reselling. I'll chime in here as
+              I find things too.
             </div>
           )}
           {feed.map((item) =>
             item.kind === "log" ? (
-              <LogRow
-                key={`log-${item.ts}-${item.line.message.slice(0, 20)}`}
+              <LogRowMemo
+                key={`log-${logKey(item.line)}`}
                 line={item.line}
                 onGoToProduct={goToProductByName}
                 isAnalyzing={(() => {
@@ -405,7 +473,7 @@ export function Activity({
               ref={textareaRef}
               rows={1}
               style={{ flex: 1, resize: "none", maxHeight: 160, overflowY: "auto", lineHeight: 1.4, padding: "9px 12px" }}
-              placeholder="Message the assistant — e.g. 'find me a Steam Deck OLED', or attach a photo of something you don't know the name of"
+              placeholder="Talk to Clynx: 'is a used Series S worth flipping?', 'find me a Steam Deck OLED', or attach a photo of something you can't name"
               value={draft}
               onChange={(e) => {
                 setDraft(e.target.value);
@@ -642,6 +710,8 @@ function AnalyzingGearIcon() {
 // the caller's onGoToProduct). A line with neither (a status/summary line
 // with no specific listing or product behind it) stays plain text — there's
 // nowhere honest to send a click.
+const LogRowMemo = React.memo(LogRow);
+
 function LogRow({
   line,
   onGoToProduct,
@@ -771,7 +841,7 @@ function ChatRow({ entry }: { entry: ChatEntry }) {
           color: isUser ? "var(--text)" : "var(--text-muted)",
         }}
       >
-        {isUser ? "Y" : isSearchAck ? "🔍" : isDealNarration ? "✨" : isBatchNarration ? "🔭" : "AI"}
+        {isUser ? "Y" : isSearchAck ? "🔍" : isDealNarration ? "✨" : isBatchNarration ? "🔭" : "C"}
       </div>
       <div style={{ flex: 1, fontSize: 13.5, lineHeight: 1.55, color: entry.error ? "var(--danger)" : "var(--text)", paddingTop: 3 }}>
         {entry.attachments && entry.attachments.length > 0 && (

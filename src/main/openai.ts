@@ -54,7 +54,17 @@ function localApiKey(): string | null {
 // local key sees AI features as available too, not gated behind a key they
 // were never meant to need.
 export function hasOpenAIAccess(): boolean {
-  return !!localApiKey() || !!cloudClientRef?.isAuthenticated();
+  return (!!localApiKey() || !!cloudClientRef?.isAuthenticated()) && !openAICreditsExhausted();
+}
+
+// OpenAI answers 429 "insufficient_quota" once the account's credits run out. Every AI feature would then fail one
+// slow request at a time, so after the first such answer AI calls fail immediately for a few minutes (and features
+// that have a free fallback, like finding photos for a Database entry, use it); then one request is allowed through to
+// find out whether credits were added.
+const CREDITS_RETRY_MS = 10 * 60_000;
+let creditsExhaustedUntil = 0;
+export function openAICreditsExhausted(): boolean {
+  return Date.now() < creditsExhaustedUntil;
 }
 
 // Same early fail-fast shape getOpenAIApiKey() used to provide (call sites
@@ -64,6 +74,9 @@ export function hasOpenAIAccess(): boolean {
 // below resolves whichever one is current itself, at the moment it's
 // actually needed.
 export function ensureOpenAIAccess(): void {
+  if (openAICreditsExhausted()) {
+    throw new Error("OpenAI credits are used up — add credits at platform.openai.com/settings/organization/billing (Clynx checks again every few minutes).");
+  }
   if (!hasOpenAIAccess()) {
     throw new Error("No OpenAI access configured — set an API key in Config, or log into Clynx Cloud.");
   }
@@ -83,15 +96,29 @@ export function ensureOpenAIAccess(): void {
 // unmodified at every call site), or throws with a clear message when
 // neither path is available.
 export async function callOpenAI(kind: "chat" | "images", body: unknown, signal?: AbortSignal): Promise<Response> {
+  if (openAICreditsExhausted()) {
+    throw new Error("OpenAI credits are used up — add credits at platform.openai.com/settings/organization/billing.");
+  }
   const localKey = localApiKey();
   if (localKey) {
     const url = kind === "chat" ? REAL_CHAT_URL : REAL_IMAGES_URL;
-    return fetch(url, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${localKey}` },
       body: JSON.stringify(body),
       signal,
     });
+    if (res.status === 429) {
+      const text = await res
+        .clone()
+        .text()
+        .catch(() => "");
+      if (/insufficient_quota|credit_balance_exhausted/i.test(text)) {
+        creditsExhaustedUntil = Date.now() + CREDITS_RETRY_MS;
+        console.error("[openai] credits are used up: AI features pause for a few minutes (photo search keeps working without AI).");
+      }
+    }
+    return res;
   }
   if (!cloudClientRef) {
     throw new Error("OPENAI_API_KEY is not set, and no cloud session is available yet.");

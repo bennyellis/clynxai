@@ -1,5 +1,10 @@
 import type { Page } from "playwright";
+import type { PhotoCheck } from "./compPhotoCheck.js";
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
+import { compMatchesSpecs, sanitizeSearchQuery, specReference, titleLooksLikeProduct } from "./compFilter.js";
+import { titleLooksLikeBrokenProduct } from "./brokenVariant.js";
+import { isLowAiMode } from "./aiMode.js";
+import { trimmedMean } from "./marketValue.js";
 
 export interface EbayComp {
   title: string;
@@ -9,6 +14,8 @@ export interface EbayComp {
   listingType: string | null;
   runTimeDays: number | null;
   itemUrl: string;
+  // The photo shown on WatchCount's result card, when it has one (used to cross-check the comp against reference photos).
+  imageUrl?: string | null;
 }
 
 const OPENAI_TIMEOUT_MS = 30_000;
@@ -30,8 +37,7 @@ const OPENAI_TIMEOUT_MS = 30_000;
 // degrades to an empty result rather than throwing if the page ever comes
 // back looking like a challenge instead of real results.
 function buildSearchUrl(query: string): string {
-  const encodedQuery = query
-    .trim()
+  const encodedQuery = sanitizeSearchQuery(query)
     .split(/\s+/)
     .map((word) => encodeURIComponent(word))
     .join("+");
@@ -122,8 +128,18 @@ function parseCompCard(cardText: string): EbayComp | null {
 export async function searchSoldComps(page: Page, query: string): Promise<EbayComp[]> {
   await page.goto(buildSearchUrl(query), { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(1500);
-  const cardTexts = await page.evaluate(() => Array.from(document.querySelectorAll(".search-box")).map((el) => (el as HTMLElement).innerText));
-  return cardTexts.map(parseCompCard).filter((c): c is EbayComp => c !== null);
+  const cards = await page.evaluate(() =>
+    Array.from(document.querySelectorAll(".search-box")).map((el) => ({
+      text: (el as HTMLElement).innerText,
+      image: (el.querySelector("img") as HTMLImageElement | null)?.src ?? null,
+    }))
+  );
+  const comps: EbayComp[] = [];
+  for (const card of cards) {
+    const comp = parseCompCard(card.text);
+    if (comp) comps.push({ ...comp, imageUrl: card.image && /^https?:/i.test(card.image) ? card.image : null });
+  }
+  return comps;
 }
 
 // Per explicit instruction — reported live: the scanner once misidentified
@@ -141,6 +157,8 @@ export async function searchSoldComps(page: Page, query: string): Promise<EbayCo
 // actually found on a real listing) or if the AI call itself fails; never
 // throws, since a fallback to the existing name is always a valid result.
 export async function deriveWatchCountQuery(fallbackName: string, sourceTitle: string | null, imageDataUri: string | null): Promise<string> {
+  // The Database entry's own name is a fine search query; asking the AI to re-derive it costs credits every research.
+  if (isLowAiMode()) return sanitizeSearchQuery(fallbackName) || fallbackName;
   if (!sourceTitle && !imageDataUri) return fallbackName;
 
   try {
@@ -195,35 +213,36 @@ Respond with ONLY a JSON object, no other text: { "query": string }`;
   }
 }
 
-// Per explicit instruction — "since the ai is only researching the normal
-// series x, have the ai understand to disregard the special listings...
-// do the equivalent of this for all researched items": an AI judgment
-// pass over the RAW comps' titles, not a hardcoded keyword blocklist,
-// since "special/limited edition" phrasing varies endlessly by product
-// and this app has no photos of these eBay listings to compare against
-// (only watchcount's own text) — this works off the same title text a
-// person would use to make the same call by eye. Averages are computed
-// here in plain arithmetic over whichever comps the AI keeps, not asked
-// of the model itself — far more reliable than trusting an LLM's own
-// math over a list of numbers.
-export async function analyzeEbayComps(
-  productName: string,
-  comps: EbayComp[]
-): Promise<{ avgSoldPriceUsd: number | null; avgRunTimeDays: number | null; avgShippingUsd: number | null; sampleSize: number }> {
-  if (comps.length === 0) return { avgSoldPriceUsd: null, avgRunTimeDays: null, avgShippingUsd: null, sampleSize: 0 };
+export interface CompAnalysis {
+  // How many otherwise-matching comps were dropped because their photo showed a different product.
+  photoRejected: number;
+  avgSoldPriceUsd: number | null;
+  avgRunTimeDays: number | null;
+  avgShippingUsd: number | null;
+  sampleSize: number;
+  // "New" / "Used" — the condition most of the confirmed comps were sold in (null when none was labelled),
+  // so asking prices can be compared against the same kind of item.
+  dominantCondition: string | null;
+  // How many of the results WatchCount returned were thrown out as not being this product.
+  rejectedCount: number;
+}
 
-  // Per explicit instruction — this used to tell the model condition
-  // wording "still counts as a match" regardless, i.e. condition was only
-  // ever a product-IDENTITY pass/fail filter. Condition segmentation is now
-  // handled afterward in plain arithmetic (see below, same "far more
-  // reliable than trusting an LLM's own math" posture as the rest of this
-  // function) using each comp's own already-parsed condition field — the AI
-  // here only ever needs to judge product identity, never condition.
-  const prompt = `You're comparing eBay sold listings against a specific product a reseller is researching: "${productName}".
-For EACH listing below, decide whether its title genuinely refers to the SAME base product — same model, NOT a special/limited/collector's edition, NOT a meaningfully different bundle/capacity/accessory set, and NOT a clearly unrelated item. Minor color variants still count as a match.
+const EMPTY_ANALYSIS: CompAnalysis = { photoRejected: 0, avgSoldPriceUsd: null, avgRunTimeDays: null, avgShippingUsd: null, sampleSize: 0, dominantCondition: null, rejectedCount: 0 };
+
+// The AI half of "is this listing the SAME product": brand/partner, edition, bundle, and anything else that
+// isn't a plain model number or capacity (those are checked in code first, see compFilter.ts). Returns the
+// indices of `titles` it considers the same product.
+export async function judgeSameProduct(query: string, titles: string[]): Promise<number[]> {
+  if (titles.length === 0) return [];
+  // Plain text checks instead of an AI call (see compFilter.ts's titleLooksLikeProduct).
+  if (isLowAiMode()) return titles.flatMap((t, i) => (titleLooksLikeProduct(query, t) ? [i] : []));
+  const prompt = `You're comparing eBay listings against ONE specific product a reseller is pricing: "${query}".
+For EACH listing below, decide whether it is for exactly that product, so its price is a fair comparison.
+
+Be strict about what makes products different in price: the manufacturer/brand (e.g. EVGA vs Gigabyte graphics cards of the same chip are different products), the exact model or product line, capacity/size/storage, generation, and special/limited/collector's editions or different bundles. Be relaxed about things that don't change the product: color, "new/used/open box" wording, seller filler. If the product name above does NOT name a manufacturer or model line (it is a generic name like a chip or console name), then any manufacturer's version counts. If the product name names a COLOR, a listing in a different color is a different product and must be rejected (a listing that names no color is fine); if it names no color, any color counts. Reject accessories, parts, cases, boxes-only, games, and unrelated items, and reject listings that bundle the product with other items (a console, controller, games, other accessories) or sell several units as a lot, since their price isn't the product's price.
 
 Listings (index: title):
-${comps.map((c, i) => `${i}: ${c.title}`).join("\n")}
+${titles.map((t, i) => `${i}: ${t}`).join("\n")}
 
 Respond with ONLY a JSON object, no other text, in this exact shape:
 { "matchingIndices": number[] }`;
@@ -236,10 +255,9 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
       {
         model: OPENAI_MODEL,
         messages: [{ role: "user", content: prompt }],
-        max_completion_tokens: 800,
-        // gpt-5-mini is a reasoning model — silently burns the whole
-        // completion-token budget on invisible reasoning tokens without
-        // this, same lesson as everywhere else this app calls OpenAI.
+        max_completion_tokens: 1200,
+        // gpt-5-mini is a reasoning model — silently burns the whole completion-token budget on invisible
+        // reasoning tokens without this, same lesson as everywhere else this app calls OpenAI.
         reasoning_effort: "minimal",
       },
       controller.signal
@@ -249,57 +267,89 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
     const content = data.choices?.[0]?.message?.content ?? "";
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : content);
-    const indices: number[] = Array.isArray(parsed.matchingIndices) ? parsed.matchingIndices.filter((i: unknown) => typeof i === "number") : [];
-    const matched = indices.map((i) => comps[i]).filter((c): c is EbayComp => !!c);
-    if (matched.length === 0) return { avgSoldPriceUsd: null, avgRunTimeDays: null, avgShippingUsd: null, sampleSize: 0 };
-
-    // Condition-awareness — segment the AI-confirmed matches by each comp's
-    // own already-parsed condition (searchSoldComps' parseCompCard already
-    // extracts "Used"/"New"/null per comp; this was previously parsed and
-    // never read anywhere), and average over whichever condition segment
-    // is actually the LARGEST among the matches — the condition a real
-    // Facebook Marketplace resale item is overwhelmingly likely to turn up
-    // in — rather than blending every condition together into one number.
-    // Falls back to the full blended set when no single segment clears a
-    // real sample floor (3), so a lone outlier or a 1-comp segment can't
-    // skew the result off a meaningless sliver of data. Plain arithmetic,
-    // no AI involved — same "far more reliable than trusting an LLM's own
-    // math" posture the rest of this function already commits to.
-    const MIN_SEGMENT_SAMPLES = 3;
-    const byCondition = new Map<string, EbayComp[]>();
-    for (const c of matched) {
-      const key = c.condition ?? "unknown";
-      const list = byCondition.get(key);
-      if (list) list.push(c);
-      else byCondition.set(key, [c]);
-    }
-    let dominantSegment = matched;
-    let dominantSize = 0;
-    for (const list of byCondition.values()) {
-      if (list.length > dominantSize) {
-        dominantSize = list.length;
-        dominantSegment = list;
-      }
-    }
-    const source = dominantSize >= MIN_SEGMENT_SAMPLES ? dominantSegment : matched;
-
-    const avgSoldPriceUsd = source.reduce((sum, c) => sum + c.priceUsd, 0) / source.length;
-    const withRunTime = source.filter((c) => c.runTimeDays !== null);
-    const avgRunTimeDays = withRunTime.length > 0 ? withRunTime.reduce((sum, c) => sum + (c.runTimeDays ?? 0), 0) / withRunTime.length : null;
-    // Only averaged across comps where a shipping cost was actually parsed
-    // (see parseShippingUsd) — a comp whose shipping line didn't match
-    // either known shape is left out of this average entirely rather than
-    // silently counted as $0, so one unparsed listing can't drag the
-    // average down.
-    const withShipping = source.filter((c) => c.shippingUsd !== null);
-    const avgShippingUsd = withShipping.length > 0 ? withShipping.reduce((sum, c) => sum + (c.shippingUsd ?? 0), 0) / withShipping.length : null;
-    return { avgSoldPriceUsd, avgRunTimeDays, avgShippingUsd, sampleSize: source.length };
+    return Array.isArray(parsed.matchingIndices)
+      ? parsed.matchingIndices.filter((i: unknown): i is number => typeof i === "number" && i >= 0 && i < titles.length)
+      : [];
   } catch (err) {
-    if ((err as Error).name === "AbortError") {
-      throw new Error(`OpenAI request timed out after ${OPENAI_TIMEOUT_MS / 1000}s`);
-    }
+    if ((err as Error).name === "AbortError") throw new Error(`OpenAI request timed out after ${OPENAI_TIMEOUT_MS / 1000}s`);
     throw err;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// Per explicit instruction — "make sure when Clynx looks at watchcount data that it is entirely accurate with
+// what it is searching and the results it relays": every result passes two gates before it counts. First the
+// hard facts, in code (same model number, same capacity, same tier word — a 4TB card's average used to include
+// 1TB and 2TB cards because only a fast AI judged this). Then the AI judges brand/edition/bundle. Averages are
+// plain arithmetic over what survives (an outlier-trimmed mean, so one mislabelled listing can't drag it).
+// `productName` is the Database entry's own name, only used to recover a capacity the search query dropped.
+export async function analyzeEbayComps(query: string, comps: EbayComp[], productName: string = query, photoCheck?: PhotoCheck | null, broken = false): Promise<CompAnalysis> {
+  if (comps.length === 0) return EMPTY_ANALYSIS;
+
+  const reference = specReference(query, productName);
+  // Copies sold "for parts or not working" are not what a working one sells for (the broken research handles those on its own).
+  const specMatched = comps.filter((c) => compMatchesSpecs(reference, c.title) && (broken || !/parts|not working/i.test(c.condition ?? "")));
+  if (specMatched.length === 0) return { ...EMPTY_ANALYSIS, rejectedCount: comps.length };
+
+  // Broken / for-parts research (a "(For Parts / Broken)" Database variant) keeps ONLY comps that are broken copies of the product,
+  // by plain text checks: the normal judge throws exactly those away.
+  const keptIndices = broken
+    ? specMatched.flatMap((c, i) => (titleLooksLikeBrokenProduct(query, c.title, /parts|not working/i.test(c.condition ?? "")) ? [i] : []))
+    : await judgeSameProduct(
+        query,
+        specMatched.map((c) => c.title)
+      );
+  let matched = keptIndices.map((i) => specMatched[i]).filter((c): c is EbayComp => !!c);
+  // Last gate: each comp's photo against the product's reference photos. A title can say "Series S" over a Series X.
+  let photoRejected = 0;
+  if (photoCheck && matched.length > 0) {
+    const keep = await photoCheck(matched.map((c) => ({ title: c.title, imageUrl: c.imageUrl ?? null })));
+    const survivors = matched.filter((_, i) => keep[i] !== false);
+    photoRejected = matched.length - survivors.length;
+    matched = survivors;
+  }
+  const rejectedCount = comps.length - matched.length - photoRejected;
+  if (matched.length === 0) return { ...EMPTY_ANALYSIS, rejectedCount, photoRejected };
+
+  // Condition-awareness — segment the confirmed matches by each comp's own condition and average the LARGEST
+  // segment (the condition a resale item is overwhelmingly likely to be in), falling back to everything when no
+  // segment reaches a real sample (3), so a lone outlier can't skew the number off a sliver of data.
+  const MIN_SEGMENT_SAMPLES = 3;
+  const byCondition = new Map<string, EbayComp[]>();
+  for (const c of matched) {
+    const key = c.condition ?? "unknown";
+    const list = byCondition.get(key);
+    if (list) list.push(c);
+    else byCondition.set(key, [c]);
+  }
+  let dominantSegment = matched;
+  let dominantKey = "unknown";
+  let dominantSize = 0;
+  for (const [key, list] of byCondition) {
+    if (list.length > dominantSize) {
+      dominantSize = list.length;
+      dominantSegment = list;
+      dominantKey = key;
+    }
+  }
+  const useSegment = dominantSize >= MIN_SEGMENT_SAMPLES;
+  const source = useSegment ? dominantSegment : matched;
+
+  const price = trimmedMean(source.map((c) => c.priceUsd));
+  const withRunTime = source.filter((c) => c.runTimeDays !== null);
+  const avgRunTimeDays = withRunTime.length > 0 ? withRunTime.reduce((sum, c) => sum + (c.runTimeDays ?? 0), 0) / withRunTime.length : null;
+  // Only averaged across comps where a shipping cost was actually parsed — an unparsed one is left out rather
+  // than counted as $0, so it can't drag the average down.
+  const withShipping = source.filter((c) => c.shippingUsd !== null);
+  const avgShippingUsd = withShipping.length > 0 ? withShipping.reduce((sum, c) => sum + (c.shippingUsd ?? 0), 0) / withShipping.length : null;
+  return {
+    avgSoldPriceUsd: price.value,
+    avgRunTimeDays,
+    avgShippingUsd,
+    sampleSize: price.used,
+    dominantCondition: !broken && useSegment && dominantKey !== "unknown" ? dominantKey : null,
+    rejectedCount,
+    photoRejected,
+  };
 }

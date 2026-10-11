@@ -116,12 +116,21 @@ function GearIcon() {
 // the DOT lights up on hover (a little glow, like a light turning on) — see
 // global.css's iconDotLightUp, applied to icon-info-dot alone; the circle
 // and stem stay still.
-function InfoBubbleIcon() {
+// While something in the Database is actively happening (a product being researched, photos being filled in) a green copy of
+// the icon fades in over it and back out, over and over (opacity only: see global.css's iconDatabaseGlow).
+function InfoBubbleIcon({ busy }: { busy: boolean }) {
   return (
-    <IconSvg className="icon-info">
+    <IconSvg className={`icon-info${busy ? " is-busy" : ""}`}>
       <circle cx="12" cy="12" r="10" />
       <line x1="12" y1="16" x2="12" y2="12" />
       <line className="icon-info-dot" x1="12" y1="8" x2="12.01" y2="8" />
+      {busy && (
+        <g className="icon-info-glow" aria-hidden="true">
+          <circle cx="12" cy="12" r="10" />
+          <line x1="12" y1="16" x2="12" y2="12" />
+          <line x1="12" y1="8" x2="12.01" y2="8" />
+        </g>
+      )}
     </IconSvg>
   );
 }
@@ -147,13 +156,55 @@ function FeedIcon() {
 // than a path morph (CSS can't animate between two different `d` shapes
 // without a JS library; a vertical squash reads as a blink just as well
 // and needs none).
-function WatchIcon() {
+//
+// Per explicit instruction — while Watch is actually running (not paused, at
+// least one watch enabled) the eye turns the scanner's green, the pupil looks
+// around (global.css's iconEyeLook, on the inner group so it never fights the
+// blink for the same transform) and the eye blinks on its own at a random
+// 7-10 second interval. The blink reuses the hover animation by toggling
+// `is-blinking` for one beat — a real timer, since a CSS loop can't be random.
+// Per explicit instruction — "whenever a Watch is active but not currently viewing anything, have the Watch icon close its
+// eye and go to sleep when it's not currently searching on its active interval." So an active Watch has two states: awake
+// (a check is running: the eye is open, looking around, blinking) and asleep (waiting for its next interval: the lid is
+// shut and a couple of Zs drift up). `searching` flips as each check starts and ends.
+function WatchIcon({ live, searching }: { live: boolean; searching: boolean }) {
+  const asleep = live && !searching;
+  const awake = live && searching;
+  const [blinking, setBlinking] = useState(false);
+  useEffect(() => {
+    if (!awake) {
+      setBlinking(false);
+      return;
+    }
+    let scheduleTimer: ReturnType<typeof setTimeout>;
+    let blinkTimer: ReturnType<typeof setTimeout>;
+    function scheduleNext() {
+      scheduleTimer = setTimeout(() => {
+        setBlinking(true);
+        blinkTimer = setTimeout(() => {
+          setBlinking(false);
+          scheduleNext();
+        }, 320);
+      }, 7000 + Math.random() * 3000);
+    }
+    scheduleNext();
+    return () => {
+      clearTimeout(scheduleTimer);
+      clearTimeout(blinkTimer);
+    };
+  }, [awake]);
   return (
-    <IconSvg className="icon-watch">
+    <IconSvg className={`icon-watch${live ? " is-live" : ""}${asleep ? " is-asleep" : ""}${blinking ? " is-blinking" : ""}`}>
       <g className="icon-watch-lid">
         <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-        <circle cx="12" cy="12" r="3" />
+        <g className="icon-watch-look">
+          <circle cx="12" cy="12" r="3" />
+        </g>
       </g>
+      {/* The sleeping eye's Zs: only visible (and only animating) while asleep. */}
+      {/* Drawn as lines, not text, so the nav button's own label stays just "Watch". */}
+      <polyline className="icon-watch-z icon-watch-z1" points="15.5 4.5 19.5 4.5 15.5 9 19.5 9" />
+      <polyline className="icon-watch-z icon-watch-z2" points="19.6 0.8 22.4 0.8 19.6 3.8 22.4 3.8" />
     </IconSvg>
   );
 }
@@ -217,7 +268,9 @@ function ClynxMark({ size = 34 }: { size?: number }) {
   return (
     <div className="clynx-mark" style={{ position: "relative", width: size, height: size }} aria-hidden="true">
       <img src={clynxMarkSrc} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }} />
-      <div className="clynx-mark-comet" style={maskStyle} />
+      <div className="clynx-mark-comet" style={maskStyle}>
+        <div className="clynx-mark-comet-band" />
+      </div>
     </div>
   );
 }
@@ -229,6 +282,10 @@ export function Sidebar({
   runningCount,
   accountCount,
   ebaySearching,
+  facebookEnabled,
+  watchRunning,
+  watchSearching,
+  databaseBusy,
   hasUnseenWatchMatches,
 }: {
   active: Screen;
@@ -245,8 +302,24 @@ export function Sidebar({
   accountCount: number;
   // The eBay engine isn't one of the Facebook accounts counted above, but
   // it is "actively searching" all the same — folded into the green
-  // Dashboard/Activity icons and the footer status text.
+  // Dashboard/Activity icons and the footer status text. (App.tsx only passes
+  // true when eBay is searching for Search For items; eBay searching on behalf
+  // of a Watch alone is Watch activity, not the scanner.)
   ebaySearching: boolean;
+  // Whether Facebook scanning is switched on in Config. The Dashboard's
+  // "scanner" is the Start Scanner button, i.e. the Facebook accounts; eBay is a
+  // separate background poller with no button of its own. So eBay lights the
+  // Dashboard/Activity icons only when Facebook is off and eBay is therefore
+  // the only scanning there is.
+  facebookEnabled: boolean;
+  // Watch is on (not paused, at least one watch enabled) — drives the green,
+  // looking-around Watch eye. Independent of `running` above, so the scanner
+  // and Watch can each be live on their own or both at once.
+  watchRunning: boolean;
+  // A Watch's check is running right now: the eye is awake. False while an active Watch waits for its next interval (asleep).
+  watchSearching: boolean;
+  // Something in the Database is actively happening right now (research running, photos being filled in): its icon glows green.
+  databaseBusy: boolean;
   // Per explicit instruction — "a subtle indicator/pulse until the user
   // visits Watch." App.tsx derives this from api.hasUnseenWatchMatches
   // (compares real match timestamps against config.watch.matchesLastViewedAt
@@ -255,6 +328,10 @@ export function Sidebar({
   hasUnseenWatchMatches: boolean;
 }) {
   const running = runningCount > 0 || ebaySearching;
+  // What the Dashboard and Activity ICONS follow: the scanner proper (see
+  // facebookEnabled above). `running` still drives the footer status, which
+  // names eBay explicitly ("eBay searching").
+  const scannerLive = runningCount > 0 || (ebaySearching && !facebookEnabled);
   // Per explicit instruction — "an occasional but random glitch effect" on
   // the logo. A fixed-period CSS loop would read as mechanically regular;
   // this instead schedules each burst at a genuinely random delay (4-10s)
@@ -292,11 +369,11 @@ export function Sidebar({
   // continuous pulse while scanning) — built inside the component instead
   // of as a module-level constant for exactly that reason.
   const items: Array<{ id: Screen; label: string; icon: React.ReactNode }> = [
-    { id: "dashboard", label: "Dashboard", icon: <SpeedometerIcon live={running} /> },
-    { id: "activity", label: "Activity", icon: <ActivityIcon live={running} /> },
+    { id: "dashboard", label: "Dashboard", icon: <SpeedometerIcon live={scannerLive} /> },
+    { id: "activity", label: "Activity", icon: <ActivityIcon live={scannerLive} /> },
     { id: "feed", label: "Feed", icon: <FeedIcon /> },
-    { id: "watch", label: "Watch", icon: <WatchIcon /> },
-    { id: "database", label: "Database", icon: <InfoBubbleIcon /> },
+    { id: "watch", label: "Watch", icon: <WatchIcon live={watchRunning} searching={watchSearching} /> },
+    { id: "database", label: "Database", icon: <InfoBubbleIcon busy={databaseBusy} /> },
     { id: "config", label: "Config", icon: <GearIcon /> },
   ];
   return (
@@ -309,7 +386,7 @@ export function Sidebar({
         width: 220,
         flexShrink: 0,
         borderRight: "1px solid var(--border)",
-        background: "var(--bg-elevated)",
+        background: "var(--panel-elevated)",
         display: "flex",
         flexDirection: "column",
         padding: "20px 14px",

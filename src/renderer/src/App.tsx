@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Sidebar, type Screen } from "./components/Sidebar.js";
 import { StarfieldBackground } from "./components/StarfieldBackground.js";
+import { SpaceBackdrop } from "./components/SpaceBackdrop.js";
 import { GlobalAssistantBar } from "./components/GlobalAssistantBar.js";
 import { Dashboard } from "./screens/Dashboard.js";
 import { Activity } from "./screens/Activity.js";
@@ -12,10 +13,81 @@ import { LoginScreen } from "./screens/LoginScreen.js";
 import { api } from "./lib/api.js";
 import type { Account, ListingRecord, LogLine, ScrapeStatus } from "./lib/api.js";
 import { playDealSound, playClickSound, playHoverSound, setSoundEnabled } from "./lib/sound.js";
-import { applyThemeColors } from "./lib/colorScheme.js";
+import { applyPanelTransparency, applyThemeColors } from "./lib/colorScheme.js";
 import { onParticlesToggle } from "./lib/particles.js";
 
 const MAX_LOGS = 300;
+
+// Every refresh hands back brand-new objects for all 500 listings, even the
+// ones that haven't changed — so every card would look "changed" to React and
+// re-render on every refresh. This keeps the previous object for any listing
+// whose content is identical, so only listings that actually changed (a new
+// one, a re-scored one, a deleted one) cause any rendering at all. If nothing
+// changed it returns the previous array itself, so the whole tree is skipped.
+//
+// The comparison is a cheap fingerprint of the fields that can change after a
+// listing is first saved — NOT a JSON.stringify of the whole record. Real
+// records carry multi-KB descriptions and photo analyses, and stringifying
+// 500 of them on every refresh (several MB) froze the UI thread for tens of
+// milliseconds each time. Long text is stamped by length plus its first and
+// last characters, which is enough to notice any real re-score or edit.
+function textStamp(s: string | null | undefined): string {
+  return s ? `${s.length}:${s.slice(0, 16)}:${s.slice(-16)}` : "";
+}
+const listingSignatures = new WeakMap<ListingRecord, string>();
+function listingSignature(l: ListingRecord): string {
+  let sig = listingSignatures.get(l);
+  if (sig === undefined) {
+    const imgs = l.imageUrls ?? [];
+    sig = [
+      l.id, l.source, l.title, l.price, textStamp(l.thumbnailUrl), imgs.length, textStamp(imgs[0]), textStamp(imgs[imgs.length - 1]),
+      textStamp(l.description), l.locationText, l.listingAge, l.matchedItem, l.referencePriceUsd, l.discountPercent,
+      l.conditionImpact, l.confidence, textStamp(l.reasoning), textStamp(l.extractedAttributes), l.shippingMentioned,
+      l.isDeal, l.dealTier, l.estimatedValueRange, l.notified, l.feedback, l.feedbackNote,
+      l.sellerName, l.sellerJoinedYear, l.sellerRating, l.sellerRatingCount, l.sellerHasProfilePhoto, l.sellerRiskPassed,
+      l.sellerRiskReasons?.length ?? 0, textStamp(l.photoAnalysis), l.photoAnalysisCheckedAt, l.photoFlaws?.length ?? 0,
+      l.matchedProductAvgSoldPriceUsd, l.matchedProductAvgRunTimeDays, l.foundByAccountId,
+    ].join("|");
+    listingSignatures.set(l, sig);
+  }
+  return sig;
+}
+const MAX_LISTINGS_IN_MEMORY = 500;
+
+// Folds listings the main process just announced into the current list without refetching it:
+// a listing already here is replaced if it really changed (same signature check as above),
+// a new one is added at the top. Unchanged records keep their identity, so their cards don't
+// re-render. (Refetching all 500 listings on every announcement cost ~0.7s of the main
+// process and several MB of IPC each time, continuously while a scan was running.)
+function applyListingUpdates(prev: ListingRecord[], updates: ListingRecord[]): ListingRecord[] {
+  const indexById = new Map(prev.map((l, i) => [l.id, i]));
+  let next = prev;
+  const fresh: ListingRecord[] = [];
+  for (const record of updates) {
+    const i = indexById.get(record.id);
+    if (i === undefined) {
+      fresh.push(record);
+    } else if (listingSignature(next[i]) !== listingSignature(record)) {
+      if (next === prev) next = prev.slice();
+      next[i] = record;
+    }
+  }
+  if (!fresh.length) return next;
+  fresh.sort((x, y) => y.firstSeenAt - x.firstSeenAt);
+  return [...fresh, ...next].slice(0, MAX_LISTINGS_IN_MEMORY);
+}
+
+function reconcileListings(prev: ListingRecord[], next: ListingRecord[]): ListingRecord[] {
+  const prevById = new Map(prev.map((l) => [l.id, l]));
+  let identical = prev.length === next.length;
+  const merged = next.map((incoming, i) => {
+    const old = prevById.get(incoming.id);
+    const kept = old && listingSignature(old) === listingSignature(incoming) ? old : incoming;
+    if (identical && prev[i] !== kept) identical = false;
+    return kept;
+  });
+  return identical ? prev : merged;
+}
 
 // Fallback for Activity's "currently searching" pill before that account's
 // first engine:statusMap push has arrived (or if there are no accounts at
@@ -38,6 +110,16 @@ const EMPTY_STATUS: ScrapeStatus = {
 };
 
 const DEFAULT_CLOUD_API_URL = "http://localhost:8787";
+
+// Each screen only re-renders when ITS props change (the screens are all
+// mounted at once, so without this every status/log update re-rendered all of
+// them, including hundreds of Feed cards).
+const DashboardMemo = React.memo(Dashboard);
+const ActivityMemo = React.memo(Activity);
+const FeedMemo = React.memo(Feed);
+const WatchMemo = React.memo(WatchScreen);
+const DatabaseMemo = React.memo(Database);
+const ConfigMemo = React.memo(ConfigScreen);
 
 export default function App() {
   // Multi-user login migration — the entire app (Dashboard/Config/Watch/
@@ -108,10 +190,64 @@ export default function App() {
   const refreshUnseenWatchMatches = useCallback(() => {
     api.hasUnseenWatchMatches().then(setHasUnseenWatchMatches);
   }, []);
-
-  const refreshListings = useCallback(() => {
-    api.listListings(500, 0).then(setListings);
+  // The sidebar shows the scanner and Watch as two separate things: the
+  // Dashboard icon is live while the SCANNER works, the Watch eye is live while
+  // WATCH is on. Watch is on when it isn't paused globally and at least one
+  // watch is enabled (the same rule the Watch screen uses for "Watching"). The
+  // eBay engine also searches for Watches, so eBay only counts as scanner
+  // activity when there are Search For items it could be searching for.
+  const [hasSearchItems, setHasSearchItems] = useState(false);
+  // eBay stands in for "the scanner" in the sidebar icons only when Facebook is
+  // switched off (then it's the only thing there is to scan with).
+  const [facebookEnabled, setFacebookEnabled] = useState(true);
+  const [watchPaused, setWatchPaused] = useState(false);
+  // A Watch's check is running right now (the Watch eye is awake); otherwise an active Watch sleeps between intervals.
+  const [watchSearching, setWatchSearching] = useState(false);
+  // Something in the Database is actively happening (a product being researched, reference photos being filled in).
+  const [researchActive, setResearchActive] = useState(false);
+  const [photoBackfillActive, setPhotoBackfillActive] = useState(false);
+  // A Facebook Watch is checked by the Facebook side regardless; an eBay Watch
+  // only actually runs while "Search eBay" is on, so the two are counted
+  // separately and only the runnable ones turn the Watch eye green.
+  const [enabledFacebookWatchCount, setEnabledFacebookWatchCount] = useState(0);
+  const [enabledEbayWatchCount, setEnabledEbayWatchCount] = useState(0);
+  const [ebayEnabled, setEbayEnabled] = useState(false);
+  const refreshEnabledWatchCount = useCallback(() => {
+    api.listWatches().then((watches) => {
+      setEnabledFacebookWatchCount(watches.filter((w) => w.enabled && w.platform === "facebook").length);
+      setEnabledEbayWatchCount(watches.filter((w) => w.enabled && w.platform === "ebay").length);
+    });
   }, []);
+
+  // Fetches up to 500 listings and re-renders everything that shows them,
+  // so it must not run once per event: a single eBay search or a busy
+  // Facebook cycle emits dozens of engine:listing events within a second
+  // (one per evaluated listing, plus a re-emit for every enrichment of the
+  // same one). Push-driven refreshes are coalesced into one trailing fetch;
+  // the first event in a burst starts a short timer and every event until it
+  // fires rides along. User-initiated refreshes (a delete, Clear all) use
+  // refreshListingsNow so the UI never feels laggy after a click.
+  const listingsRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshListingsNow = useCallback(() => {
+    if (listingsRefreshTimer.current) {
+      clearTimeout(listingsRefreshTimer.current);
+      listingsRefreshTimer.current = null;
+    }
+    api.listListings(500, 0).then((next) => setListings((prev) => reconcileListings(prev, next)));
+  }, []);
+  const refreshListings = useCallback(() => {
+    if (listingsRefreshTimer.current) return;
+    listingsRefreshTimer.current = setTimeout(() => {
+      listingsRefreshTimer.current = null;
+      api.listListings(500, 0).then((next) => setListings((prev) => reconcileListings(prev, next)));
+    }, 600);
+  }, []);
+  useEffect(
+    () => () => {
+      if (listingsRefreshTimer.current) clearTimeout(listingsRefreshTimer.current);
+    },
+    []
+  );
 
   const goToProduct = useCallback((productId: string) => {
     setScreen("database");
@@ -119,6 +255,12 @@ export default function App() {
   }, []);
 
   const clearRequestedProduct = useCallback(() => setOpenProductId(null), []);
+  const startAccount = useCallback((accountId: string) => api.startEngine(accountId), []);
+  const stopAccount = useCallback((accountId: string) => api.stopEngine(accountId), []);
+  const handleLoggedOut = useCallback(() => {
+    setAuthenticated(false);
+    setScreen("dashboard");
+  }, []);
 
   // Per explicit instruction — trying to tab away from Config with unsaved
   // changes is denied (not just discouraged): the screen shakes and Save
@@ -135,6 +277,18 @@ export default function App() {
     [screen, configDirty]
   );
 
+  const goToFeed = useCallback(() => handleSelectScreen("feed"), [handleSelectScreen]);
+
+  // A clicked desktop notification (a Watch found something) opens the screen it names.
+  useEffect(() => {
+    const off = api.onNavigate((target) => {
+      if (target === "feed" || target === "watch" || target === "dashboard") handleSelectScreen(target);
+    });
+    return () => {
+      off();
+    };
+  }, [handleSelectScreen]);
+
   useEffect(() => {
     // Multi-user login migration — none of this should run (or, on a
     // relaunch, re-run redundantly) until a user is actually authenticated:
@@ -150,27 +304,72 @@ export default function App() {
     api.getConfig().then((c) => {
       document.documentElement.setAttribute("data-theme", c.theme);
       applyThemeColors(c);
+      applyPanelTransparency(c.panelTransparency);
       setSoundEnabled(c.soundEnabled);
       setParticlesEnabled(c.particlesEnabled);
       setAccounts(c.accounts);
+      setHasSearchItems(c.searchItems.length > 0);
+      setFacebookEnabled(c.facebookEnabled !== false);
+      setEbayEnabled(c.ebay?.enabled ?? false);
+      setWatchPaused(c.watch.globallyPaused);
     });
     api.getEngineStatusMap().then(setStatusMap);
     refreshListings();
     refreshUnseenWatchMatches();
+    refreshEnabledWatchCount();
 
+    // Log lines and status updates arrive dozens of times a second during
+    // a scan, and each setState here re-renders the app root and everything
+    // under it. Lines are collected and flushed as ONE update four times a
+    // second; status pushes keep only the latest and apply it five times a
+    // second. Nothing is lost — the log gets every line, the Live panel just
+    // shows the newest state — but the UI does a fraction of the work.
+    let pendingLogs: LogLine[] = [];
+    let logFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    const flushLogs = () => {
+      logFlushTimer = null;
+      const batch = pendingLogs;
+      pendingLogs = [];
+      if (batch.length) setLogs((prev) => [...prev, ...batch].slice(-MAX_LOGS));
+    };
     const offLog = api.onLog((line) => {
-      setLogs((prev) => [...prev.slice(-MAX_LOGS + 1), line]);
+      pendingLogs.push(line);
+      if (!logFlushTimer) logFlushTimer = setTimeout(flushLogs, 250);
       // "deal" fires exactly once, right when evaluateListing first flags
       // something — unlike onListing below, which re-fires every time that
       // same record gets updated later (eBay comps, photo analysis), so
       // hooking the sound here instead of there avoids playing it 2-3
-      // times for one single deal.
+      // times for one single deal. Played immediately, not batched.
       if (line.level === "deal") playDealSound();
     });
-    const offListing = () => refreshListings();
-    const offListingUnsub = api.onListing(offListing);
+    // Each announced listing is applied in place (see applyListingUpdates), batched so a burst
+    // of announcements is a single state update. A full refetch still happens for the cases
+    // the main process flags with listings:refresh (a clear, a deletion, a Watch match...).
+    let pendingListings = new Map<string, ListingRecord>();
+    let listingFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    const flushListings = () => {
+      listingFlushTimer = null;
+      const batch = [...pendingListings.values()];
+      pendingListings = new Map();
+      if (batch.length) setListings((prev) => applyListingUpdates(prev, batch));
+    };
+    const offListingUnsub = api.onListing((record) => {
+      if (!record) return;
+      pendingListings.set(record.id, record);
+      if (!listingFlushTimer) listingFlushTimer = setTimeout(flushListings, 300);
+    });
     const offListingsRefresh = api.onListingsRefresh(refreshListings);
-    const offStatus = api.onStatusMap(setStatusMap);
+    let latestStatusMap: Record<string, ScrapeStatus> | null = null;
+    let statusFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    const offStatus = api.onStatusMap((map) => {
+      latestStatusMap = map;
+      if (statusFlushTimer) return;
+      statusFlushTimer = setTimeout(() => {
+        statusFlushTimer = null;
+        if (latestStatusMap) setStatusMap(latestStatusMap);
+        latestStatusMap = null;
+      }, 200);
+    });
     // Per explicit instruction — a chat-driven theme change (e.g. asking
     // the global assistant for dark mode) needs to actually repaint the
     // app immediately, the same way picking it in Config's own Appearance
@@ -181,9 +380,14 @@ export default function App() {
     const offConfigUpdated = api.onConfigUpdated((next) => {
       document.documentElement.setAttribute("data-theme", next.theme);
       applyThemeColors(next);
+      applyPanelTransparency(next.panelTransparency);
       setSoundEnabled(next.soundEnabled);
       setParticlesEnabled(next.particlesEnabled);
       setAccounts(next.accounts);
+      setHasSearchItems(next.searchItems.length > 0);
+      setFacebookEnabled(next.facebookEnabled !== false);
+      setEbayEnabled(next.ebay?.enabled ?? false);
+      setWatchPaused(next.watch.globallyPaused);
       // Covers both a new watch match landing AND the Watch screen itself
       // clearing matchesLastViewedAt — both travel through config:updated.
       refreshUnseenWatchMatches();
@@ -194,9 +398,23 @@ export default function App() {
     const offParticlesToggle = onParticlesToggle(setParticlesEnabled);
     // A new Watch match (Phase 2) broadcasts watches:updated — re-check the
     // pulse indicator the same way onListing already re-checks listings.
-    const offWatchesUpdated = api.onWatchesUpdated(refreshUnseenWatchMatches);
+    // (A watch being added, removed, paused or resumed also broadcasts this, so
+    // it keeps the Watch icon's on/off state current too.)
+    void api.isWatchSearching().then(setWatchSearching);
+    const offWatchSearching = api.onWatchSearching(setWatchSearching);
+    void api.getResearchStatus().then((list) => setResearchActive(list.length > 0));
+    const offResearch = api.onResearchStatus((list) => setResearchActive(list.length > 0));
+    void api.getPhotoBackfillStatus().then((p) => setPhotoBackfillActive(p.running));
+    const offBackfill = api.onPhotoBackfillProgress((p) => setPhotoBackfillActive(p.running));
+    const offWatchesUpdated = api.onWatchesUpdated(() => {
+      refreshUnseenWatchMatches();
+      refreshEnabledWatchCount();
+    });
 
     return () => {
+      offWatchSearching();
+      offResearch();
+      offBackfill();
       offLog();
       offListingUnsub();
       offListingsRefresh();
@@ -204,6 +422,8 @@ export default function App() {
       offConfigUpdated();
       offWatchesUpdated();
       offParticlesToggle();
+      if (logFlushTimer) clearTimeout(logFlushTimer);
+      if (statusFlushTimer) clearTimeout(statusFlushTimer);
     };
   }, [authenticated, refreshListings, refreshUnseenWatchMatches]);
 
@@ -274,6 +494,7 @@ export default function App() {
   // yet.
   return (
     <div style={{ display: "flex", height: "100%", position: "relative" }}>
+      <SpaceBackdrop />
       {particlesEnabled && <StarfieldBackground />}
       {!authChecked ? (
         <div
@@ -305,7 +526,11 @@ export default function App() {
             }
             runningCount={accounts.filter((a) => statusMap[a.id]?.running).length}
             accountCount={accounts.length}
-            ebaySearching={!!statusMap["ebay"]?.running}
+            ebaySearching={!!statusMap["ebay"]?.running && hasSearchItems}
+            facebookEnabled={facebookEnabled}
+            watchRunning={!watchPaused && (enabledFacebookWatchCount > 0 || (ebayEnabled && enabledEbayWatchCount > 0))}
+            watchSearching={watchSearching}
+            databaseBusy={researchActive || photoBackfillActive}
             hasUnseenWatchMatches={hasUnseenWatchMatches}
           />
           <div style={{ flex: 1, minWidth: 0, padding: 28, overflow: "hidden", position: "relative", zIndex: 1 }}>
@@ -320,36 +545,29 @@ export default function App() {
                 animation, since a display:none element is removed from the
                 render tree entirely and gets a fresh one when it returns. */}
             <div className="enter" style={{ display: screen === "dashboard" ? "block" : "none", height: "100%" }}>
-              <Dashboard
+              <DashboardMemo
                 accounts={accounts}
                 statusMap={statusMap}
                 listings={listings}
-                onStart={(accountId) => api.startEngine(accountId)}
-                onStop={(accountId) => api.stopEngine(accountId)}
-                onGoToFeed={() => handleSelectScreen("feed")}
+                onStart={startAccount}
+                onStop={stopAccount}
+                onGoToFeed={goToFeed}
               />
             </div>
             <div className="enter" style={{ display: screen === "activity" ? "block" : "none", height: "100%" }}>
-              <Activity status={statusMap[accounts[0]?.id ?? ""] ?? EMPTY_STATUS} logs={logs} onGoToProduct={goToProduct} />
+              <ActivityMemo status={statusMap[accounts[0]?.id ?? ""] ?? EMPTY_STATUS} logs={logs} onGoToProduct={goToProduct} />
             </div>
             <div className="enter" style={{ display: screen === "feed" ? "block" : "none", height: "100%" }}>
-              <Feed listings={listings} onRefresh={refreshListings} onGoToProduct={goToProduct} />
+              <FeedMemo active={screen === "feed"} listings={listings} onRefresh={refreshListingsNow} onGoToProduct={goToProduct} />
             </div>
             <div className="enter" style={{ display: screen === "watch" ? "block" : "none", height: "100%" }}>
-              <WatchScreen active={screen === "watch"} />
+              <WatchMemo active={screen === "watch"} />
             </div>
             <div className="enter" style={{ display: screen === "database" ? "block" : "none", height: "100%" }}>
-              <Database requestedProductId={openProductId} onRequestedProductHandled={clearRequestedProduct} />
+              <DatabaseMemo requestedProductId={openProductId} onRequestedProductHandled={clearRequestedProduct} />
             </div>
             <div className="enter" style={{ display: screen === "config" ? "block" : "none", height: "100%" }}>
-              <ConfigScreen
-                onDirtyChange={setConfigDirty}
-                shakeSignal={configShakeSignal}
-                onLoggedOut={() => {
-                  setAuthenticated(false);
-                  setScreen("dashboard");
-                }}
-              />
+              <ConfigMemo active={screen === "config"} onDirtyChange={setConfigDirty} shakeSignal={configShakeSignal} onLoggedOut={handleLoggedOut} />
             </div>
           </div>
           {/* Per explicit instruction — reachable from every screen except

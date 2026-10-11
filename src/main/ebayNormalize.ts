@@ -60,6 +60,7 @@ export function normalizeEbayListing(raw: EbayItemDetailRaw): ListingDetail {
     locationText: raw.itemLocationCity,
     source: "ebay",
     description: raw.description ?? "",
+    ebayShippingUsd: raw.shippingCostUsd,
     // eBay listings are inherently shipped — the platform's whole point —
     // unlike Facebook's own "did the seller happen to mention shipping in
     // the text" signal, which this field otherwise represents. Purely

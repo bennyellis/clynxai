@@ -4,6 +4,9 @@
 // separate provider/key the way Gemini did before switching everything to
 // OpenAI.
 import sharp from "sharp";
+import { CLYNX_VOICE } from "./voice.js";
+import { colorsIn } from "./colors.js";
+import { isLowAiMode } from "./aiMode.js";
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 import type { FlawFeedbackExample, PhotoFlaw } from "./types.js";
 
@@ -346,7 +349,9 @@ export async function analyzeListingPhotos(
   const detectFlaws = !!opts?.detectFlaws;
   const flawFeedbackExamples = detectFlaws ? (opts?.flawFeedbackExamples ?? []) : [];
 
-  const prompt = `You're looking at ${images.length} photo(s), numbered 1 to ${images.length} in the order shown below, from a single Facebook Marketplace listing titled "${context.title}", asking price ${context.price !== null ? `$${context.price}` : "not listed"}. Listing text: "${context.description.slice(0, 500)}"
+  const prompt = `${CLYNX_VOICE}
+
+You're looking at ${images.length} photo(s), numbered 1 to ${images.length} in the order shown below, from a single Facebook Marketplace listing titled "${context.title}", asking price ${context.price !== null ? `$${context.price}` : "not listed"}. Listing text: "${context.description.slice(0, 500)}"
 
 Your main job: identify the focal product(s) actually being SOLD in these photos — treat the photos as the source of truth, not the title/text, which can be vague, incomplete, or wrong. Look at every photo carefully and read any visible text on boxes, cases, labels, or screens (e.g. game titles, model numbers, serial numbers shown in a settings screen) to identify the main item, plus any other item pictured that is itself a genuinely separate, individually-resalable product line (an extra game, a second device, etc.) even if the title/text never mentioned it. Note anything that confirms or contradicts what the listing title/text claims, and any visible damage not mentioned in the text.
 
@@ -365,7 +370,7 @@ Separately from the per-product photos above: look across ALL ${images.length} p
   }
 ${
   claimedItem
-    ? `\nThis listing is supposed to be a "${claimedItem}". Check CAREFULLY and STRICTLY whether the photos actually show that specific product — per explicit instruction, require a genuinely high-confidence match (call it >80% sure), not just "plausible" or "could be it." A common scam/mistake pattern is a listing titled/matched as a full item (e.g. a game console) whose photos actually show only a minor accessory for it (e.g. just a controller or a cable), a different variant/model/color than claimed, or a bundle that's missing the core item itself — all of these are worth meaningfully less and are NOT a match, even though they're related to "${claimedItem}". Base this purely on what the photos themselves show — never on how good a price sounds; a steep discount is not evidence of a mismatch, and this business exists specifically to find those. Set matchesClaim to true ONLY when you're confident the photos show the same specific product this listing claims to be. Set it to false whenever the photos show something meaningfully different or lesser (wrong variant, accessory-only, incomplete bundle, or a different product entirely), OR whenever the photos genuinely aren't clear/complete enough to be confident either way — treat an uncertain call as a mismatch, not a pass. Explain what they actually show instead when false.${
+    ? `\nThis listing is supposed to be a "${claimedItem}" — that comes from the listing's TITLE, and THE TITLE COMES FIRST: it is the primary evidence of what is being sold. The photos are only there to confirm or contradict it. Look through ALL of the photos: if the "${claimedItem}" itself is visible in ANY of them, set matchesClaim to true — even when the photos are poor, dark, blurry, cluttered, amateur or oddly framed, even when the item is partly out of frame, sitting on a couch or the floor, or surrounded by other things. Bad photography is never a reason to reject a listing. Set matchesClaim to false ONLY when the photos affirmatively show that this is NOT the claimed product AND the claimed product itself appears in NONE of them: the photos show only a minor accessory for it (e.g. just a controller or a cable), a clearly different variant/model than claimed (e.g. a Series S when a Series X was claimed), a bundle that is missing the core item itself, or a different product entirely — all of those are worth meaningfully less and are NOT a match, even though they are related to "${claimedItem}". Base this purely on what the photos themselves show — never on how good a price sounds; a steep discount is not evidence of a mismatch, and this business exists specifically to find those. If the photos are simply too unclear, too few or too unhelpful to tell either way, set matchesClaim to null (the title stands) — do not guess false. Explain what they actually show instead when false.${
         claimedItemReferenceImages.length
           ? ` You'll also see ${claimedItemReferenceImages.length} confirmed-genuine reference photo(s) of a real "${claimedItem}" right after the listing's own photos — use those as concrete ground truth for this comparison, not just your general knowledge of what one looks like.`
           : ""
@@ -390,7 +395,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
   "expertTake": string,             // your own short, human, FIRST-PERSON reaction to THIS listing — 1-2 sentences, written the way a sharp, opinionated Facebook-Marketplace-to-eBay reseller would actually say it out loud on seeing these photos (excited about a good find, skeptical of a sketchy one, unimpressed by an overpriced dud, whatever's genuinely warranted) — not a restatement of summary, and not generic ("looks fine"). React to the SPECIFIC price/condition/value combination in front of you.
   "identifiedProducts": string[],  // ONLY the focal product(s) actually being sold, plus any other genuinely separate, individually-resalable product line pictured (e.g. an extra game, an extra controller) — canonical name only, see above, e.g. ["PlayStation 5 Slim Digital Edition", "Spider-Man 2 (PS5)", "God of War Ragnarok (PS5)"]. NEVER include low-value necessities that merely come with the main item (power cords, AC adapters, chargers, sensor bars, mounts, cases, etc.) — those belong in bundleDescription instead, not here. Empty array if you can't confidently identify anything specific.
   "photoAttribution": [ { "photoNumber": number, "product": string, "boundingBox": { "x": number, "y": number, "width": number, "height": number } } ],  // for EACH photo (by its number, 1 to ${images.length}, matching the order shown) that clearly and specifically depicts ONE of the products listed in identifiedProducts, pair its number with that EXACT product string (must match identifiedProducts verbatim) and a tight boundingBox around just that product within that photo — see above. Skip any photo that doesn't clearly show one specific identifiedProducts item on its own (an angle shot of the same item already covered elsewhere is fine to skip — this is about finding at least one good representative photo per product, not labeling every photo). Empty array if nothing qualifies.
-  "hasValuableBundle": boolean,     // true ONLY if photos show specific additional items bundled in (games, accessories, etc.) NOT mentioned in the title/description, that would meaningfully add to resale value beyond the base item alone
+  "hasValuableBundle": boolean,     // true ONLY if the listing includes specific additional items beyond the base item (games, an expansion/storage card, extra controllers, accessories, etc.) FOR THE ASKING PRICE, that would meaningfully add to resale value on their own. READ THE DESCRIPTION LITERALLY: if the seller says they "also have" something, sell it "separately", want money "for" it ("storage card for $120"), or itemize a list with a price per item (console - $200, game - $20, game - $30), then the asking price covers only the main item and those extras are NOT included: answer false. Items merely visible in the photos (a headset in the background) only count when the text does not contradict that. Never count the base item itself or low-value necessities (cables, power cords).
   "bundleDescription": string,      // if hasValuableBundle is true: specifically what's included, read as precisely as you can (e.g. "Includes 4 games visible in the photo: Zelda BOTW, Mario Kart 8, Smash Bros Ultimate, Animal Crossing"). Empty string if hasValuableBundle is false.
   "bundleEstimatedValueUsd": number | null,  // if hasValuableBundle is true: your best-guess TYPICAL USED resale value, in whole US dollars, of JUST the bundled extras you listed above (not the main item, not the total) — e.g. those 4 games together might typically resell for around 80 used. A real number estimate, not a range string. Null if hasValuableBundle is false or you genuinely can't estimate it.
   "matchesClaim": boolean | null,   // ${claimedItem ? `whether the photos are consistent with this actually being a "${claimedItem}" — see above` : "null — no claimed item was given to compare against"}
@@ -602,13 +607,17 @@ export async function classifyThumbnailImage(
   // caller since every entry here is an extra image in the request.
   referenceIneligibleImages: Array<{ imageDataUri: string; category: string | null }> = []
 ): Promise<ImageEligibilityResult> {
+  // A vision call on nearly every listing scanned: not worth credits (the title filters and blacklist still apply).
+  if (isLowAiMode()) return { ineligible: false, category: null, reason: null, error: null };
   try {
     ensureOpenAIAccess();
   } catch (err) {
     return imageEligibilityError((err as Error).message);
   }
 
-  const prompt = `You're looking at the thumbnail photo for a Facebook Marketplace listing titled "${title}". A mail-order reseller buys items here and ships them out by mail — they can never buy/resell a vehicle, boat, piece of real estate/property, or a bulky local-pickup-only item like furniture, a large appliance, a hot tub, a pool table, or similar. Your only job: does THIS PHOTO show one of those ineligible categories, regardless of what the title says (titles often leave this out entirely)?
+  const prompt = `You're looking at the thumbnail photo for a Facebook Marketplace listing titled "${title}". A mail-order reseller buys items here and ships them out by mail — they can never buy/resell a vehicle, boat, piece of real estate/property, or a bulky local-pickup-only item like furniture, a large appliance, a hot tub, a pool table, or similar. Your job: decide whether this listing is one of those ineligible things, judging by what is actually being SOLD.
+
+THE TITLE COMES FIRST. The title tells you what the seller is selling. If the title names a specific shippable item (a console, phone, laptop, headset, tool, toy, clothing, collectible — anything that fits in a box) and that item is visible ANYWHERE in the photo, then this listing is NOT ineligible — however messy, dark, blurry, cluttered or oddly framed the photo is, and whatever the item is sitting on or next to (a couch, bed, floor, car seat, table, a pile of other things). Furniture, a room, a house or a vehicle that is merely the setting does not count, and neither does a photo being poor. Only flag a listing as ineligible when the item the title names is NOT what the photo shows — i.e. the title is vague or gives nothing away and the photo shows one of the ineligible things as the item being sold (titles often leave this out entirely).
 ${
   referenceIneligibleImages.length
     ? `\nAfter this listing's own thumbnail, you'll see ${referenceIneligibleImages.length} reference photo(s) already confirmed as ineligible, each labeled with its category. If this listing's photo genuinely looks like the same kind of thing as one of them, that's a strong signal to flag it too.\n`
@@ -618,7 +627,8 @@ Be conservative — only flag something you can actually see clearly, not a gues
 
 Respond with ONLY a JSON object, no other text, in this exact shape:
 {
-  "ineligible": boolean,
+  "titleItemVisible": boolean, // true ONLY if the title names a specific shippable item (NOT a vehicle, boat, property or bulky furniture/appliance) and that item is visible somewhere in the photo
+  "ineligible": boolean,       // must be false whenever titleItemVisible is true
   "category": string,   // short category if ineligible, e.g. "boat", "sofa", "house" — empty string otherwise
   "reason": string       // one plain sentence explaining what you see — empty string if not ineligible
 }`;
@@ -661,14 +671,17 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
     if (!text.trim()) return imageEligibilityError("OpenAI returned an empty response.");
     try {
       const parsed = JSON.parse(text);
+      // The title wins: if the model also says the titled item is visible, the
+      // photo can't veto the listing, whatever else it said.
+      const ineligible = !!parsed.ineligible && parsed.titleItemVisible !== true;
       return {
-        ineligible: !!parsed.ineligible,
-        category: typeof parsed.category === "string" && parsed.category.trim() ? parsed.category.trim() : null,
-        reason: typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : null,
+        ineligible,
+        category: ineligible && typeof parsed.category === "string" && parsed.category.trim() ? parsed.category.trim() : null,
+        reason: ineligible && typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : null,
         error: null,
       };
     } catch {
-      return imageEligibilityError("Couldn't parse the AI's response.");
+      return imageEligibilityError("Couldn't read Clynx's response.");
     }
   } catch (err) {
     if ((err as Error).name === "AbortError") {
@@ -712,7 +725,7 @@ export async function matchesReferenceProduct(
   itemName: string,
   referenceImages: string[]
 ): Promise<ReferenceImageMatchResult> {
-  if (!referenceImages.length) return { matches: false, reason: null, error: null };
+  if (!referenceImages.length || isLowAiMode()) return { matches: false, reason: null, error: null };
 
   try {
     ensureOpenAIAccess();
@@ -770,7 +783,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         error: null,
       };
     } catch {
-      return referenceImageMatchError("Couldn't parse the AI's response.");
+      return referenceImageMatchError("Couldn't read Clynx's response.");
     }
   } catch (err) {
     if ((err as Error).name === "AbortError") {
@@ -812,7 +825,7 @@ export async function analyzeReferencePhotoDifferences(
   productName: string,
   referenceImages: string[]
 ): Promise<ReferencePhotoDifferencesResult> {
-  if (referenceImages.length < 2) return { summary: null, error: null };
+  if (referenceImages.length < 2 || isLowAiMode()) return { summary: null, error: null };
 
   try {
     ensureOpenAIAccess();
@@ -861,7 +874,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
       const summary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";
       return { summary: parsed.hasDifferences && summary ? summary : null, error: null };
     } catch {
-      return { summary: null, error: "Couldn't parse the AI's response." };
+      return { summary: null, error: "Couldn't read Clynx's response." };
     }
   } catch (err) {
     if ((err as Error).name === "AbortError") {
@@ -905,7 +918,7 @@ export async function auditReferencePhotoGallery(
   referenceImages: string[],
   knownProducts: string[]
 ): Promise<ReferencePhotoAuditResult> {
-  if (referenceImages.length < 2) return { findings: [], error: null };
+  if (referenceImages.length < 2 || isLowAiMode()) return { findings: [], error: null };
 
   try {
     ensureOpenAIAccess();
@@ -913,11 +926,17 @@ export async function auditReferencePhotoGallery(
     return { findings: [], error: (err as Error).message };
   }
 
+  // An entry whose name names a color ("Xbox Series S (Black)") is kept strictly to that color: a photo of the same
+  // product in another color is a misfile too, and is named with the right color so it can be moved or given its own entry.
+  const namesColor = colorsIn(productName).size > 0;
+  const colorClause = namesColor
+    ? ` This entry's name names a color, so entries are kept apart by color: a photo of the SAME product in a DIFFERENT color than "${productName}" names (e.g. a white console filed under a black one) IS a mismatch. For those, actualSubject is the product's name with the correct color in the same format as "${productName}" (e.g. replace the color in the parentheses).`
+    : "";
   const prompt = `These are all ${referenceImages.length} reference photos currently filed under "${productName}" on a resale Database's product page. Most of them should genuinely show the same real-world product — treat that majority consensus as the ground truth for what "${productName}" actually looks like.
 
-Look at every photo and find any that CLEARLY show a different, specific, identifiable product than that consensus. Do NOT flag a photo just because it's a worse angle, bad lighting, a different color/condition of the SAME product, or a different generation/variant that still IS "${productName}" — only flag a genuine misfile, something that shouldn't be filed under this product at all.
+Look at every photo and find any that CLEARLY show a different, specific, identifiable product than that consensus. Do NOT flag a photo just because it's a worse angle, bad lighting, a different condition of the SAME product, or a different generation/variant that still IS "${productName}"${namesColor ? "" : ", or a different color of the same product"} — only flag a genuine misfile, something that shouldn't be filed under this product at all.${colorClause}
 
-For each genuine mismatch, name what it actually shows using ONLY its own canonical, generic model name — the name a retailer would use (no condition, color, or listing phrasing folded in). First check whether it matches one of these already-tracked products, and if so use that EXACT name verbatim: ${
+For each genuine mismatch, name what it actually shows using ONLY its own canonical, generic model name — the name a retailer would use (no condition or listing phrasing folded in${namesColor ? "; the color only when it is the reason for the mismatch" : ", and no color"}). First check whether it matches one of these already-tracked products, and if so use that EXACT name verbatim: ${
     knownProducts.length ? knownProducts.map((n) => `"${n}"`).join(", ") : "(none tracked yet)"
   }.
 
@@ -971,7 +990,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         }));
       return { findings, error: null };
     } catch {
-      return { findings: [], error: "Couldn't parse the AI's response." };
+      return { findings: [], error: "Couldn't read Clynx's response." };
     }
   } catch (err) {
     if ((err as Error).name === "AbortError") {
@@ -1038,7 +1057,7 @@ Respond with ONLY a JSON object, no other text: { "answer": string }`;
     try {
       const parsed = JSON.parse(text);
       const answer = typeof parsed.answer === "string" && parsed.answer.trim() ? parsed.answer.trim() : null;
-      return answer ? { answer, error: null } : { answer: null, error: "Couldn't parse the AI's answer." };
+      return answer ? { answer, error: null } : { answer: null, error: "Couldn't read Clynx's answer." };
     } catch {
       // Fall back to the raw text rather than failing outright — still a
       // real, readable answer even if it didn't come back as clean JSON.
@@ -1145,7 +1164,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
       const parsed = JSON.parse(text);
       return { matches: !!parsed.matches, reason: typeof parsed.reason === "string" ? parsed.reason.trim() || null : null, error: null };
     } catch {
-      return { matches: false, reason: null, error: "Couldn't parse the AI's response." };
+      return { matches: false, reason: null, error: "Couldn't read Clynx's response." };
     }
   } catch (err) {
     if ((err as Error).name === "AbortError") {
@@ -1246,7 +1265,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
       const note = typeof parsed.note === "string" && parsed.note.trim() ? parsed.note.trim() : null;
       return { actualSubject, note, error: null };
     } catch {
-      return { actualSubject: null, note: null, error: "Couldn't parse the AI's response." };
+      return { actualSubject: null, note: null, error: "Couldn't read Clynx's response." };
     }
   } catch (err) {
     if ((err as Error).name === "AbortError") {

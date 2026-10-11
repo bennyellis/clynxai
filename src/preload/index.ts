@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { Account, ActiveProductResearch, BlacklistedImage, BlacklistTerm, CloudStatus, Config, FeedbackVerdict, ListingRecord, LogLine, ProductImage, ProductProfile, ScrapeStatus, Watch, WatchMatch } from "../main/types.js";
+import type { DiscoveryEntry } from "../main/discovery.js";
+import type { Account, ActiveProductResearch, BlacklistedImage, BlacklistTerm, CloudStatus, Config, FeedbackVerdict, ListingRecord, LogLine, ProductImage, ProductProfile, ScrapeStatus, Watch, WatchMatch, WatchPlatform } from "../main/types.js";
 import type { ChatMessage, ChatContext, ChatAttachment } from "../main/chat.js";
 import type { MetricsSnapshot } from "../main/metrics.js";
 
@@ -31,6 +32,7 @@ const api = {
     patch: Partial<Pick<Config, "maxListingAgeHours" | "rotateSearchItems" | "rotateSearchItemsCount">>
   ): Promise<void> => ipcRenderer.invoke("filters:update", patch),
   removeSearchItem: (item: string): Promise<void> => ipcRenderer.invoke("filters:removeSearchItem", { item }),
+  removeRecentSearch: (search: { item: string; minPriceUsd: number | null; maxPriceUsd: number | null; includeBroken?: boolean }): Promise<void> => ipcRenderer.invoke("searches:removeRecent", search),
 
   hasOpenAIKey: (): Promise<boolean> => ipcRenderer.invoke("env:hasOpenAIKey"),
   saveOpenAIKey: (key: string): Promise<void> => ipcRenderer.invoke("env:saveOpenAIKey", key),
@@ -47,6 +49,7 @@ const api = {
   },
   startEngine: (accountId: string): Promise<void> => ipcRenderer.invoke("engine:start", { accountId }),
   stopEngine: (accountId: string): Promise<void> => ipcRenderer.invoke("engine:stop", { accountId }),
+  skipEngineWait: (accountId: string): Promise<void> => ipcRenderer.invoke("engine:skipWait", { accountId }),
   runEngineOnce: (accountId: string): Promise<void> => ipcRenderer.invoke("engine:runOnce", { accountId }),
   login: (accountId: string): Promise<boolean> => ipcRenderer.invoke("engine:login", { accountId }),
   checkLogin: (accountId: string): Promise<boolean> => ipcRenderer.invoke("engine:checkLogin", { accountId }),
@@ -161,10 +164,6 @@ const api = {
   // SAME fuzzy-match logic the scanner itself relies on, before actually
   // adding a new Search For item.
   findMatchingProduct: (name: string): Promise<ProductProfile | null> => ipcRenderer.invoke("products:findMatch", { name }),
-  // Per explicit instruction — the "Is this what you're searching for?"
-  // popup now always shows an image: this covers the case findMatchingProduct
-  // comes back empty, pulling a web-sourced reference photo instead.
-  findReferenceImage: (name: string): Promise<string | null> => ipcRenderer.invoke("products:findReferenceImage", { name }),
   listGroupThumbnails: (): Promise<Record<string, string>> => ipcRenderer.invoke("products:listGroupThumbnails"),
   onGroupThumbnailUpdated: (cb: (path: string, imageData: string) => void) => {
     const listener = (_e: unknown, args: { path: string; imageData: string }) => cb(args.path, args.imageData);
@@ -204,6 +203,13 @@ const api = {
   addProductImage: (productId: string): Promise<ProductImage | null> => ipcRenderer.invoke("products:addImage", { productId }),
   deleteProductImage: (imageId: string): Promise<void> => ipcRenderer.invoke("products:deleteImage", { imageId }),
   searchProductNow: (id: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke("products:searchNow", { id }),
+  // Entries on screen with a blank box get a thumbnail researched right away (see index.ts's ensureThumbnailsFor).
+  ensureThumbnails: (ids: string[]): Promise<number> => ipcRenderer.invoke("products:ensureThumbnails", { ids }),
+  // A folder tile on screen with nothing to show gets its brand logo / group picture found (no AI needed).
+  // A Watch's own ntfy topic (blank goes back to the Config topic); null if the name isn't a valid topic.
+  setWatchNtfyTopic: (id: string, topic: string | null): Promise<Watch | null> => ipcRenderer.invoke("watch:setNtfyTopic", { id, topic }),
+  linkEbayStore: (username: string): Promise<{ ok: boolean; username: string; error?: string }> => ipcRenderer.invoke("ebayStore:link", username),
+  ensureFolderImage: (segments: string[]): Promise<boolean> => ipcRenderer.invoke("products:ensureFolderImage", { segments }),
   refreshEbayComps: (id: string): Promise<{ ok: boolean; message: string }> =>
     ipcRenderer.invoke("products:refreshEbayComps", { id }),
   // Per explicit instruction — "avg. Facebook Marketplace price... place
@@ -224,13 +230,15 @@ const api = {
     items: string[],
     linkedProductId?: string | null,
     minPriceUsd?: number | null,
-    maxPriceUsd?: number | null
+    maxPriceUsd?: number | null,
+    includeBroken?: boolean
   ): Promise<{ ok: boolean; message: string }> =>
     ipcRenderer.invoke("search:addProducts", {
       items,
       linkedProductId: linkedProductId ?? null,
       minPriceUsd: minPriceUsd ?? null,
       maxPriceUsd: maxPriceUsd ?? null,
+      includeBroken: includeBroken === true,
     }),
   // Per explicit instruction — "Watch: keep an eye out for this over time
   // and alert me when it appears," persistent across restarts (unlike
@@ -238,13 +246,19 @@ const api = {
   // Watch/WatchMatch for the full shape.
   createWatch: (args: {
     name: string;
+    platform: WatchPlatform;
     searchPhrase: string;
     linkedProductId: string | null;
+    // Facebook Watches: everything to look out for, how often (minutes), which accounts (empty = any).
+    terms?: Array<{ phrase: string; linkedProductId?: string | null }>;
+    checkIntervalMinutes?: number;
+    accountIds?: string[];
     minPriceUsd: number | null;
     maxPriceUsd: number | null;
     minProfitUsd: number | null;
     minDiscountPercent: number | null;
     maxListingAgeMinutes: number | null;
+    minSellerRatingPercent: number | null;
     locationMode: "country" | "state" | "city";
     selectedState: string | null;
     selectedCityOrZip: string | null;
@@ -261,10 +275,14 @@ const api = {
       minProfitUsd: number | null;
       minDiscountPercent: number | null;
       maxListingAgeMinutes: number | null;
+      minSellerRatingPercent: number | null;
       locationMode: "country" | "state" | "city";
       selectedState: string | null;
       selectedCityOrZip: string | null;
       searchRadiusMiles: number | null;
+      terms: Array<{ phrase: string; linkedProductId?: string | null }>;
+      checkIntervalMinutes: number;
+      accountIds: string[];
     }>
   ): Promise<Watch | null> => ipcRenderer.invoke("watch:update", { id, patch }),
   setWatchEnabled: (id: string, enabled: boolean): Promise<Watch | null> => ipcRenderer.invoke("watch:setEnabled", { id, enabled }),
@@ -284,6 +302,19 @@ const api = {
     const listener = (_e: unknown, watches: Watch[]) => cb(watches);
     ipcRenderer.on("watches:updated", listener);
     return () => ipcRenderer.removeListener("watches:updated", listener);
+  },
+  // Whether a Watch is searching right now (true while its check runs, false while it waits for its next interval).
+  isWatchSearching: (): Promise<boolean> => ipcRenderer.invoke("watch:isSearching"),
+  onWatchSearching: (cb: (searching: boolean) => void) => {
+    const listener = (_e: unknown, searching: boolean) => cb(searching);
+    ipcRenderer.on("watch:searching", listener);
+    return () => ipcRenderer.removeListener("watch:searching", listener);
+  },
+  // The main process asking the window to show a screen (a clicked desktop notification).
+  onNavigate: (cb: (screen: string) => void) => {
+    const listener = (_e: unknown, screen: string) => cb(screen);
+    ipcRenderer.on("app:navigate", listener);
+    return () => ipcRenderer.removeListener("app:navigate", listener);
   },
   askAboutImage: (imageDataUri: string, question: string, subjectName: string): Promise<{ answer: string | null; error: string | null }> =>
     ipcRenderer.invoke("images:ask", { imageDataUri, question, subjectName }),
@@ -316,6 +347,13 @@ const api = {
     const listener = (_e: unknown, active: ActiveProductResearch[]) => cb(active);
     ipcRenderer.on("research:status", listener);
     return () => ipcRenderer.removeListener("research:status", listener);
+  },
+  // The Database's Discovery tab: the live feed of products Clynx is looking into, with its thoughts on each.
+  getDiscoveryFeed: (): Promise<DiscoveryEntry[]> => ipcRenderer.invoke("discovery:list"),
+  onDiscoveryEntry: (cb: (entry: DiscoveryEntry) => void) => {
+    const listener = (_e: unknown, entry: DiscoveryEntry) => cb(entry);
+    ipcRenderer.on("discovery:entry", listener);
+    return () => ipcRenderer.removeListener("discovery:entry", listener);
   },
 
   // Per explicit instruction — pipeline instrumentation for Activity's

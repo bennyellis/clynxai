@@ -38,3 +38,17 @@ export function evaluateSellerRisk(seller: SellerSignals, config: SellerRiskConf
 
   return { passed: reasons.length === 0, reasons };
 }
+
+// Facebook Marketplace is full of scam bots posting high-ticket items at a suspiciously low price. They give
+// themselves away by writing a phone number with the middle masked in asterisks (XXX**XXX**XXXX, to dodge
+// Facebook's own filters), and usually joined Facebook this year. A listing like that is skipped outright: no
+// blacklist term is added, since the product itself is fine and a real listing for it may turn up.
+const MASKED_PHONE = /\d{3}\s*\*{2,3}\s*\d{3}\s*\*{2,3}\s*\d{4}/;
+
+/** The reason to skip a listing as a scam bot, or null when it doesn't look like one. */
+export function detectScamBot(text: string, seller?: { joinedFacebookYear: number | null }): string | null {
+  const match = text.match(MASKED_PHONE);
+  if (!match) return null;
+  const joinedThisYear = seller?.joinedFacebookYear != null && seller.joinedFacebookYear >= new Date().getFullYear();
+  return `likely scam bot: the listing has a masked phone number ("${match[0].replace(/\s+/g, "")}")${joinedThisYear ? ` and the account joined Facebook in ${seller?.joinedFacebookYear}` : ""}`;
+}

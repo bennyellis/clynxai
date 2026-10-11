@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { createPortal } from "react-dom";
 import { Modal } from "./Modal.js";
 import { api } from "../lib/api.js";
+import { imageSource } from "../lib/imageSource.js";
 
 // Per explicit instruction — only Database's Library tab (the product
 // tile grid) and Feed's listing cards skip this; every other photo in the
@@ -174,8 +175,14 @@ export function ImageLightbox({
           onClick={(e) => e.stopPropagation()}
           style={{ fontSize: 12.5, color: "var(--text-muted)", textAlign: "center", cursor: "default" }}
         >
-          {context.kind === "blacklisted" ? "The AI has this flagged as: " : "The AI has this filed as: "}
+          {context.kind === "blacklisted" ? "Clynx has this flagged as: " : "Clynx has this filed as: "}
           <strong style={{ color: "var(--text)" }}>{context.subjectName}</strong>
+          {context.kind === "reference" && context.sourceTitle !== undefined && (
+            <div style={{ marginTop: 3 }}>
+              Source: <strong style={{ color: "var(--text)" }}>{imageSource(context.sourceTitle).name}</strong>
+              {imageSource(context.sourceTitle).detail ? ` — ${imageSource(context.sourceTitle).detail}` : ""}
+            </div>
+          )}
         </div>
       )}
 
@@ -263,7 +270,7 @@ export function ImageLightbox({
           {correctionReason ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <p style={{ margin: 0, fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.5 }}>
-                If you know the real product, telling us directly is a much better correction than making the AI
+                If you know the real product, telling us directly is a much better correction than making Clynx
                 guess again from the same photo.
               </p>
               <input
@@ -277,7 +284,7 @@ export function ImageLightbox({
                 {submittingFeedback ? "Working on it..." : "Submit correction"}
               </button>
               <button className="icon ghost" disabled={submittingFeedback} onClick={() => submitFeedback(correctionReason)}>
-                I don't know — let the AI figure it out
+                I don't know — let Clynx figure it out
               </button>
             </div>
           ) : (

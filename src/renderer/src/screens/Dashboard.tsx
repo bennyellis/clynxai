@@ -4,7 +4,17 @@ import { api } from "../lib/api.js";
 import { playStartSound, playStopSound } from "../lib/sound.js";
 import { Modal } from "../components/Modal.js";
 import { WatchFormFlow } from "../components/WatchFormFlow.js";
-import { FlameIcon, SOURCE_COLORS, SOURCE_NAMES, SourceLogo, isHotListing, type ListingSource } from "../components/ListingSourceMarks.js";
+import {
+  FlameIcon,
+  HotRing,
+  OUTLINE_WIDTH_PX,
+  SOURCE_COLORS,
+  SOURCE_NAMES,
+  SourceLogo,
+  isHotListing,
+  listingOutlineColor,
+  type ListingSource,
+} from "../components/ListingSourceMarks.js";
 
 export function Dashboard({
   accounts,
@@ -79,11 +89,16 @@ export function Dashboard({
   // what "should this be included when starting everything" means.
   const startableAccounts = accounts.filter((a) => a.enabled && !statusMap[a.id]?.running);
   const runningAccounts = accounts.filter((a) => statusMap[a.id]?.running);
+  // Start normally skips accounts switched to "Disabled" in Config. But when NO account is enabled, pressing Start can only
+  // mean "scan with what I have": it used to sit greyed out saying "Scanning" with nothing scanning, and Stop was greyed
+  // out too, so both buttons looked dead. Now Start then starts every account that isn't already running.
+  const noneEnabled = !accounts.some((a) => a.enabled);
+  const startTargets = startableAccounts.length ? startableAccounts : noneEnabled ? accounts.filter((a) => !statusMap[a.id]?.running) : [];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%", overflow: "hidden" }}>
       <div>
-        <h1 style={{ margin: 0, fontSize: 30 }}>Dashboard</h1>
+        <h1 style={{ margin: 0, fontSize: 28 }}>Dashboard</h1>
         <p style={{ color: "var(--text-muted)", margin: "6px 0 0", fontSize: 15 }}>
           Browsing Facebook Marketplace within your set radius for your Search For items and standout deals.
         </p>
@@ -92,7 +107,7 @@ export function Dashboard({
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
         <button
           className="success"
-          disabled={!!busy || !startableAccounts.length || !facebookEnabled}
+          disabled={!!busy || !startTargets.length || !facebookEnabled}
           // Per explicit instruction — "for the start/stop buttons, don't
           // play the D pitch — that's what their own unique chimes are
           // for": App.tsx's global click-sound listener skips any element
@@ -109,12 +124,12 @@ export function Dashboard({
             // completed. That's why the button never visibly stayed disabled
             // and never showed a "scanning" state — busy was true for a
             // single React tick, not for the real duration of starting.
-            run("start", () => Promise.all(startableAccounts.map((account) => onStart(account.id))).then(() => undefined));
+            run("start", () => Promise.all(startTargets.map((account) => onStart(account.id))).then(() => undefined));
           }}
         >
           {!facebookEnabled ? (
             "Facebook Off"
-          ) : !startableAccounts.length ? (
+          ) : !startTargets.length && runningAccounts.length ? (
             <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
               Scanning
               <span className="typing-dots">
@@ -129,7 +144,9 @@ export function Dashboard({
         </button>
         <button
           className="danger-solid"
-          disabled={!!busy || !runningAccounts.length}
+          // Only a Stop already in progress disables it: while Start is still working (looking up a location can take
+          // minutes) the account counts as running and Stop must still work.
+          disabled={busy === "stop" || !runningAccounts.length}
           data-no-click-sound
           onClick={() => {
             playStopSound();
@@ -139,11 +156,13 @@ export function Dashboard({
           {busy === "stop" ? "Stopping..." : "Stop"}
         </button>
       </div>
-      <p style={{ fontSize: 13.5, color: "var(--text-dim)", margin: "-4px 0 0" }}>
-        Starts every enabled account at once, each opening its own Facebook window if one isn't already open — log in
-        there (or from Config's Accounts section) and set that account's location + max distance filter directly
-        inside it, since it's the exact browser profile that account reuses. Watch it happen live on the Activity
-        page.
+      <p
+        style={{ fontSize: 13, color: "var(--text-dim)", margin: "-4px 0 0" }}
+        title="Starts every enabled account at once. Each opens its own Facebook window if one isn't already open — log in there (or from Config → Sources) and it reuses that browser profile from then on."
+      >
+        {noneEnabled && startTargets.length
+          ? "No account is switched on in Config, so Start will start all of them. Each opens its own Facebook window. Follow along on Activity."
+          : "Starts every enabled account — each opens its own Facebook window. Follow along on Activity."}
       </p>
 
       {/* Per explicit instruction — Live moves to its own side column,
@@ -152,7 +171,7 @@ export function Dashboard({
           independently-scrolling column so a tall Live panel doesn't force
           the whole page to scroll just to reach it. */}
       <div style={{ display: "flex", gap: 16, flex: 1, minHeight: 0 }}>
-        <div style={{ flex: 2, minWidth: 0, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", paddingRight: 4 }}>
+        <div style={{ flex: 2, minWidth: 0, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", paddingRight: 4, paddingBottom: 64 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 14 }}>
             <StatCard label="Listings evaluated" value={totalListingsEvaluated} />
             <StatCard label="Deals in last 24h" value={dealsToday} accent="var(--success)" />
@@ -176,7 +195,7 @@ export function Dashboard({
             account) — see LiveCard below for how each account's own tile
             shrinks to fit alongside the others once more than one is
             running. */}
-        <div style={{ flex: 1, minWidth: 280, display: "flex", flexDirection: "column", overflowY: "auto" }}>
+        <div style={{ flex: 1, minWidth: 280, display: "flex", flexDirection: "column", overflowY: "auto", paddingBottom: 64 }}>
           <LiveCard accounts={accounts} statusMap={statusMap} onGoToFeed={onGoToFeed} ebayEnabled={ebayEnabled} />
         </div>
       </div>
@@ -219,7 +238,7 @@ function BestDealsCard({ listings }: { listings: ListingRecord[] }) {
           const thumbnail = l.thumbnailUrl ?? l.imageUrls[0] ?? null;
           const runTime = l.matchedProductAvgRunTimeDays;
           const hot = isHotListing(l);
-          const sourceColor = SOURCE_COLORS[l.source];
+          const outlineColor = listingOutlineColor(l);
           return (
             <a
               key={l.id}
@@ -233,9 +252,20 @@ function BestDealsCard({ listings }: { listings: ListingRecord[] }) {
                   outline + small Facebook logo, eBay ones a green outline +
                   small eBay logo, and a really good one also gets an orange
                   flame and a glow (see global.css's .listing-hot). */}
+              <div className={hot ? "listing-hot" : undefined}>
+              {hot && <HotRing color={outlineColor} />}
               <div
-                className={`card${hot ? " listing-hot" : ""}`}
-                style={{ padding: 0, overflow: "hidden", cursor: "pointer", border: `2px solid ${sourceColor}`, ["--source-color" as string]: sourceColor }}
+                className="card"
+                style={{
+                  padding: 0,
+                  overflow: "hidden",
+                  cursor: "pointer",
+                  // A hot card's border is transparent so its HotRing shows through.
+                  border: `${OUTLINE_WIDTH_PX}px solid ${hot ? "transparent" : outlineColor}`,
+                  backgroundClip: hot ? "padding-box" : undefined,
+                  // A hot card's HotRing shimmers underneath it, so its fill stays solid.
+                  backgroundColor: hot ? "var(--bg-card)" : undefined,
+                }}
               >
                 <div style={{ position: "relative", width: "100%", aspectRatio: "1 / 1", background: "var(--bg-elevated)" }}>
                   {thumbnail ? (
@@ -298,6 +328,7 @@ function BestDealsCard({ listings }: { listings: ListingRecord[] }) {
                   )}
                 </div>
               </div>
+              </div>
             </a>
           );
         })}
@@ -353,7 +384,14 @@ function LiveCard({
         }}
       >
         {accounts.map((account) => (
-          <LiveAccountTile key={account.id} status={statusMap[account.id]} label={account.label} compact={compact} source="facebook" />
+          <LiveAccountTile
+            key={account.id}
+            status={statusMap[account.id]}
+            label={account.label}
+            compact={compact}
+            source="facebook"
+            onSkipWait={() => void api.skipEngineWait(account.id)}
+          />
         ))}
         {ebayEnabled && (
           <LiveAccountTile
@@ -389,7 +427,10 @@ function LiveAccountTile({
   compact,
   offMessage,
   source,
+  onSkipWait,
 }: {
+  // Ends the scanner's wait between passes early (only offered while it is sleeping).
+  onSkipWait?: () => void;
   status: ScrapeStatus | undefined;
   label: string;
   compact: boolean;
@@ -411,7 +452,23 @@ function LiveAccountTile({
     analyzingPhotos = false,
     currentReaction = null,
     loggedIn = null,
+    sleepingUntil = null,
   } = status ?? {};
+  // While the scanner sits out its wait between passes: a live countdown, so the panel says what is really happening.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!sleepingUntil) return;
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [sleepingUntil]);
+  const sleepLeftMs = running && sleepingUntil ? sleepingUntil - now : 0;
+  const sleepText = (() => {
+    const total = Math.max(1, Math.round(sleepLeftMs / 1000));
+    const m = Math.floor(total / 60);
+    const sec = total % 60;
+    return m > 0 ? `${m} min ${sec} s` : `${sec} s`;
+  })();
 
   return (
     <div
@@ -433,6 +490,7 @@ function LiveAccountTile({
             borderRadius: "50%",
             background: "currentColor",
             color: running ? "var(--danger)" : "var(--text-dim)",
+            boxShadow: running ? "0 0 8px currentColor" : undefined,
             animation: running ? "liveDotPulse 1.6s ease-in-out infinite" : undefined,
             flexShrink: 0,
           }}
@@ -447,7 +505,33 @@ function LiveAccountTile({
           Each of the three is keyed so switching between them always
           replays its own "enter" animation instead of the DOM just
           patching text in place. */}
-      {currentActionNote ? (
+      {sleepLeftMs > 0 ? (
+        <div
+          key="sleeping"
+          className="enter-fade"
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 10,
+            padding: compact ? "18px 12px" : "36px 16px",
+            borderRadius: 12,
+            background: "var(--gradient-soft)",
+            border: "1px solid var(--border-strong)",
+            textAlign: "center",
+          }}
+        >
+          <div style={{ fontSize: compact ? 22 : 30 }}>😴</div>
+          <div style={{ fontWeight: 700, fontSize: compact ? 12.5 : 14 }}>Sleeping for {sleepText}...</div>
+          <div style={{ fontSize: 12, color: "var(--text-dim)" }}>The next pass starts on its own after that.</div>
+          {onSkipWait && (
+            <button className="icon" style={{ fontSize: 12.5, padding: "6px 14px" }} onClick={onSkipWait}>
+              Skip wait
+            </button>
+          )}
+        </div>
+      ) : currentActionNote ? (
         <div
           key={`action-${currentActionNote}`}
           className="enter-fade"
@@ -471,7 +555,7 @@ function LiveAccountTile({
         </div>
       ) : currentListing ? (
         <div key={currentListing.id} className="enter">
-          <div style={{ position: "relative", width: "100%", aspectRatio: "1 / 1", borderRadius: 12, overflow: "hidden", background: "var(--bg-elevated)", boxShadow: `0 0 0 2px ${SOURCE_COLORS[source]}` }}>
+          <div style={{ position: "relative", width: "100%", aspectRatio: "1 / 1", borderRadius: 12, overflow: "hidden", background: "var(--bg-elevated)", boxShadow: `0 0 0 ${OUTLINE_WIDTH_PX}px ${SOURCE_COLORS[source]}` }}>
             {currentListing.thumbnailUrl ? (
               <img
                 src={currentListing.thumbnailUrl}
@@ -536,7 +620,7 @@ function LiveAccountTile({
           {running
             ? loggedIn === false
               ? "⚠ Not logged into Facebook in this account's browser window — log in there, then it'll pick back up on its own next cycle."
-              : "Between cycles — sleeping a bit before the next pass."
+              : "Loading the next listings..."
             : (offMessage ?? "Start the scanner to watch it work here, live.")}
         </div>
       )}
@@ -599,7 +683,7 @@ function LiveAccountTile({
       {currentReaction && (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: 0.5 }}>
-            AI Feedback
+            Clynx Feedback
           </div>
           <div
             key={currentReaction}
@@ -664,26 +748,11 @@ function FiltersCard() {
   // between.
   const [draftInput, setDraftInput] = useState("");
   const [adding, setAdding] = useState(false);
-  // Per explicit instruction — "if the ai already has prior knowledge on
-  // the thing you are searching for, have it bring up an image from
-  // Database... prompting the user with a popup asking if that's what
-  // you're searching for": holds the name being added and whatever image is
-  // being confirmed against while that popup is on screen, cleared either
-  // way once the user answers. `product` is set only for a genuine Database
-  // match (so its id can be linked on confirm); per further explicit
-  // instruction ("ask the user 100% of the time... if it's something not
-  // found in Database, pull a related image from google images"), this now
-  // ALSO gets populated with no `product` but a web-sourced `imageUrl` when
-  // there's no Database match at all — the popup shows either way, never
-  // silently skipped.
-  const [pendingMatch, setPendingMatch] = useState<{ name: string; product: ProductProfile | null; imageUrl: string | null } | null>(
-    null
-  );
   // Per explicit instruction — "they may want to have multiple products
   // with multiple different min/max prices... each time they set one of
   // those parameters should only apply to the product they're trying to
-  // search before it's officially queued": once identity is confirmed
-  // (pendingMatch above), this holds that name + linkedProductId while a
+  // search before it's officially queued": right after a product is typed in
+  // (the old "is this what you're searching for?" step is gone), this holds that name + linkedProductId while a
   // "Set a price range for ___?" prompt collects its own min/max — the item
   // only actually gets added to the Search For list (via addToSearchList)
   // once this step is answered either way, with whatever price range was
@@ -692,6 +761,9 @@ function FiltersCard() {
   const [pendingPrice, setPendingPrice] = useState<{ name: string; linkedProductId: string | null } | null>(null);
   const [priceMinDraft, setPriceMinDraft] = useState("");
   const [priceMaxDraft, setPriceMaxDraft] = useState("");
+  // "Include broken / for-parts listings" for the product being added (no extra searches: it only decides whether a broken
+  // listing that turns up in the normal search is taken seriously and priced as a broken copy).
+  const [includeBrokenDraft, setIncludeBrokenDraft] = useState(false);
   // Per explicit instruction — "Search For = search for this now, Watch =
   // continue looking for this over time... provide an action such as
   // Watch so the user can turn something they're currently searching for
@@ -743,7 +815,8 @@ function FiltersCard() {
     name: string,
     linkedProductId: string | null,
     minPriceUsd: number | null,
-    maxPriceUsd: number | null
+    maxPriceUsd: number | null,
+    includeBroken = false
   ) {
     if (!name || adding) return;
     setAdding(true);
@@ -754,27 +827,15 @@ function FiltersCard() {
       // account's scanner or runs an immediate search itself (see index.ts's
       // add_search_item) — Start Scanning is the only thing that does that
       // now, same as any other change to what you're looking for.
-      await api.searchForProducts([name], linkedProductId, minPriceUsd, maxPriceUsd);
+      await api.searchForProducts([name], linkedProductId, minPriceUsd, maxPriceUsd, includeBroken);
     } finally {
       setAdding(false);
     }
   }
 
-  // Per explicit instruction — "if the ai already has prior knowledge on
-  // the thing you are searching for, have it bring up an image from
-  // Database... prompting the user with a popup" + further explicit
-  // instruction ("ask the user 100% of the time what they're searching
-  // for... if it's something not found in Database, pull a related image
-  // from google images"): checks for an existing Database entry first,
-  // using the same fuzzy-match logic the scanner itself relies on (see
-  // index.ts's products:findMatch) — if that finds one WITH a photo, the
-  // popup confirms against it exactly like before. Otherwise (no match, or
-  // a match with no photo), this now falls through to a fresh web-sourced
-  // reference image (products:findReferenceImage — the same search+vision-
-  // verification pass lookupProduct itself uses for a new Database entry's
-  // photo) instead of silently adding — the popup always shows now, with
-  // whatever photo (Database or web) it could find, or none at all if
-  // neither turned anything up.
+  // Adding a product goes straight to the price-range question: there is no "is this what
+  // you're searching for?" confirmation any more. If the Database already has a matching
+  // product (the same fuzzy match the scanner itself uses), the item is linked to it quietly.
   async function handleAddClick() {
     const name = draftInput.trim();
     if (!name || adding) return;
@@ -782,45 +843,34 @@ function FiltersCard() {
     setAdding(true);
     try {
       const match = await api.findMatchingProduct(name).catch(() => null);
-      if (match?.imageUrl) {
-        setPendingMatch({ name, product: match, imageUrl: match.imageUrl });
-        return;
-      }
-      const referenceImageUrl = await api.findReferenceImage(name).catch(() => null);
-      setPendingMatch({ name, product: null, imageUrl: referenceImageUrl });
+      setPriceMinDraft("");
+      setPriceMaxDraft("");
+      setIncludeBrokenDraft(false);
+      setPendingPrice({ name, linkedProductId: match?.id ?? null });
     } finally {
       setAdding(false);
     }
-  }
-
-  function confirmPendingMatch(confirmed: boolean) {
-    if (!pendingMatch) return;
-    const { name, product } = pendingMatch;
-    setPendingMatch(null);
-    // Per explicit instruction — price range is asked NEXT, before this
-    // product is actually queued: "prompt the user with the min/max prices
-    // after they add the product/hit enter... whatever the user sets have
-    // that be applied to the product... before it's officially queued."
-    setPriceMinDraft("");
-    setPriceMaxDraft("");
-    setPendingPrice({ name, linkedProductId: confirmed ? (product?.id ?? null) : null });
   }
 
   function submitPendingPrice() {
     if (!pendingPrice) return;
     const { name, linkedProductId } = pendingPrice;
     setPendingPrice(null);
-    addToSearchList(name, linkedProductId, parsePriceDraft(priceMinDraft), parsePriceDraft(priceMaxDraft));
+    addToSearchList(name, linkedProductId, parsePriceDraft(priceMinDraft), parsePriceDraft(priceMaxDraft), includeBrokenDraft);
   }
 
   function skipPendingPrice() {
     if (!pendingPrice) return;
     const { name, linkedProductId } = pendingPrice;
     setPendingPrice(null);
-    addToSearchList(name, linkedProductId, null, null);
+    addToSearchList(name, linkedProductId, null, null, includeBrokenDraft);
   }
 
   if (!config) return null;
+
+  // Past searches that aren't on the Search For list right now (so a click always adds something).
+  const queued = new Set(config.searchItems.map((s) => s.item.trim().toLowerCase()));
+  const recentChips = (config.recentSearches ?? []).filter((r) => !queued.has(r.item.trim().toLowerCase())).slice(0, 8);
 
   return (
     <div className="card enter" style={{ display: "flex", flexDirection: "column", gap: 14, padding: 22 }}>
@@ -872,6 +922,11 @@ function FiltersCard() {
                     {formatPriceRangeLabel(s.minPriceUsd, s.maxPriceUsd)}
                   </span>
                 )}
+                {s.includeBroken && (
+                  <span title="Includes broken / for-parts listings" style={{ fontSize: 13 }}>
+                    🔧
+                  </span>
+                )}
                 <button
                   className="icon ghost"
                   title={`Turn "${s.item}" into a persistent Watch`}
@@ -912,70 +967,49 @@ function FiltersCard() {
             {adding ? "Adding…" : "Add product"}
           </button>
         </div>
+        {recentChips.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 12.5, color: "var(--text-dim)", fontWeight: 600 }}>Recent searches</span>
+            {recentChips.map((r) => (
+              <span
+                key={`${r.item}|${r.minPriceUsd ?? ""}|${r.maxPriceUsd ?? ""}|${r.includeBroken ? "b" : ""}`}
+                className="pill"
+                style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 4px 3px 4px", fontSize: 13 }}
+              >
+                <button
+                  className="icon ghost"
+                  title={`Add "${r.item}"${formatPriceRangeLabel(r.minPriceUsd, r.maxPriceUsd) ? ` (${formatPriceRangeLabel(r.minPriceUsd, r.maxPriceUsd)})` : ""} to the Search For list again`}
+                  disabled={adding}
+                  onClick={() => addToSearchList(r.item, r.linkedProductId ?? null, r.minPriceUsd, r.maxPriceUsd, !!r.includeBroken)}
+                  style={{ padding: "2px 8px", fontSize: 13, display: "inline-flex", gap: 6, alignItems: "baseline" }}
+                >
+                  <span>{r.item}</span>
+                  {formatPriceRangeLabel(r.minPriceUsd, r.maxPriceUsd) && (
+                    <span style={{ color: "var(--text-dim)", fontWeight: 600, fontSize: 12 }}>{formatPriceRangeLabel(r.minPriceUsd, r.maxPriceUsd)}</span>
+                  )}
+                  {r.includeBroken && <span title="Includes broken / for-parts listings">🔧</span>}
+                </button>
+                <button
+                  className="icon ghost"
+                  title={`Forget "${r.item}"`}
+                  onClick={() => void api.removeRecentSearch({ item: r.item, minPriceUsd: r.minPriceUsd, maxPriceUsd: r.maxPriceUsd, includeBroken: !!r.includeBroken })}
+                  style={{ padding: "0 4px", fontSize: 12, lineHeight: 1, color: "var(--text-dim)" }}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
-      {pendingMatch && (
-        <Modal title="Is this what you're searching for?" onClose={() => setPendingMatch(null)}>
-          {pendingMatch.imageUrl ? (
-            <img
-              src={pendingMatch.imageUrl}
-              alt={pendingMatch.product?.name ?? pendingMatch.name}
-              style={{ width: "100%", maxHeight: 220, objectFit: "contain", borderRadius: 10, background: "var(--bg-elevated)", display: "block" }}
-            />
-          ) : (
-            <div
-              style={{
-                width: "100%",
-                height: 160,
-                borderRadius: 10,
-                background: "var(--bg-elevated)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: 40,
-              }}
-            >
-              📦
-            </div>
-          )}
-          <p style={{ margin: 0, fontSize: 15.5, lineHeight: 1.5 }}>
-            {pendingMatch.product ? (
-              <>
-                Already have "{pendingMatch.product.name}" in the Database. If this is it, matching gets a lot more
-                precise — listings get compared against this exact photo, not just the title, so things like games
-                or accessories that merely mention "{pendingMatch.name}" get filtered out.
-              </>
-            ) : pendingMatch.imageUrl ? (
-              <>
-                Nothing in the Database yet for "{pendingMatch.name}" — here's a reference photo pulled from the
-                web. Confirm it looks right before the scanner starts hunting for it.
-              </>
-            ) : (
-              <>
-                Nothing in the Database yet for "{pendingMatch.name}", and couldn't find a reference photo either —
-                just confirming before the scanner starts hunting for it.
-              </>
-            )}
-          </p>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button className="icon" style={{ flex: 1 }} onClick={() => confirmPendingMatch(false)}>
-              No, something else
-            </button>
-            <button className="primary" style={{ flex: 1 }} onClick={() => confirmPendingMatch(true)}>
-              Yes, that's it
-            </button>
-          </div>
-        </Modal>
-      )}
-
-      {/* Per explicit instruction — asked right after identity is
-          confirmed, before the product is actually added to the Search For
+      {/* Per explicit instruction — asked right after a product is typed in,
+          before the product is actually added to the Search For
           list: "each time they set one of those parameters should only
           apply to the product they're trying to search before it's
           officially queued." Closing this without an explicit choice
-          (Escape, clicking outside) behaves the same as "Skip" — identity
-          was already confirmed by this point, so the product still gets
-          added, just with no price limit. */}
+          (Escape, clicking outside) behaves the same as "Skip" — the
+          product still gets added, just with no price limit. */}
       {pendingPrice && (
         <Modal title={`Set a price range for "${pendingPrice.name}"?`} onClose={skipPendingPrice}>
           <p style={{ margin: 0, fontSize: 15.5, lineHeight: 1.5 }}>
@@ -1012,6 +1046,18 @@ function FiltersCard() {
               </div>
             </div>
           </div>
+          <label
+            style={{ display: "flex", alignItems: "flex-start", gap: 10, fontSize: 14.5, color: "var(--text)", cursor: "pointer", textTransform: "none", letterSpacing: 0, fontWeight: 500 }}
+          >
+            <input type="checkbox" checked={includeBrokenDraft} onChange={(e) => setIncludeBrokenDraft(e.target.checked)} style={{ marginTop: 3 }} />
+            <span>
+              Include broken / for-parts listings
+              <span style={{ display: "block", fontSize: 12.5, color: "var(--text-dim)", marginTop: 2 }}>
+                Broken ones often resell for far more than they cost. Clynx doesn't search for anything extra: if a broken listing shows up in the normal
+                search it gets priced as a broken copy, using its own "(For Parts / Broken)" variant in the Database.
+              </span>
+            </span>
+          </label>
           <div style={{ display: "flex", gap: 8 }}>
             <button className="icon" style={{ flex: 1 }} onClick={skipPendingPrice}>
               Skip — no price limit
@@ -1039,6 +1085,11 @@ function FiltersCard() {
       {config.searchItems.length > 1 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <label
+            title={
+              config.rotateSearchItems
+                ? "Facebook can only search one product at a time, so the scanner sticks with one item across as many locations as it takes to evaluate that many listings, then moves to the next. Runs independently of location rotation."
+                : "Off: no dedicated search per item. The scanner browses generally and only evaluates listings that already look relevant to something above, moving on fast from locations with nothing of interest."
+            }
             style={{
               display: "flex",
               alignItems: "center",
@@ -1066,15 +1117,10 @@ function FiltersCard() {
                 commitRotateCount(rotateCountDraft);
               }}
               onClick={(e) => e.stopPropagation()}
-              style={{ width: 52 }}
+              style={{ width: 84 }}
             />
             listings
           </label>
-          <div style={{ fontSize: 11.5, color: "var(--text-dim)", paddingLeft: 22 }}>
-            {config.rotateSearchItems
-              ? "Facebook can only search one product at a time — the scanner sticks with one item across however many locations it takes to evaluate that many listings, then moves to the next. Runs independently of location rotation."
-              : "Unchecked: no dedicated search per item — the scanner browses generally and only evaluates listings that already look relevant to something above, moving on fast from locations with nothing of interest."}
-          </div>
         </div>
       )}
 
@@ -1114,6 +1160,9 @@ function StatCard({ label, value, accent }: { label: string; value: number; acce
 // instead of jumping straight to the new value.
 function useCountUp(target: number, durationMs = 500): number {
   const [display, setDisplay] = useState(target);
+  // Always the value currently on screen. If the target changes mid-animation
+  // (counts update rapidly during a scan) the next animation starts from
+  // here, instead of snapping back to the last value that finished settling.
   const fromRef = useRef(target);
 
   useEffect(() => {
@@ -1124,9 +1173,10 @@ function useCountUp(target: number, durationMs = 500): number {
     const tick = (now: number) => {
       const t = Math.min(1, (now - start) / durationMs);
       const eased = 1 - Math.pow(1 - t, 3);
-      setDisplay(Math.round(from + (target - from) * eased));
+      const value = Math.round(from + (target - from) * eased);
+      fromRef.current = value;
+      setDisplay(value);
       if (t < 1) raf = requestAnimationFrame(tick);
-      else fromRef.current = target;
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);

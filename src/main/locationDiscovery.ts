@@ -2,6 +2,7 @@ import type { Page } from "playwright";
 import { OPENAI_MODEL, callOpenAI } from "./openai.js";
 import { changeLocation } from "./scraper.js";
 import { politeDelay } from "./browser.js";
+import { topCitiesForState } from "./stateCities.js";
 
 const OPENAI_TIMEOUT_MS = 30_000;
 
@@ -22,8 +23,14 @@ const OPENAI_TIMEOUT_MS = 30_000;
 // name (e.g. "Phoenix, Arizona", not "Phoenix, AZ") — confirmed live
 // against a screenshot of Facebook's own Location field, which persists
 // the full name, never a 2-letter abbreviation.
+//
+// Per explicit instruction — "when the user wants a specific state to be searched, make sure Clynx is looking in the top 10 biggest
+// cities in that state": the state's cities now come from a fixed table of its most populous cities (stateCities.ts), biggest first,
+// the same every time and without needing the AI. Only a state that isn't in the table falls back to asking the AI.
 export async function lookupTopCitiesInState(state: string, count = 10): Promise<string[]> {
-  const prompt = `List the ${count} most populous/major cities in the US state of "${state}" — real, well-known cities Facebook Marketplace would recognize as browsable locations, the ones anyone from that state would readily name. Respond with ONLY a JSON object, no other text, in this exact shape:
+  const fixed = topCitiesForState(state, count);
+  if (fixed) return fixed;
+  const prompt = `List the ${count} MOST POPULOUS cities (largest by population, biggest first) in the US state of "${state}" — real cities Facebook Marketplace would recognize as browsable locations. Respond with ONLY a JSON object, no other text, in this exact shape:
 { "cities": string[] }
 Each entry formatted as "City, ${state}" using the state's full name spelled out (not a 2-letter abbreviation — that's what actually has to be typed into Facebook Marketplace's own location search box). Exactly ${count} entries, unless the state genuinely doesn't have that many notable cities.`;
 
@@ -51,7 +58,7 @@ Each entry formatted as "City, ${state}" using the state's full name spelled out
     const cities = Array.isArray(parsed.cities)
       ? parsed.cities.map((c: unknown) => String(c).trim()).filter(Boolean)
       : [];
-    if (!cities.length) throw new Error("The AI didn't return any cities.");
+    if (!cities.length) throw new Error("Clynx couldn't find any cities for that state.");
     return cities;
   } catch (err) {
     if ((err as Error).name === "AbortError") {

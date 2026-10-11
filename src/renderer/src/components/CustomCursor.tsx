@@ -74,13 +74,22 @@ export function CustomCursor() {
       latestY = e.clientY;
     }
 
+    // Only touch the DOM when the pointer actually moved — this loop runs
+    // for the life of the app, and rewriting an unchanged transform every
+    // frame while the mouse is idle was pure wasted style work.
+    let drawnX = NaN;
+    let drawnY = NaN;
     function tick() {
       const el = ref.current;
-      if (el) el.style.transform = `translate(${latestX}px, ${latestY}px)`;
+      if (el && (latestX !== drawnX || latestY !== drawnY)) {
+        el.style.transform = `translate(${latestX}px, ${latestY}px)`;
+        drawnX = latestX;
+        drawnY = latestY;
+      }
       rafId = requestAnimationFrame(tick);
     }
 
-    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mousemove", onMove, { passive: true });
     rafId = requestAnimationFrame(tick);
 
     return () => {
