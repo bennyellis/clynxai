@@ -540,6 +540,11 @@ export class ScrapeEngine {
   // The Facebook session problem found on the page the scanner is looking at (see guardSession). sessionBroken ends the current
   // cycle early; reportedProblem remembers what the owner was last told, so it hears about changes only.
   private sessionBroken = false;
+  // Locations a cycle tried to open, and how many of them could not be opened at all (no connection, browser gone). When every one
+  // failed the cycle did nothing, which must count as a failed cycle (see the end of runCycle), not a quiet success.
+  private visitsAttempted = 0;
+  private visitsNotOpened = 0;
+  private lastNotOpenedMessage = "";
   private consecutiveFailures = 0;
   private reportedFailureKind: string | null = null;
   private reportedProblem: SessionProblem | null = null;
@@ -2601,8 +2606,11 @@ export class ScrapeEngine {
           this.noteSession((shown ? classifyFacebookPage(shown) : null) ?? "logged-out");
           return;
         }
-        this.setStatus({ loggedIn });
-        this.noteSession(null);
+        // Deliberately NOT clearing a reported session problem here: this check only loads Marketplace's front page, which can pass
+        // while the page the cycle then opens still shows a login wall. The cycle's own check (guardSession, after each location is
+        // opened) clears it when a normal page is really seen, so the notice and its phone push cannot flap on and off every cycle.
+        // While a problem is reported the status stays "logged out" until the cycle's own check sees a normal page.
+        this.setStatus({ loggedIn: this.reportedProblem ? false : loggedIn });
       }
 
       await this.runCycle(page, config);
@@ -2629,6 +2637,9 @@ export class ScrapeEngine {
   // searchForItemNow() for the same Facebook page.
   private async runCycle(page: Page, config: EngineConfig): Promise<void> {
     this.sessionBroken = false;
+    this.visitsAttempted = 0;
+    this.visitsNotOpened = 0;
+    this.lastNotOpenedMessage = "";
     this.setStatus({ lastCycleStartedAt: Date.now(), lastError: null, listingsThisCycle: 0, currentSearch: "browsing" });
 
     const perLocation = Math.max(1, config.listingsPerLocation);
@@ -2736,6 +2747,7 @@ export class ScrapeEngine {
       // general browse pass, still needs its own real navigation, since by
       // then the page has moved on to whatever the first search left it on.
       let justConfirmedLocation = false;
+      if (!this.stopRequested && !this.priorityRequested) this.visitsAttempted++;
       if (locationCount > 1) {
         this.log("info", `📍 Chose a new location to search: ${locationLabel}`);
         // Per explicit instruction — "have it switch locations, THEN enter
@@ -2773,6 +2785,8 @@ export class ScrapeEngine {
             this.log("warn", `Switched to ${locationLabel}, but couldn't confirm the location from the page — continuing anyway.`);
           }
         } catch (err) {
+          this.visitsNotOpened++;
+          this.lastNotOpenedMessage = (err as Error).message;
           this.log("warn", `Failed to navigate to ${locationLabel}: ${(err as Error).message} — continuing anyway.`);
         }
       } else if (!this.stopRequested && !this.priorityRequested) {
@@ -2781,6 +2795,9 @@ export class ScrapeEngine {
           await page.waitForTimeout(1200);
           await this.verifyRadiusOnPage(page, config);
         } catch (err) {
+          // verifyRadiusOnPage handles its own failures, so what reaches here is the page itself not opening.
+          this.visitsNotOpened++;
+          this.lastNotOpenedMessage = (err as Error).message;
           this.log("warn", `Start-of-cycle radius check failed: ${(err as Error).message} — continuing anyway.`);
         }
       }
@@ -3135,6 +3152,12 @@ export class ScrapeEngine {
       upcomingListings: [],
       currentActionNote: null,
     });
+
+    // Not one location could even be opened (the connection is down, the browser is gone): that is a failed cycle, not a quiet one
+    // that found nothing. The loop backs off and, after a few in a row, tells the user why (noteCycleFailed).
+    if (!this.stopRequested && !this.priorityRequested && this.visitsAttempted > 0 && this.visitsNotOpened >= this.visitsAttempted) {
+      throw new Error(this.lastNotOpenedMessage || "Could not open any Facebook Marketplace page");
+    }
   }
 
   // Runs an immediate search for one item — triggered when the chat

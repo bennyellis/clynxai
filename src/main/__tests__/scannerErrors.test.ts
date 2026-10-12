@@ -75,6 +75,38 @@ run(async () => {
     check("healthy cycles keep the configured pause and raise nothing", events.length === 0 && waits.every((w) => w === 60_000), { events, waits });
   }
 
+  section("a cycle that could not open a single page is a FAILED cycle (found by the integration run: it used to look like a quiet success)");
+  {
+    const mkPage = (gotoFails: boolean) => new Proxy({}, {
+      get(_t, prop: string) {
+        if (prop === "then") return undefined;
+        if (prop === "url") return () => "https://www.facebook.com/marketplace/richmond/";
+        if (prop === "isClosed") return () => false;
+        if (prop === "evaluate") return async () => ({ title: "Marketplace | Facebook", hasLoginForm: false, bodyText: "Marketplace Today's picks" });
+        if (prop === "waitForTimeout") return async () => {};
+        if (prop === "goto") return async () => { if (gotoFails) throw new Error("page.goto: net::ERR_INTERNET_DISCONNECTED at https://www.facebook.com/marketplace/richmond/"); };
+        return () => { throw new Error(`page.${String(prop)} is not available in this test`); };
+      },
+    }) as any;
+    const one = baseConfig({ browseUrls: ["https://www.facebook.com/marketplace/richmond/"], searchItems: [] });
+    const a = makeEngine({ config: one });
+    let msg = "";
+    try { await (a.engine as any).runCycle(mkPage(true), one); } catch (e) { msg = (e as Error).message; }
+    check("single location, connection down: the cycle throws so the loop can back off and report it", /ERR_INTERNET_DISCONNECTED/.test(msg), msg);
+    check("and the throw is explained as a network problem", explainScannerError(msg).kind === "network");
+
+    const many = baseConfig({ browseUrls: ["https://www.facebook.com/marketplace/a/", "https://www.facebook.com/marketplace/b/", "https://www.facebook.com/marketplace/c/"], searchItems: [] });
+    const b = makeEngine({ config: many });
+    let msg2 = "";
+    try { await (b.engine as any).runCycle(mkPage(true), many); } catch (e) { msg2 = (e as Error).message; }
+    check("several locations, none opens: also a failed cycle", /ERR_INTERNET_DISCONNECTED/.test(msg2), msg2);
+
+    const c = makeEngine({ config: one });
+    let threw = false;
+    try { await (c.engine as any).runCycle(mkPage(false), one); } catch { threw = true; }
+    check("a connection that works but finds nothing is NOT a failed cycle", !threw);
+  }
+
   section("a stalled scanner reaches the phone, but only when there is a topic");
   {
     installFetchStub();

@@ -143,6 +143,33 @@ run(async () => {
     check("a file that is not a database is reported as damaged", !rn.ok, rn);
   }
 
+  section("a database the Store cannot set up (valid SQLite, incompatible schema) is recovered, not left locked (found by the integration run)");
+  {
+    // Found by running the real app: the failed Store kept the file open, so on Windows moving it aside failed (EBUSY) and the user was
+    // stuck on "Loading...". The Store now closes its database when setup fails.
+    const p = fresh();
+    require("node:fs").mkdirSync(path.dirname(p), { recursive: true });
+    const odd = new DatabaseSync(p);
+    odd.exec("CREATE VIEW products AS SELECT 1 AS id; CREATE TABLE precious (x TEXT); INSERT INTO precious VALUES ('keep me');");
+    odd.close();
+    let threw = false;
+    try {
+      new Store(p);
+    } catch {
+      threw = true;
+    }
+    check("(setup) the Store really cannot use this database", threw);
+    require("node:fs").renameSync(p, `${p}.moved-test`);
+    check("and it leaves the file closed, so it can be moved aside", existsSync(`${p}.moved-test`) && !existsSync(p));
+    require("node:fs").renameSync(`${p}.moved-test`, p);
+
+    const opened = openWithRecovery(p, () => new Store(p));
+    check("openWithRecovery gives a working fresh store", opened.store.countListings() === 0 && !!opened.recovered, opened.recovered);
+    const keptCopy = opened.recovered?.damagedCopy;
+    check("the unusable database is kept, and the data in it is still there", !!keptCopy && existsSync(keptCopy) && (() => { const d = new DatabaseSync(keptCopy!); const r = d.prepare("SELECT x FROM precious").get() as any; d.close(); return r?.x === "keep me"; })());
+    opened.store.close();
+  }
+
   section("the quarantine leaves no stray files and keeps names unique");
   {
     const p = fresh();

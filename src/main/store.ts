@@ -65,6 +65,22 @@ export class Store {
   constructor(dbPath: string) {
     mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
+    try {
+      this.initialize();
+    } catch (err) {
+      // A database the app cannot set up must not stay open: on Windows an open file cannot be moved aside, and recovering from a
+      // damaged database (dbIntegrity.ts) needs to move it.
+      try {
+        this.db.close();
+      } catch {
+        /* already closed */
+      }
+      throw err;
+    }
+  }
+
+  // Creates the tables and runs the migrations (split out of the constructor so a failure can close the database, see above).
+  private initialize(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS listings (
         id TEXT PRIMARY KEY,

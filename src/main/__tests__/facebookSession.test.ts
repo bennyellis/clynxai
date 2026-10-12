@@ -88,6 +88,40 @@ run(async () => {
     check("a closed page never raises a problem", (await e.guardSession(dead, "closed")) === false && problems.length === 3);
   }
 
+  section("no flapping: a front page that looks fine while the page the cycle opens is a login wall (found by the integration run)");
+  {
+    // Marketplace's front page passes the quick login check; the location page is a login wall. Every cycle used to clear the notice
+    // (front page ok) and raise it again (wall), repeating the phone push each time.
+    const problems: Array<string | null> = [];
+    const config = baseConfig({ browseUrls: ["https://www.facebook.com/marketplace/richmond/"] });
+    const { engine } = makeEngine({ config, extra: { onSessionProblem: (p: unknown) => void problems.push(p as string | null) } });
+    const front = snap({});
+    const wall = snap({ url: "https://www.facebook.com/marketplace/richmond/", hasLoginForm: true });
+    let current = front;
+    const fb: any = new Proxy({}, {
+      get(_t, prop: string) {
+        if (prop === "then") return undefined; // not a promise (it is returned from async functions)
+        if (prop === "url") return () => current.url;
+        if (prop === "isClosed") return () => false;
+        if (prop === "evaluate") return async () => ({ title: current.title, hasLoginForm: current.hasLoginForm, bodyText: current.bodyText });
+        if (prop === "waitForTimeout") return async () => {};
+        if (prop === "goto") return async (u: string) => void (current = /facebook\.com\/marketplace\/?$/.test(u) ? front : { ...wall, url: u });
+        // locator(...)/getByPlaceholder(...) as used by the quick login check: no login box on the front page
+        if (prop === "locator" || prop === "getByPlaceholder") return () => ({ first: () => ({ waitFor: async () => {}, count: async () => 0 }) });
+        return () => { throw new Error(`page.${String(prop)} is not available in this test`); };
+      },
+    });
+    (engine as any).ensureBrowser = async () => fb;
+    for (let cycle = 0; cycle < 4; cycle++) await (engine as any).runOnce();
+    check("four cycles report the problem exactly once and never 'fixed'", problems.length === 1 && problems[0] === "logged-out", problems);
+    current = front;
+    // now Facebook really works: a cycle whose location page is a normal page clears it
+    const okPage = new Proxy(fb, { get(t, prop: string) { if (prop === "goto") return async (u: string) => void (current = snap({ url: u })); return (t as any)[prop]; } });
+    (engine as any).ensureBrowser = async () => okPage;
+    await (engine as any).runOnce();
+    check("a cycle that sees a normal page afterwards clears it, once", problems.length === 2 && problems[1] === null, problems);
+  }
+
   section("a cycle that lands on a login wall stops there instead of searching it");
   {
     const problems: Array<string | null> = [];
