@@ -1,0 +1,431 @@
+CLYNX: PRODUCTION-READINESS AND USER-EXPERIENCE AUDIT (PAID BETA)
+==================================================================
+Read-only. No code was modified. Prepared 2026-10-11 from the current source, plus measurements on a read-only copy of one
+real user database. The deal-quality work being done in another session (dealGate.ts, preAlert.ts, scrapeEngine.ts final
+qualification, store gate columns, notify.ts) was NOT touched or re-audited; where a finding depends on it, that is stated.
+
+How to read this
+  Severity:    BLOCKER (a paid launch is not credible without it) / HIGH (will drive support tickets or cancellations) /
+               MEDIUM / LOW
+  Complexity:  S = up to 1 day, M = 2 to 5 days, L = 1 to 3 weeks
+  Beta gate:   MUST = fix before a paid beta, SHOULD = fix during the beta, LATER = can wait
+  Evidence is cited as file : function (the code is the source of truth; line numbers drift).
+
+What I could NOT verify (be aware): a packaged installer was never built or run here; contrast ratios and screen-reader
+behaviour were not measured; memory growth over a long scan and startup time were not measured; Facebook's live behaviour
+(session expiry wording, checkpoints) was not tested. Those are listed as test tasks in the checklist, not as findings.
+
+
+0. EXECUTIVE SUMMARY: THE TEN THINGS THAT WILL HURT MOST
+--------------------------------------------------------
+ 1. There is no billing, plan, or subscription surface at all in the desktop app (no plan display, no limits, no upgrade,
+    no cancel), and the server's plan limits are not enforced anywhere. (A1, A4)
+ 2. A new customer cannot get working: the login screen points at http://localhost:8787 and its error message tells them to
+    open Docker Desktop; there is no password reset; eBay needs hand-editing a ".env" file; the installer has no signing,
+    no updater, and no browser dependency handling. (O2, O3, D1, D2, R4)
+ 3. There is no first-run guidance. The path to the first useful result involves mandatory login, a Facebook login in a
+    separate Chrome window, a lazy location resolution, an optional ntfy setup with an EMPTY default topic, and optional
+    third-party accounts, none of it explained. (O1, N2)
+ 4. The Feed cards do not show the profit calculation or why a listing is a deal (only photo, title, price, age, seller).
+    That is the product's core promise, hidden. (U1)
+ 5. A hot path loads the whole product table INCLUDING every base64 thumbnail (about 41 MB for 555 products) each time a
+    listing is saved with a fuzzy product match. (P1)
+ 6. A damaged or partly written config.json silently resets ALL settings to defaults and then overwrites the file. Config
+    writes are not atomic; the database has no backup, no integrity check, no recovery path. (S1, S2, S3)
+ 7. A Facebook session that expires mid-scan is not detected (the "logged in" flag is only re-checked when it is not already
+    true), and a failed scan cycle just logs and sleeps. Customers will see "nothing is happening" with no explanation. (R1, R2)
+ 8. Failed phone notifications are only logged in Activity: no retry, no queue, no visible warning. (N1)
+ 9. There are no diagnostics: logs live only in memory (200 lines), there is no log file, no "copy diagnostics", no crash
+    reporting. Every support case will start blind. (D3)
+10. Closing the window quits the app, which also stops Watches, which are marketed as persistent monitors. (R3)
+
+
+1. SCANNER RELIABILITY
+----------------------
+What already works (do not redesign): the engine self-heals a closed or crashed browser (scrapeEngine.ts ensureBrowser:
+single-flight launch, one relaunch retry when the context is dead; wireContextCloseDetection stops the scanner cleanly if
+the user closes the window); a single-instance lock (index.ts requestSingleInstanceLock); a power-save blocker during scans;
+a per-pass wait with countdown and "Skip wait"; Watches persist their schedule in the database.
+
+R1  Facebook session expiry mid-scan is not detected                                   Severity: HIGH   Complexity: M   Beta: MUST
+    Impact: a customer's session lapses, searches return empty pages or a login wall, the Dashboard still says "scanning",
+    no deals arrive, and they cancel or open a ticket.
+    Where: scrapeEngine.ts runOnce; the check is guarded by `if (this.status.loggedIn !== true)`, and loggedIn is only reset
+    to null in stop() (grep: `loggedIn: null` appears only at initial status and stop).
+    Evidence: after the first successful isLoggedIn(), the flag stays true for the whole run; scraper.ts diagnoseEmptyPage
+    only produces a log string, it does not flip the status.
+    Fix: re-run the cheap login check at the start of every cycle (or whenever a search yields zero cards twice), set
+    status.loggedIn=false, show the existing Dashboard warning and send one push/desktop notification ("Facebook logged you
+    out: open Clynx and log in"). Reset the notification when login returns.
+
+R2  A failed cycle logs and sleeps; no escalation                                        Severity: HIGH   Complexity: S-M   Beta: SHOULD
+    Where: scrapeEngine.ts loop(): catch -> setStatus({lastError}) + log "Cycle failed" -> normal wait.
+    Evidence: no consecutive-failure counter, no backoff, no user-visible state beyond Activity.
+    Fix: count consecutive failures; after 3, show a persistent Dashboard banner with the last error in plain words and a
+    "Try again" button, back off (2x wait, capped), and notify once.
+
+R3  Closing the window quits the app (and stops Watches)                                 Severity: HIGH   Complexity: M   Beta: MUST
+    Where: index.ts app.on("window-all-closed") -> stopUserSession() -> app.quit(); no Tray, no login-item setting
+    (grep: no `new Tray`, no `openAtLogin`).
+    Impact: "persistent monitor" Watches silently stop when the user closes the window; deals are missed.
+    Fix: minimize to the system tray on close with a first-time explanation, add "Start Clynx when I sign in to Windows" and
+    "Keep Watches running in the background" options, and a real Quit in the tray menu. Minimum viable alternative: warn on
+    close ("Watches will stop") and fix the copy.
+
+R4  Chrome dependency and raw Playwright errors                                          Severity: HIGH   Complexity: M   Beta: MUST
+    Where: browser.ts openPersistentContext (channel "chrome", fallback to bundled Chromium); package.json postinstall
+    ("playwright install chromium") runs only on developer machines.
+    Evidence: a packaged app has no bundled browser; if Chrome is missing, the fallback throws Playwright's raw
+    "Executable doesn't exist ... run playwright install" text, which reaches the user through "Cycle failed: ...".
+    grep for "Google Chrome|playwright install" in src finds no friendly handling.
+    Fix: preflight at first Start (look for Chrome in standard install paths); if absent, show "Clynx needs Google Chrome.
+    Install it, then click Retry" with a link; or ship Playwright's Chromium via electron-builder extraResources.
+
+R5  Offline start locks the user out of their own data                                   Severity: MEDIUM-HIGH Complexity: M   Beta: SHOULD
+    Where: cloudClient.ts restoreSessionOnce (3 retries over 14 s, then ok:false) -> index.ts checkOrRestoreSession ->
+    LoginScreen; bootstrapUserSession only runs after authentication.
+    Impact: no internet, or the server is down, and the app shows the login form even though the saved session is valid and
+    the user's local data and Watches exist.
+    Fix: if a persisted session exists but the refresh failed due to a NETWORK error, offer "Continue offline" that runs
+    bootstrapUserSession with cloud sync and the AI proxy disabled and a visible banner.
+
+R6  Scanner state across restarts                                                        Severity: LOW-MEDIUM Complexity: S   Beta: LATER
+    The Search For list resets on every launch (config.ts loadConfig, by design) and the scanner never resumes after a
+    restart or crash. Recent-search chips soften this. Add an opt-in "Resume scanning at launch" setting later.
+
+R7  Notification failures are covered under N1; synchronous database work under P4.
+
+
+2. USER ONBOARDING
+------------------
+O1  No first-run flow; the path to a first useful result is undocumented in the product      Severity: HIGH   Complexity: M-L  Beta: MUST (minimal)
+    Evidence: grep for welcome/onboard/getting started/checklist finds only the assistant bubble's greeting
+    (GlobalAssistantBar.tsx WELCOME). Sequence a new customer faces: mandatory account login (LoginScreen) -> Dashboard with
+    empty states -> Start Scanner opens a separate Chrome window they must log into -> the first Start also resolves
+    locations through Facebook's own dialog (config.ts: default accounts[0] locationMode "country", locationResolved false;
+    index.ts resolveAccountLocationIfNeeded) -> nothing in the Feed ("Nothing here yet.", Feed.tsx) -> phone alerts need ntfy
+    -> comps need a WatchCount login -> eBay needs keys.
+    Fix: a first-run checklist card on the Dashboard with live status and one button per step: (1) Connect Facebook (opens
+    the window, shows "connected"), (2) Choose where to look (city/state/ZIP), (3) Add your first Search For item (with
+    suggestions), (4) Phone alerts (generate topic, show QR/instructions, "Send a test"), (5) Optional: eBay, comps.
+    Hide steps that the hosted service handles for them.
+
+O2  Login screen is not customer-ready                                                    Severity: BLOCKER Complexity: M   Beta: MUST
+    Where: LoginScreen.tsx; index.ts DEFAULT_CLOUD_API_URL = "http://localhost:8787"; friendlyLoginError.
+    Evidence: the unreachable-server message reads "If you run it with Docker, make sure Docker Desktop is open ...";
+    "Advanced: server address" is exposed; there is no "Forgot password", no email verification, no show-password toggle;
+    labels are not bound to inputs (0 htmlFor in the renderer).
+    Fix: ship the hosted HTTPS URL as the default (hide the server field behind a developer flag), replace the Docker text
+    with "Can't reach Clynx. Check your internet connection and try again.", add password reset (server work) and a
+    show-password toggle, associate labels.
+
+O3  eBay features require hand-editing a .env file                                        Severity: HIGH   Complexity: M   Beta: MUST (or hide eBay)
+    Where: Config.tsx (message "Add EBAY_CLIENT_ID and EBAY_CLIENT_SECRET to .env (see .env.example)"), WatchFormFlow.tsx
+    (same text); .env.example is stale (still lists Groq and Gemini keys).
+    Impact: a customer cannot use eBay scanning, eBay Watches or eBay-based valuation, and sees developer instructions.
+    Fix: hold the eBay application credentials server-side behind an authenticated proxy (the OpenAI proxy pattern) so
+    customers need nothing; until then hide the eBay UI in the beta.
+
+O4  Comps depend on the customer's own WatchCount account                                  Severity: MEDIUM  Complexity: L   Beta: SHOULD (strategy)
+    Where: Config.tsx "eBay sold comps (WatchCount.com)": "20 lookups/day anonymous, 200/day with a WatchCount account";
+    scrapeEngine.ts openWatchCountLogin.
+    Impact: the value engine silently degrades for customers who never create a third-party account; the UI teaches them a
+    third-party limit. Recommend a server-side comps cache shared across customers (also better unit economics).
+
+O5  Defaults make the first scan slow and unexplained                                      Severity: MEDIUM  Complexity: S-M Beta: SHOULD
+    Evidence: default location mode "country" with lazy resolution, general-deal detection on by default, no copy explaining
+    the first-run delay. Add a progress sentence ("Setting up your search areas, about 2 minutes the first time") and offer
+    a nearby default (state or city) instead of nationwide.
+
+O6  Product vocabulary is internal jargon                                                  Severity: MEDIUM  Complexity: S   Beta: SHOULD
+    Examples visible to customers: "Search For", "Watch", "Database / Library / Discovery", "General deals (unverified
+    pricing)", "green flag", "hidden gem", "Include broken", "Save OpenAI credits", "WatchCount". Add one-line help under
+    each screen title and tooltips, and rename the ones that expose vendors (see U5).
+
+
+3. INTERFACE CLARITY
+--------------------
+U1  Feed cards do not show profit, value or the reason                                     Severity: HIGH   Complexity: S-M Beta: MUST
+    Where: components/ListingCard.tsx (card body renders photo carousel, title, price, original price, shipping, age and
+    location, seller rating, then Interested / Not interested buttons). grep for discountPercent/profit/keep finds no
+    display in the card; `record.reasoning` is only used to detect "blacklisted". The profit math exists only in ntfy
+    messages and Activity log lines. The Dashboard "Best Deals" shows a discount percent.
+    Impact: the first question a customer asks is "why is this a deal and what do I make?"; the app cannot answer it. This is
+    the biggest source of preventable support questions and distrust.
+    Fix: add a compact "numbers" row: "Sells ~$320 · you keep ~$270 · profit ~$120 (31%)" plus a one-line verdict. NOTE: the
+    other session has added persisted verdict fields (dealStatus, gateHeadline, gateReasons, requiredDiscountPercent,
+    targetPriceUsd) but the screens do not display them yet; build this on those fields and coordinate to avoid collisions in
+    ListingCard.tsx / Feed.tsx / Dashboard.tsx.
+
+U2  Generic empty, loading and error states                                                 Severity: MEDIUM Complexity: S   Beta: SHOULD
+    Evidence: Feed "Nothing here yet."; Watch "No matches yet."; App "Loading..." (App.tsx). They say nothing about the next
+    step or whether the scanner is running. Add state-specific guidance ("Scanner is stopped: Start it", "Scanning, 14
+    checked so far", "Nothing matched your filters").
+
+U3  Errors are raw and buried                                                              Severity: MEDIUM Complexity: S-M Beta: SHOULD
+    Evidence: "Cycle failed: <exception text>" and "Notification failed: ..." go to Activity only; the one persistent banner
+    is the Facebook-login warning (Dashboard.tsx). Introduce a single "Needs attention" area on the Dashboard fed by typed
+    problems (not logged in, browser missing, alerts failing, AI quota, server unreachable) with plain-language fixes.
+
+U4  Scanner status is good                                                                  (keep)
+    The Dashboard Live panel, sleep countdown, "Skip wait" and per-account tiles already explain activity well.
+
+U5  Developer and vendor terms leak into customer copy                                      Severity: HIGH   Complexity: S   Beta: MUST
+    Evidence (grep in the renderer): ".env", "EBAY_CLIENT_ID", "OpenAI usage / Save OpenAI credits", "Docker Desktop",
+    "WatchCount". For a hosted product, remove ".env" and Docker, and reword AI usage as a plan feature ("Smart research:
+    standard / light").
+
+
+4. FEED USABILITY
+-----------------
+F1  No sorting                                                                              Severity: MEDIUM Complexity: S   Beta: SHOULD
+    Feed.tsx offers filters (all / deals / Watch finds; all / Facebook / eBay), a text search and a card-size slider; order
+    is newest first only. Add sort by profit, price, distance/age and "best first".
+
+F2  No saved deals; capped history                                                          Severity: MEDIUM-HIGH Complexity: M Beta: SHOULD
+    Evidence: App.tsx loads listListings(500, 0) (newest 500, no pagination); "Interested" records feedback (and a research
+    action) but is not a saved list; "Clear all" deletes history. A deal the user wants to act on later scrolls out of the
+    500. Add a Saved flag with its own persistent view, and pagination or "load more".
+
+F3  Duplicate handling is by listing id only                                                Severity: MEDIUM Complexity: M   Beta: LATER
+    Evidence: store.hasSeenCached / saveScored key on the listing id. Reposted or cross-listed items (new ids) appear again;
+    the same product on Facebook and eBay is not linked. Add a soft duplicate marker (same seller, similar title and price in
+    a window) shown as "Relisted".
+
+F4  Full refetch of up to 500 listings during busy scans                                    Severity: MEDIUM Complexity: S-M Beta: SHOULD
+    Where: App.tsx refreshListings (throttled to every 600 ms) calls api.listListings(500, 0) on each listings:refresh
+    event; each record carries description and image URL arrays. Prefer the existing delta path (applyListingUpdates) and
+    refetch only on explicit changes.
+
+F5  Profit visibility: see U1. Sorting by profit depends on U1's data.
+
+
+5. PERFORMANCE
+--------------
+Measured on a read-only copy of a real user database (data/users/<id>/scout.db = 544 MB):
+    product_images   459.5 MB   (4,098 reference photos, average 114 KB, largest 385 KB, stored as base64 data URIs)
+    products          47.2 MB   (555 products; the image_url thumbnails alone are 41.5 MB, average 93 KB)
+    listings           0.1 MB   (only 22 rows; the user clears the Feed, so this will grow for real customers)
+    journal_mode = delete (not WAL)
+
+P1  Every fuzzy product match loads ALL product rows with their images                    Severity: HIGH   Complexity: S-M Beta: MUST
+    Where: store.ts findMatchingProduct -> listProducts() (`SELECT * FROM products`), 16 call sites; saveScored calls
+    findMatchingProduct for every saved listing that has a matched item (and saveScored runs several times per listing).
+    Impact: when the matched name is not an exact product name, each call reads and parses about 41 MB of base64 on the
+    main thread, stalling scanning, IPC and the UI.
+    Fix: keep an in-memory index of (id, name) refreshed on product writes and run the fuzzy match against it, then load
+    the single matched row; never SELECT image columns in list paths.
+
+P2  Image storage inside SQLite                                                              Severity: HIGH   Complexity: M-L Beta: SHOULD (cap: MUST)
+    Impact: 460 MB of photos for one user; slow startup copies, heavy backups, no per-user storage control, cloud sync
+    excludes images, DatabaseSync reads are blocking.
+    Fix (staged): (1) cap and prune reference photos and thumbnails (resize thumbnails to about 20 KB); (2) move images to
+    files under userData/images/<hash>.jpg with a path column; (3) enable WAL.
+
+P3  Renderer holds duplicate copies of the whole product list including thumbnails         Severity: MEDIUM Complexity: S-M Beta: SHOULD
+    Where: Activity.tsx loads api.listProducts() only to map a log line's product name to an id; Database.tsx loads it
+    again; main pushes whole products (with images) on every products:updated. Add a light endpoint (id, name) for Activity
+    and send images separately or lazily.
+
+P4  Synchronous database access on the main process                                       Severity: MEDIUM Complexity: M   Beta: SHOULD
+    node:sqlite DatabaseSync blocks the event loop; bootstrapUserSession runs mergeDuplicateProductEntries (loads all
+    products) and sweeps at startup. Startup time was not measured. After P1/P2, measure startup and long-query stalls.
+
+P5  Feed rendering is already virtualized (Feed.tsx treadmill, fixed card height)          (keep)
+    Long-running scan memory was not measured. Caches are bounded (seen cache 20,000 ids, 200 log lines, Discovery 40
+    entries). Run a 24 h soak test sampling main and renderer memory before the beta.
+
+
+6. NOTIFICATIONS
+----------------
+N1  Delivery failures are silent                                                            Severity: HIGH   Complexity: S-M Beta: MUST
+    Where: notify.ts postNtfyMessage throws on a non-OK response or timeout; callers (scrapeEngine / ebayEngine alert blocks)
+    catch and log "Notification failed" to Activity.
+    Impact: a customer misses a deal and is never told alerts are failing.
+    Fix: retry (3 attempts with backoff), persist unsent alerts in the database for a later pass, and raise a visible
+    "Alerts aren't reaching your phone" item (see U3) with a "Send test" button.
+
+N2  Empty default topic, no test, no guidance, public topics                                 Severity: HIGH   Complexity: S   Beta: MUST
+    Where: config.ts DEFAULT_CONFIG.ntfy.topic = ""; notify.ts builds `${server}/${topic}`; Config.tsx ntfy section.
+    Evidence: with the default, the request goes to "https://ntfy.sh/" and fails; there is no validation, no
+    "Send test notification", and ntfy.sh topics are public, so a guessable topic exposes the customer's deals.
+    Fix: generate a random topic at first run (shown as text and QR), add a test button, and warn if the topic is short.
+
+N3  Duplicate alerts                                                                        (being fixed elsewhere)
+    A Watch match that is also a deal used to push twice; the other session's work makes it one combined notification.
+    Re-test after it merges (also with a Watch that has its own ntfy topic).
+
+N4  Preferences are minimal                                                                 Severity: MEDIUM Complexity: S-M Beta: SHOULD
+    Evidence: desktop notifications exist only for Watch finds (index.ts notifyWatchMatch checks
+    config.desktopNotifications); deal alerts go only to ntfy; no quiet hours, no minimum profit or stars, no per-source
+    choice. Add "minimum profit" and "quiet hours" first (cheap and removes the main reason people mute alerts).
+
+N5  Low-quality alerts                                                                       (being fixed elsewhere)
+    Track an "alert quality" metric in the beta (thumbs-down rate per alert) to prove the gate works.
+
+
+7. DISTRIBUTION
+---------------
+D1  Installer configuration is minimal and unverified                                       Severity: BLOCKER Complexity: M-L Beta: MUST
+    Evidence: package.json "build" contains only appId, productName and the Windows icon. No target (NSIS), no code
+    signing, no publish/update configuration, no asarUnpack for native dependencies (sharp, playwright). A packaged build
+    was never run in this audit; packaged-app behaviour of Playwright, sharp and node:sqlite is unproven.
+    Impact: SmartScreen warnings, installs that fail on clean machines, no way to ship fixes.
+    Fix: NSIS installer, a code-signing certificate, electron-updater with a publish channel, asarUnpack where needed, and a
+    test on a clean Windows 10 and 11 VM (no Node, no dev tools, with and without Chrome).
+
+D2  Browser dependency: see R4.                                                              Beta: MUST
+
+D3  No diagnostics or crash reporting                                                        Severity: HIGH   Complexity: S-M Beta: MUST
+    Evidence: index.ts keeps recentLogs (200 lines, in memory); process.on("uncaughtException" / "unhandledRejection") only
+    pushes to Activity; no log file, no crash reporter, no "export diagnostics".
+    Fix: rotating log file in userData/logs, a Help > "Copy diagnostics" button (app and OS version, config without secrets,
+    last 500 log lines, database size, last errors, last sync status), and optional crash reporting (for example Sentry)
+    with an opt-in.
+
+D4  No update path or version compatibility check                                           Severity: HIGH   Complexity: S-M Beta: MUST (with D1)
+    The client never reports its version to the server and the server cannot require an upgrade. Add app version to every
+    request and a "please update" response.
+
+D5  node:sqlite is an experimental Node module                                              Severity: MEDIUM Complexity: S   Beta: SHOULD
+    store.ts imports DatabaseSync from "node:sqlite". Pin the Electron version and watch for deprecation; consider
+    better-sqlite3 later.
+
+D6  Windows only; uninstall leaves large per-user data                                      (document / LATER)
+    The single-instance lock exists (good).
+
+
+8. ACCOUNT MANAGEMENT AND BILLING
+---------------------------------
+A1  There is no subscription, plan or billing surface                                        Severity: BLOCKER Complexity: L   Beta: MUST
+    Evidence: grep for plan / subscription / billing / upgrade / entitlement in Config.tsx, App.tsx, index.ts and
+    cloudClient.ts finds nothing; the desktop never calls GET /me/entitlements. Server side, getEntitlementsForPlan() defines
+    free (5 Watches, 2 devices, 10 Search For items, AI research off) and pro (unlimited), but no route enforces it and the
+    OpenAI proxy is unmetered.
+    Fix: Stripe Checkout and Customer Portal; an "Account" section in Config (plan, renewal date, usage, Manage billing,
+    Cancel via the portal); server-side enforcement (AI metering and rate limits, Watch and Search For limits); client-side
+    limit messages with an upgrade button.
+
+A2  Missing account basics                                                                    Severity: HIGH   Complexity: M   Beta: MUST (reset, delete)
+    Evidence: the account area is "Cloud Sync" with only a Log out button (Config.tsx). No password reset or change, no email
+    verification, no delete-account or data export, no device list. Delete-account and export are needed for privacy law.
+
+A3  Log out does not revoke the server session                                                Severity: MEDIUM Complexity: S   Beta: SHOULD
+    cloudClient.ts logout() deliberately clears only local state ("Does NOT call POST /auth/logout"). On a shared PC the
+    refresh token stays valid for 30 days. Call the endpoint best-effort, then clear local state regardless.
+
+A4  No billing-related feedback states                                                         Severity: HIGH   Complexity: M   Beta: MUST (with A1)
+    Needed: trial ending, payment failed (grace period), limit reached ("You've used 5 of 5 Watches. Upgrade"), plan expired
+    (read-only mode with a clear banner), and downgrade effects (what stays, what pauses). Without them, billing problems
+    look like bugs and become cancellations.
+
+
+9. DATA SAFETY
+--------------
+S1  A damaged config silently resets all settings and is then overwritten                  Severity: HIGH   Complexity: S   Beta: MUST
+    Where: config.ts loadConfig: `catch { return { ...DEFAULT_CONFIG }; }`; index.ts bootstrapUserSession then calls
+    saveConfig(CONFIG_PATH, config).
+    Impact: one corrupt or truncated config.json permanently loses accounts, location setup, thresholds, Watch topics,
+    with no message and no copy of the old file.
+    Fix: on a parse failure, rename the file to config.json.corrupt-<time>, restore config.json.bak (written after every
+    successful load), and tell the user what happened.
+
+S2  Settings files are written non-atomically                                                  Severity: HIGH   Complexity: S   Beta: MUST
+    Where: config.ts saveConfig = writeFileSync(path, ...); same pattern for .env (saveEnvKey), app-settings.json,
+    cloud-session.json (cloudClient writeSession). A crash or power loss mid-write truncates the file (and feeds S1).
+    Fix: write to a temp file and rename; keep one .bak.
+
+S3  No database backup, integrity check or recovery path                                       Severity: HIGH   Complexity: M   Beta: MUST (small tables)
+    Where: index.ts bootstrapUserSession `store = new Store(DB_PATH)` has no try/catch; the login handlers await it, so a
+    corrupt database rejects the login flow and the user is stuck. The only "backups" folder holds hand-made source
+    snapshots. journal_mode is "delete".
+    Fix: PRAGMA quick_check at open; on failure move the file aside and offer restore or start fresh; take a rolling daily
+    backup (keep 3) of the important small tables (watches, feedback, products without images, settings) rather than the
+    whole 544 MB file; consider WAL.
+
+S4  Migrations are ad hoc                                                                      Severity: MEDIUM Complexity: S-M Beta: SHOULD
+    store.ts runs ALTER TABLE checks and one-time data migrations gated by schema_flags rows (some destructive, such as
+    clearing comps). There is no schema version and no automatic backup before migrating. Add a schema_version and take a
+    pre-migration backup of the small tables.
+
+S5  Cloud sync is only a partial safety net                                                    Severity: MEDIUM Complexity: S-M Beta: LATER
+    Watches, feedback and core product fields sync; settings (config.json), listings and images do not, so a new PC or a
+    reinstall loses settings and photos. Document it, and sync the settings blob later.
+
+
+10. ACCESSIBILITY
+-----------------
+X1  Keyboard, focus and dialogs                                                                Severity: MEDIUM Complexity: S-M Beta: SHOULD
+    Evidence: global.css sets `outline: none` on controls (inputs only change border color on :focus); only one rule uses
+    :focus-visible; no tabIndex anywhere; 187 onClick handlers but 21 aria-* attributes and 5 role attributes in the
+    renderer; Modal.tsx has no role="dialog", no aria-modal, no Escape to close, no focus trap or focus return, and an
+    unlabelled "x" button; labels are not bound to inputs (LoginScreen and others, 0 htmlFor).
+    Fix: visible focus ring for all buttons and links, Escape closes dialogs, role="dialog" aria-modal and focus management
+    in Modal, aria-label on icon-only buttons, label htmlFor.
+
+X2  Text size and contrast                                                                     Severity: LOW-MEDIUM Complexity: S Beta: SHOULD
+    Many small sizes (11 to 13.5 px) and a dim secondary text color on dark backgrounds; contrast was not measured. Run a
+    contrast check on the default theme and enforce a minimum 12.5 px for body-supporting text. (Positive: user-picked colors
+    already go through a legibility helper, colorScheme.ts.)
+
+X3  Motion and decoration                                                                      Severity: LOW Complexity: S Beta: LATER
+    prefers-reduced-motion is honoured only indirectly (performance.ts picks the "lite" tier). Add an explicit "Reduce
+    effects" switch for the starfield, particles and sounds. Note: components/CustomCursor.tsx is exported but not mounted
+    anywhere (dead code), so there is no hidden-cursor issue today; delete it or keep it unmounted.
+
+X4  Layout and screen readers                                                                  Severity: LOW-MEDIUM Complexity: M Beta: LATER
+    Fixed minimum window 960x640 and body zoom 0.95 are fine for a desktop app; behaviour at 125 to 150% Windows scaling was
+    not verified. Icon-only controls use title attributes rather than aria-label; decorative canvases are not marked
+    aria-hidden. A basic screen-reader pass is a post-beta task.
+
+
+11. PRIORITIZED MINIMAL PAID-BETA CHECKLIST
+-------------------------------------------
+Order is by customer impact per effort. Items marked [coord] touch files the deal-quality session is also changing.
+
+ A. Cannot charge or onboard without these (BLOCKERS)
+  1. Billing and plan limits end to end: Stripe checkout and portal, an Account section (plan, usage, manage, cancel),
+     server-enforced limits and AI metering, limit and payment messages (A1, A4)                                    L
+  2. Hosted login: default HTTPS server URL, friendly errors, password reset, show-password, bound labels (O2, A2)     M
+  3. Installer you can ship: NSIS, signing, updater, asarUnpack, clean Windows 10/11 VM test, Chrome preflight or a
+     bundled browser (D1, D2, R4)                                                                                   M-L
+  4. Take the developer out of the product: no .env, no Docker, no OpenAI wording; eBay via server or hidden (U5, O3)  S-M
+
+ B. First 10 minutes (what decides refunds)
+  5. First-run checklist: Facebook, location, first Search For, phone alerts with a random topic and a test button,
+     plus plain-language help text (O1, N2, O6)                                                                     M
+  6. Show the numbers and the reason on every Feed card, using the persisted verdict fields [coord] (U1)             S-M
+  7. Persistent "Needs attention" area fed by typed problems (not logged in, browser missing, alerts failing, server
+     unreachable) (U3)                                                                                              S-M
+
+ C. Stop silent failures (what causes "it stopped working")
+  8. Detect Facebook logout mid-scan and notify; escalate repeated cycle failures (R1, R2)                           M
+  9. Retry and surface failed alert deliveries (N1)                                                                  S-M
+ 10. Window close behaviour: tray and background running, or an explicit warning (R3)                                M
+
+ D. Do not lose or corrupt customer data
+ 11. Atomic settings writes, config backup and corrupt-file handling (S1, S2)                                        S
+ 12. Database quick_check, small-table daily backup, recovery screen (S3)                                            M
+
+ E. Keep it fast
+ 13. Fix the product-table hot path (in-memory name index, never SELECT images in list paths) (P1)                   S-M
+ 14. Cap and prune stored images, resize thumbnails (P2 stage 1)                                                     S-M
+ 15. 24 h soak test and a clean-machine install walkthrough with a stopwatch from install to first deal (P5)         S
+
+ F. Supportability
+ 16. Log file, "Copy diagnostics", app version sent to the server, optional crash reporting (D3, D4)                 S-M
+
+SHOULD DURING THE BETA: sorting and saved deals (F1, F2), minimum-profit and quiet-hours notification settings (N4),
+offline "continue" mode (R5), server-side comps cache (O4), keyboard and dialog accessibility basics (X1), log-out revokes
+the session (A3), schema versioning (S4), light product endpoint for Activity (P3), delta Feed refresh (F4).
+
+LATER: soft duplicate detection (F3), image files and WAL (P2 stages 2-3), resume scanning (R6), settings sync (S5),
+reduced-effects switch and screen-reader pass (X3, X4), macOS.
+
+What is already good and should not be redesigned: the Dashboard Live panel and wait controls, browser self-healing and
+single-instance lock, the virtualized Feed, the themed dialogs and color-legibility helper, the Watch scheduler persistence,
+and the cloud refresh-token design.
+
+Suggested beta exit metrics: minutes from install to first alert (target under 10); share of new users who reach a first
+Feed result; alert delivery success rate and thumbs-down rate per alert; crash-free sessions; support tickets per 100 users
+by category (setup, login, "nothing happening", billing).
