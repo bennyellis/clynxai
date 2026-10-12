@@ -189,7 +189,9 @@ button {
   background: var(--bg-card);
   color: var(--text);
   padding: 12px 20px;
-  transition: all 0.15s ease;
+  /* Explicit properties, never "all": animating every property on hover made the GPU redo large areas (measured: the biggest single
+     cost of moving the mouse over the window). */
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
 }
 button:hover:not(:disabled) {
   background: var(--bg-card-hover);
@@ -808,7 +810,12 @@ a {
     var(--accent-2) 56%,
     transparent 68%
   );
-  animation: clynxMarkComet 2.8s linear infinite;
+  /* Not continuous any more (it cost frame drops and GPU for the app's whole life): the sweep plays once every ~25 s, when Sidebar.tsx adds
+     `comet-go` (Visual mode only; see ClynxMark). Between sweeps the band rests at its end position, where it shows nothing. */
+  animation: none;
+}
+.clynx-mark-comet-band.comet-go {
+  animation: clynxMarkComet 2.8s linear 1;
 }
 @keyframes clynxMarkComet {
   0% { transform: translate3d(-61.54%, -61.54%, 0); }
@@ -873,7 +880,7 @@ h1 {
   inset: 0;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.2s ease;
+  /* No fade: a full-card pseudo-element fading in and out under the moving mouse was a measurable GPU cost. */
   background-image:
     linear-gradient(var(--accent-1), var(--accent-1)), linear-gradient(var(--accent-1), var(--accent-1)),
     linear-gradient(var(--accent-2), var(--accent-2)), linear-gradient(var(--accent-2), var(--accent-2));
@@ -943,8 +950,20 @@ button.primary:hover:not(:disabled)::before {
   background: currentColor;
 }
 
-button, .card, input, select, textarea, .pill, .badge {
-  transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+/* Was one `transition: all` shared by buttons, cards, inputs and pills. Each now animates only what actually changes on hover/focus, and
+   cards animate nothing at all (they are large; their hover state changes instantly). */
+button {
+  transition: background-color 0.15s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.15s cubic-bezier(0.4, 0, 0.2, 1), color 0.15s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.15s cubic-bezier(0.4, 0, 0.2, 1), transform 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+}
+input, select, textarea {
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+.pill, .badge {
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+}
+.card {
+  transition: none;
 }
 button:hover:not(:disabled) {
   transform: translateY(-1px);
@@ -1344,6 +1363,10 @@ html[data-idle] .icon-info-glow {
 }
 
 .tile-image {
+  /* The hover zoom animates only in the Visual effects mode; elsewhere it is instant (large photos re-rasterise while it runs). */
+  transition: none;
+}
+html[data-perf="high"] .tile-image {
   transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .card:hover .tile-image {

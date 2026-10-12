@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import clynxMarkSrc from "../assets/clynx/clynx-mark.png";
+import { getTier, isIdle } from "../lib/performance.js";
 
 export type Screen = "dashboard" | "activity" | "feed" | "watch" | "database" | "config";
 
@@ -265,11 +266,28 @@ function ClynxMark({ size = 34 }: { size?: number }) {
     WebkitMaskPosition: "center",
     maskPosition: "center",
   };
+  // The light sweeps across the mark once every ~25 s (never continuously) and only in the Visual effects mode; skipped while idle.
+  const [go, setGo] = useState(false);
+  useEffect(() => {
+    let off: ReturnType<typeof setTimeout> | null = null;
+    const play = () => {
+      if (getTier() !== "high" || isIdle() || document.hidden) return;
+      setGo(true);
+      off = setTimeout(() => setGo(false), 3000);
+    };
+    const first = setTimeout(play, 4000);
+    const every = setInterval(play, 25_000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(every);
+      if (off) clearTimeout(off);
+    };
+  }, []);
   return (
     <div className="clynx-mark" style={{ position: "relative", width: size, height: size }} aria-hidden="true">
       <img src={clynxMarkSrc} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }} />
       <div className="clynx-mark-comet" style={maskStyle}>
-        <div className="clynx-mark-comet-band" />
+        <div className={go ? "clynx-mark-comet-band comet-go" : "clynx-mark-comet-band"} />
       </div>
     </div>
   );
