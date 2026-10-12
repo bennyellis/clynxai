@@ -12,3 +12,10 @@ config.json
 # Per-install login/session state (holds a refresh token) — never commit
 cloud-session.json
 app-settings.json
+
+# Last-known-good copies and kept-aside damaged files written by safeFs.ts / dbIntegrity.ts (can hold keys or tokens)
+*.bak
+*.corrupt-*
+*.unreadable-*
+*.tmp-*
+*.recover-requested
