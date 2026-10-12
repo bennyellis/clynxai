@@ -13,6 +13,7 @@ import { hasOpenAIAccess, initOpenAIProxy } from "./openai.js";
 import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
 import { writeFileAtomicWithBackup } from "./safeFs.js";
 import { NoticeBoard } from "./appNotices.js";
+import { openWithRecovery, requestRecovery, runIntegrityCheckInBackground } from "./dbIntegrity.js";
 import { loadConfig, saveConfig, takeConfigLoadNotice, DEFAULT_CONFIG, DEFAULT_BROWSE_URLS, DEFAULT_COUNTRY_CITIES } from "./config.js";
 import {
   streamChat,
@@ -2804,7 +2805,38 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   config = { ...config, cloud: { enabled: true, apiUrl: appSettings.cloudApiUrl } };
   saveConfig(CONFIG_PATH, config);
 
-  store = new Store(DB_PATH);
+  // A damaged database is moved aside (never deleted) and a fresh one started, instead of the app failing to log in.
+  const dbOpen = openWithRecovery(DB_PATH, () => new Store(DB_PATH));
+  store = dbOpen.store;
+  if (dbOpen.recovered) {
+    const kept = dbOpen.recovered.damagedCopy ? ` The old database was kept as ${path.basename(dbOpen.recovered.damagedCopy)} in your Clynx data folder.` : "";
+    notices.set({
+      id: "db-recovered",
+      severity: "warning",
+      title: dbOpen.recovered.requestedByUser ? "Started a fresh database" : "Your database was damaged, so Clynx started a fresh one",
+      message: dbOpen.recovered.requestedByUser
+        ? `Your Database, Library and Feed start empty again; your settings and Watches sync back from your account.${kept}`
+        : `Clynx found a problem (${dbOpen.recovered.reason}). Your settings are untouched and Watches sync back from your account, but the Database, Library and Feed start empty.${kept}`,
+      action: "dismiss",
+      actionLabel: "Got it",
+    });
+  }
+  // A full check of a large database takes seconds, so it runs in a separate process a while after startup.
+  const dbPathChecked = DB_PATH;
+  setTimeout(() => {
+    void runIntegrityCheckInBackground(dbPathChecked).then((r) => {
+      if (DB_PATH !== dbPathChecked || r.ok) return;
+      console.error("[db] integrity check failed:", r.detail);
+      notices.set({
+        id: "db-damaged",
+        severity: "error",
+        title: "Your database has damage",
+        message: `Clynx's check found a problem (${r.detail.slice(0, 160)}). Scanning may keep working, but data could be missing or wrong. "Back up and start fresh" keeps the damaged file for investigation and restarts Clynx with an empty database.`,
+        action: "recover-database",
+        actionLabel: "Back up and start fresh",
+      });
+    });
+  }, 90_000);
   mergeDuplicateProductEntries();
   // A little after startup, so the app is up and the first scan isn't competing with it.
   setTimeout(() => void sweepBlankProducts(), 8000);
@@ -3039,6 +3071,13 @@ app.whenReady().then(() => {
   ipcMain.handle("engine:statusMap", (): Record<string, ScrapeStatus> => Object.fromEntries(engineStatusMap));
   ipcMain.handle("notices:list", () => notices.list());
   ipcMain.handle("notices:dismiss", (_e, args: { id: string }) => notices.clear(args.id));
+  // "Back up and start fresh": the open database cannot be renamed, so mark it and restart; the next start moves it aside.
+  ipcMain.handle("db:recover", () => {
+    requestRecovery(DB_PATH);
+    allowClose = true;
+    app.relaunch();
+    app.quit();
+  });
 
   // Multi-user login migration — the interactive login IS the cloud auth
   // now (no more headless CLYNX_CLOUD_EMAIL/PASSWORD env-based bootstrapAuth
