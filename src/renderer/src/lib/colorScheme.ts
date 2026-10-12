@@ -249,7 +249,7 @@ const RAINBOW_CYCLE_MS = 48_000;
 // consumer re-resolves), so this updates ~20 times a second rather than
 // every frame; at this cycle length each step shifts the hue by under half a
 // degree, which still looks perfectly continuous.
-const RAINBOW_STEP_MS: Record<PerfTier, number> = { high: 70, balanced: 140, lite: 320 };
+const RAINBOW_STEP_MS: Record<PerfTier, number> = { visual: 70, balanced: 140, performance: 320 };
 const RAINBOW_ACCENT_HUE_OFFSET = 55;
 
 let rainbowFrame: number | null = null;

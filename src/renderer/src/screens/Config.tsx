@@ -636,18 +636,22 @@ export function ConfigScreen({
             </div>
           </SettingRow>
           <SettingRow
-            title="Effects quality"
+            title="Performance mode"
             description={
               effects === "auto"
-                ? `Auto picks for your graphics (${getGpuLabel()}) and lowers itself if your computer struggles — currently ${getTier() === "high" ? "full" : getTier() === "balanced" ? "balanced" : "low power"}.`
-                : "Lower settings thin out the stars and switch off ambient animations — smoother on older computers."
+                ? `Auto picks for your graphics (${getGpuLabel()}) and lowers itself if your computer struggles: currently ${getTier() === "visual" ? "Visual" : getTier() === "balanced" ? "Balanced" : "Performance"}. Only the look of the app changes; scanning, deals and alerts are the same in every mode.`
+                : effects === "visual"
+                  ? "The full look: animated starfield, glow and ambient effects. Uses the most graphics power."
+                  : effects === "balanced"
+                    ? "A calmer starfield (about 18 frames a second), no glow or flybys and no hover lift. Noticeably lighter on graphics."
+                    : "A still backdrop and no decorative animation: the lightest mode, best for integrated graphics and 120/144 Hz screens."
             }
           >
-            <select value={effects} onChange={(e) => changeEffects(e.target.value as PerfPreference)}>
+            <select value={effects} onChange={(e) => changeEffects(e.target.value as PerfPreference)} aria-label="Performance mode">
               <option value="auto">Auto (recommended)</option>
-              <option value="high">Full</option>
+              <option value="visual">Visual</option>
               <option value="balanced">Balanced</option>
-              <option value="lite">Low power</option>
+              <option value="performance">Performance</option>
             </select>
           </SettingRow>
           <CheckRow title="Sound" description="Start/stop chimes, tab ticks and the deal alert." checked={cfg.soundEnabled} onChange={toggleSound} />

@@ -1190,7 +1190,8 @@ button.nav-item:hover:not(:disabled) {
   0%, 100% { opacity: 0; }
   50% { opacity: 1; }
 }
-html[data-perf="lite"] .icon-info-glow {
+html[data-perf="balanced"] .icon-info-glow,
+html[data-perf="performance"] .icon-info-glow {
   filter: none;
 }
 html[data-idle] .icon-info-glow {
@@ -1366,7 +1367,7 @@ html[data-idle] .icon-info-glow {
   /* The hover zoom animates only in the Visual effects mode; elsewhere it is instant (large photos re-rasterise while it runs). */
   transition: none;
 }
-html[data-perf="high"] .tile-image {
+html[data-perf="visual"] .tile-image {
   transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .card:hover .tile-image {
@@ -1400,7 +1401,8 @@ html[data-perf="high"] .tile-image {
   0%, 100% { opacity: 0.55; }
   50% { opacity: 1; }
 }
-html[data-perf="lite"] .listing-hot::after {
+html[data-perf="balanced"] .listing-hot::after,
+html[data-perf="performance"] .listing-hot::after {
   animation: none;
   opacity: 0.75;
 }
@@ -1441,7 +1443,8 @@ html[data-perf="lite"] .listing-hot::after {
 /* Lowest effects tier: the sheen stays (it's what marks a hot deal) but moves
    in 96 discrete steps per lap (~30fps) instead of continuously, so it asks the
    GPU for far fewer frames. */
-html[data-perf="lite"] .hot-ring-sweep {
+html[data-perf="balanced"] .hot-ring-sweep,
+html[data-perf="performance"] .hot-ring-sweep {
   animation-timing-function: steps(96, end);
 }
 
@@ -1592,20 +1595,28 @@ html[data-grid-live] .bd-aurora {
    in which always-on UI animations run. Lite switches the decorative ones off
    (the status dots keep their static glow; the small sidebar icon animations
    that mean "scanning" are kept). */
-html[data-perf="lite"] .listing-hot::after {
+html[data-perf="balanced"] .listing-hot::after,
+html[data-perf="performance"] .listing-hot::after {
   animation: none;
   opacity: 0.75;
 }
-html[data-perf="lite"] .clynx-mark-comet-band,
-html[data-perf="lite"] .live-scan-overlay {
+html[data-perf="balanced"] .clynx-mark-comet-band,
+html[data-perf="performance"] .clynx-mark-comet-band,
+html[data-perf="balanced"] .live-scan-overlay,
+html[data-perf="performance"] .live-scan-overlay {
   animation: none !important;
   display: none;
 }
-html[data-perf="lite"] .dot.on,
-html[data-perf="lite"] .nav-item-pulse-dot,
-html[data-perf="lite"] .floaty,
-html[data-perf="lite"] [style*="liveDotPulse"],
-html[data-perf="lite"] [style*="liveActionPulse"] {
+html[data-perf="balanced"] .dot.on,
+html[data-perf="performance"] .dot.on,
+html[data-perf="balanced"] .nav-item-pulse-dot,
+html[data-perf="performance"] .nav-item-pulse-dot,
+html[data-perf="balanced"] .floaty,
+html[data-perf="performance"] .floaty,
+html[data-perf="balanced"] [style*="liveDotPulse"],
+html[data-perf="performance"] [style*="liveDotPulse"],
+html[data-perf="balanced"] [style*="liveActionPulse"],
+html[data-perf="performance"] [style*="liveActionPulse"] {
   animation: none !important;
 }
 
@@ -1624,6 +1635,36 @@ html[data-idle] [style*="liveDotPulse"],
 html[data-idle] [style*="liveActionPulse"] {
   animation-play-state: paused !important;
 }
-html[data-perf="lite"] .modal-backdrop {
+html[data-perf="balanced"] .modal-backdrop,
+html[data-perf="performance"] .modal-backdrop {
   backdrop-filter: none;
+}
+
+/* Performance modes (lib/performance.ts). Only what is drawn changes; nothing here touches scanning, deals, Watches or alerts.
+   Balanced: no card hover lift or shadow (large cards re-rasterise under the moving mouse).
+   Performance: additionally no transitions, no entrance animations and no button lift: hover and focus changes are instant. Functional
+   indicators (the "typing" dots, the scanning icons) are not matched here and keep running. Focus outlines are untouched. */
+html[data-perf="balanced"] .card:hover,
+html[data-perf="performance"] .card:hover {
+  transform: none;
+  box-shadow: none;
+}
+html[data-perf="balanced"] .card:hover .tile-image,
+html[data-perf="performance"] .card:hover .tile-image {
+  transform: none;
+}
+html[data-perf="performance"] *,
+html[data-perf="performance"] *::before,
+html[data-perf="performance"] *::after {
+  transition: none !important;
+}
+html[data-perf="performance"] .card,
+html[data-perf="performance"] .enter,
+html[data-perf="performance"] .enter-fade {
+  animation: none !important;
+}
+html[data-perf="performance"] button:hover:not(:disabled),
+html[data-perf="performance"] button:active:not(:disabled),
+html[data-perf="performance"] button.nav-item:hover:not(:disabled) {
+  transform: none;
 }

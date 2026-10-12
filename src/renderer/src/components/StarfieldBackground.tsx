@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { getTier, isIdle, reportFrame, subscribeTier } from "../lib/performance.js";
+import { getTier, isIdle, isUnfocused, reportFrame, subscribeTier } from "../lib/performance.js";
 import clynxMarkSrc from "../assets/clynx/clynx-mark.png";
 
 interface Star {
@@ -203,6 +203,7 @@ export function StarfieldBackground() {
     // re-reads at most a few times a second (see tick()).
     const paletteObserver = new MutationObserver(() => {
       paletteDirty = true;
+      kick(); // a still backdrop (performance mode) has no loop running: wake it so the new colours are drawn
     });
     paletteObserver.observe(document.documentElement, {
       attributes: true,
@@ -216,12 +217,16 @@ export function StarfieldBackground() {
     // stars (and the grid) don't get more than they need. `extras` = the
     // satellite and meteors.
     const TIERS = {
-      high: { density: 1700, max: 900, min: 320, dprCap: 2, frameMs: 20, halo: true, extras: true },
-      balanced: { density: 3600, max: 420, min: 160, dprCap: 1.5, frameMs: 33, halo: false, extras: true },
-      lite: { density: 9000, max: 160, min: 80, dprCap: 1, frameMs: 33, halo: false, extras: false },
+      // visual: the full look at about 30fps (it used to run at about 48 on a 144Hz screen, which measured as the largest cost of the backdrop).
+      // balanced: about 18fps, 1x resolution, no glow, satellite, meteors or flybys.
+      // performance: drawn ONCE as a still image (still: true); redrawn only after a resize, a mode change or a colour change.
+      visual: { density: 1700, max: 900, min: 320, dprCap: 1.5, frameMs: 33, halo: true, extras: true, still: false },
+      balanced: { density: 3600, max: 420, min: 160, dprCap: 1, frameMs: 55, halo: false, extras: false, still: false },
+      performance: { density: 9000, max: 160, min: 80, dprCap: 1, frameMs: 33, halo: false, extras: false, still: true },
     } as const;
     // While the user is idle (see lib/performance.ts) the field just trickles.
     const IDLE_FRAME_MS = 66;
+    const UNFOCUSED_FRAME_MS = 200;
 
     // The orbit ring from global.css's .bd-orbit — center (50%, 44%), radii
     // (69vw, 27vh), tilted -12deg. Keep in sync with that rule. The satellite
@@ -476,6 +481,14 @@ export function StarfieldBackground() {
       ctx!.setTransform(dpr, 0, 0, dpr, 0, 0);
       const count = Math.min(p.max, Math.max(p.min, Math.floor((width * height) / p.density)));
       stars = Array.from({ length: count }, () => spawnStar(true));
+      kick(); // a new size or mode needs a new picture
+    }
+    // Performance mode draws one frame and stops the loop; kick() starts it again when something changes (resize, mode, colours).
+    let stillDone = false;
+    let loopStarted = false;
+    function kick() {
+      stillDone = false;
+      if (loopStarted && rafId === 0) rafId = requestAnimationFrame(tick);
     }
     resize();
 
@@ -953,12 +966,21 @@ export function StarfieldBackground() {
         return;
       }
       const p = TIERS[getTier()];
+      // Performance mode: the picture is already on screen; nothing to redraw until kick() says so.
+      if (p.still && stillDone) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+        lastTickAt = null;
+        lastRafAt = null;
+        return;
+      }
       // Report the real display cadence on EVERY callback (drawn or not): the
       // auto-quality governor needs to know how the whole page is keeping up,
       // not how often this canvas chose to redraw.
       if (lastRafAt !== null && focused) reportFrame(now - lastRafAt);
       lastRafAt = now;
-      const minFrameMs = isIdle() ? Math.max(p.frameMs, IDLE_FRAME_MS) : p.frameMs;
+      // Unfocused (another window in front for a few seconds): about 5fps. Idle (no input for 30 s): about 15fps.
+      const minFrameMs = isUnfocused() ? Math.max(p.frameMs, UNFOCUSED_FRAME_MS) : isIdle() ? Math.max(p.frameMs, IDLE_FRAME_MS) : p.frameMs;
       if (lastTickAt !== null && now - lastTickAt < minFrameMs * 0.8) return;
       const frameGapMs = lastTickAt === null ? 0 : now - lastTickAt;
       lastTickAt = now;
@@ -1098,7 +1120,7 @@ export function StarfieldBackground() {
       // Unlike the satellite and meteors this runs on every quality tier: it is a
       // single small shape, and the canvas is being redrawn anyway.
       flybyClockS += dt;
-      if (!flyby.active && flybyClockS >= nextFlybyAtS && !isIdle()) {
+      if (!flyby.active && p.extras && flybyClockS >= nextFlybyAtS && !isIdle()) {
         startFlyby();
         nextFlybyAtS = flybyClockS + FLYBY_MIN_GAP_S + Math.random() * (FLYBY_MAX_GAP_S - FLYBY_MIN_GAP_S);
       }
@@ -1119,7 +1141,10 @@ export function StarfieldBackground() {
         }
         if (meteor.active) drawMeteor(dt);
       }
+      // The still picture is complete once the colours it was drawn with are current.
+      if (p.still && !paletteDirty) stillDone = true;
     }
+    loopStarted = true;
     rafId = requestAnimationFrame(tick);
 
     return () => {

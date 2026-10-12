@@ -271,7 +271,7 @@ function ClynxMark({ size = 34 }: { size?: number }) {
   useEffect(() => {
     let off: ReturnType<typeof setTimeout> | null = null;
     const play = () => {
-      if (getTier() !== "high" || isIdle() || document.hidden) return;
+      if (getTier() !== "visual" || isIdle() || document.hidden) return;
       setGo(true);
       off = setTimeout(() => setGo(false), 3000);
     };

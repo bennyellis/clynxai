@@ -2,13 +2,16 @@
 //
 // The backdrop itself is static at every tier (see SpaceBackdrop.tsx), so the
 // tiers trade starfield cost and always-on UI animation:
-//   high      — dense starfield with glow (~48-60fps), satellite, meteors and
-//               all ambient UI animation.
-//   balanced  — a thinner 30fps starfield without glow, satellite and meteors,
-//               all ambient UI animation.
-//   lite      — a sparse 30fps starfield at 1x resolution; the always-on
-//               decorative CSS animations are switched off (a hot deal's border
-//               sheen stays, stepped). The grid still scrolls at every tier.
+//   visual      — the full look: dense starfield with glow, satellite, meteors, the
+//                 occasional logo sweep and ambient UI animation (starfield capped at
+//                 about 30fps).
+//   balanced    — a thin starfield at about 18fps, 1x resolution, no glow, satellite,
+//                 meteors, flybys or logo sweep, no card hover lift, decorative CSS
+//                 animation off.
+//   performance — NO continuous decorative animation: the starfield is drawn once as
+//                 a still image (and again only if the window is resized or the colours
+//                 change), hover transitions are off. Functional indicators stay.
+// Saved settings from before the rename: "high" is now visual, "lite" is performance.
 //
 // "auto" (the default) picks a starting tier from the hardware — including the
 // GPU: integrated graphics (Intel UHD/HD/Iris) and software rendering start on
@@ -23,11 +26,11 @@
 // starfield and pauses the decorative animations — see isIdle() below — so an
 // app left running all day or overnight costs next to nothing.
 
-export type PerfTier = "high" | "balanced" | "lite";
+export type PerfTier = "visual" | "balanced" | "performance";
 export type PerfPreference = "auto" | PerfTier;
 
 const PREF_KEY = "clynx.effects";
-const TIER_ORDER: PerfTier[] = ["high", "balanced", "lite"];
+const TIER_ORDER: PerfTier[] = ["visual", "balanced", "performance"];
 
 function readStorage(key: string): string | null {
   try {
@@ -45,7 +48,7 @@ function writeStorage(key: string, value: string): void {
 }
 
 function isTier(v: unknown): v is PerfTier {
-  return v === "high" || v === "balanced" || v === "lite";
+  return v === "visual" || v === "balanced" || v === "performance";
 }
 
 // The GPU's own name (e.g. "ANGLE (Intel, Intel(R) UHD Graphics ...)"), read
@@ -84,32 +87,35 @@ export function getGpuLabel(): string {
 
 function hardwareTier(): PerfTier {
   try {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return "lite";
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return "performance";
     const cores = navigator.hardwareConcurrency || 8;
     const memory = (navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 8;
-    if (cores <= 2 || memory <= 2) return "lite";
+    if (cores <= 2 || memory <= 2) return "performance";
     const gpu = detectGpu();
     // No hardware WebGL, or a software rasterizer: everything is drawn on the
     // CPU, so keep the effects minimal.
-    if (gpu === "none" || /swiftshader|llvmpipe|software|basic render|warp/i.test(gpu)) return "lite";
-    let tier: PerfTier = "high";
+    if (gpu === "none" || /swiftshader|llvmpipe|software|basic render|warp/i.test(gpu)) return "performance";
+    let tier: PerfTier = "visual";
     // Integrated Intel graphics (UHD / HD / Iris) share memory bandwidth with
     // the CPU and, at 120-144Hz, can't re-composite a full window every
     // refresh alongside the scanner's browser windows (and everything else the
     // machine is doing), so they start on the lightest tier. Arc is a real GPU.
-    if (/intel/i.test(gpu) && !/\barc\b/i.test(gpu)) tier = "lite";
+    if (/intel/i.test(gpu) && !/\barc\b/i.test(gpu)) tier = "performance";
     // A modest CPU/RAM budget caps a strong GPU at balanced — but never raises
     // a tier the checks above already lowered.
-    if (tier === "high" && (cores <= 4 || memory <= 4)) tier = "balanced";
+    if (tier === "visual" && (cores <= 4 || memory <= 4)) tier = "balanced";
     return tier;
   } catch {
     // fall through to the default
   }
-  return "high";
+  return "visual";
 }
 
 let preference: PerfPreference = (() => {
   const saved = readStorage(PREF_KEY);
+  // Settings saved before the modes were renamed (high / lite) keep meaning what they meant.
+  if (saved === "high") return "visual";
+  if (saved === "lite") return "performance";
   return saved === "auto" || isTier(saved) ? (saved as PerfPreference) : "auto";
 })();
 
@@ -162,14 +168,29 @@ let lastInputAt = typeof performance !== "undefined" ? performance.now() : 0;
 let idle = false;
 
 export function isIdle(): boolean {
-  return idle;
+  return idle || unfocused;
+}
+
+// The window is visible but does not have focus (another program, or the scanner's browser, is in front). After a few seconds the decorative
+// layers throttle hard (see StarfieldBackground) and CSS animations pause; focusing the window brings everything back at once.
+const UNFOCUSED_AFTER_MS = 3000;
+let unfocused = false;
+let unfocusTimer: ReturnType<typeof setTimeout> | null = null;
+export function isUnfocused(): boolean {
+  return unfocused;
+}
+function setUnfocused(next: boolean): void {
+  if (unfocused === next) return;
+  unfocused = next;
+  if (next) document.documentElement.setAttribute("data-idle", "");
+  else if (!idle) document.documentElement.removeAttribute("data-idle");
 }
 
 function setIdle(next: boolean): void {
   if (idle === next) return;
   idle = next;
   if (next) document.documentElement.setAttribute("data-idle", "");
-  else document.documentElement.removeAttribute("data-idle");
+  else if (!unfocused) document.documentElement.removeAttribute("data-idle");
 }
 
 export function initPerformance(): void {
@@ -184,6 +205,17 @@ export function initPerformance(): void {
   setInterval(() => {
     if (!idle && performance.now() - lastInputAt > IDLE_AFTER_MS) setIdle(true);
   }, 2000);
+  window.addEventListener("blur", () => {
+    if (unfocusTimer) clearTimeout(unfocusTimer);
+    unfocusTimer = setTimeout(() => setUnfocused(true), UNFOCUSED_AFTER_MS);
+  });
+  window.addEventListener("focus", () => {
+    if (unfocusTimer) clearTimeout(unfocusTimer);
+    unfocusTimer = null;
+    setUnfocused(false);
+  });
+  // A window that starts without focus (opened behind something) gets the same treatment.
+  if (!document.hasFocus()) unfocusTimer = setTimeout(() => setUnfocused(true), UNFOCUSED_AFTER_MS);
 }
 
 // --- Frame-time watchdog ------------------------------------------------------
@@ -221,7 +253,7 @@ export function reportFrame(frameGapMs: number): void {
   windowGaps.length = 0;
   vsyncMs = Math.max(4, Math.min(vsyncMs, sorted[Math.floor(sorted.length * 0.25)]));
   // Lite is the floor.
-  const struggling = autoTier !== "lite" && avg > vsyncMs * STRUGGLE_FACTOR;
+  const struggling = autoTier !== "performance" && avg > vsyncMs * STRUGGLE_FACTOR;
   slowWindows = struggling ? slowWindows + 1 : 0;
   // Two slow windows in a row (a couple of seconds) before acting, so a
   // one-off hitch (a big list rendering) doesn't downgrade the session.
