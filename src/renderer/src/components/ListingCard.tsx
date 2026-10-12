@@ -321,6 +321,24 @@ function ListingCardImpl({
     ) : record.source === "ebay" && record.sellerFeedbackPercent != null ? (
       <span>{record.sellerFeedbackPercent.toFixed(1)}% positive</span>
     ) : null;
+  // The Deal Quality Gate's saved decision, so the card says what Clynx decided and why. Only for listings that were actually
+  // gated (older ones have no verdict and look as before). A negotiation opportunity shows the discount the seller must give.
+  const verdictChip =
+    record.dealStatus === "profitable_now"
+      ? { label: "Deal", color: "var(--success)", detail: record.gateHeadline ?? "Profitable at the asking price" }
+      : record.dealStatus === "negotiation"
+        ? {
+            label: "Negotiate",
+            color: "var(--warn)",
+            detail:
+              record.requiredDiscountPercent !== null
+                ? `Needs ${record.requiredDiscountPercent}% off${record.targetPriceUsd !== null ? ` · offer ~$${Math.round(record.targetPriceUsd)}` : ""}`
+                : (record.gateHeadline ?? "A deal if the seller comes down"),
+          }
+        : record.dealStatus === "worth_a_look"
+          ? { label: "Worth a look", color: "var(--accent-3-text)", detail: record.gateHeadline ?? "Interesting, not fully verified" }
+          : null;
+
   // Facebook shows where the item is; eBay doesn't (it ships).
   const locationLine = record.source === "facebook" ? record.locationText : null;
   const ageLocationLine = [record.listingAge, locationLine].filter(Boolean).join(" · ") || null;
@@ -633,6 +651,18 @@ function ListingCardImpl({
             <div style={{ fontSize: 14, color: "var(--text-muted)" }}>+ {shippingUsd === 0 ? "free" : money(shippingUsd)} shipping</div>
           )}
         </div>
+
+        {verdictChip && (
+          <div
+            title={record.gateHeadline ?? undefined}
+            style={{ display: "flex", alignItems: "baseline", gap: 6, fontSize: 12.5, lineHeight: 1.35, minWidth: 0 }}
+          >
+            <span className="pill" style={{ flexShrink: 0, color: verdictChip.color, borderColor: verdictChip.color, fontWeight: 700, fontSize: 11.5, padding: "2px 8px" }}>
+              {verdictChip.label}
+            </span>
+            <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{verdictChip.detail}</span>
+          </div>
+        )}
 
         {ageLocationLine && (
           <div title={`Found by the scanner ${timeAgo(record.firstSeenAt)}`} style={{ fontSize: 12.5, color: "var(--text-dim)" }}>

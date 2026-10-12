@@ -5,8 +5,8 @@ import { Modal } from "../components/Modal.js";
 import { ThumbnailSizeSlider, useThumbnailSize } from "../components/ThumbnailSize.js";
 import { api } from "../lib/api.js";
 
-type Filter = "all" | "deals" | "watch";
-const FILTER_LABELS: Record<Filter, string> = { all: "all", deals: "deals", watch: "Watch finds" };
+type Filter = "all" | "deals" | "look" | "watch";
+const FILTER_LABELS: Record<Filter, string> = { all: "all", deals: "deals", look: "Worth a look", watch: "Watch finds" };
 type SourceFilter = "all" | "facebook" | "ebay";
 const SOURCE_FILTER_LABELS: Record<SourceFilter, string> = { all: "All sources", facebook: "Facebook", ebay: "eBay" };
 
@@ -60,7 +60,15 @@ export function Feed({
   // explicit request, in favor of watching the scanner actually work.
   // "All" vs "Deals" (and the search box) stay exactly as they were.
   const filtered = useMemo(() => {
-    let result = filter === "deals" ? listings.filter((l) => l.isDeal) : filter === "watch" ? listings.filter((l) => l.watchNames.length > 0) : listings;
+    // "Deals" = qualified by the Deal Quality Gate (isDeal is the saved decision); "Worth a look" = interesting but unverified.
+    let result =
+      filter === "deals"
+        ? listings.filter((l) => l.isDeal)
+        : filter === "look"
+          ? listings.filter((l) => l.dealStatus === "worth_a_look")
+          : filter === "watch"
+            ? listings.filter((l) => l.watchNames.length > 0)
+            : listings;
     if (sourceFilter !== "all") result = result.filter((l) => l.source === sourceFilter);
     const q = searchQuery.trim().toLowerCase();
     if (q) {
@@ -181,7 +189,7 @@ export function Feed({
             style={{ width: 240 }}
           />
           <ThumbnailSizeSlider value={cardSize} onChange={setCardSize} min={220} max={480} step={20} />
-          {(["all", "deals", "watch"] as Filter[]).map((f) => (
+          {(["all", "deals", "look", "watch"] as Filter[]).map((f) => (
             <button
               key={f}
               className={filter === f ? "seg on" : "seg"}

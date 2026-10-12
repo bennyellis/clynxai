@@ -662,6 +662,12 @@ export function ConfigScreen({
 
       {tab === "notifications" && (
         <Section title="Push notifications (ntfy)" subtitle="Install the ntfy app and subscribe to your topic to get alerts on your phone.">
+          <CheckRow
+            title="Also alert me about “Worth a look” finds"
+            description="Interesting listings Clynx couldn't fully verify (unknown age or thin sales data). Off by default: they stay in the Feed. When on, they arrive quietly, clearly labelled."
+            checked={cfg.notifyWorthALook === true}
+            onChange={(v) => update("notifyWorthALook", v)}
+          />
           <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
             <Field label="Server">
               <input value={cfg.ntfy.server} onChange={(e) => update("ntfy", { ...cfg.ntfy, server: e.target.value })} />

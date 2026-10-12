@@ -1,0 +1,32 @@
+CLYNX DEAL QUALITY GATE: IMPLEMENTATION REPORT
+==============================================
+Status: complete (stages 1-5). Commits: 8e99a90 (stages 1-4, engine + store + tests), plus the Stage 5 commit that follows it.
+Rollback point: tag checkpoint-before-deal-gate (commit e57fa8a).
+
+WHAT CHANGED
+ Stage 1  listingAge.ts, watchMatching.ts: relative-age parsing ("2 hours ago", "a week ago"); Watches enforce age; unknown age is
+          stored as unknown (null), never as fresh.
+ Stage 2  dealGate.ts (new): one universal gate. Statuses: profitable_now, negotiation (with required discount and offer price),
+          worth_a_look, pass. Weak evidence lowers confidence instead of discarding rare finds.
+ Stage 3  store.ts/types.ts: the final verdict is saved with the listing (status, confidence, stars, headline, reasons, required
+          discount, target price, age in hours), with a migration for older databases. isDeal now means "qualified".
+ Stage 4  preAlert.ts, scrapeEngine.ts, ebayEngine.ts, notify.ts, dealSummary.ts: final qualification runs after vision, bundles and
+          hidden-gem adjustments; AI-only finds are validated by a fresh WatchCount/eBay market check before any deal alert; Watch
+          matches stay deliverable but say plainly whether they are also deals; one combined push, never two; Worth a Look is
+          Feed-only unless Config > notifyWorthALook is on (then a quiet, labelled push).
+ Stage 5  Feed: new "Worth a look" filter. Cards: chip with the saved verdict (Deal / Negotiate: "Needs 11% off - offer ~$400" /
+          Worth a look) and the reason. Config > Notifications: toggle for Worth-a-look alerts. Dashboard counts and Best Deals
+          already read isDeal, which is now the saved decision, so they agree with the Feed and the alerts.
+          App.tsx's change-detection signature includes the new fields so cards refresh when a verdict changes.
+
+TESTS (npm test: 8 files, all pass; npm run typecheck clean; npm run build ok)
+ ageRoutes, dealGate, gateRoutes, hiddenGems (new: 9 checks), listingAge, listingSource, qualification, storeGate.
+ Electron screen checks re-run against the new build, all pass: smoke (every screen, no renderer errors), assistantui, discovery,
+ blacklist, watchmatches, and a new card-chip check (Deal / Negotiate with discount and offer / Worth a look / ungated has no chip).
+
+REMAINING LIMITATIONS
+ - Not run against live Facebook/eBay traffic; first real scan should be watched in Activity for "Deal Quality Gate:" lines.
+ - Listings saved before this change have no verdict; they show as before (isDeal fallback) and get no chip.
+ - Facebook's age wording is approximate; only exact-enough phrases are parsed, everything else is "unknown".
+ - The running app must be relaunched to pick up the new build (production runs from out/).
+ - The cloud server was not changed.
