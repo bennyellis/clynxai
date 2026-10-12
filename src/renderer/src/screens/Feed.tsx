@@ -4,6 +4,7 @@ import { ListingCard, listingCardHeight } from "../components/ListingCard.js";
 import { Modal } from "../components/Modal.js";
 import { ThumbnailSizeSlider, useThumbnailSize } from "../components/ThumbnailSize.js";
 import { api } from "../lib/api.js";
+import { describeEmptyFeed, type ScannerStateKind } from "../lib/scannerState.js";
 
 type Filter = "all" | "deals" | "look" | "watch";
 const FILTER_LABELS: Record<Filter, string> = { all: "all", deals: "deals", look: "Worth a look", watch: "Watch finds" };
@@ -24,6 +25,9 @@ export function Feed({
   listings,
   onRefresh,
   onGoToProduct,
+  scannerKind,
+  hasSearchItems,
+  onGoToDashboard,
 }: {
   // False while another screen is showing. Every screen stays mounted (just
   // hidden) so state survives tab switches, but a hidden Feed has no reason
@@ -34,6 +38,10 @@ export function Feed({
   // Per explicit instruction — the Research button takes the user straight
   // to that product's own Database page instead of leaving them on Feed.
   onGoToProduct: (productId: string) => void;
+  // What the scanner is doing right now (lib/scannerState.ts), so an empty Feed can say why it is empty.
+  scannerKind: ScannerStateKind;
+  hasSearchItems: boolean;
+  onGoToDashboard: () => void;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
   // Per explicit instruction — see only Facebook listings, only eBay ones,
@@ -230,12 +238,26 @@ export function Feed({
 
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", paddingRight: 4, paddingBottom: 64 }}>
         {filtered.length === 0 && (
-          <div className="card" style={{ color: "var(--text-dim)" }}>
-            {searchQuery.trim()
-              ? `No listings match "${searchQuery.trim()}".`
-              : sourceFilter !== "all"
-                ? `No ${SOURCE_FILTER_LABELS[sourceFilter]} listings here yet.`
-                : "Nothing here yet."}
+          <div className="card" role="status" style={{ color: "var(--text-dim)", display: "flex", flexDirection: "column", gap: 10, alignItems: "flex-start" }}>
+            {searchQuery.trim() ? (
+              `No listings match "${searchQuery.trim()}".`
+            ) : sourceFilter !== "all" && listings.some((l) => l.source === sourceFilter) === false && listings.length > 0 ? (
+              `No ${SOURCE_FILTER_LABELS[sourceFilter]} listings here yet.`
+            ) : (
+              (() => {
+                const empty = describeEmptyFeed({ scanner: scannerKind, listingCount: listings.length, filter, hasSearchItems });
+                return (
+                  <>
+                    <span>{empty.text}</span>
+                    {empty.action === "dashboard" && (
+                      <button className="icon" onClick={onGoToDashboard}>
+                        Go to the Dashboard
+                      </button>
+                    )}
+                  </>
+                );
+              })()
+            )}
           </div>
         )}
         {/* One tall, empty area the size of the whole list; only the rows in view are placed inside it. */}

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Sidebar, type Screen } from "./components/Sidebar.js";
 import { StarfieldBackground } from "./components/StarfieldBackground.js";
 import { SpaceBackdrop } from "./components/SpaceBackdrop.js";
@@ -10,6 +10,8 @@ import { WatchScreen } from "./screens/Watch.js";
 import { ConfigScreen } from "./screens/Config.js";
 import { Database } from "./screens/Database.js";
 import { LoginScreen } from "./screens/LoginScreen.js";
+import { useNotices } from "./components/NoticesPanel.js";
+import { describeScannerState } from "./lib/scannerState.js";
 import { api } from "./lib/api.js";
 import type { Account, ListingRecord, LogLine, ScrapeStatus, StartupProblem } from "./lib/api.js";
 import { playDealSound, playClickSound, playHoverSound, setSoundEnabled } from "./lib/sound.js";
@@ -213,6 +215,9 @@ export default function App() {
   // eBay engine also searches for Watches, so eBay only counts as scanner
   // activity when there are Search For items it could be searching for.
   const [hasSearchItems, setHasSearchItems] = useState(false);
+  // What the scanner is doing, in one word: the Feed's empty states say the right thing for each (see lib/scannerState.ts). Only the kind is
+  // passed down, so the Feed does not re-render on every scan tick.
+  const notices = useNotices();
   // eBay stands in for "the scanner" in the sidebar icons only when Facebook is
   // switched off (then it's the only thing there is to scan with).
   const [facebookEnabled, setFacebookEnabled] = useState(true);
@@ -294,6 +299,8 @@ export default function App() {
   );
 
   const goToFeed = useCallback(() => handleSelectScreen("feed"), [handleSelectScreen]);
+  const goToDashboard = useCallback(() => handleSelectScreen("dashboard"), [handleSelectScreen]);
+  const scannerKind = useMemo(() => describeScannerState({ accounts, statusMap, notices, facebookEnabled }).kind, [accounts, statusMap, notices, facebookEnabled]);
 
   // A clicked desktop notification (a Watch found something) opens the screen it names.
   useEffect(() => {
@@ -574,7 +581,7 @@ export default function App() {
               <ActivityMemo status={statusMap[accounts[0]?.id ?? ""] ?? EMPTY_STATUS} logs={logs} onGoToProduct={goToProduct} />
             </div>
             <div className="enter" style={{ display: screen === "feed" ? "block" : "none", height: "100%" }}>
-              <FeedMemo active={screen === "feed"} listings={listings} onRefresh={refreshListingsNow} onGoToProduct={goToProduct} />
+              <FeedMemo active={screen === "feed"} listings={listings} onRefresh={refreshListingsNow} onGoToProduct={goToProduct} scannerKind={scannerKind} hasSearchItems={hasSearchItems} onGoToDashboard={goToDashboard} />
             </div>
             <div className="enter" style={{ display: screen === "watch" ? "block" : "none", height: "100%" }}>
               <WatchMemo active={screen === "watch"} />

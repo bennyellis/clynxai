@@ -4,6 +4,8 @@ import { api } from "../lib/api.js";
 import { playStartSound, playStopSound } from "../lib/sound.js";
 import { Modal } from "../components/Modal.js";
 import { NoticesPanel, useNotices } from "../components/NoticesPanel.js";
+import { describeScannerState } from "../lib/scannerState.js";
+import { explainScannerError } from "../../../main/scannerErrors.js";
 import { WatchFormFlow } from "../components/WatchFormFlow.js";
 import {
   FlameIcon,
@@ -84,6 +86,8 @@ export function Dashboard({
   // A problem that has its own notice (Facebook logged out, scans failing) is shown there, with a button, not repeated as a bare error line.
   const notices = useNotices();
   const accountsWithErrors = accounts.filter((a) => statusMap[a.id]?.lastError && !notices.some((n) => n.accountId === a.id));
+  // One plain line answering "is it running, waiting for me, or broken?" (also drives the Feed's empty states).
+  const scanner = describeScannerState({ accounts, statusMap, notices, facebookEnabled });
   // Per explicit instruction — back to a single green Start / red Stop
   // pair (not a per-account row each, not a separate "start all" bar on
   // top of that) — these two just act on every account at once now.
@@ -159,6 +163,26 @@ export function Dashboard({
           {busy === "stop" ? "Stopping..." : "Stop"}
         </button>
       </div>
+      <div
+        role="status"
+        aria-live="polite"
+        data-testid="scanner-state"
+        data-state={scanner.kind}
+        style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", margin: "-4px 0 0", fontSize: 14 }}
+      >
+        <span
+          aria-hidden="true"
+          style={{
+            width: 9,
+            height: 9,
+            borderRadius: "50%",
+            alignSelf: "center",
+            background: scanner.tone === "ok" ? "var(--success)" : scanner.tone === "bad" ? "var(--danger)" : scanner.tone === "warn" ? "var(--warn)" : "var(--text-dim)",
+          }}
+        />
+        <b style={{ color: scanner.tone === "bad" ? "var(--danger)" : "var(--text)" }}>{scanner.headline}</b>
+        <span style={{ color: "var(--text-muted)" }}>{scanner.detail}</span>
+      </div>
       <p
         style={{ fontSize: 13, color: "var(--text-dim)", margin: "-4px 0 0" }}
         title="Starts every enabled account at once. Each opens its own Facebook window if one isn't already open — log in there (or from Config → Sources) and it reuses that browser profile from then on."
@@ -184,7 +208,12 @@ export function Dashboard({
 
           {accountsWithErrors.map((account) => (
             <div key={account.id} className="card enter" style={{ borderColor: "rgba(248,113,113,0.35)", color: "var(--danger)" }}>
-              {account.label} — last error: {statusMap[account.id]!.lastError}
+              {account.label} — {(() => {
+                const raw = statusMap[account.id]!.lastError as string;
+                const explained = explainScannerError(raw);
+                // A recognised problem gets its plain-words explanation; anything else is shown as it came.
+                return explained.kind === "unknown" ? `last error: ${raw}` : `${explained.title}. ${explained.message}`;
+              })()}
             </div>
           ))}
 
