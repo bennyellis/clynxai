@@ -1,0 +1,170 @@
+CLYNX: PHASE 1 INTEGRATION VALIDATION REPORT
+============================================
+Question: does the committed Phase 1 work actually behave in the REAL Electron app, not just in unit tests?
+Method: the real built app (out/main + out/preload + out/renderer) was started by a test driver (Playwright's Electron support) inside a
+throwaway sandbox, with its own user-data directory, its own per-user data folder and database, its own browser profile, and a fake cloud
+server on 127.0.0.1:18787. Your real database, settings, session files, browser profiles and Facebook logins were never opened.
+
+Bottom line
+  - The real app starts, logs in, restores its session, loads/saves config, recovers from damaged config/session/database files without
+    ever discarding the original, and shows the new notices and buttons. All new IPC handlers answer.
+  - The validation FOUND 3 REAL DEFECTS in my Phase 1 work. They are fixed, covered by new regression tests that fail without the fix, and
+    committed (b26982a). Details in section 3. One older bug unrelated to Phase 1 was also found and NOT changed (section 4).
+  - Live Facebook behaviour was NOT verified. Everything Facebook-related ran against mocked pages (section 2).
+  - Deal-quality code is byte-for-byte unchanged since the Phase 1 checkpoint, and its saved data works end to end in the real app.
+
+
+1. WHAT PASSED (real app, sandboxed)
+------------------------------------
+T1 Startup and session (18 checks, run 3 times for timing)
+  PASS  real Electron app starts and opens a window; no saved session -> login screen
+  PASS  new bridge functions exist (listNotices, dismissNotice, onNotices, recoverDatabase)
+  PASS  IPC notices:list answers [] and notices:dismiss accepts an unknown id, before login
+  PASS  register -> bootstrapUserSession creates the per-user folder, config.json and scout.db inside the sandbox only
+  PASS  healthy first start raises no notice; the covering index idx_products_lookup exists in the new database
+  PASS  config loads over IPC; saving twice leaves config.json.bak = previous save, no *.tmp-* files
+  PASS  cloud-session.json written (atomically) with the token; after login the Dashboard shows
+  PASS  relaunch restores the session silently (Dashboard, no login screen); the fake cloud saw only /auth, /devices, /health calls
+  PASS  no renderer errors and no unhandled exceptions in main-process output, first start and relaunch
+
+T3 Configuration and session-file recovery (20 checks)
+  PASS  [A] truncated config.json + good .bak: app starts, logs in, yellow "restored" notice, the last good settings (31, not defaults) are
+        back, the damaged file is kept byte-for-byte as config.json.corrupt-<time>, config.json is whole again, dismiss works
+  PASS  [B] damaged config.json and NO backup: app starts, "reset" notice, defaults used, the damaged file is still on disk (not overwritten)
+  PASS  [C] valid JSON that is not a settings object ("[1,2,3]"): notice, app starts, a copy is kept
+  PASS  [D] a normal restart raises no notice and leaves no temp files
+  PASS  [E] truncated cloud-session.json: the user is NOT logged out; the backup session restores (fake server saw the refresh); the
+        damaged file is kept aside
+  PASS  [F] session rejected by the server: login screen, no crash, no stray notice
+
+T4 Database integrity and recovery (22 checks)
+  PASS  [a] destroyed header: app starts (not stuck), plain-words notice naming the kept file, the ORIGINAL IS KEPT BYTE-FOR-BYTE IDENTICAL
+        (sha256 equal), a fresh valid database replaces it
+  PASS  [b] "start fresh" marker: healthy database moved aside byte-for-byte identical, marker consumed, earlier kept copies untouched
+  PASS  [c] valid SQLite the app cannot use (incompatible schema): recovered with a notice; every row of the original is still in the kept
+        copy (see note on byte-identity below); replacement database valid. (Only passes after fix #1.)
+  PASS  [d] damage in the body of the file (header and schema intact): start is not delayed (about 1 s to Dashboard); no alarm before the
+        check; about 90 s after login the background check raised the red "Your database has damage" notice with the recovery action;
+        the app stayed responsive; pressing the button's IPC only wrote the marker (open file untouched); app.relaunch() really restarted the
+        app by itself; after the restart the damaged database was kept, sha256 IDENTICAL to what was on disk, a fresh valid database in place,
+        all four kept copies from the whole run still present
+  NOTE  byte-identity caveat: in case [c] the failed open attempt had already added empty tables to the database before giving up, so that
+        kept copy is not byte-identical to the file as it was, but all of its data is intact. In cases [a], [b] and [d] it is identical.
+
+T5 Facebook session expiry and failing scans (21 checks; real scan engine, real headless Chrome with a sandbox profile)
+  PASS  [1] session expires (page redirects to the login page): detected while scanning; red notice for that account with an "Open Facebook"
+        action in plain words; account marked logged out; Activity logs it once and the cycle ends (no "found 0 listings"); exactly one phone
+        push reached the (local mock) ntfy server; the Dashboard card shows with no duplicate "last error" line; further cycles while still
+        logged out do not repeat the push or the notice; when the mock turns healthy the notice clears by itself, the account is logged in
+        again, no second push
+  PASS  [2] login wall shown in place (password box over a Marketplace page): detected, and cleared when gone
+  PASS  [3] security check (checkpoint page): reported as a security check, not as a logout
+  PASS  [4] connection drops: failed cycles back off 30 s, 1 min, 2 min; after 3 in a row a "Clynx can't reach Facebook" notice with a
+        "Try again" button appears; no raw browser error text in it; one phone push; the next good cycle withdraws it
+  PASS  containment: see section 2
+
+T6 Deal-quality compatibility (13 checks)
+  PASS  the gate columns exist in a database created by the current build; saved verdicts (profitable_now, negotiation with 11% / $400,
+        worth_a_look with reasons, pass) round-trip through the real IPC; a listing saved before the gate existed still reads (no verdict,
+        old isDeal kept)
+  PASS  Feed shows the Deal / Negotiate ("Needs 11% off, offer ~$400") / Worth a look chips; the "Worth a look" filter keeps just that listing;
+        the "deals" filter shows qualified and legacy deals only; the Dashboard "Deals in last 24h" counts exactly those 3
+  PASS  git diff since the Phase 1 checkpoint shows NO change to dealGate.ts, preAlert.ts, dealSummary.ts, resaleMath.ts, listingAge.ts,
+        watchMatching.ts, bundleBreakdown.ts, placeholderPrice.ts, profitGate.ts
+  PASS  all 13 unit test files (including the 8 deal-quality ones) pass on the final code
+
+Regression and startup checks
+  PASS  7 stub-based screen scripts on the final build: smoke 10, assistantui 14, discovery 31, blacklist 7, watchmatches 8, gatechip 6,
+        notices 14 (all pass)
+  PASS  npm run typecheck clean; npm run build ok; npm test: 13 of 13 files
+  PASS  no unhandled exceptions or renderer errors in any real-app run (the only TypeErrors seen were in my fake server's answers to the sync
+        pulls, which the app caught and logged; fixed in the fake server)
+
+Startup and speed (same machine, baseline = the build at tag checkpoint-before-phase1 built in a temporary worktree and run through the same driver)
+                                                   baseline            current
+  first window, small database (3 runs each)      713 / 709 / 751 ms   726 / 766 ms (one noisy 1206 ms run)
+  relaunch to Dashboard, small database            981 / 936 / 939 ms   934 / 957 ms
+  423 MB synthetic database, start #1 to Dashboard 2375 ms              1660 ms (final run 1895 ms)
+  423 MB synthetic database, start #2 to Dashboard 2508 ms              1604 ms (final run 1831 ms)
+  fuzzy product lookup over real IPC, no match     274.6 ms             4.8 ms (final run 5.7 ms)
+  fuzzy product lookup over real IPC, phrased hit  255.9 ms             5.8 ms (final run 6.1 ms)
+  No startup delay was introduced; startup with a large database is about 0.6 to 0.9 s FASTER, because the startup duplicate-merge no
+  longer loads every product photo. The database for these runs is random synthetic data generated by the test (555 products with 90 KB
+  thumbnails, ~3,900 reference photos), not yours.
+
+
+2. WHAT WAS SIMULATED (and what that means)
+-------------------------------------------
+  - The cloud server: a fake on 127.0.0.1 that accepts any register/login/refresh and answers sync calls with empty lists.
+  - Facebook: EVERY facebook.com request of the scan browser was answered by a mock page (healthy Marketplace page, login page, login wall,
+    checkpoint page, connection refused). The scan engine, Playwright, real headless Google Chrome and the real DOM were used, so the page
+    classification, the cycle logic, the notices, the buttons and the phone-push path ran for real; only Facebook's answers were fake.
+  - The phone push target: a local mock of ntfy on 127.0.0.1:18788.
+  - The databases: synthetic, generated by the tests.
+  - Disclosure (containment): in my first T5 runs the mock answered "expired session" with an HTTP redirect. Chrome follows a fulfilled
+    redirect inside the browser WITHOUT asking the mock again, so for those runs the sandbox's Chrome (a brand-new profile that had never
+    logged in; no cookies, no credentials, nothing of yours) anonymously loaded Facebook's public login page and public /checkpoint URL from
+    the real facebook.com, plus one blocked request to static.xx.fbcdn.net. No account was involved and nothing was submitted, but "mocked
+    only" was not true for those runs. I noticed it from the page text in the log, replaced redirects with in-page redirects, and added a
+    second barrier (the browser cannot resolve ANY host name, so nothing can leave even if a route is bypassed). The final T5 run (21 of 21)
+    and every number above come from the contained setup; it also checks that no real Facebook page text and no DNS-blocked page ever
+    rendered. The other tests never started the scanner, so they made no Facebook requests at all; I did not monitor other hosts the app
+    itself might contact (for example on startup), only that the fake cloud saw just the expected calls.
+  - Real data safety: a size and modified-time fingerprint of 9,460 paths of your real data (project data folder with the 544 MB database,
+    browser profiles, config/session/settings files, and the AppData folders for Clynx and Marketplace Scout) taken before and after: 0 added,
+    0 removed, 0 changed. Your Clynx was not running during the tests. File contents were never read for this check.
+
+
+3. DEFECTS FOUND IN PHASE 1 BY THIS VALIDATION (all fixed, regression-tested, committed in b26982a)
+---------------------------------------------------------------------------------------------------
+ #1 Database recovery could fail and trap the user on "Loading..."   [store.ts, dbIntegrity.ts]
+    Case: a valid SQLite file whose structure the app cannot use. The Store constructor threw halfway but left the database open; on Windows
+    an open file cannot be moved, so quarantine failed with EBUSY and the login call rejected. The original was not lost (a copy had been made)
+    but the user was stuck. Fix: the Store now closes its database when setup fails. Unit test added (fails with EBUSY without the fix,
+    passes with it); the real-app case [c] now passes.
+ #2 The Facebook-logout notice could flap and re-send the phone push every cycle   [scrapeEngine.ts]
+    Case: Marketplace's front page loads fine but the page the cycle then opens is a login wall. The quick login check cleared the notice, the
+    cycle raised it again, and the phone got a push every cycle (8 pushes in the test). Fix: only the check made after a location is opened
+    can clear it, and the account stays "logged out" until then. Unit test added (fails without the fix).
+ #3 A dropped connection did not raise the "can't reach Facebook" notice   [scrapeEngine.ts]
+    A cycle where no page could be opened was recorded as a quiet success that found nothing, so the notice and the backoff never triggered
+    in the most common failure. Fix: a cycle in which every location failed to open now counts as a failed cycle (the loop then backs off
+    and, after 3, tells the user). Unit tests added for one location, several locations, and "connection fine but nothing found" (not a failure).
+ Honest correction to my Phase 1 report: its limitation list did not say #3 existed; the Phase 1 claim that a dropped connection is reported
+ was only true when the first login check itself threw.
+
+
+4. FOUND, NOT CHANGED (outside Phase 1, per "no unrelated changes")
+-------------------------------------------------------------------
+  - Clicking the window's X on the LOGIN screen does nothing (also in the pre-Phase-1 build): the close request is handed to Config.tsx, which
+    is only mounted after login, so nothing answers it. A logged-out user cannot close the app from the window. (Source: index.ts
+    mainWindow.on("close") sends app:closeRequested; only Config.tsx's onCloseRequested listener confirms.) It also meant my test driver
+    could not close the app from that screen. Suggested fix for a later phase: confirm the close in the main process when no user session is
+    active.
+  - The recovery path cannot tell the user if moving the damaged database fails for another reason (for example antivirus holding it): the
+    login call would reject and the screen would stay on "Loading...". Rare; worth a friendly error in a later phase.
+
+
+5. STILL REQUIRES REAL-WORLD VALIDATION (cannot be done without your real accounts or data)
+-------------------------------------------------------------------------------------------
+  - Facebook's real logged-out page, real checkpoint pages and real URLs: the classifier is validated against realistic mocks, not against
+    live Facebook. Test with a THROWAWAY Facebook account in a Clynx test user: log in, then log out inside the Clynx Chrome window
+    (or clear its cookies) while scanning; expect the red card at the next location, a phone push, and recovery after logging in again.
+  - A real security check ("confirm it's you"): only Facebook can produce one; watch how it looks when it happens.
+  - Phone notifications through the real ntfy server, with your real topic.
+  - Behaviour on your real 544 MB database: the first start after the update builds the covering index (about 1.2 s measured on a copy);
+    the 90-second background check on that file took 0.5 to 6.4 s in a separate process when measured earlier. Start the update on a copy
+    first if you want to be careful: copy your Clynx data folder and run the new build with a different data folder.
+  - A damaged real database and a real Wi-Fi drop on your own machine (steps 5 C to E of the Phase 1 report).
+  - A packaged installer: everything here ran from the unpackaged build; packaged-app differences (paths, process.execPath for the background
+    check child process, Chrome detection) are untested.
+  - Long-running behaviour (hours of scanning, memory growth) was not exercised.
+
+
+6. FILES
+--------
+  Committed: b26982a (fixes + tests). Changed: src/main/store.ts, src/main/scrapeEngine.ts, and the tests
+  src/main/__tests__/dbIntegrity.test.ts, facebookSession.test.ts, scannerErrors.test.ts.
+  The test driver scripts are in the session scratchpad (scratchpad/integ: lib.cjs, t1..t6, fingerprint.cjs); they are not part of the
+  repository. They can be moved into scripts/ if you want to rerun them.
+  Temporary things removed: all sandboxes, the baseline worktree and its node_modules junction (the project's node_modules is intact).
