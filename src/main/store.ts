@@ -449,6 +449,13 @@ export class Store {
     ]) {
       if (!productCols.includes(column)) this.db.exec(`ALTER TABLE products ADD COLUMN ${column} ${type}`);
     }
+    // A covering index for name lookups. A product row carries its photo (~90 KB of text) in the middle of the row, and SQLite has
+    // to read past that photo to reach any column stored after it (created_at, family, the eBay prices), so even a query for just
+    // names sorted by date read every photo. These columns, all together in a small index, are answered without touching the rows
+    // (see listProductIndex and enrichManyWithMatchedProductPricing).
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_products_lookup ON products(created_at DESC, name, id, family, ebay_est_value_usd, ebay_avg_sold_price_usd, ebay_avg_shipping_usd, ebay_avg_run_time_days)"
+    );
     // One-time: eBay prices researched before "Series S" and "Series X" could be told apart for the products whose names have such
     // a letter (an Xbox Series S entry was averaging Series X sales, ~$500 instead of ~$280) are cleared, to be researched again
     // (the Database page offers "Research now").
@@ -1162,11 +1169,14 @@ export class Store {
   listProductsSharingBase(name: string, excludeId?: string): ProductProfile[] {
     const base = colorlessProductTokens(name);
     if (!base.size) return [];
-    return this.listProducts().filter((p) => {
-      if (p.id === excludeId) return false;
-      const other = colorlessProductTokens(p.name);
-      return other.size === base.size && [...base].every((t) => other.has(t));
-    });
+    return this.listProductIndex()
+      .filter((p) => {
+        if (p.id === excludeId) return false;
+        const other = colorlessProductTokens(p.name);
+        return other.size === base.size && [...base].every((t) => other.has(t));
+      })
+      .map((p) => this.getProductById(p.id))
+      .filter((p): p is ProductProfile => p !== null);
   }
 
   // The entry that is exactly this product in exactly this color, if there is one.
@@ -1400,6 +1410,14 @@ export class Store {
     return rows.map(rowToProduct);
   }
 
+  // A light view of the Database for lookups that only need to know which products exist: id, name and family, newest first. It
+  // never reads a product's photo (a row's thumbnail is ~90 KB of text, so listProducts() on a library of hundreds is tens of
+  // megabytes), and it is read fresh each time, so a product added a moment ago is always seen. Use this, not listProducts(),
+  // for name matching and name lists; load the one row you need afterwards with getProductById.
+  listProductIndex(): Array<{ id: string; name: string; family: string | null }> {
+    return this.db.prepare("SELECT id, name, family FROM products ORDER BY created_at DESC").all() as Array<{ id: string; name: string; family: string | null }>;
+  }
+
   getProductById(id: string): ProductProfile | null {
     const row = this.db.prepare("SELECT * FROM products WHERE id = ?").get(id) as any;
     return row ? rowToProduct(row) : null;
@@ -1419,7 +1437,9 @@ export class Store {
   findMatchingProduct(name: string): ProductProfile | null {
     const exact = this.getProductByName(name);
     if (exact) return exact;
-    return this.listProducts().find((p) => isSimilarProductName(name, p.name)) ?? null;
+    // Fuzzy: compare against names only, then load just the one product that matched.
+    const similar = this.listProductIndex().find((p) => isSimilarProductName(name, p.name));
+    return similar ? this.getProductById(similar.id) : null;
   }
 
   // Clynx Cloud Phase 6 — productSync.ts's own applier, mirroring
@@ -2743,7 +2763,7 @@ const DATABASE_VARIANT_QUALIFIER_WORDS = new Set(["pro", "slim", "max", "plus", 
 // "PS5" vs "PlayStation 5" tokenize differently and won't match — solving
 // that generally would need a per-brand alias table, which isn't worth the
 // maintenance burden here.
-function isSimilarProductName(a: string, b: string): boolean {
+export function isSimilarProductName(a: string, b: string): boolean {
   // A "(For Parts / Broken)" variant is never the same product as the working one (nor as another product's variant by fuzzy match).
   if (isBrokenVariantName(a) !== isBrokenVariantName(b)) return false;
   const tokensA = productNameTokens(a);

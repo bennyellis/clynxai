@@ -1422,7 +1422,7 @@ function ensurePhotoGalleryAudit(productId: string): void {
       // rest wait for 10, when the gallery's consensus is reliable.
       if (images.length < (colorsIn(product.name).size > 0 ? 3 : 10)) return;
       const knownProducts = store
-        .listProducts()
+        .listProductIndex()
         .map((p) => p.name)
         .filter((n) => n.toLowerCase() !== product.name.toLowerCase());
       const result = await auditReferencePhotoGallery(
@@ -2279,7 +2279,7 @@ async function discoverAndCreateSiblingProducts(brand: string, generation: strin
   // rather than both independently suggesting (and racing to create) the
   // same handful of titles.
   const alreadyTracked = store
-    .listProducts()
+    .listProductIndex()
     .filter((p) => p.family && (p.family === familyPath || p.family.toLowerCase().startsWith(`${familyPath.toLowerCase()} >`)))
     .map((p) => p.name);
 
@@ -2317,7 +2317,7 @@ async function discoverAndCreateSiblingProducts(brand: string, generation: strin
 const VARIANT_DISCOVERY_COUNT = 5;
 
 async function discoverAndCreateProductVariants(productName: string, category: string, familyPath: string | null, parentId?: string): Promise<void> {
-  const alreadyTracked = store.listProducts().map((p) => p.name);
+  const alreadyTracked = store.listProductIndex().map((p) => p.name);
   const variantNames = await discoverProductVariants({ productName, category, alreadyTracked, count: VARIANT_DISCOVERY_COUNT });
   if (!variantNames.length) return;
   if (parentId) discovery.note(parentId, "finding", `It comes in other versions I should know about: ${variantNames.join(", ")}. Looking into those next.`);
@@ -4075,7 +4075,7 @@ app.whenReady().then(() => {
     ): Promise<{ ok: boolean; message: string }> => {
       const knownProducts = args.productId
         ? store
-            .listProducts()
+            .listProductIndex()
             .map((p) => p.name)
             .filter((n) => n.toLowerCase() !== args.currentLabel.toLowerCase())
         : [];
