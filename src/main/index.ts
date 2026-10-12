@@ -63,6 +63,7 @@ import { FeedbackSyncService } from "./feedbackSync.js";
 import { ProductSyncService } from "./productSync.js";
 import type { Account, ActiveProductResearch, CloudStatus, Config, EngineConfig, FeedbackVerdict, LogLine, OnboardingState, ProductProfile, ScrapeStatus, SearchItem, Watch, WatchPlatform, WatchTerm } from "./types.js";
 import { rmSync } from "node:fs";
+import { createDiagnosticsLog, createRecoveryLimiter } from "./diagnostics.js";
 
 Menu.setApplicationMenu(null);
 
@@ -76,6 +77,9 @@ Menu.setApplicationMenu(null);
 // brings the first window to the front and exits.
 const hasInstanceLock = app.requestSingleInstanceLock();
 if (!hasInstanceLock) app.quit();
+// Writes down crashes of any Clynx process (and a previous run that ended unexpectedly) in <data folder>/logs/diagnostics.log.
+const diagnostics = createDiagnosticsLog(path.join(app.getPath("userData"), "logs"));
+const windowRecovery = createRecoveryLimiter(3, 10 * 60_000);
 app.on("second-instance", () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -361,11 +365,13 @@ function restartAllEnginesIfRunning(reason: string): void {
 // state), but still better surfaced than a silent, total process death.
 process.on("unhandledRejection", (reason) => {
   const message = reason instanceof Error ? reason.message : String(reason);
+  diagnostics.record("unhandled-rejection", { error: reason instanceof Error ? reason : message });
   const line: LogLine = { ts: Date.now(), level: "error", message: `Unhandled error (recovered, scanner should keep running): ${message}` };
   recordLog(line);
   sendToRenderer("engine:log", line);
 });
 process.on("uncaughtException", (err) => {
+  diagnostics.record("uncaught-exception", { error: err });
   const line: LogLine = { ts: Date.now(), level: "error", message: `Unexpected error (recovered, scanner should keep running): ${err.message}` };
   recordLog(line);
   sendToRenderer("engine:log", line);
@@ -2970,6 +2976,28 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   sendToRenderer("config:updated", config);
 }
 
+// Records every way a Clynx process can die or hang. The renderer (the window's page) is reloaded when it crashes - the scanner runs in this main
+// process, so it keeps going either way - but at most 3 times in 10 minutes, so a page that crashes at once is not reloaded forever.
+function watchProcessHealth(): void {
+  app.on("render-process-gone", (_event, webContents, details) => {
+    diagnostics.record("renderer-gone", { reason: details.reason, exitCode: details.exitCode, url: webContents.getURL() });
+    if (details.reason === "clean-exit" || details.reason === "killed" || !mainWindow || mainWindow.isDestroyed() || webContents !== mainWindow.webContents) return;
+    if (windowRecovery.tryAcquire()) {
+      diagnostics.record("renderer-reloaded");
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
+      }, 500);
+    } else {
+      diagnostics.record("renderer-not-reloaded", { note: "crashed more than 3 times in 10 minutes" });
+    }
+  });
+  app.on("child-process-gone", (_event, details) => {
+    diagnostics.record("child-process-gone", { type: details.type, reason: details.reason, exitCode: details.exitCode, name: details.name, serviceName: details.serviceName });
+  });
+  mainWindow?.on("unresponsive", () => diagnostics.record("window-unresponsive"));
+  mainWindow?.on("responsive", () => diagnostics.record("window-responsive-again"));
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -3014,7 +3042,8 @@ function createWindow() {
   mainWindow.on("close", (event) => {
     // Nobody is logged in (login screen, or a login that failed): there are no Config edits to save and nothing in the renderer to answer
     // the question, so the window must simply close. Before this the X did nothing on the login screen.
-    if (allowClose || !hasActiveUserSession) return;
+    // A window whose page has crashed (and was not brought back) cannot answer the unsaved-changes question either, so it must just close.
+    if (allowClose || !hasActiveUserSession || mainWindow?.webContents.isCrashed()) return;
     event.preventDefault();
     sendToRenderer("app:closeRequested");
   });
@@ -3028,7 +3057,9 @@ function createWindow() {
 
 app.whenReady().then(() => {
   if (!hasInstanceLock) return; // a second copy is already shutting itself down — don't build a window or register handlers
+  diagnostics.beginSession({ version: app.getVersion(), electron: process.versions.electron, platform: process.platform, packaged: app.isPackaged });
   createWindow();
+  watchProcessHealth();
 
   ipcMain.handle("config:get", () => config);
   ipcMain.handle("config:save", (_e, next: Config) => {
@@ -4360,4 +4391,9 @@ app.on("window-all-closed", async () => {
 
 app.on("before-quit", async () => {
   await stopUserSession();
+});
+
+// Reaching here means the app is shutting down in an orderly way; the next start will not report an unexpected end.
+app.on("will-quit", () => {
+  if (hasInstanceLock) diagnostics.endSession();
 });

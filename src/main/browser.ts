@@ -1,5 +1,5 @@
 import type { BrowserContext, Page } from "playwright";
-import { stealthChromium } from "./stealthBrowser.js";
+import { getStealthChromium } from "./stealthBrowser.js";
 
 // Uses your real installed Google Chrome (not Playwright's own bundled
 // "Chromium for Testing" build) — you specifically want to be logging into
@@ -13,6 +13,7 @@ import { stealthChromium } from "./stealthBrowser.js";
 // stealthBrowser.ts) so the common automation fingerprints are patched
 // regardless of which channel actually ends up being used.
 export async function openPersistentContext(profileDir: string, headless: boolean): Promise<BrowserContext> {
+  const stealthChromium = await getStealthChromium();
   try {
     const ctx = await stealthChromium.launchPersistentContext(profileDir, {
       headless,
