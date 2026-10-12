@@ -6,8 +6,9 @@ import path from "node:path";
 import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { timedSync, recordEvent } from "./metrics.js";
-import type { BlacklistedImage, BlacklistTerm, FeedbackExample, FeedbackVerdict, FlawFeedbackExample, ListingRecord, MyStoreReference, PhotoFlaw, ProductImage, ProductProfile, ScoredListing, SellerRiskResult, Watch, WatchMatch, WatchPlatform, WatchSearchLink, WatchTerm } from "./types.js";
+import type { BlacklistedImage, BlacklistTerm, FeedbackExample, FeedbackVerdict, FlawFeedbackExample, GateReasonRecord, ListingRecord, MyStoreReference, PhotoFlaw, ProductImage, ProductProfile, ScoredListing, SellerRiskResult, Watch, WatchMatch, WatchPlatform, WatchSearchLink, WatchTerm } from "./types.js";
 import { brokenVariantName, isBrokenVariantName } from "./brokenVariant.js";
+import { assessListingAge } from "./listingAge.js";
 
 // What a product is worth on eBay, as the total the BUYER pays (the sold item price plus the shipping they paid): the estimate when
 // there is one, else the sold average with its average shipping. The user keeps ~84% of that total (eBay's cut is on all of it).
@@ -257,6 +258,15 @@ export class Store {
       ["photo_analysis_checked_at", "INTEGER"],
       ["location_text", "TEXT"],
       ["listing_age", "TEXT"],
+      // The Deal Quality Gate's persisted verdict (see types.ts DealStatus) and the parsed listing age.
+      ["deal_status", "TEXT"],
+      ["gate_confidence", "TEXT"],
+      ["gate_stars", "REAL"],
+      ["gate_headline", "TEXT"],
+      ["gate_reasons", "TEXT"],
+      ["required_discount_percent", "REAL"],
+      ["target_price_usd", "REAL"],
+      ["listing_age_hours", "REAL"],
       ["seller_name", "TEXT"],
       ["description", "TEXT"],
       // Per explicit instruction — multi-account scanning: which account's
@@ -618,11 +628,13 @@ export class Store {
            is_deal, deal_tier, estimated_value_range, notified, first_seen_at,
            seller_joined_year, seller_rating, seller_rating_count, seller_has_profile_photo,
            seller_risk_passed, seller_risk_reasons, location_text, listing_age, seller_name, description, product_id, source, just_listed,
-           ebay_seller_feedback_percent, ebay_shipping_usd)
+           ebay_seller_feedback_percent, ebay_shipping_usd,
+           deal_status, gate_confidence, gate_stars, gate_headline, gate_reasons, required_discount_percent, target_price_usd, listing_age_hours)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
            COALESCE((SELECT notified FROM listings WHERE id = ?), 0),
            COALESCE((SELECT first_seen_at FROM listings WHERE id = ?), ?),
-           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+           ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         listing.id,
@@ -663,7 +675,15 @@ export class Store {
         listing.source ?? "facebook",
         listing.justListed ? 1 : 0,
         listing.seller?.ebayFeedbackPercentage ?? null,
-        listing.ebayShippingUsd ?? null
+        listing.ebayShippingUsd ?? null,
+        scored.gate?.status ?? null,
+        scored.gate?.confidence ?? null,
+        scored.gate?.stars ?? null,
+        scored.gate?.headline ?? null,
+        scored.gate ? JSON.stringify(scored.gate.reasons) : null,
+        scored.gate?.requiredDiscountPercent ?? null,
+        scored.gate?.targetPriceUsd ?? null,
+        assessListingAge(listing.listingAge, null).hours
       );
     // Every saveScored call means this id is now definitively in the
     // listings table — remember it so a LATER hasSeenCached() check for the
@@ -726,6 +746,12 @@ export class Store {
 
   markNotified(id: string): void {
     this.db.prepare("UPDATE listings SET notified = 1 WHERE id = ?").run(id);
+  }
+
+  // Whether a push has already gone out for this listing (a deal alert or a Watch match): the other kind must not repeat it.
+  isListingNotified(id: string): boolean {
+    const row = this.db.prepare("SELECT notified FROM listings WHERE id = ?").get(id) as { notified?: number } | undefined;
+    return !!row?.notified;
   }
 
   // Per explicit instruction — multi-account scanning: which account's
@@ -859,8 +885,8 @@ export class Store {
   // it sells for on eBay, how fast, and from how many sales. Feeds the star rating in ntfy alerts (dealSummary.ts).
   getProductSignals(matchedItem: string | null, title: string): ProductSignals | null {
     const rows = this.db
-      .prepare(`SELECT id, name, ${EBAY_VALUE_SQL} AS value, ebay_avg_run_time_days AS run, ebay_comps_sample_size AS n, ebay_comps_checked_at AS at, my_store_ref AS store FROM products`)
-      .all() as Array<{ id: string; name: string; value: number | null; run: number | null; n: number | null; at: number | null; store: string | null }>;
+      .prepare(`SELECT id, name, ${EBAY_VALUE_SQL} AS value, ebay_avg_run_time_days AS run, ebay_comps_sample_size AS n, ebay_comps_checked_at AS at, my_store_ref AS store, ebay_est_basis AS basis FROM products`)
+      .all() as Array<{ id: string; name: string; value: number | null; run: number | null; n: number | null; at: number | null; store: string | null; basis: string | null }>;
     const toSignals = (r: (typeof rows)[number]): ProductSignals => ({
       id: r.id,
       name: r.name,
@@ -869,6 +895,7 @@ export class Store {
       compSample: r.n ?? null,
       checkedAt: r.at ?? null,
       storeValueUsd: parseMyStore(r.store)?.medianUsd ?? null,
+      basis: r.basis === "sold" || r.basis === "blend" || r.basis === "active" ? r.basis : null,
     });
     if (matchedItem) {
       const lower = matchedItem.toLowerCase();
@@ -2634,7 +2661,25 @@ function rowToRecord(row: any): ListingRecord {
     matchedProductAvgRunTimeDays: null,
     foundByAccountId: row.found_by_account_id ?? null,
     foundByAccountLabel: row.found_by_account_label ?? null,
+    dealStatus: row.deal_status === "profitable_now" || row.deal_status === "negotiation" || row.deal_status === "worth_a_look" || row.deal_status === "pass" ? row.deal_status : null,
+    gateConfidence: row.gate_confidence === "high" || row.gate_confidence === "medium" || row.gate_confidence === "low" ? row.gate_confidence : null,
+    gateStars: row.gate_stars ?? null,
+    gateHeadline: row.gate_headline ?? null,
+    gateReasons: parseGateReasons(row.gate_reasons),
+    requiredDiscountPercent: row.required_discount_percent ?? null,
+    targetPriceUsd: row.target_price_usd ?? null,
+    listingAgeHours: row.listing_age_hours ?? null,
   };
+}
+
+function parseGateReasons(raw: unknown): GateReasonRecord[] {
+  if (typeof raw !== "string" || !raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 // Filler words stripped before comparing product names for similarity —

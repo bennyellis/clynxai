@@ -1,10 +1,20 @@
-// The market check that runs before a deal notification goes out. The Database's price for a product can be days old (or
-// from a handful of sales), so Clynx looks the product up on WatchCount and eBay first (sold prices, what sellers are asking
-// now), files what it found in the Database, and only then works out the stars and decides whether the deal still deserves a
-// push. The look-up itself lives in index.ts (it needs the browser, the Database and eBay); this file is the decision.
-import { buildAlertSummary, type AlertSummary, type SignalSource } from "./dealSummary.js";
+// Final qualification of a scored listing, run once every score adjustment (vision, bundles, hidden gems) has been made, and
+// before anything is pushed. It does three things:
+//
+//   1. Works out how reliable the resale value is (Database evidence, or a reference price the user typed).
+//   2. Validates it: before an AI-only find, or anything about to be pushed, is trusted, Clynx looks the product up on
+//      WatchCount and eBay (the market check; the Database's number may be days old or from a handful of sales), files what it
+//      found in the Database, and uses the fresh evidence.
+//   3. Runs the Deal Quality Gate (dealGate.ts) and returns the listing with its final, persistable verdict: isDeal now means
+//      "qualified" (Profitable Now or Negotiation Opportunity), and a Watch match no longer counts as a deal unless it passes.
+//
+// The look-up itself lives in index.ts (it needs the browser, the Database and eBay); this file is the decision.
+import { buildAlertSummary, composeGateAlert, composeWatchAlert, type AlertSummary, type SignalSource } from "./dealSummary.js";
+import { evidenceFromSignals, qualifyListing, toGateSnapshot, userEvidence, type GateExtras, type GateVerdict, type ValueEvidence } from "./dealGate.js";
+import { assessListingAge } from "./listingAge.js";
+import { isSuspiciousPrice } from "./placeholderPrice.js";
+import type { ResaleSettings } from "./resaleMath.js";
 import type { ScoredListing } from "./types.js";
-import { isSuspiciousPrice, placeholderPriceReason } from "./placeholderPrice.js";
 
 export interface MarketCheck {
   productId: string | null;
@@ -19,57 +29,146 @@ export interface MarketCheck {
 // purpose "bundle": the product is one item of a listing that holds several, priced on its own (not an alert check).
 export type MarketChecker = (listing: { title: string; matchedItem: string | null; purpose?: "bundle" }) => Promise<MarketCheck | null>;
 
-export interface PreparedAlert {
-  send: boolean;
-  summary: AlertSummary;
+export interface QualifyArgs {
+  scored: ScoredListing;
+  source: SignalSource | null;
+  settings: ResaleSettings;
+  // The account's general freshness window (hours), null = none.
+  maxAgeHours: number | null;
+  check?: MarketChecker;
+  // Ask WatchCount/eBay before deciding (anything that may be pushed). The check also runs when the listing would qualify, or when
+  // the only thing behind the deal is the AI's own opinion: a verdict that would trigger a push is always validated first.
+  refreshMarket: boolean;
+  // Extras that come with the item, split into what may be counted (corroborated, capped) and what may not.
+  extras?: GateExtras | null;
+  visionMismatch?: boolean;
+  hardCapExceeded?: boolean;
+  log: (message: string) => void;
+}
+
+export interface Qualification {
+  // The listing as it should now be saved: gate attached, isDeal = qualified, tier cleared when it did not qualify.
+  scored: ScoredListing;
+  verdict: GateVerdict;
   market: MarketCheck | null;
 }
 
-export async function prepareAlert(args: {
-  check?: MarketChecker;
-  source: SignalSource | null;
-  scored: ScoredListing;
-  netPercent: number;
-  minMarginPercent?: number;
-  // Config > "Skip deals that need more than ___% off the asking price" (default 15).
-  maxCutPercent?: number;
-  referencePriceUsd?: number | null;
-  // A deal Clynx found on its own can be held back when the fresh numbers sink it; a Watch the user set up themselves is
-  // always delivered (the user asked for it), just rated on the fresh numbers.
-  canWithhold: boolean;
-  log: (message: string) => void;
-}): Promise<PreparedAlert> {
-  const { scored } = args;
-  // Last line of defence: a placeholder price ($0, $1, $1234...) never gets a notification, whatever found the listing (a Watch
-  // included). The scanners skip these long before this point; this covers anything that slips through.
-  if (scored.listing.price !== null && isSuspiciousPrice(scored.listing.price)) {
-    args.log(`Skipped the alert for "${scored.listing.title}": ${placeholderPriceReason(scored.listing.price)}.`);
-    return { send: false, summary: buildAlertSummary(args.source, scored, { netPercent: args.netPercent, minMarginPercent: args.minMarginPercent, maxCutPercent: args.maxCutPercent, referencePriceUsd: args.referencePriceUsd }), market: null };
-  }
-  let market: MarketCheck | null = null;
+function pathwayOf(scored: ScoredListing): "search" | "database" | "general" | "ebay" {
+  if (scored.listing.source === "ebay") return "ebay";
+  if (scored.dealTier === "general" || !scored.extraction.matchedItem) return "general";
+  return scored.referencePriceUsd !== null && scored.extraction.reasoning.startsWith("Recognised from the Database") ? "database" : "search";
+}
+
+/**
+ * The resale evidence behind a scored listing. The scorer's reference price is the Database's value when there is one (so the
+ * Database's evidence applies) and otherwise the reference the user typed for the Search For item. With no reference price at all
+ * (an AI-only find) it is whatever the Database knows about the product the listing is about, if anything.
+ */
+export function resolveEvidence(scored: ScoredListing, source: SignalSource | null, now: number = Date.now()): ValueEvidence | null {
+  const { listing, extraction } = scored;
+  let signals = null;
   try {
-    // A broken / for-parts deal is checked against its Database variant, not the working product.
-    const variant = scored.extraction.brokenVariant;
-    market = (await args.check?.({ title: variant ?? scored.listing.title, matchedItem: variant ?? scored.extraction.matchedItem })) ?? null;
-  } catch (err) {
-    args.log(`Market check failed (${(err as Error).message}), using what the Database already knows.`);
+    signals = source?.getProductSignals(extraction.brokenVariant ?? extraction.matchedItem, listing.title) ?? null;
+  } catch {
+    signals = null;
   }
-  if (market?.note) args.log(market.note);
-  const summary = buildAlertSummary(args.source, scored, {
-    netPercent: args.netPercent,
-    minMarginPercent: args.minMarginPercent,
-    maxCutPercent: args.maxCutPercent,
-    referencePriceUsd: args.referencePriceUsd,
-    marketValueUsd: market?.valueUsd ?? null,
+  const ref = scored.referencePriceUsd;
+  if (ref !== null && ref > 0) {
+    // The scorer used the Database's value: its evidence applies. Otherwise the reference is the user's own typed price.
+    if (signals?.valueUsd && Math.abs(signals.valueUsd - ref) <= Math.max(1, ref * 0.01)) return evidenceFromSignals(signals, now);
+    return userEvidence(ref);
+  }
+  return evidenceFromSignals(signals, now);
+}
+
+function gateOnce(args: QualifyArgs, evidence: ValueEvidence | null, scored: ScoredListing): GateVerdict {
+  const { listing, extraction } = scored;
+  let market: { runTimeDays: number | null; fbAvgPriceUsd: number | null; fbSample: number | null } | undefined;
+  try {
+    const signals = args.source?.getProductSignals(extraction.brokenVariant ?? extraction.matchedItem, listing.title) ?? null;
+    const fb = signals && args.source && listing.source !== "ebay" ? args.source.getFacebookPriceStats(signals.id) : null;
+    market = { runTimeDays: signals?.runTimeDays ?? null, fbAvgPriceUsd: fb?.avgPriceUsd ?? null, fbSample: fb?.sampleSize ?? null };
+  } catch {
+    market = undefined;
+  }
+  return qualifyListing({
+    pathway: pathwayOf(scored),
+    priceUsd: listing.price ?? 0,
+    shippingUsd: listing.ebayShippingUsd ?? 0,
+    conditionImpact: extraction.conditionImpact,
+    broken: !!extraction.brokenVariant,
+    evidence,
+    extras: args.extras ?? null,
+    age: assessListingAge(listing.listingAge, args.maxAgeHours),
+    aiFlagged: scored.isDeal && scored.referencePriceUsd === null,
+    placeholderPrice: listing.price !== null && isSuspiciousPrice(listing.price),
+    visionMismatch: args.visionMismatch,
+    hardCapExceeded: args.hardCapExceeded,
+    settings: args.settings,
+    market,
   });
-  // The negotiation rule: when the user would have to negotiate more than the limit (15% by default) below the asking price to
-  // reach a good deal (the minimum margin after eBay's cut), the alert is skipped. Extras that are really included in the price
-  // count towards the value (a hidden gem), which is already in `summary`. A Watch the user set up is always delivered, and
-  // with no sales data there is nothing to judge by.
-  const skip = args.canWithhold && summary.reachable === false;
-  if (skip) {
-    const limit = args.maxCutPercent ?? 15;
-    args.log(`Skipped the alert for "${scored.listing.title}": the price would need negotiating ${summary.cutNeededPercent ?? `over ${limit}`}% below the asking price to be a good deal (your limit is ${limit}%).`);
+}
+
+export async function qualifyScoredListing(args: QualifyArgs): Promise<Qualification> {
+  let scored = args.scored;
+  let evidence = resolveEvidence(scored, args.source);
+  let verdict = gateOnce(args, evidence, scored);
+
+  // Validate before trusting: refresh the numbers for anything that may be pushed.
+  let market: MarketCheck | null = null;
+  const wantsCheck = args.refreshMarket || verdict.qualified || (scored.isDeal && scored.referencePriceUsd === null);
+  const hardStop = verdict.status === "pass" && verdict.reasons.some((r) => ["AGE_STALE", "PHOTO_MISMATCH", "HARD_CAP", "PLACEHOLDER_PRICE"].includes(r.code));
+  if (wantsCheck && args.check && !hardStop) {
+    const variant = scored.extraction.brokenVariant;
+    try {
+      market = (await args.check({ title: variant ?? scored.listing.title, matchedItem: variant ?? scored.extraction.matchedItem })) ?? null;
+    } catch (err) {
+      args.log(`Market check failed (${(err as Error).message}), using what the Database already knows.`);
+    }
+    if (market?.note) args.log(market.note);
+    if (market && market.valueUsd !== null && market.valueUsd > 0) {
+      let fresh: ValueEvidence | null = null;
+      try {
+        const name = market.productName ?? variant ?? scored.extraction.matchedItem;
+        fresh = evidenceFromSignals(args.source?.getProductSignals(name, scored.listing.title) ?? null);
+      } catch {
+        fresh = null;
+      }
+      // The check found a number but the Database has no record to back it with a sample: the fresh value replaces the old one and
+      // keeps the old evidence's basis (a reference the user typed stays "typed"; with nothing before it, it is thin).
+      evidence = fresh && fresh.valueUsd ? fresh : { valueUsd: market.valueUsd, basis: evidence?.basis ?? "blend", sampleSize: evidence?.sampleSize ?? null, ageDays: 0 };
+      const ref = evidence.valueUsd as number;
+      scored = { ...scored, referencePriceUsd: ref, discountPercent: scored.listing.price !== null ? ((ref - scored.listing.price) / ref) * 100 : scored.discountPercent };
+      verdict = gateOnce(args, evidence, scored);
+    }
   }
-  return { send: !skip, summary, market };
+
+  const qualified = verdict.qualified;
+  const final: ScoredListing = {
+    ...scored,
+    isDeal: qualified,
+    dealTier: qualified ? (scored.dealTier ?? "search") : null,
+    gate: toGateSnapshot(verdict),
+  };
+  args.log(`Deal Quality Gate: ${verdict.status.replace(/_/g, " ")}${verdict.headline ? ` - ${verdict.headline}` : ""}`);
+  return { scored: final, verdict, market };
+}
+
+/** The notification text for a qualified deal, a Watch match, or a worth-a-look find, built from the final verdict. */
+export function buildQualifiedAlert(args: {
+  q: Qualification;
+  source: SignalSource | null;
+  settings: ResaleSettings;
+  kind: "deal" | "watch" | "look";
+  watchName?: string;
+}): AlertSummary {
+  const { q, source, settings } = args;
+  const base = buildAlertSummary(source, q.scored, {
+    netPercent: settings.netPercent,
+    minMarginPercent: settings.minMarginPercent,
+    maxCutPercent: settings.maxCutPercent,
+    marketValueUsd: q.market?.valueUsd ?? null,
+  });
+  if (args.kind === "watch") return composeWatchAlert({ summary: base, verdict: q.verdict, watchName: args.watchName ?? "Watch" });
+  return composeGateAlert(base, q.verdict);
 }

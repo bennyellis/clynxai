@@ -45,6 +45,10 @@ export function resaleSettingsFrom(config: { ebayNetPercent?: number; minProfitM
   };
 }
 
+// How much of a product's value is assumed to remain when the listing flags a condition problem (a minor flaw: 60%, a major one
+// such as "for parts": 25%). The same factors scorer.ts's CONDITION_VALUE_MULTIPLIER uses (a test keeps the two in step).
+export const CONDITION_VALUE_FACTOR = { none: 1, unknown: 1, minor: 0.6, major: 0.25 } as const;
+
 export interface ResaleOutcome {
   // What the user keeps after eBay's cut.
   keepUsd: number;

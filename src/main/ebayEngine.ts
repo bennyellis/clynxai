@@ -16,8 +16,8 @@ import { normalizeEbayListing } from "./ebayNormalize.js";
 import { evaluateSellerRisk } from "./sellerRisk.js";
 import { matchSearchItem, scoreListing } from "./scorer.js";
 import { EbayProductFilter, summarizeDropped } from "./ebayProductFilter.js";
-import { sendDealAlert, sendWatchMatchAlert } from "./notify.js";
-import { prepareAlert, type MarketChecker } from "./preAlert.js";
+import { sendDealAlert, sendWatchMatchAlert, sendWorthALookAlert } from "./notify.js";
+import { buildQualifiedAlert, qualifyScoredListing, type MarketChecker, type Qualification } from "./preAlert.js";
 import { isSuspiciousPrice, placeholderPriceReason } from "./placeholderPrice.js";
 import { estimateListingAgeHours, isListingTooOld } from "./listingAge.js";
 import { deriveWatchReferencePrice, evaluateWatchConditions, passesWatchPriceGate, passesWatchSellerRating, watchAsSearchItem } from "./watchMatching.js";
@@ -356,45 +356,83 @@ export class EbayEngine {
           passesWatchPriceGate(w, listing.price!) &&
           passesWatchSellerRating(w.minSellerRatingPercent, listing.seller.ebayFeedbackPercentage)
       );
-      await this.recordWatchMatches(priceQualifiedWatches, scored, engineConfig);
 
-      if (scored.isDeal) {
-        const tierLabel = scored.dealTier === "search" ? "DEAL" : "POSSIBLE DEAL (unverified pricing)";
-        this.log(
-          `${tierLabel}: ${listing.title} — $${listing.price}${scored.discountPercent !== null ? ` (${scored.discountPercent.toFixed(0)}% under)` : ""}`,
-          "deal",
-          listing.url
-        );
-        try {
-          const prepared = await prepareAlert({
-            check: this.opts.checkMarket,
-            source: this.opts.store,
-            scored,
-            netPercent: resaleSettingsFrom(engineConfig).netPercent,
-            minMarginPercent: resaleSettingsFrom(engineConfig).minMarginPercent,
-            maxCutPercent: resaleSettingsFrom(engineConfig).maxCutPercent,
-            canWithhold: true,
-            log: (m) => this.log(m, "info", listing.url),
-          });
-          if (prepared.send) {
-            await sendDealAlert(engineConfig, scored, prepared.summary);
-            this.opts.store.markNotified(listing.id);
-          }
-        } catch (err) {
-          this.log(`Notification failed: ${(err as Error).message}`, "error", listing.url);
-        }
-        this.opts
-          .onNarrate({
-            kind: "deal",
-            title: listing.title,
-            price: listing.price,
-            dealTier: scored.dealTier as "search" | "general",
-            discountPercent: scored.discountPercent,
-            estimatedValueRange: scored.estimatedValueRange,
-            reasoning: scored.extraction.reasoning,
-          })
-          .catch(() => {});
+      // The Deal Quality Gate decides what this listing is (age, resale evidence validated against a fresh market check for anything
+      // that may be pushed, margin, negotiation); isDeal means "qualified" and the verdict is saved so every screen agrees.
+      let qualification: Qualification | null = null;
+      if (scored.isDeal || priceQualifiedWatches.length > 0) {
+        qualification = await qualifyScoredListing({
+          scored,
+          source: this.opts.store,
+          settings: resaleSettingsFrom(engineConfig),
+          maxAgeHours: config.maxListingAgeHours,
+          check: this.opts.checkMarket,
+          refreshMarket: scored.isDeal,
+          log: (m) => this.log(m, "info", listing.url),
+        });
+        scored = qualification.scored;
+        this.opts.store.saveScored(scored, sellerRisk);
+        this.opts.store.setListingFoundBy(listing.id, "ebay", "eBay");
+        const finalRecord = this.opts.store.getById(listing.id);
+        if (finalRecord) this.opts.onListing(finalRecord);
       }
+      const watched = await this.recordWatchMatches(priceQualifiedWatches, scored, engineConfig, qualification ?? undefined);
+      if (watched) {
+        qualification = watched;
+        scored = watched.scored;
+      }
+
+      if (qualification?.verdict.qualified) {
+        await this.pushQualifiedDeal(qualification, engineConfig, listing as ListingDetail & { price: number });
+      } else if (qualification?.verdict.status === "worth_a_look") {
+        await this.noteWorthALook(qualification, engineConfig, listing as ListingDetail & { price: number });
+      }
+    }
+  }
+
+  // A qualified deal: logged, pushed once (never again if a Watch match already told the user), and narrated.
+  private async pushQualifiedDeal(q: Qualification, config: EngineConfig, listing: ListingDetail & { price: number }): Promise<void> {
+    const { scored, verdict } = q;
+    const tag = verdict.status === "negotiation" ? "NEGOTIATION OPPORTUNITY" : verdict.confidence === "low" ? "DEAL (limited sales data)" : "DEAL";
+    this.log(
+      `${tag}: ${listing.title} — $${listing.price}${verdict.status === "negotiation" && verdict.facts.requiredDiscountPercent !== null ? ` (needs ${verdict.facts.requiredDiscountPercent}% off: offer ~$${verdict.facts.targetPriceUsd})` : scored.discountPercent !== null ? ` (${scored.discountPercent.toFixed(0)}% under)` : ""}`,
+      "deal",
+      listing.url
+    );
+    try {
+      if (this.opts.store.isListingNotified(listing.id)) {
+        this.log(`Already notified about "${listing.title}" (as a Watch match): not sending a second alert.`, "info", listing.url);
+      } else {
+        const summary = buildQualifiedAlert({ q, source: this.opts.store, settings: resaleSettingsFrom(config), kind: "deal" });
+        await sendDealAlert(config, scored, summary);
+        this.opts.store.markNotified(listing.id);
+      }
+    } catch (err) {
+      this.log(`Notification failed: ${(err as Error).message}`, "error", listing.url);
+    }
+    this.opts
+      .onNarrate({
+        kind: "deal",
+        title: listing.title,
+        price: listing.price,
+        dealTier: (scored.dealTier ?? "search") as "search" | "general",
+        discountPercent: scored.discountPercent,
+        estimatedValueRange: scored.estimatedValueRange,
+        reasoning: verdict.headline,
+      })
+      .catch(() => {});
+  }
+
+  // Worth a look: kept in the Feed, never pushed unless the user turned that on (Config > notifyWorthALook), and then quietly.
+  private async noteWorthALook(q: Qualification, config: EngineConfig, listing: ListingDetail & { price: number }): Promise<void> {
+    this.log(`Worth a look: ${listing.title} — ${q.verdict.headline}`, "info", listing.url);
+    if (!config.notifyWorthALook || this.opts.store.isListingNotified(listing.id)) return;
+    try {
+      const summary = buildQualifiedAlert({ q, source: this.opts.store, settings: resaleSettingsFrom(config), kind: "look" });
+      await sendWorthALookAlert(config, q.scored, { ...summary, message: q.verdict.headline });
+      this.opts.store.markNotified(listing.id);
+    } catch (err) {
+      this.log(`Notification failed: ${(err as Error).message}`, "error", listing.url);
     }
   }
 
@@ -403,8 +441,9 @@ export class EbayEngine {
   // than a shared export since that one is a private ScrapeEngine method
   // tied to `this.log`'s own signature, not worth a refactor for one other
   // caller.
-  private async recordWatchMatches(watches: Watch[], scored: ScoredListing, config: EngineConfig): Promise<void> {
-    if (watches.length === 0 || scored.listing.price === null) return;
+  private async recordWatchMatches(watches: Watch[], scored: ScoredListing, config: EngineConfig, qualification?: Qualification): Promise<Qualification | null> {
+    let current: Qualification | null = qualification ?? null;
+    if (watches.length === 0 || scored.listing.price === null) return current;
     const price = scored.listing.price;
     const listingAgeHours = scored.listing.listingAge ? estimateListingAgeHours(scored.listing.listingAge) : null;
     for (const watch of watches) {
@@ -412,6 +451,7 @@ export class EbayEngine {
       const result = evaluateWatchConditions(watch, price, referencePrice, listingAgeHours, {
         netPercent: resaleSettingsFrom(config).netPercent,
         shippingUsd: scored.listing.ebayShippingUsd ?? 0,
+        defaultMaxAgeHours: config.maxListingAgeHours,
       });
       if (!result.satisfied) continue;
       const match = this.opts.store.recordWatchMatch({
@@ -427,31 +467,52 @@ export class EbayEngine {
       if (!match) continue;
       this.log(`WATCH MATCH: "${watch.name}" — ${scored.listing.title} — $${price}`, "deal", scored.listing.url);
       try {
-        const prepared = await prepareAlert({
-          check: this.opts.checkMarket,
-          source: this.opts.store,
-          scored,
-          netPercent: resaleSettingsFrom(config).netPercent,
-          minMarginPercent: resaleSettingsFrom(config).minMarginPercent,
-          maxCutPercent: resaleSettingsFrom(config).maxCutPercent,
-          referencePriceUsd: referencePrice,
-          canWithhold: false,
-          log: (m) => this.log(m, "info", scored.listing.url),
-        });
-        await sendWatchMatchAlert(
-          config,
-          watch,
-          scored,
-          { discoveryMode: "active", discountPercentAtMatch: result.discountPercent, profitUsdAtMatch: result.profitUsd },
-          referencePrice,
-          prepared.summary
-        );
+        const settings = resaleSettingsFrom(config);
+        // The verdict this alert reports: the final one when the caller has it, else worked out now with a fresh market check. A Watch
+        // match is always delivered, but it says plainly whether it is also a qualified deal.
+        if (!current || (!current.market && current.verdict.status !== "pass")) {
+          current = await qualifyScoredListing({
+            scored: current ? current.scored : scored,
+            source: this.opts.store,
+            settings,
+            maxAgeHours: config.maxListingAgeHours,
+            check: this.opts.checkMarket,
+            refreshMarket: true,
+            log: (m) => this.log(m, "info", scored.listing.url),
+          });
+          this.opts.store.saveScored(current.scored);
+          this.opts.store.setListingFoundBy(scored.listing.id, "ebay", "eBay");
+          const savedRecord = this.opts.store.getById(scored.listing.id);
+          if (savedRecord) this.opts.onListing(savedRecord);
+        }
+        if (current.verdict.reasons.some((r) => r.code === "PLACEHOLDER_PRICE")) {
+          this.log(`Skipped the alert for "${scored.listing.title}": $${price} looks like a placeholder price.`, "info", scored.listing.url);
+        } else {
+          const summary = buildQualifiedAlert({ q: current, source: this.opts.store, settings, kind: "watch", watchName: watch.name });
+          // A Watch with its own ntfy topic (a friend's) reaches someone else, so the main topic's deal alert never replaces it.
+          const ownTopic = !!watch.ntfyTopic?.trim() && watch.ntfyTopic.trim() !== config.ntfy.topic;
+          if (!ownTopic && this.opts.store.isListingNotified(scored.listing.id)) {
+            this.log(`Watch "${watch.name}": "${scored.listing.title}" was already notified as a deal: not sending a second alert.`, "info", scored.listing.url);
+          } else {
+            await sendWatchMatchAlert(
+              config,
+              watch,
+              current.scored,
+              { discoveryMode: "active", discountPercentAtMatch: result.discountPercent, profitUsdAtMatch: result.profitUsd },
+              referencePrice,
+              summary,
+              current.verdict.qualified
+            );
+            if (!ownTopic) this.opts.store.markNotified(scored.listing.id);
+          }
+        }
         this.opts.store.markWatchMatchNotified(match.id);
       } catch (err) {
         this.log(`Watch notification failed: ${(err as Error).message}`, "error", scored.listing.url);
       }
       this.opts.onWatchMatch(watch, { listingId: scored.listing.id });
     }
+    return current;
   }
 
   // Persists a listing that's being skipped (too old / seller risk) with no

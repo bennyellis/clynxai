@@ -7,6 +7,7 @@
 // sell (a used monitor) are left out of the bundle altogether: the bundle is built from the things most likely to sell.
 import { callOpenAI, ensureOpenAIAccess, OPENAI_MODEL } from "./openai.js";
 import { mentionsExtras } from "./profitGate.js";
+import type { GateExtras } from "./dealGate.js";
 
 export type Sellability = "easy" | "moderate" | "hard";
 
@@ -260,4 +261,27 @@ export function valueBundle(args: { main: BundleItem; mainValueUsd: number; extr
     lines,
     summary: parts.join("; "),
   };
+}
+
+// ---------- what the Deal Quality Gate may count
+
+// A single photo-based guess at what the extras are worth is only trusted up to this share of the base item's value, and only when
+// the listing's own words mention extras. Anything beyond that (or all of it, when nothing in the text backs it up) is "unverified":
+// it can make a listing Worth a Look (a possible hidden gem) but never a deal on its own.
+export const VISION_LUMP_CAP_OF_BASE = 0.4;
+
+/** The extras the gate may count from an item-by-item breakdown: what is priced for real. A price that was only estimated is unverified. */
+export function gateExtrasFromValuation(v: BundleValuation): GateExtras {
+  const added = Math.max(0, v.addedUsd);
+  const focalEstimated = v.lines[0]?.estimated === true;
+  const estimatedShare = v.lines.filter((l) => l.status === "counted" && l.estimated).reduce((sum, l) => sum + l.countedUsd, 0);
+  const counted = focalEstimated ? 0 : Math.max(0, added - estimatedShare);
+  return { countedUsd: Math.round(counted), uncountedUsd: Math.round(added - counted) };
+}
+
+/** The extras the gate may count from the single photo-based estimate (see VISION_LUMP_CAP_OF_BASE). */
+export function gateExtrasFromLump(lumpUsd: number, baseValueUsd: number, corroboratedByText: boolean): GateExtras {
+  const lump = Math.max(0, lumpUsd);
+  const counted = corroboratedByText ? Math.min(lump, Math.max(0, baseValueUsd) * VISION_LUMP_CAP_OF_BASE) : 0;
+  return { countedUsd: Math.round(counted), uncountedUsd: Math.round(lump - counted) };
 }

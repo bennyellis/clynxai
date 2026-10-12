@@ -186,6 +186,8 @@ export const DEFAULT_CONFIG: Config = {
   minProfitMarginPercent: 20,
   maxNegotiationPercent: 15,
   lowAiMode: true,
+  // "Worth a look" finds stay in the Feed only unless this is turned on (then they are pushed quietly).
+  notifyWorthALook: false,
   recentSearches: [],
   ebayStoreUsername: "",
   searchItems: [],

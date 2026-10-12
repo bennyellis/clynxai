@@ -15,14 +15,16 @@ import {
   CONDITION_VALUE_MULTIPLIER,
 } from "./scorer.js";
 import { detectScamBot, evaluateSellerRisk } from "./sellerRisk.js";
-import { sendDealAlert, sendWatchMatchAlert } from "./notify.js";
-import { prepareAlert, type MarketChecker } from "./preAlert.js";
+import { sendDealAlert, sendWatchMatchAlert, sendWorthALookAlert } from "./notify.js";
+import { buildQualifiedAlert, qualifyScoredListing, type MarketChecker, type Qualification } from "./preAlert.js";
+import type { GateExtras } from "./dealGate.js";
 import { isSuspiciousPrice } from "./placeholderPrice.js";
 import { looksBroken } from "./brokenVariant.js";
 import { watchAsSearchItems, matchWatchTerm, passesWatchPriceGate, deriveWatchReferencePrice, evaluateWatchConditions } from "./watchMatching.js";
 import { resaleSettingsFrom } from "./resaleMath.js";
 import { extrasPricedSeparately, isHiddenGemCandidate, repriceWithExtras } from "./profitGate.js";
-import { looksLikeBundle, type BundleValuation } from "./bundleBreakdown.js";
+import { decideAgeGate } from "./listingAge.js";
+import { gateExtrasFromLump, gateExtrasFromValuation, looksLikeBundle, type BundleValuation } from "./bundleBreakdown.js";
 import { analyzeListingPhotos, classifyThumbnailImage, matchesReferenceProduct, type PhotoAnalysisResult } from "./vision.js";
 import { resolveIdentityTarget } from "./productIdentity.js";
 import { downloadImageAsDataUri, shrinkImageDataUri } from "./webResearch.js";
@@ -1047,6 +1049,24 @@ export class ScrapeEngine {
     return NOT_COUNTED;
   }
 
+  // Opens a listing's detail page. A method (not a bare call) so the evaluation routes can be exercised in tests without a browser.
+  protected loadListingDetail(page: Page, listing: ListingSummary): Promise<ListingDetail> {
+    return fetchListingDetail(page, listing);
+  }
+
+  // A listing past the general freshness window (kept only for a Watch) is never an ordinary deal: same record, deal flags cleared.
+  private demoteForAge(scored: ScoredListing, ageText: string | null): ScoredListing {
+    return {
+      ...scored,
+      isDeal: false,
+      dealTier: null,
+      extraction: {
+        ...scored.extraction,
+        reasoning: `${scored.extraction.reasoning} (Listed ${ageText ?? "a while ago"}, older than your freshness window, so it is kept only for the Watch whose own age window covers it, not as a deal.)`,
+      },
+    };
+  }
+
   // Per explicit instruction — checks each already price-qualified Watch
   // candidate's FULL conditions (profit/discount/age — see
   // watchMatching.ts's evaluateWatchConditions) against the given `scored`
@@ -1066,9 +1086,12 @@ export class ScrapeEngine {
     config: EngineConfig,
     discoveryMode: "passive" | "active",
     // The term already known to be what this listing is (the active check worked it out).
-    knownTerm?: WatchTerm
-  ): Promise<void> {
-    if (watches.length === 0 || scored.listing.price === null) return;
+    knownTerm?: WatchTerm,
+    // The listing's final qualification when the caller already has it; otherwise it is worked out when a match is delivered.
+    qualification?: Qualification
+  ): Promise<Qualification | null> {
+    let current: Qualification | null = qualification ?? null;
+    if (watches.length === 0 || scored.listing.price === null) return current;
     const price = scored.listing.price;
     const listingAgeHours = scored.listing.listingAge ? estimateListingAgeHours(scored.listing.listingAge) : null;
     for (const watch of watches) {
@@ -1090,7 +1113,7 @@ export class ScrapeEngine {
         }
       }
       const referencePrice = deriveWatchReferencePrice(watch, this.opts.store, term.linkedProductId ?? watch.linkedProductId);
-      const result = evaluateWatchConditions(watch, price, referencePrice, listingAgeHours, { netPercent: resaleSettingsFrom(config).netPercent });
+      const result = evaluateWatchConditions(watch, price, referencePrice, listingAgeHours, { netPercent: resaleSettingsFrom(config).netPercent, defaultMaxAgeHours: config.maxListingAgeHours });
       if (!result.satisfied) continue;
       const match = this.opts.store.recordWatchMatch({
         watchId: watch.id,
@@ -1104,35 +1127,54 @@ export class ScrapeEngine {
       });
       if (!match) continue; // already recorded via the other evaluation point — not a new match, no duplicate alert
       this.log("deal", `WATCH MATCH: "${watch.name}" — ${scored.listing.title} — $${price}`, scored.listing.url);
-      // Same posture as the existing sendDealAlert call site below: a failed
-      // push is logged, not thrown, and markWatchMatchNotified is skipped so
-      // it isn't silently lost — the match row itself is already durable.
+      // A failed push is logged, not thrown, and markWatchMatchNotified is skipped so it isn't silently lost — the match row itself
+      // is already durable.
       try {
-        const prepared = await prepareAlert({
-          check: this.opts.checkMarket,
-          source: this.opts.store,
-          scored,
-          netPercent: resaleSettingsFrom(config).netPercent,
-          minMarginPercent: resaleSettingsFrom(config).minMarginPercent,
-          maxCutPercent: resaleSettingsFrom(config).maxCutPercent,
-          referencePriceUsd: referencePrice,
-          canWithhold: false,
-          log: (m) => this.log("info", m, scored.listing.url),
-        });
-        await sendWatchMatchAlert(
-          config,
-          watch,
-          scored,
-          { discoveryMode, discountPercentAtMatch: result.discountPercent, profitUsdAtMatch: result.profitUsd },
-          referencePrice,
-          prepared.summary
-        );
+        const settings = resaleSettingsFrom(config);
+        // The verdict this alert reports: the final one when the caller has it, else worked out now with a fresh market check. A
+        // Watch match is always delivered, but it says plainly whether it is also a qualified deal.
+        if (!current || (!current.market && current.verdict.status !== "pass")) {
+          current = await qualifyScoredListing({
+            scored: current ? current.scored : scored,
+            source: this.opts.store,
+            settings,
+            maxAgeHours: config.maxListingAgeHours,
+            check: this.opts.checkMarket,
+            refreshMarket: true,
+            log: (m) => this.log("info", m, scored.listing.url),
+          });
+          this.opts.store.saveScored(current.scored);
+          const savedRecord = this.opts.store.getLastSavedListing();
+          if (savedRecord) this.opts.onListing(savedRecord);
+        }
+        if (current.verdict.reasons.some((r) => r.code === "PLACEHOLDER_PRICE")) {
+          this.log("info", `Skipped the alert for "${scored.listing.title}": $${price} looks like a placeholder price.`, scored.listing.url);
+        } else {
+          const summary = buildQualifiedAlert({ q: current, source: this.opts.store, settings, kind: "watch", watchName: watch.name });
+          // A Watch with its own ntfy topic (a friend's) reaches someone else, so the main topic's deal alert never replaces it.
+          const ownTopic = !!watch.ntfyTopic?.trim() && watch.ntfyTopic.trim() !== config.ntfy.topic;
+          if (!ownTopic && this.opts.store.isListingNotified(scored.listing.id)) {
+            this.log("info", `Watch "${watch.name}": "${scored.listing.title}" was already notified as a deal: not sending a second alert.`, scored.listing.url);
+          } else {
+            await sendWatchMatchAlert(
+              config,
+              watch,
+              current.scored,
+              { discoveryMode, discountPercentAtMatch: result.discountPercent, profitUsdAtMatch: result.profitUsd },
+              referencePrice,
+              summary,
+              current.verdict.qualified
+            );
+            if (!ownTopic) this.opts.store.markNotified(scored.listing.id);
+          }
+        }
         this.opts.store.markWatchMatchNotified(match.id);
       } catch (err) {
         this.log("error", `Watch notification failed: ${(err as Error).message}`, scored.listing.url);
       }
       this.opts.onWatchMatch?.(watch, { listingId: scored.listing.id });
     }
+    return current;
   }
 
   // Evaluates one listing end to end (detail fetch, seller risk, scoring,
@@ -1529,7 +1571,7 @@ export class ScrapeEngine {
     await this.sleep(1200, 3000);
     let detail: ListingDetail;
     try {
-      detail = await fetchListingDetail(page, listing);
+      detail = await this.loadListingDetail(page, listing);
     } catch (err) {
       this.log("error", `Failed to load detail for ${listing.url}: ${(err as Error).message}`, listing.url);
       // page.goto(listing.url) is the very first line inside
@@ -1569,12 +1611,13 @@ export class ScrapeEngine {
     // THIS listing's real age can rescue it; each watch still enforces its
     // own bound individually via evaluateWatchConditions further down
     // regardless of what rescued it here.
-    const listingAgeHours = detail.listingAge ? estimateListingAgeHours(detail.listingAge) : null;
-    const ageQualifiedRescueWatches = priceQualifiedWatches.filter((w) => {
-      if (w.maxListingAgeMinutes === null) return true; // no age condition on this watch = no ceiling from it
-      return listingAgeHours !== null && listingAgeHours < w.maxListingAgeMinutes / 60;
-    });
-    if (isListingTooOld(detail.listingAge, config.maxListingAgeHours) && ageQualifiedRescueWatches.length === 0) {
+    // A Watch can rescue a listing past the general window only if it has an age window of its OWN that covers it (a Watch
+    // with no age condition uses the general window, so it cannot). A rescued listing is kept for that Watch only: it must
+    // not also become an ordinary deal, since nothing downstream of this gate re-checks age (see listingAge.ts decideAgeGate,
+    // the final guard in runPostScoringPipeline, and dealGate.ts). An age that is unknown is not skipped here, but it can
+    // never be a verified deal.
+    const ageGate = decideAgeGate(detail.listingAge, config.maxListingAgeHours, priceQualifiedWatches);
+    if (ageGate.skip) {
       this.log("info", `skip (too old — ${detail.listingAge}): ${listing.title}`, listing.url);
       this.opts.store.saveScored({
         listing: detail,
@@ -1583,7 +1626,7 @@ export class ScrapeEngine {
           extractedAttributes: "",
           conditionImpact: "unknown",
           confidence: "low",
-          reasoning: `Skipped — listed ${detail.listingAge}, older than the 24-hour freshness window for this fast-moving business.`,
+          reasoning: `Skipped — listed ${detail.listingAge}, older than your ${config.maxListingAgeHours}-hour freshness window.`,
         },
         referencePriceUsd: null,
         discountPercent: null,
@@ -1723,6 +1766,8 @@ export class ScrapeEngine {
       this.log("error", `Scoring failed for "${listing.title}": ${(err as Error).message}`, listing.url);
       return { ...NOT_COUNTED, counted: true, visitedDetailPage: true };
     }
+    // Past the general freshness window and kept only for a Watch with its own covering window: never an ordinary deal.
+    if (ageGate.watchOnly) scored = this.demoteForAge(scored, detail.listingAge);
 
     this.opts.store.saveScored(scored, sellerRisk);
     const record = this.opts.store.getLastSavedListing();
@@ -2083,6 +2128,9 @@ export class ScrapeEngine {
         ? scored.referencePriceUsd * (scored.extraction.brokenVariant ? 1 : CONDITION_VALUE_MULTIPLIER[detectConditionImpact(`${listing.title} ${detail.description}`)])
         : 0;
     let bundleExtras: { valueUsd: number; phrase: string } | null = null;
+    // What of the extras the Deal Quality Gate may COUNT (priced item by item, or named in the listing and capped) and what it may not.
+    // Whether the extras turn a listing into a deal is decided by the gate below, once everything else has been adjusted.
+    let gateExtras: GateExtras | null = null;
     if (
       !extrasSeparate &&
       this.opts.valueBundle &&
@@ -2098,6 +2146,7 @@ export class ScrapeEngine {
         if (valuation) {
           this.log("info", `Bundle breakdown for "${listing.title}": ${valuation.summary}. The lot is worth about $${valuation.totalValueUsd} (simply adding everything up would say $${valuation.naiveSumUsd}).`, listing.url);
           bundleExtras = { valueUsd: valuation.addedUsd, phrase: valuation.summary };
+          gateExtras = gateExtrasFromValuation(valuation);
         }
       } catch (err) {
         this.log("warn", `Couldn't break down the bundle in "${listing.title}": ${(err as Error).message}`, listing.url);
@@ -2105,6 +2154,8 @@ export class ScrapeEngine {
     }
     if (!bundleExtras && !extrasSeparate && photoResult?.hasValuableBundle && photoResult.bundleEstimatedValueUsd) {
       bundleExtras = { valueUsd: photoResult.bundleEstimatedValueUsd, phrase: `${photoResult.bundleDescription}, worth an estimated $${photoResult.bundleEstimatedValueUsd}` };
+      // One photo-based guess: counted only when the listing's own words mention extras, and only up to a share of the base item's value.
+      gateExtras = gateExtrasFromLump(photoResult.bundleEstimatedValueUsd, baseValueForLot, looksLikeBundle(`${listing.title}\n${detail.description}`));
     }
     if (
       bundleExtras &&
@@ -2114,39 +2165,10 @@ export class ScrapeEngine {
       baseValueForLot > 0 &&
       listing.price !== null
     ) {
-      // The whole lot is judged with eBay's cut and the user's minimum margin (profitGate.ts): the base item's value (reduced for
-      // condition, unless it is already priced as a broken copy) plus what the extras add. (This used to be a plain discount
-      // percentage that ignored eBay's cut, which could call a losing lot a deal.)
-      const baseValueUsd = baseValueForLot;
-      const lot = repriceWithExtras({
-        baseValueUsd,
-        extrasValueUsd: bundleExtras.valueUsd,
-        priceUsd: listing.price,
-        shippingUsd: detail.ebayShippingUsd ?? 0,
-        settings: resaleSettingsFrom(config),
-      });
-      // Remembered either way: the alert rates the whole lot, not just the base item.
-      scored = { ...scored, bundleValueUsd: bundleExtras.valueUsd, bundleDescription: bundleExtras.phrase };
-      if (lot.isGood && !scored.isDeal) {
-        this.log(
-          "deal",
-          `Hidden gem: "${listing.title}" comes with extras (${bundleExtras.phrase}). The whole lot resells for about $${lot.totalValueUsd.toFixed(0)}, so you'd keep roughly $${lot.keepUsd.toFixed(0)} after fees against $${listing.price} asking.`,
-          listing.url
-        );
-        scored = {
-          ...scored,
-          isDeal: true,
-          dealTier: "search" as const,
-          discountPercent: lot.discountPercent,
-          extraction: {
-            ...scored.extraction,
-            reasoning: `${scored.extraction.reasoning} Also, the listing comes with extras (${bundleExtras.phrase}): the whole lot resells for about $${lot.totalValueUsd.toFixed(0)}, so you'd keep roughly $${lot.keepUsd.toFixed(0)} after eBay's fees against $${listing.price} asking.`,
-          },
-        };
-        this.opts.store.saveScored(scored, sellerRisk);
-        const updated = this.opts.store.getLastSavedListing();
-        if (updated) this.opts.onListing(updated);
-      }
+      // Remembered either way: the alert rates the whole lot (what may be counted), not just the base item.
+      scored = { ...scored, bundleValueUsd: gateExtras ? gateExtras.countedUsd : 0, bundleDescription: bundleExtras.phrase };
+    } else {
+      gateExtras = null;
     }
 
     // Per explicit instruction: every evaluated listing (not just confirmed
@@ -2181,6 +2203,7 @@ export class ScrapeEngine {
     // they're willing to pay, no matter how good the discount otherwise
     // looks. Runs after every isDeal-affecting block above so it has final
     // say regardless of which one(s) actually set isDeal true.
+    let hardCapHit = false;
     if (scored.isDeal && listing.price !== null) {
       const price = listing.price;
       for (const subject of rawSubjects) {
@@ -2203,6 +2226,7 @@ export class ScrapeEngine {
           this.opts.store.saveScored(scored, sellerRisk);
           const updated = this.opts.store.getLastSavedListing();
           if (updated) this.opts.onListing(updated);
+          hardCapHit = true;
           break;
         }
       }
@@ -2334,61 +2358,49 @@ export class ScrapeEngine {
       }
     }
 
-    // Per explicit instruction — the SECOND, deferred Watch evaluation
-    // point: some listings only become deal-shaped AFTER vision runs
-    // (bundle-value re-pricing, green-flag photo confirmation, the
-    // mismatch override above all can change scored's own pricing fields)
-    // — this re-checks the exact same price-qualified watches against
-    // whatever scored's FINAL state is by this point. store.recordWatchMatch's
-    // own UNIQUE(watch_id, listing_id) + INSERT OR IGNORE makes this safe
-    // to call even when the first (immediate) evaluation point already
-    // recorded the same watch+listing — a genuine no-op there, not a
-    // duplicate alert. Deliberately independent of scored.isDeal, same as
-    // the first evaluation point.
-    await this.recordWatchMatchesIfAny(priceQualifiedWatches, scored, config, discoveryMode);
+    // ---- Final qualification. Everything that can change what this listing is has now happened (vision, green-flag confirmation,
+    // bundle / hidden-gem extras, the hard price cap), so the Deal Quality Gate decides ONCE, on the final state: age, resale evidence
+    // (validated against a fresh WatchCount / eBay check for anything that may be pushed, and always for an AI-only find), margin and
+    // negotiation. isDeal now means "qualified" (Profitable Now or Negotiation Opportunity); the verdict is saved so the Feed, the
+    // Dashboard and the notifications all agree.
+    const rawIsDeal = scored.isDeal;
+    let qualification: Qualification | null = null;
+    if (scored.isDeal || gateExtras !== null || priceQualifiedWatches.length > 0) {
+      qualification = await qualifyScoredListing({
+        scored,
+        source: this.opts.store,
+        settings: resaleSettingsFrom(config),
+        maxAgeHours: config.maxListingAgeHours,
+        check: this.opts.checkMarket,
+        refreshMarket: rawIsDeal,
+        extras: gateExtras,
+        visionMismatch: mismatchCorrection !== null,
+        hardCapExceeded: hardCapHit,
+        log: (m) => this.log("info", m, listing.url),
+      });
+      scored = qualification.scored;
+      this.opts.store.saveScored(scored, sellerRisk);
+      const finalRecord = this.opts.store.getLastSavedListing();
+      if (finalRecord) this.opts.onListing(finalRecord);
+    }
 
-    if (scored.isDeal) {
-      const tierLabel = scored.dealTier === "search" ? "DEAL" : "POSSIBLE DEAL (unverified pricing)";
-      this.log(
-        "deal",
-        `${tierLabel}: ${listing.title} — $${listing.price}${
-          scored.discountPercent !== null ? ` (${scored.discountPercent.toFixed(0)}% under)` : ""
-        }`,
-        listing.url
-      );
-      try {
-        const prepared = await prepareAlert({
-          check: this.opts.checkMarket,
-          source: this.opts.store,
-          scored,
-          netPercent: resaleSettingsFrom(config).netPercent,
-          minMarginPercent: resaleSettingsFrom(config).minMarginPercent,
-          maxCutPercent: resaleSettingsFrom(config).maxCutPercent,
-          canWithhold: true,
-          log: (m) => this.log("info", m, listing.url),
-        });
-        if (prepared.send) {
-          await sendDealAlert(config, scored, prepared.summary);
-          this.opts.store.markNotified(listing.id);
-        }
-      } catch (err) {
-        this.log("error", `Notification failed: ${(err as Error).message}`, listing.url);
+    // The SECOND, deferred Watch evaluation point (some listings only become deal-shaped after vision), now against the FINAL verdict.
+    // A Watch match is judged by the Watch's own criteria and is always delivered, but it only counts as a deal if it passed the gate,
+    // and a match that is also a qualified deal is ONE notification. store.recordWatchMatch's UNIQUE(watch_id, listing_id) + INSERT OR
+    // IGNORE makes this safe when the first (pre-vision) point already recorded the same match.
+    const watched = await this.recordWatchMatchesIfAny(priceQualifiedWatches, scored, config, discoveryMode, undefined, qualification ?? undefined);
+    if (watched) {
+      qualification = watched;
+      scored = watched.scored;
+    }
+
+    if (qualification?.verdict.qualified) {
+      if (!rawIsDeal && gateExtras && gateExtras.countedUsd > 0) {
+        this.log("deal", `Hidden gem: "${listing.title}" comes with extras (${scored.bundleDescription ?? "extras"}) that make it worth buying at $${listing.price}.`, listing.url);
       }
-      this.opts
-        .onNarrate({
-          kind: "deal",
-          title: listing.title,
-          price: listing.price,
-          dealTier: scored.dealTier as "search" | "general",
-          discountPercent: scored.discountPercent,
-          estimatedValueRange: scored.estimatedValueRange,
-          reasoning: scored.extraction.reasoning,
-        })
-        .catch(() => {});
-      // photoResult already ran earlier (see above) for every eligible
-      // listing regardless of deal status — nothing left to do here, this
-      // used to be a second, redundant photo-analysis call just for
-      // confirmed deals before that became true.
+      await this.pushQualifiedDeal(qualification, config, listing);
+    } else if (qualification?.verdict.status === "worth_a_look") {
+      await this.noteWorthALook(qualification, config, listing);
     } else if (greenFlagCandidate) {
       // Per explicit instruction: a green flag that DIDN'T pan out (photo
       // analysis was off, vision couldn't confirm it, or it was confirmed
@@ -2404,6 +2416,53 @@ export class ScrapeEngine {
       );
     } else {
       this.log("info", `skip: ${listing.title} — ${scored.extraction.reasoning || "no match / not a deal"}`, listing.url);
+    }
+  }
+
+  // A qualified deal (Profitable Now or Negotiation Opportunity): logged, pushed once (never again if a Watch match already told the
+  // user about this listing), and narrated.
+  private async pushQualifiedDeal(q: Qualification, config: EngineConfig, listing: ListingSummary & { price: number }): Promise<void> {
+    const { scored, verdict } = q;
+    const tag = verdict.status === "negotiation" ? "NEGOTIATION OPPORTUNITY" : verdict.confidence === "low" ? "DEAL (limited sales data)" : "DEAL";
+    this.log(
+      "deal",
+      `${tag}: ${listing.title} — $${listing.price}${verdict.status === "negotiation" && verdict.facts.requiredDiscountPercent !== null ? ` (needs ${verdict.facts.requiredDiscountPercent}% off: offer ~$${verdict.facts.targetPriceUsd})` : scored.discountPercent !== null ? ` (${scored.discountPercent.toFixed(0)}% under)` : ""}`,
+      listing.url
+    );
+    try {
+      if (this.opts.store.isListingNotified(scored.listing.id)) {
+        this.log("info", `Already notified about "${listing.title}" (as a Watch match): not sending a second alert.`, listing.url);
+      } else {
+        const summary = buildQualifiedAlert({ q, source: this.opts.store, settings: resaleSettingsFrom(config), kind: "deal" });
+        await sendDealAlert(config, scored, summary);
+        this.opts.store.markNotified(scored.listing.id);
+      }
+    } catch (err) {
+      this.log("error", `Notification failed: ${(err as Error).message}`, listing.url);
+    }
+    this.opts
+      .onNarrate({
+        kind: "deal",
+        title: listing.title,
+        price: listing.price,
+        dealTier: (scored.dealTier ?? "search") as "search" | "general",
+        discountPercent: scored.discountPercent,
+        estimatedValueRange: scored.estimatedValueRange,
+        reasoning: verdict.headline,
+      })
+      .catch(() => {});
+  }
+
+  // Worth a look: kept in the Feed, never pushed unless the user turned that on (Config > notifyWorthALook), and then quietly.
+  private async noteWorthALook(q: Qualification, config: EngineConfig, listing: ListingSummary & { price: number }): Promise<void> {
+    this.log("info", `Worth a look: ${listing.title} — ${q.verdict.headline}`, listing.url);
+    if (!config.notifyWorthALook || this.opts.store.isListingNotified(q.scored.listing.id)) return;
+    try {
+      const summary = buildQualifiedAlert({ q, source: this.opts.store, settings: resaleSettingsFrom(config), kind: "look" });
+      await sendWorthALookAlert(config, q.scored, { ...summary, message: `${q.verdict.headline}` });
+      this.opts.store.markNotified(q.scored.listing.id);
+    } catch (err) {
+      this.log("error", `Notification failed: ${(err as Error).message}`, listing.url);
     }
   }
 
@@ -3294,11 +3353,32 @@ export class ScrapeEngine {
   private async evaluateWatchCandidate(page: Page, watch: Watch, term: WatchTerm, listing: ListingSummary, config: EngineConfig): Promise<boolean> {
     let detail: ListingDetail;
     try {
-      detail = await fetchListingDetail(page, listing);
+      detail = await this.loadListingDetail(page, listing);
     } catch (err) {
       this.log("warn", `Watch "${watch.name}": couldn't open "${listing.title}" (${(err as Error).message}) — will look again next time.`, listing.url);
       this.opts.store.unmarkWatchSeen(watch.id, listing.id);
       return false;
+    }
+
+    // Facebook's own "Date listed" filter (applied in the search) is best-effort, so the age is checked here too, once the page
+    // is open: the Watch's own window, else the account's general one. Past the general window it only continues if the Watch's
+    // own window covers it, and then only as this Watch's match, never as an ordinary deal.
+    const ageGate = decideAgeGate(detail.listingAge, config.maxListingAgeHours, [watch]);
+    if (ageGate.skip) {
+      this.log("info", `Watch "${watch.name}": skip (too old — ${detail.listingAge}): ${listing.title}`, listing.url);
+      this.opts.store.saveScored({
+        listing: detail,
+        extraction: { matchedItem: null, extractedAttributes: "", conditionImpact: "unknown", confidence: "low", reasoning: `Skipped — listed ${detail.listingAge}, older than your freshness window.` },
+        referencePriceUsd: null,
+        discountPercent: null,
+        isDeal: false,
+        dealTier: null,
+        estimatedValueRange: null,
+        offTopicSuggestion: null,
+      });
+      const staleRecord = this.opts.store.getLastSavedListing();
+      if (staleRecord) this.opts.onListing(staleRecord);
+      return true;
     }
 
     const scamReason = detectScamBot(`${detail.title} ${detail.description}`, detail.seller);
@@ -3332,10 +3412,26 @@ export class ScrapeEngine {
       this.opts.store.unmarkWatchSeen(watch.id, listing.id);
       return false;
     }
+    if (ageGate.watchOnly) scored = this.demoteForAge(scored, detail.listingAge);
+    // The listing is judged by the Deal Quality Gate like any other (a Watch match no longer counts as a deal unless it passes).
+    let qualification = await qualifyScoredListing({
+      scored,
+      source: this.opts.store,
+      settings: resaleSettingsFrom(config),
+      maxAgeHours: config.maxListingAgeHours,
+      check: this.opts.checkMarket,
+      refreshMarket: scored.isDeal,
+      log: (m) => this.log("info", m, listing.url),
+    });
+    scored = qualification.scored;
     this.opts.store.saveScored(scored, sellerRisk);
     const record = this.opts.store.getLastSavedListing();
     if (record) this.opts.onListing(record);
-    await this.recordWatchMatchesIfAny([watch], scored, config, "active", term);
+    const watched = await this.recordWatchMatchesIfAny([watch], scored, config, "active", term, qualification);
+    if (watched) qualification = watched;
+    // A qualified deal found by an active Watch check is announced once (combined with the Watch match when there is one).
+    if (qualification.verdict.qualified) await this.pushQualifiedDeal(qualification, config, listing as ListingSummary & { price: number });
+    else if (qualification.verdict.status === "worth_a_look") await this.noteWorthALook(qualification, config, listing as ListingSummary & { price: number });
     return true;
   }
 

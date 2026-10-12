@@ -353,6 +353,8 @@ export interface Config {
   stateCitiesVersion?: number;
   // "Save OpenAI credits" (on by default): everything that isn't a core function runs without AI or doesn't run. See aiMode.ts.
   lowAiMode: boolean;
+  // Also push "Worth a look" finds (quietly, low priority). Off by default: they stay in the Feed only.
+  notifyWorthALook?: boolean;
   // The last products searched for (newest first) with their price ranges, kept across restarts so they can be added again in one
   // click (the Search For list itself resets every launch).
   recentSearches: RecentSearch[];
@@ -715,6 +717,30 @@ export interface ExtractionResult {
 // Treat "general" with real skepticism — there's no vetted price behind it.
 export type DealTier = "search" | "general" | null;
 
+// The final verdict of the Deal Quality Gate (dealGate.ts) for a listing. Persisted, so the Feed, the Dashboard and the
+// notifications all show the same decision:
+//   profitable_now  a good deal at the asking price          negotiation  a good deal if the seller comes down (see requiredDiscountPercent)
+//   worth_a_look    interesting but unverified (Feed only)   pass         not a deal
+// "Qualified" (a real Deal) means profitable_now or negotiation.
+export type DealStatus = "profitable_now" | "negotiation" | "worth_a_look" | "pass";
+
+export interface GateReasonRecord {
+  code: string;
+  severity: "good" | "warn" | "bad" | "info";
+  text: string;
+}
+
+export interface GateSnapshot {
+  status: DealStatus;
+  confidence: "high" | "medium" | "low";
+  stars: number | null;
+  headline: string;
+  reasons: GateReasonRecord[];
+  // negotiation only: how far below the asking price, and the price to offer
+  requiredDiscountPercent: number | null;
+  targetPriceUsd: number | null;
+}
+
 export interface ScoredListing {
   listing: ListingDetail;
   // Extras that come with the item (a bundled game, an expansion card) and what they add to its eBay value, when Clynx spotted some:
@@ -736,6 +762,8 @@ export interface ScoredListing {
   // same kind of listing gets skipped deterministically next time, without
   // spending another AI call on it.
   offTopicSuggestion: string | null;
+  // The Deal Quality Gate's final verdict, set once every score adjustment (vision, bundles, hidden gems) has been made.
+  gate?: GateSnapshot;
 }
 
 // --- App-level records (persisted + sent to the renderer) ---------------
@@ -870,6 +898,17 @@ export interface ListingRecord {
   // than blanking it out).
   foundByAccountId: string | null;
   foundByAccountLabel: string | null;
+  // The Deal Quality Gate's persisted verdict (see DealStatus). null = never gated (older listings, and listings that were
+  // never deal candidates): the UI then falls back to isDeal, exactly as before.
+  dealStatus: DealStatus | null;
+  gateConfidence: "high" | "medium" | "low" | null;
+  gateStars: number | null;
+  gateHeadline: string | null;
+  gateReasons: GateReasonRecord[];
+  requiredDiscountPercent: number | null;
+  targetPriceUsd: number | null;
+  // The listing's age in hours as parsed when it was scraped (null: unknown). Facebook's wording is approximate.
+  listingAgeHours: number | null;
 }
 
 // A user-curated product "database" entry. aiSummary is built from a real,

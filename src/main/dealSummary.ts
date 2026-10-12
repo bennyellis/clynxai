@@ -11,6 +11,7 @@
 import { DEFAULT_MIN_PROFIT_MARGIN_PERCENT, keepRangeUsd, resaleOutcome } from "./resaleMath.js";
 import { cutNeededPercent, withinNegotiationReach } from "./profitGate.js";
 import type { ScoredListing } from "./types.js";
+import type { GateVerdict } from "./dealGate.js";
 
 export interface ProductSignals {
   id: string;
@@ -23,6 +24,8 @@ export interface ProductSignals {
   checkedAt?: number | null;
   // What the user's own linked eBay store lists it for (their own price, not the market's).
   storeValueUsd?: number | null;
+  // What the value rests on: sold comps, sold nudged by asking prices ("blend"), or asking prices only ("active"). null: unknown.
+  basis?: "sold" | "blend" | "active" | null;
 }
 
 export interface SignalSource {
@@ -251,6 +254,36 @@ export function composeAlert(args: { priceUsd: number | null; age: string | null
     title: `${sourceSquare(args.source)} ${parts.join(" - ")}`,
     message: `${args.reason} - ${starsText(args.stars)}`,
   };
+}
+
+/**
+ * A deal alert in the Deal Quality Gate's words: the gate's headline and stars replace the plain rating, a negotiation shows what
+ * to offer (and how much off that is), and a low-confidence verdict says the sales data is limited.
+ */
+export function composeGateAlert(summary: AlertSummary, verdict: GateVerdict): AlertSummary {
+  const stars = verdict.stars ?? summary.stars;
+  const limited = verdict.confidence === "low" ? " (limited sales data)" : "";
+  const reason = `${verdict.headline}${limited}`;
+  const target = verdict.facts.targetPriceUsd;
+  // "$450" -> "$450 (offer ~$400)": the first price in the title is the asking price.
+  const title = verdict.status === "negotiation" && target !== null ? summary.title.replace(/\$(\d+)/, (m) => `${m} (offer ~$${Math.round(target)})`) : summary.title;
+  return { ...summary, stars, reason, title, message: `${reason} - ${starsText(stars)}` };
+}
+
+/**
+ * A Watch match is the user's own explicit request, so it is always delivered, but it is labelled as a Watch match and says
+ * plainly whether it also passed the Deal Quality Gate. A match that IS a qualified deal is one combined notification (never two).
+ */
+export function composeWatchAlert(args: { summary: AlertSummary; verdict: GateVerdict; watchName: string }): AlertSummary {
+  const { summary, verdict, watchName } = args;
+  const [square, ...rest] = summary.title.split(" ");
+  const qualified = verdict.qualified;
+  const title = `${square} ${qualified ? "Watch match + deal" : "Watch match"} - ${rest.join(" ")}`;
+  const gated = composeGateAlert(summary, verdict);
+  const message = qualified
+    ? `${watchName}: ${gated.message}`
+    : `${watchName}: not a qualified deal${verdict.status === "pass" ? " (a pass)" : ""}. ${verdict.headline}`;
+  return { ...summary, stars: verdict.stars ?? summary.stars, reason: verdict.headline, title, message };
 }
 
 /** Everything the notification needs, worked out from the scored listing and what the Database knows. */

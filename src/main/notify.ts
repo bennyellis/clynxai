@@ -124,7 +124,9 @@ export async function sendWatchMatchAlert(
   scored: ScoredListing,
   _match: { discoveryMode: "passive" | "active"; discountPercentAtMatch: number | null; profitUsdAtMatch: number | null },
   _referencePriceUsd: number | null,
-  summary: AlertSummary
+  summary: AlertSummary,
+  // The match is also a qualified deal: one combined notification instead of a Watch alert plus a deal alert.
+  combinedWithDeal: boolean = false
 ): Promise<void> {
   const { listing } = scored;
   if (listing.price === null) return; // shouldn't happen — recordWatchMatchesIfAny already guards this, defensive only
@@ -136,8 +138,22 @@ export async function sendWatchMatchAlert(
     message: summary.message,
     click: listing.url,
     priority: "high",
-    tags: "eye",
+    tags: combinedWithDeal ? "eye,moneybag" : "eye",
     photoUrl: listing.imageUrls[0] ?? listing.thumbnailUrl,
     photoFilenamePrefix: "watch-match",
+  });
+}
+
+// "Worth a look" is Feed-only by default; with Config > notifyWorthALook it is pushed quietly (low priority), clearly labelled.
+export async function sendWorthALookAlert(config: NotifyConfig, scored: ScoredListing, summary: AlertSummary): Promise<void> {
+  const [square, ...rest] = summary.title.split(" ");
+  await postNtfyMessage(config, {
+    title: `${square} Worth a look - ${rest.join(" ")}`,
+    message: summary.message,
+    click: scored.listing.url,
+    priority: "low",
+    tags: "mag",
+    photoUrl: scored.listing.imageUrls[0] ?? scored.listing.thumbnailUrl,
+    photoFilenamePrefix: "look",
   });
 }

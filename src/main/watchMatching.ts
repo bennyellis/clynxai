@@ -137,7 +137,9 @@ export function evaluateWatchConditions(
   listingAgeHours: number | null,
   // The user resells on eBay and keeps ~84% of the sale price, so a Watch's profit is that, not the full reference
   // price, minus what the purchase costs (price + any shipping charge). See resaleMath.ts.
-  resale: { netPercent?: number; shippingUsd?: number } = {}
+  // defaultMaxAgeHours: the account's general freshness window, used when the Watch has no age condition of its own (a Watch
+  // that says nothing about age does not mean "any age": the general window is what its Facebook search filter already used).
+  resale: { netPercent?: number; shippingUsd?: number; defaultMaxAgeHours?: number | null } = {}
 ): WatchConditionResult {
   const netPercent = resale.netPercent ?? DEFAULT_EBAY_NET_PERCENT;
   const profitUsd = referencePrice !== null ? (referencePrice * netPercent) / 100 - (price + (resale.shippingUsd ?? 0)) : null;
@@ -157,6 +159,10 @@ export function evaluateWatchConditions(
     if (listingAgeHours === null || listingAgeHours >= maxHours) {
       return { satisfied: false, profitUsd, discountPercent };
     }
+  } else if (resale.defaultMaxAgeHours != null && listingAgeHours !== null && listingAgeHours >= resale.defaultMaxAgeHours) {
+    // No window of its own: the general one applies. An unknown age is let through here (the Watch has no age criterion of
+    // its own to fail), but the match is delivered as "age unknown", never as a qualified deal.
+    return { satisfied: false, profitUsd, discountPercent };
   }
   return { satisfied: true, profitUsd, discountPercent };
 }
