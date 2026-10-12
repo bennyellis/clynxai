@@ -71,8 +71,13 @@ export function quarantineDatabase(dbPath: string): string {
       try {
         unlinkSync(from);
       } catch (err) {
-        // The copy exists but the original could not be removed: say where the copy is, so it is not lost track of.
-        (err as { savedCopy?: string }).savedCopy = to;
+        // The original could not be removed (something holds it open), so it is still exactly where it was: drop the redundant copy
+        // rather than leave a second 500 MB file behind for every retry, and let the caller report the failure.
+        try {
+          unlinkSync(to);
+        } catch {
+          (err as { savedCopy?: string }).savedCopy = to; // could not even remove the copy: say where it is
+        }
         throw err;
       }
     }
