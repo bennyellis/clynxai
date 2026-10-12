@@ -2,6 +2,7 @@ import { powerSaveBlocker } from "electron";
 import { isLowAiMode } from "./aiMode.js";
 import type { BrowserContext, Page } from "playwright";
 import { openPersistentContext, isLoggedIn, politeDelay } from "./browser.js";
+import { classifyFacebookPage, describeSessionProblem, readPageSnapshot, looksLikeHealthyFacebookPage, type SessionProblem } from "./facebookSession.js";
 import { buildWatchSearchUrl, browseListings, searchMarketplace, fetchListingDetail, diagnoseEmptyPage, verifyOrSetRadius, readCurrentLocationLabel } from "./scraper.js";
 import {
   scoreListing,
@@ -270,6 +271,9 @@ export interface ScrapeEngineOptions {
   // caller with the store access + fire-and-forget dedup this needs;
   // scrapeEngine.ts itself doesn't hold either.
   onReferencePhotoAdded?: (productId: string) => void;
+  // Fired when this account's Facebook session is found to be unusable (logged out, or stopped by a security check), and again with
+  // null once it is working again. Only on a change, never repeated, so the owner can raise and clear a persistent notice.
+  onSessionProblem?: (problem: SessionProblem | null) => void;
   // Fired for a live AI one-liner — a reaction to a deal, or a recap after
   // finishing a batch. Best-effort: narration failures are swallowed by
   // the caller so an OpenAI hiccup never breaks scraping.
@@ -529,6 +533,10 @@ export class ScrapeEngine {
   // source of bugs; see runCycle); reset in start()/triggerOnce() so a
   // fresh scan always redoes it, but never set again mid-scan.
   private scanSetupDone = false;
+  // The Facebook session problem found on the page the scanner is looking at (see guardSession). sessionBroken ends the current
+  // cycle early; reportedProblem remembers what the owner was last told, so it hears about changes only.
+  private sessionBroken = false;
+  private reportedProblem: SessionProblem | null = null;
   // Which Search For item currently gets the dedicated active search, and
   // how many listings have been evaluated for it since the last switch —
   // both used only when config.rotateSearchItems is on (2+ Search For
@@ -712,7 +720,45 @@ export class ScrapeEngine {
     const page = await this.ensureBrowser();
     const loggedIn = await isLoggedIn(page);
     this.setStatus({ loggedIn });
+    this.noteSession(loggedIn ? null : "logged-out");
     return loggedIn;
+  }
+
+  // Tells the owner (once per change) what is wrong with the Facebook session, or that it is fine again.
+  private noteSession(problem: SessionProblem | null): void {
+    if (problem === this.reportedProblem) return;
+    this.reportedProblem = problem;
+    try {
+      this.opts.onSessionProblem?.(problem);
+    } catch {
+      /* a notice that cannot be shown must not break scanning */
+    }
+  }
+
+  /**
+   * Looks at the page the browser is showing right now (no navigation, milliseconds) for a login wall or a security check. Facebook
+   * does not announce an expired session: the next page just is not Marketplace. On a problem the account is marked logged out, the
+   * owner is told once, and the current cycle ends (`sessionBroken`); the next cycle looks again, so scanning resumes on its own
+   * once the user has logged in. Returns true when there is a problem.
+   */
+  private async guardSession(page: Page, where: string): Promise<boolean> {
+    const snapshot = await readPageSnapshot(page);
+    if (!snapshot) return false; // could not tell: never stop a scan on a guess
+    const problem = classifyFacebookPage(snapshot);
+    if (problem) {
+      this.sessionBroken = true;
+      const words = describeSessionProblem(problem, "this account");
+      if (this.reportedProblem !== problem) this.log("error", `${words.short} (seen ${where}; page: ${snapshot.url})`);
+      this.setStatus({ loggedIn: false, lastError: words.short });
+      this.noteSession(problem);
+      return true;
+    }
+    if (looksLikeHealthyFacebookPage(snapshot) && this.reportedProblem) {
+      this.log("info", "Facebook session is working again.");
+      this.setStatus({ loggedIn: true, lastError: null });
+      this.noteSession(null);
+    }
+    return false;
   }
 
   // Opens a headed window into the SAME browser profile the scraper reuses
@@ -765,7 +811,8 @@ export class ScrapeEngine {
       if (!stillHasLoginForm) {
         const confirmed = await isLoggedIn(this.page);
         if (confirmed) {
-          this.setStatus({ loggedIn: true });
+          this.setStatus({ loggedIn: true, lastError: null });
+          this.noteSession(null);
           this.log("info", "Login confirmed.");
           return true;
         }
@@ -2518,9 +2565,12 @@ export class ScrapeEngine {
           const message = "Not logged into Facebook yet — a browser window should be open; log in there. This cycle will skip and retry next time.";
           this.setStatus({ loggedIn, lastError: message });
           this.log("error", message);
+          const shown = await readPageSnapshot(page);
+          this.noteSession((shown ? classifyFacebookPage(shown) : null) ?? "logged-out");
           return;
         }
         this.setStatus({ loggedIn });
+        this.noteSession(null);
       }
 
       await this.runCycle(page, config);
@@ -2546,6 +2596,7 @@ export class ScrapeEngine {
   // steps that precede this, can never race a chat-triggered
   // searchForItemNow() for the same Facebook page.
   private async runCycle(page: Page, config: EngineConfig): Promise<void> {
+    this.sessionBroken = false;
     this.setStatus({ lastCycleStartedAt: Date.now(), lastError: null, listingsThisCycle: 0, currentSearch: "browsing" });
 
     const perLocation = Math.max(1, config.listingsPerLocation);
@@ -2603,7 +2654,7 @@ export class ScrapeEngine {
     const visitOrder = locationCount > 1 ? shuffledIndices(locationCount) : [this.locationIndex % Math.max(locationCount, 1)];
 
     for (let visit = 0; visit < visitsThisCycle; visit++) {
-      if (this.stopRequested) break;
+      if (this.stopRequested || this.sessionBroken) break;
       if (this.priorityRequested) {
         this.log("info", "Pausing the current cycle — a chat request needs the page right now.");
         break;
@@ -2701,6 +2752,10 @@ export class ScrapeEngine {
           this.log("warn", `Start-of-cycle radius check failed: ${(err as Error).message} — continuing anyway.`);
         }
       }
+
+      // The page was just loaded: if Facebook answered with a login wall or a security check, say so and stop this cycle here
+      // instead of searching a page that is not Marketplace (which looks like "0 listings found" forever).
+      if (!this.stopRequested && !this.priorityRequested && (await this.guardSession(page, `after opening ${locationLabel}`))) break;
 
       let totalEvaluatedHere = 0;
       const batchDeals: Array<{ title: string; price: number | null }> = [];
@@ -2973,6 +3028,7 @@ export class ScrapeEngine {
             // Dashboard instead of a silent, uninformative zero.
             const diagnosis = await diagnoseEmptyPage(page).catch((err) => `(diagnosis failed: ${err.message})`);
             this.log("warn", `Empty browse — page state was: ${diagnosis}`);
+            await this.guardSession(page, "after an empty browse");
           }
 
           // Per explicit instruction — in generalSearchMode there's no

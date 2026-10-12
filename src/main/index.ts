@@ -13,6 +13,8 @@ import { hasOpenAIAccess, initOpenAIProxy } from "./openai.js";
 import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
 import { writeFileAtomicWithBackup } from "./safeFs.js";
 import { NoticeBoard } from "./appNotices.js";
+import { describeSessionProblem } from "./facebookSession.js";
+import { sendSystemAlert } from "./notify.js";
 import { openWithRecovery, requestRecovery, runIntegrityCheckInBackground } from "./dbIntegrity.js";
 import { loadConfig, saveConfig, takeConfigLoadNotice, DEFAULT_CONFIG, DEFAULT_BROWSE_URLS, DEFAULT_COUNTRY_CITIES } from "./config.js";
 import {
@@ -2400,6 +2402,18 @@ function createEngineForAccount(accountId: string): ScrapeEngine {
     },
     onProductUpdated: (product) => sendToRenderer("products:updated", product),
     onReferencePhotoAdded: (productId) => ensurePhotoDifferenceAnalysis(productId),
+    // Facebook logged this account out (or stopped it with a security check): a notice that stays on the Dashboard until it is
+    // fixed, plus one phone push, since the user is probably not looking at the app. Cleared when the session works again.
+    onSessionProblem: (problem) => {
+      const noticeId = `fb-session:${accountId}`;
+      if (!problem) {
+        notices.clear(noticeId);
+        return;
+      }
+      const words = describeSessionProblem(problem, currentAccount().label);
+      notices.set({ id: noticeId, severity: "error", title: words.title, message: words.message, action: "open-facebook-login", actionLabel: "Open Facebook", accountId });
+      void sendSystemAlert(config, `Clynx: ${words.title}`, words.short);
+    },
     onStatus: (status) => {
       engineStatusMap.set(accountId, status);
       broadcastEngineStatusMap();

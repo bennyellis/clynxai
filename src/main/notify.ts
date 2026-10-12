@@ -59,9 +59,9 @@ async function postNtfyMessage(
     const headers: Record<string, string> = {
       Title: encodeHeader(opts.title),
       Message: encodeHeader(opts.message),
-      Click: encodeHeader(opts.click),
       Priority: opts.priority,
     };
+    if (opts.click) headers.Click = encodeHeader(opts.click);
     // ntfy turns each tag into an emoji; an unverified deal gets none (it used to get a thinking face).
     if (opts.tags) headers.Tags = opts.tags;
     // Presence of Filename is what tells ntfy the request body is a file
@@ -96,6 +96,19 @@ async function postNtfyMessage(
     }
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+// A message about Clynx itself rather than a listing (the Facebook session expired, a scan keeps failing): the one case where the
+// user needs to hear something while away from the app. Does nothing without a topic; never throws (a failed notice must not break the
+// scanner); returns whether the push went out.
+export async function sendSystemAlert(config: NotifyConfig, title: string, message: string): Promise<boolean> {
+  if (!config.ntfy?.topic?.trim() || !config.ntfy.server?.trim()) return false;
+  try {
+    await postNtfyMessage(config, { title, message, click: "", priority: "high", tags: "warning", photoUrl: null, photoFilenamePrefix: "system" });
+    return true;
+  } catch {
+    return false;
   }
 }
 
