@@ -48,6 +48,8 @@ run(async () => {
       check("moving a locked database aside fails with a DatabaseRecoveryError (not a raw EBUSY)", err instanceof DatabaseRecoveryError, String(err));
       const problem = describeStartupFailure(err, path.dirname(p));
       check("which describes itself in plain words", problem.kind === "database-locked" && /Nothing was deleted/.test(problem.message), problem);
+      check("the request to start fresh is NOT used up by the failed attempt (found by the integration run): the marker stays for the next try", existsSync(`${p}.recover-requested`));
+      check("and no redundant copy of the database was left behind", !readdirSafe(path.dirname(p)).some((f) => f.startsWith("scout.db.corrupt-")), readdirSafe(path.dirname(p)));
     } else {
       check("(non-Windows: a rename of an open file succeeds; locked-file case not applicable)", true);
     }

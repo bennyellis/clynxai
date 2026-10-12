@@ -114,14 +114,21 @@ export interface DatabasePrep {
 export function prepareDatabase(dbPath: string): DatabasePrep {
   const marker = recoveryMarkerPath(dbPath);
   if (existsSync(marker)) {
-    try {
-      unlinkSync(marker);
-    } catch {
-      /* a stuck marker only means this happens once more */
-    }
+    const consume = () => {
+      try {
+        unlinkSync(marker);
+      } catch {
+        /* a stuck marker only means this happens once more */
+      }
+    };
     if (existsSync(dbPath)) {
-      return { recovered: { reason: "you chose to start fresh", damagedCopy: quarantineOrThrow(dbPath), requestedByUser: true } };
+      // The request is only used up once the database has really been moved aside: if that fails (file held open), the marker stays so
+      // the next try, after the user fixes the cause, still does what they asked.
+      const damagedCopy = quarantineOrThrow(dbPath);
+      consume();
+      return { recovered: { reason: "you chose to start fresh", damagedCopy, requestedByUser: true } };
     }
+    consume();
     return { recovered: null };
   }
   if (!existsSync(dbPath)) return { recovered: null };
