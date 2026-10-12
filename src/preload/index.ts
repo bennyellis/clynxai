@@ -180,6 +180,8 @@ const api = {
   },
 
   listProducts: (): Promise<ProductProfile[]> => ipcRenderer.invoke("products:list"),
+  // Ids and names only, no photos (the light lookup).
+  listProductIndex: (): Promise<Array<{ id: string; name: string; family: string | null }>> => ipcRenderer.invoke("products:listIndex"),
   // Per explicit instruction — Dashboard's "is this what you're searching
   // for?" popup: looks up an existing Database entry by name using the
   // SAME fuzzy-match logic the scanner itself relies on, before actually

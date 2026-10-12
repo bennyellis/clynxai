@@ -483,9 +483,13 @@ function sortFamilyNodes(nodes: FamilyNode[], sortBy: LibrarySortBy): FamilyNode
 }
 
 export function Database({
+  active = true,
   requestedProductId,
   onRequestedProductHandled,
 }: {
+  // False while another screen is showing. The library (every product with its photo, tens of MB) is loaded the first time this screen is
+  // shown, not when the app starts.
+  active?: boolean;
   // Set by App.tsx when the Feed's Research button asks to jump straight to
   // one product's own page — per explicit instruction, more convenient than
   // landing on the grid and having to find/click it. undefined when this
@@ -512,17 +516,22 @@ export function Database({
   // index.ts's runPhotoBackfill).
   const [missingPhotos, setMissingPhotos] = useState(0);
   const [photoBackfill, setPhotoBackfill] = useState<{ running: boolean; done: number; total: number }>({ running: false, done: 0, total: 0 });
+  const photoInfoLoaded = useRef(false);
   useEffect(() => {
-    api.countProductsMissingPhotos().then(setMissingPhotos);
-    api.getPhotoBackfillStatus().then(setPhotoBackfill);
     const off = api.onPhotoBackfillProgress((p) => {
       setPhotoBackfill(p);
-      if (!p.running) api.countProductsMissingPhotos().then(setMissingPhotos);
+      if (!p.running && photoInfoLoaded.current) api.countProductsMissingPhotos().then(setMissingPhotos);
     });
     return () => {
       off();
     };
   }, []);
+  useEffect(() => {
+    if (!active || photoInfoLoaded.current) return;
+    photoInfoLoaded.current = true;
+    api.countProductsMissingPhotos().then(setMissingPhotos);
+    api.getPhotoBackfillStatus().then(setPhotoBackfill);
+  }, [active]);
   // Per explicit instruction — the Library's own "+" button, for a product
   // the user already has their own photo/info for rather than something
   // the AI needs to research. The dialog only collects name/category —
@@ -578,10 +587,17 @@ export function Database({
     }
   }, [requestedProductId, products, onRequestedProductHandled]);
 
+  const libraryLoaded = useRef(false);
   useEffect(() => {
+    if (!active || libraryLoaded.current) return;
+    libraryLoaded.current = true;
     api.listProducts().then(setProducts);
-    // A folder's brand logo was just found (see requestFolderImage): its products carry it, so reload them.
-    const refetch = () => void api.listProducts().then(setProducts);
+  }, [active]);
+  useEffect(() => {
+    // A folder's brand logo was just found (see requestFolderImage): its products carry it, so reload them (once the library has been loaded).
+    const refetch = () => {
+      if (libraryLoaded.current) void api.listProducts().then(setProducts);
+    };
     window.addEventListener("clynx:products-stale", refetch);
     const off = api.onProductUpdated((updated) => {
       // Upsert, not update-only — a product created from chat (research_product)

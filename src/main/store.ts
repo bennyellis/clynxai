@@ -404,6 +404,10 @@ export class Store {
       this.db.exec("ALTER TABLE product_images ADD COLUMN kind TEXT NOT NULL DEFAULT 'normal'");
     }
 
+    // Counting a product's reference photos has to read its `kind` column, which sits behind each ~114 KB photo, so the plain grouped count
+    // scanned every photo (about 350 ms for a library of ~4,000 photos). These two small columns together in an index answer it without
+    // touching the photos.
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_product_images_kind ON product_images(product_id, kind)");
     const productCols = (this.db.prepare("PRAGMA table_info(products)").all() as any[]).map((c) => c.name);
     if (!productCols.includes("observed_notes")) {
       this.db.exec("ALTER TABLE products ADD COLUMN observed_notes TEXT");
@@ -1432,6 +1436,11 @@ export class Store {
   // never reads a product's photo (a row's thumbnail is ~90 KB of text, so listProducts() on a library of hundreds is tens of
   // megabytes), and it is read fresh each time, so a product added a moment ago is always seen. Use this, not listProducts(),
   // for name matching and name lists; load the one row you need afterwards with getProductById.
+  // The entries with no thumbnail yet (id and name only, never the photos of the others): what the background "research blank entries" sweep needs.
+  listBlankProductIndex(): Array<{ id: string; name: string }> {
+    return this.db.prepare("SELECT id, name FROM products WHERE image_url IS NULL OR image_url = '' ORDER BY created_at DESC").all() as Array<{ id: string; name: string }>;
+  }
+
   listProductIndex(): Array<{ id: string; name: string; family: string | null }> {
     return this.db.prepare("SELECT id, name, family FROM products ORDER BY created_at DESC").all() as Array<{ id: string; name: string; family: string | null }>;
   }

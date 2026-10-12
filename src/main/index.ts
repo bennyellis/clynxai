@@ -1955,9 +1955,10 @@ async function fillReferencePhotos(id: string, name: string, replaceThumbnail: b
 const REFERENCE_PHOTO_BACKFILL_BELOW = 5;
 const PHOTO_BACKFILL_CONCURRENCY = 2;
 let photoBackfill: { done: number; total: number } | null = null;
-function productsNeedingPhotos(): ProductProfile[] {
+function productsNeedingPhotos(): Array<{ id: string; name: string }> {
+  // Names and ids only: this runs when the Database opens and when the backfill starts, and must not read every product's photo.
   const counts = store.countNormalImagesByProduct();
-  return store.listProducts().filter((p) => (counts.get(p.id) ?? 0) < REFERENCE_PHOTO_BACKFILL_BELOW);
+  return store.listProductIndex().filter((p) => (counts.get(p.id) ?? 0) < REFERENCE_PHOTO_BACKFILL_BELOW);
 }
 function broadcastPhotoBackfill(): void {
   sendToRenderer("products:photoBackfillProgress", {
@@ -2635,7 +2636,7 @@ async function sweepBlankProducts(): Promise<void> {
   const startStore = store;
   let moreToDo = false;
   try {
-    const allBlanks = startStore.listProducts().filter((p) => !p.imageUrl && !activeResearch.has(p.id) && !blankSweepAttempted.has(p.id));
+    const allBlanks = startStore.listBlankProductIndex().filter((p) => !activeResearch.has(p.id) && !blankSweepAttempted.has(p.id));
     if (allBlanks.length === 0) return;
     const blanks = allBlanks.slice(0, BLANK_SWEEP_BATCH);
     moreToDo = allBlanks.length > blanks.length;
@@ -3588,6 +3589,8 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.handle("products:ensureThumbnails", (_e, args: { ids: string[] }): number => ensureThumbnailsFor(Array.isArray(args?.ids) ? args.ids.filter((x) => typeof x === "string") : []));
+  // Ids and names only (no photos): for screens that just need to look a product up by name (Activity).
+  ipcMain.handle("products:listIndex", () => store.listProductIndex());
   ipcMain.handle("products:list", () => {
     // Folds together entries that turned out to be the same product (see Store.mergeDuplicateProducts); a no-op normally.
     mergeDuplicateProductEntries();

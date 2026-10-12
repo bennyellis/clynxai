@@ -589,7 +589,7 @@ export default function App() {
               <WatchMemo active={screen === "watch"} />
             </div>
             <div className="enter" style={{ display: screen === "database" ? "block" : "none", height: "100%" }}>
-              <DatabaseMemo requestedProductId={openProductId} onRequestedProductHandled={clearRequestedProduct} />
+              <DatabaseMemo active={screen === "database" || openProductId !== null} requestedProductId={openProductId} onRequestedProductHandled={clearRequestedProduct} />
             </div>
             <div className="enter" style={{ display: screen === "config" ? "block" : "none", height: "100%" }}>
               <ConfigMemo active={screen === "config"} onDirtyChange={setConfigDirty} shakeSignal={configShakeSignal} onLoggedOut={handleLoggedOut} />

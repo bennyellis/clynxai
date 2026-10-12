@@ -110,12 +110,13 @@ export function Activity({
   // Just for resolving a log line's productName to an id on click — not
   // rendered directly, so a plain fetch-once-plus-live-update is enough,
   // same pattern Database.tsx itself uses for its own product list.
-  const [products, setProducts] = useState<ProductProfile[]>([]);
+  // Ids and names only: the whole library (with every photo) used to be loaded here at launch just to turn a name into an id.
+  const [products, setProducts] = useState<Array<{ id: string; name: string }>>([]);
 
   useEffect(() => {
-    api.listProducts().then(setProducts);
+    api.listProductIndex().then(setProducts);
     const off = api.onProductUpdated((updated) => {
-      setProducts((prev) => (prev.some((p) => p.id === updated.id) ? prev.map((p) => (p.id === updated.id ? updated : p)) : [updated, ...prev]));
+      setProducts((prev) => (prev.some((p) => p.id === updated.id) ? prev.map((p) => (p.id === updated.id ? { id: updated.id, name: updated.name } : p)) : [{ id: updated.id, name: updated.name }, ...prev]));
     });
     return () => {
       off();
