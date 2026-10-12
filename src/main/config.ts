@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { preserveCopy, readJsonFileSafe, writeFileAtomicWithBackup } from "./safeFs.js";
 import { randomUUID } from "node:crypto";
 import type { Config } from "./types.js";
 
@@ -268,12 +268,36 @@ function deriveBrowseUrlFromLegacySearchUrl(searchUrl: string): string | null {
   }
 }
 
+// What happened the last time loadConfig met a config.json it could not use as it was. A damaged file is never lost and never
+// silently replaced: it is kept aside (savedCopy) and the app tells the user (index.ts shows a persistent notice).
+export interface ConfigLoadNotice {
+  // restored: the file was damaged, the last known-good copy was put back
+  // reset: the file was damaged and there was no good copy, so settings start from the defaults
+  kind: "restored" | "reset";
+  savedCopy: string | null;
+}
+let lastConfigLoadNotice: ConfigLoadNotice | null = null;
+/** The notice from the most recent loadConfig, once (null when the file loaded normally). */
+export function takeConfigLoadNotice(): ConfigLoadNotice | null {
+  const n = lastConfigLoadNotice;
+  lastConfigLoadNotice = null;
+  return n;
+}
+
 export function loadConfig(configPath: string): Config {
-  if (!existsSync(configPath)) {
+  lastConfigLoadNotice = null;
+  const read = readJsonFileSafe<any>(configPath);
+  if (read.status === "missing") {
     return { ...DEFAULT_CONFIG };
   }
+  if (read.status === "damaged") {
+    lastConfigLoadNotice = { kind: "reset", savedCopy: read.quarantinedTo };
+    return { ...DEFAULT_CONFIG };
+  }
+  if (read.status === "restored") lastConfigLoadNotice = { kind: "restored", savedCopy: read.quarantinedTo };
   try {
-    const raw = JSON.parse(readFileSync(configPath, "utf-8"));
+    const raw = read.value;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("config.json is not a settings object");
     const merged: Config = { ...DEFAULT_CONFIG, ...raw };
 
     // Per explicit instruction — multiple Facebook accounts. A config
@@ -396,10 +420,13 @@ export function loadConfig(configPath: string): Config {
 
     return merged;
   } catch {
+    // The file parsed but could not be used: keep a copy of it before anything can overwrite it with defaults.
+    lastConfigLoadNotice = { kind: "reset", savedCopy: preserveCopy(configPath, "unreadable") };
     return { ...DEFAULT_CONFIG };
   }
 }
 
 export function saveConfig(configPath: string, config: Config): void {
-  writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
+  // Atomic (temp file, then replace) and the previous good file is kept as config.json.bak.
+  writeFileAtomicWithBackup(configPath, JSON.stringify(config, null, 2));
 }

@@ -24,7 +24,7 @@
 // which server (apiUrl) it belongs to, since index.ts needs that to decide
 // which per-user data folder to load *before* any per-user Config exists to
 // read an apiUrl from.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { readJsonFileSafe, writeFileAtomicWithBackup } from "./safeFs.js";
 import type { Config, FeedbackVerdict, ListingRecord, ProductProfile, SyncStatus, Watch, WatchMatch } from "./types.js";
 
 // The wire shape a PUT /watches/:localId body/response uses — Watch's own
@@ -344,10 +344,12 @@ interface CloudSession {
   apiUrl: string | null;
 }
 
-function readSession(sessionPath: string): CloudSession {
+export function readSession(sessionPath: string): CloudSession {
   try {
-    if (!existsSync(sessionPath)) return { deviceId: null, refreshToken: null, userId: null, email: null, apiUrl: null };
-    const raw = JSON.parse(readFileSync(sessionPath, "utf-8"));
+    // A damaged file is moved aside and the last good copy (cloud-session.json.bak) is used, so one bad write cannot log the user out.
+    const read = readJsonFileSafe<any>(sessionPath);
+    if (read.status === "missing" || read.status === "damaged") return { deviceId: null, refreshToken: null, userId: null, email: null, apiUrl: null };
+    const raw = read.value;
     return {
       deviceId: typeof raw?.deviceId === "string" ? raw.deviceId : null,
       refreshToken: typeof raw?.refreshToken === "string" ? raw.refreshToken : null,
@@ -361,9 +363,9 @@ function readSession(sessionPath: string): CloudSession {
   }
 }
 
-function writeSession(sessionPath: string, session: CloudSession): void {
+export function writeSession(sessionPath: string, session: CloudSession): void {
   try {
-    writeFileSync(sessionPath, JSON.stringify(session, null, 2), "utf-8");
+    writeFileAtomicWithBackup(sessionPath, JSON.stringify(session, null, 2));
   } catch (err) {
     console.error("[cloudClient] failed to write cloud-session.json:", err);
   }

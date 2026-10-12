@@ -11,7 +11,9 @@ import { EbayEngine } from "./ebayEngine.js";
 import { hasEbayCredentials } from "./ebayClient.js";
 import { hasOpenAIAccess, initOpenAIProxy } from "./openai.js";
 import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
-import { loadConfig, saveConfig, DEFAULT_CONFIG, DEFAULT_BROWSE_URLS, DEFAULT_COUNTRY_CITIES } from "./config.js";
+import { writeFileAtomicWithBackup } from "./safeFs.js";
+import { NoticeBoard } from "./appNotices.js";
+import { loadConfig, saveConfig, takeConfigLoadNotice, DEFAULT_CONFIG, DEFAULT_BROWSE_URLS, DEFAULT_COUNTRY_CITIES } from "./config.js";
 import {
   streamChat,
   streamNarration,
@@ -124,7 +126,7 @@ function loadAppSettings(): AppSettings {
   }
 }
 function saveAppSettings(settings: AppSettings): void {
-  writeFileSync(APP_SETTINGS_PATH, JSON.stringify(settings, null, 2), "utf-8");
+  writeFileAtomicWithBackup(APP_SETTINGS_PATH, JSON.stringify(settings, null, 2));
 }
 let appSettings: AppSettings = loadAppSettings();
 
@@ -135,7 +137,7 @@ function saveEnvKey(varName: string, key: string): void {
     lines = readFileSync(ENV_PATH, "utf-8").split("\n").filter((l) => !l.startsWith(`${varName}=`));
   }
   lines.push(`${varName}=${trimmed}`);
-  writeFileSync(ENV_PATH, lines.filter(Boolean).join("\n") + "\n", "utf-8");
+  writeFileAtomicWithBackup(ENV_PATH, lines.filter(Boolean).join("\n") + "\n", () => true);
   process.env[varName] = trimmed;
 }
 
@@ -234,6 +236,10 @@ function recordLog(line: LogLine) {
   recentLogs.push(line);
   if (recentLogs.length > 200) recentLogs.shift();
 }
+
+// Problems the user has to know about and can act on (damaged settings or database, expired Facebook login, a scan that keeps
+// failing). They stay on the Dashboard until fixed or dismissed; see appNotices.ts.
+const notices = new NoticeBoard((list) => sendToRenderer("notices:updated", list));
 
 // Per explicit instruction — multiple Facebook accounts scanning
 // concurrently, one ScrapeEngine per account (see createEngineForAccount
@@ -2772,7 +2778,23 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   configurePathsForUser(userId);
   discovery.clear();
 
+  notices.clearAll(); // a different user (or a fresh start) must not inherit the last one's problems
   config = loadConfig(CONFIG_PATH);
+  const configNotice = takeConfigLoadNotice();
+  if (configNotice) {
+    const where = configNotice.savedCopy ? ` The damaged file was kept as ${path.basename(configNotice.savedCopy)} in your Clynx data folder.` : "";
+    notices.set({
+      id: "config-damaged",
+      severity: "warning",
+      title: configNotice.kind === "restored" ? "Your settings file was damaged and restored" : "Your settings file was damaged and reset",
+      message:
+        configNotice.kind === "restored"
+          ? `Clynx put back your last good settings, so nothing was lost except possibly your most recent change.${where}`
+          : `Clynx could not read your settings, so they start from the defaults. Check Config and re-enter anything that looks wrong.${where}`,
+      action: "dismiss",
+      actionLabel: "Got it",
+    });
+  }
   // Per explicit instruction — cloud auth IS how the user got into the app
   // at all now; there's no scenario left where you're logged in but cloud
   // sync is "disabled". apiUrl always mirrors the install-level Server URL
@@ -3015,6 +3037,8 @@ app.whenReady().then(() => {
   // ScrapeEngine, instead of the single implicit engine a one-account setup
   // used to have.
   ipcMain.handle("engine:statusMap", (): Record<string, ScrapeStatus> => Object.fromEntries(engineStatusMap));
+  ipcMain.handle("notices:list", () => notices.list());
+  ipcMain.handle("notices:dismiss", (_e, args: { id: string }) => notices.clear(args.id));
 
   // Multi-user login migration — the interactive login IS the cloud auth
   // now (no more headless CLYNX_CLOUD_EMAIL/PASSWORD env-based bootstrapAuth
