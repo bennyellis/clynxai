@@ -5,3 +5,4 @@ export type { DiscoveryEntry, DiscoveryThought, DiscoverySource } from "../../..
 export type { LocationDiscoveryResult } from "../../../main/locationDiscovery.js";
 export type { MetricsSnapshot, StageStats, EventStats } from "../../../main/metrics.js";
 export type { AppNotice } from "../../../main/appNotices.js";
+export type { StartupProblem } from "../../../main/startupErrors.js";

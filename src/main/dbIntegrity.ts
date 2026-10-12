@@ -9,6 +9,7 @@
 import { spawn } from "node:child_process";
 import { closeSync, copyFileSync, existsSync, openSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { DatabaseRecoveryError } from "./startupErrors.js";
 
 const SQLITE_MAGIC = "SQLite format 3\u0000";
 const COMPANIONS = ["-journal", "-wal", "-shm"];
@@ -67,7 +68,13 @@ export function quarantineDatabase(dbPath: string): string {
       renameSync(from, to);
     } catch {
       copyFileSync(from, to);
-      unlinkSync(from);
+      try {
+        unlinkSync(from);
+      } catch (err) {
+        // The copy exists but the original could not be removed: say where the copy is, so it is not lost track of.
+        (err as { savedCopy?: string }).savedCopy = to;
+        throw err;
+      }
     }
   };
   move(dbPath, dest);
@@ -82,6 +89,15 @@ export function quarantineDatabase(dbPath: string): string {
     }
   }
   return dest;
+}
+
+/** quarantineDatabase, but a failure becomes a DatabaseRecoveryError the app can explain to the user (nothing is ever deleted). */
+function quarantineOrThrow(dbPath: string): string {
+  try {
+    return quarantineDatabase(dbPath);
+  } catch (err) {
+    throw new DatabaseRecoveryError(`The damaged database could not be moved aside: ${(err as Error).message}`, (err as { savedCopy?: string }).savedCopy ?? null, err);
+  }
 }
 
 export interface DatabasePrep {
@@ -99,14 +115,14 @@ export function prepareDatabase(dbPath: string): DatabasePrep {
       /* a stuck marker only means this happens once more */
     }
     if (existsSync(dbPath)) {
-      return { recovered: { reason: "you chose to start fresh", damagedCopy: quarantineDatabase(dbPath), requestedByUser: true } };
+      return { recovered: { reason: "you chose to start fresh", damagedCopy: quarantineOrThrow(dbPath), requestedByUser: true } };
     }
     return { recovered: null };
   }
   if (!existsSync(dbPath)) return { recovered: null };
   const probe = probeDatabaseFile(dbPath);
   if (probe.ok) return { recovered: null };
-  return { recovered: { reason: probe.reason, damagedCopy: quarantineDatabase(dbPath), requestedByUser: false } };
+  return { recovered: { reason: probe.reason, damagedCopy: quarantineOrThrow(dbPath), requestedByUser: false } };
 }
 
 /**
@@ -120,8 +136,13 @@ export function openWithRecovery<T>(dbPath: string, open: () => T): { store: T; 
     // Opening itself failed (a damaged page the quick probe could not see). Keep the file, start fresh once.
     if (!existsSync(dbPath)) throw err;
     const reason = `the database could not be used (${(err as Error).message})`;
-    recovered = { reason, damagedCopy: quarantineDatabase(dbPath), requestedByUser: false };
-    return { store: open(), recovered };
+    recovered = { reason, damagedCopy: quarantineOrThrow(dbPath), requestedByUser: false };
+    try {
+      return { store: open(), recovered };
+    } catch (second) {
+      // Even a fresh database could not be started (disk full, folder locked): the old one is safe; say what happened.
+      throw new DatabaseRecoveryError(`A new database could not be started: ${(second as Error).message}`, recovered.damagedCopy, second);
+    }
   }
 }
 

@@ -12,6 +12,7 @@ import { hasEbayCredentials } from "./ebayClient.js";
 import { hasOpenAIAccess, initOpenAIProxy } from "./openai.js";
 import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
 import { writeFileAtomicWithBackup } from "./safeFs.js";
+import { describeStartupFailure, type StartupProblem } from "./startupErrors.js";
 import { NoticeBoard } from "./appNotices.js";
 import { describeSessionProblem } from "./facebookSession.js";
 import { sendSystemAlert } from "./notify.js";
@@ -3003,7 +3004,9 @@ function createWindow() {
   // with nothing unsaved gets waved through immediately, so this never
   // adds a prompt to the common case.
   mainWindow.on("close", (event) => {
-    if (allowClose) return;
+    // Nobody is logged in (login screen, or a login that failed): there are no Config edits to save and nothing in the renderer to answer
+    // the question, so the window must simply close. Before this the X did nothing on the login screen.
+    if (allowClose || !hasActiveUserSession) return;
     event.preventDefault();
     sendToRenderer("app:closeRequested");
   });
@@ -3096,6 +3099,11 @@ app.whenReady().then(() => {
   // used to have.
   ipcMain.handle("engine:statusMap", (): Record<string, ScrapeStatus> => Object.fromEntries(engineStatusMap));
   ipcMain.handle("notices:list", () => notices.list());
+  // "Show data folder" on the startup-problem screen: the folder holding the user's database and settings (kept files included).
+  ipcMain.handle("app:showDataFolder", async () => {
+    const folder = DB_PATH.startsWith(USERS_ROOT) ? path.dirname(DB_PATH) : USERS_ROOT;
+    await shell.openPath(existsSync(folder) ? folder : baseDir);
+  });
   ipcMain.handle("notices:dismiss", (_e, args: { id: string }) => notices.clear(args.id));
   // "Back up and start fresh": the open database cannot be renamed, so mark it and restart; the next start moves it aside.
   ipcMain.handle("db:recover", () => {
@@ -3121,7 +3129,19 @@ app.whenReady().then(() => {
   // revoking every session ("Refresh token reuse detected; all sessions
   // revoked") — logging the user out for no reason. Concurrent callers now
   // share one in-flight check instead of racing.
-  type SessionCheck = { authenticated: boolean; userId: string | null; email: string | null; apiUrl: string | null };
+  type SessionCheck = { authenticated: boolean; userId: string | null; email: string | null; apiUrl: string | null; startupProblem?: StartupProblem };
+  // Opens the user's data. If that fails (a damaged database that cannot be moved aside, a full disk, a locked folder) the user gets a
+  // plain-words problem on the login screen with a Try again button, instead of a window stuck on "Loading...".
+  async function bootstrapOrExplain(userId: string, email: string): Promise<{ ok: true } | { ok: false; problem: StartupProblem }> {
+    try {
+      await bootstrapUserSession(userId, email);
+      return { ok: true };
+    } catch (err) {
+      console.error("[startup] opening the user's data failed:", err);
+      const folder = DB_PATH.startsWith(USERS_ROOT) ? path.dirname(DB_PATH) : USERS_ROOT;
+      return { ok: false, problem: describeStartupFailure(err, folder) };
+    }
+  }
   let sessionCheckInFlight: Promise<SessionCheck> | null = null;
   async function checkOrRestoreSession(): Promise<SessionCheck> {
     if (hasActiveUserSession && currentUserId) {
@@ -3134,7 +3154,8 @@ app.whenReady().then(() => {
         appSettings = { ...appSettings, cloudApiUrl: restored.apiUrl };
         saveAppSettings(appSettings);
       }
-      await bootstrapUserSession(restored.userId, restored.email ?? "");
+      const opened = await bootstrapOrExplain(restored.userId, restored.email ?? "");
+      if (!opened.ok) return { authenticated: false, userId: null, email: null, apiUrl: restored.apiUrl, startupProblem: opened.problem };
       return { authenticated: true, userId: restored.userId, email: restored.email, apiUrl: restored.apiUrl };
     }
     return { authenticated: false, userId: null, email: null, apiUrl: appSettings.cloudApiUrl };
@@ -3150,26 +3171,28 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     "auth:login",
-    async (_e, args: { apiUrl: string; email: string; password: string }): Promise<{ ok: boolean; userId?: string; email?: string; error?: string }> => {
+    async (_e, args: { apiUrl: string; email: string; password: string }): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem }> => {
       const apiUrl = (args.apiUrl || appSettings.cloudApiUrl).trim();
       const result = await cloudClient.login(apiUrl, args.email.trim(), args.password);
       if (!result.ok || !result.data) return { ok: false, error: result.error ?? "Login failed" };
       appSettings = { ...appSettings, cloudApiUrl: apiUrl };
       saveAppSettings(appSettings);
-      await bootstrapUserSession(result.data.userId, result.data.email);
+      const opened = await bootstrapOrExplain(result.data.userId, result.data.email);
+      if (!opened.ok) return { ok: false, error: opened.problem.message, startupProblem: opened.problem };
       return { ok: true, userId: result.data.userId, email: result.data.email };
     }
   );
 
   ipcMain.handle(
     "auth:register",
-    async (_e, args: { apiUrl: string; email: string; password: string }): Promise<{ ok: boolean; userId?: string; email?: string; error?: string }> => {
+    async (_e, args: { apiUrl: string; email: string; password: string }): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem }> => {
       const apiUrl = (args.apiUrl || appSettings.cloudApiUrl).trim();
       const result = await cloudClient.register(apiUrl, args.email.trim(), args.password);
       if (!result.ok || !result.data) return { ok: false, error: result.error ?? "Registration failed" };
       appSettings = { ...appSettings, cloudApiUrl: apiUrl };
       saveAppSettings(appSettings);
-      await bootstrapUserSession(result.data.userId, result.data.email);
+      const opened = await bootstrapOrExplain(result.data.userId, result.data.email);
+      if (!opened.ok) return { ok: false, error: opened.problem.message, startupProblem: opened.problem };
       return { ok: true, userId: result.data.userId, email: result.data.email };
     }
   );

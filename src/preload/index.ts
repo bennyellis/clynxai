@@ -4,6 +4,7 @@ import type { Account, ActiveProductResearch, BlacklistedImage, BlacklistTerm, C
 import type { ChatMessage, ChatContext, ChatAttachment } from "../main/chat.js";
 import type { MetricsSnapshot } from "../main/metrics.js";
 import type { AppNotice } from "../main/appNotices.js";
+import type { StartupProblem } from "../main/startupErrors.js";
 
 const api = {
   getConfig: (): Promise<Config> => ipcRenderer.invoke("config:get"),
@@ -50,6 +51,8 @@ const api = {
   },
   // Problems that need the user's attention (damaged files, Facebook logged out, a scan that keeps failing); see appNotices.ts.
   listNotices: (): Promise<AppNotice[]> => ipcRenderer.invoke("notices:list"),
+  // Opens the folder holding the user's database and settings in Explorer (the startup-problem screen's "Show data folder").
+  showDataFolder: (): Promise<void> => ipcRenderer.invoke("app:showDataFolder"),
   dismissNotice: (id: string): Promise<void> => ipcRenderer.invoke("notices:dismiss", { id }),
   onNotices: (cb: (notices: AppNotice[]) => void) => {
     const listener = (_e: unknown, notices: AppNotice[]) => cb(notices);
@@ -398,11 +401,11 @@ const api = {
   // refresh token is, exactly like the existing cloud-session.json already
   // did for the old env-based auth).
   auth: {
-    getSession: (): Promise<{ authenticated: boolean; userId: string | null; email: string | null; apiUrl: string | null }> =>
+    getSession: (): Promise<{ authenticated: boolean; userId: string | null; email: string | null; apiUrl: string | null; startupProblem?: StartupProblem }> =>
       ipcRenderer.invoke("auth:getSession"),
-    login: (apiUrl: string, email: string, password: string): Promise<{ ok: boolean; userId?: string; email?: string; error?: string }> =>
+    login: (apiUrl: string, email: string, password: string): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem }> =>
       ipcRenderer.invoke("auth:login", { apiUrl, email, password }),
-    register: (apiUrl: string, email: string, password: string): Promise<{ ok: boolean; userId?: string; email?: string; error?: string }> =>
+    register: (apiUrl: string, email: string, password: string): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem }> =>
       ipcRenderer.invoke("auth:register", { apiUrl, email, password }),
     logout: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("auth:logout"),
   },

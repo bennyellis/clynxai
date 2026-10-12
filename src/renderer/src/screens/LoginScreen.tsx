@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { api } from "../lib/api.js";
+import type { StartupProblem } from "../lib/api.js";
 
 // Multi-user login migration — blocks the ENTIRE app until authenticated
 // (see App.tsx, which renders this instead of everything else until
@@ -35,10 +36,17 @@ function readLastEmail(): string {
 export function LoginScreen({
   defaultApiUrl,
   onAuthenticated,
+  startupProblem = null,
+  onRetry,
 }: {
   defaultApiUrl: string;
   onAuthenticated: () => void;
+  // Opening the user's data failed (damaged database that could not be moved aside, full disk, locked file): explained here.
+  startupProblem?: StartupProblem | null;
+  onRetry?: () => void;
 }) {
+  const [problem, setProblem] = useState<StartupProblem | null>(startupProblem);
+  useEffect(() => setProblem(startupProblem), [startupProblem]);
   const [mode, setMode] = useState<"login" | "register">("login");
   const [apiUrl, setApiUrl] = useState(defaultApiUrl);
   const [email, setEmail] = useState(readLastEmail);
@@ -61,6 +69,10 @@ export function LoginScreen({
         mode === "login"
           ? await api.auth.login(trimmedUrl, trimmedEmail, password)
           : await api.auth.register(trimmedUrl, trimmedEmail, password);
+      if (!result.ok && result.startupProblem) {
+        setProblem(result.startupProblem);
+        return;
+      }
       if (!result.ok) {
         const friendly = friendlyLoginError(result.error ?? (mode === "login" ? "Login failed." : "Registration failed."), trimmedUrl);
         setError(friendly.message);
@@ -95,6 +107,30 @@ export function LoginScreen({
             {mode === "login" ? "Log in to your Clynx account." : "Create a Clynx account."}
           </p>
         </div>
+
+        {problem && (
+          <div role="alert" style={{ display: "flex", flexDirection: "column", gap: 8, padding: 12, borderRadius: 10, border: "1px solid var(--danger)", background: "var(--danger-bg)" }}>
+            <strong style={{ color: "var(--danger)" }}>{problem.title}</strong>
+            <span style={{ fontSize: 13.5, lineHeight: 1.5 }}>{problem.message}</span>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                className="icon"
+                onClick={() => {
+                  setProblem(null);
+                  (onRetry ?? onAuthenticated)();
+                }}
+              >
+                Try again
+              </button>
+              {problem.folder && (
+                <button type="button" className="icon ghost" onClick={() => api.showDataFolder()}>
+                  Show data folder
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         <Field label="Email">
           <input

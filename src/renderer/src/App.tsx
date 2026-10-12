@@ -11,7 +11,7 @@ import { ConfigScreen } from "./screens/Config.js";
 import { Database } from "./screens/Database.js";
 import { LoginScreen } from "./screens/LoginScreen.js";
 import { api } from "./lib/api.js";
-import type { Account, ListingRecord, LogLine, ScrapeStatus } from "./lib/api.js";
+import type { Account, ListingRecord, LogLine, ScrapeStatus, StartupProblem } from "./lib/api.js";
 import { playDealSound, playClickSound, playHoverSound, setSoundEnabled } from "./lib/sound.js";
 import { applyPanelTransparency, applyThemeColors } from "./lib/colorScheme.js";
 import { onParticlesToggle } from "./lib/particles.js";
@@ -131,13 +131,29 @@ export default function App() {
   const [authChecked, setAuthChecked] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [defaultApiUrl, setDefaultApiUrl] = useState(DEFAULT_CLOUD_API_URL);
+  // Opening the user's data failed (see index.ts's bootstrapOrExplain): shown on the login screen with a Try again button.
+  const [startupProblem, setStartupProblem] = useState<StartupProblem | null>(null);
 
   const checkSession = useCallback(() => {
-    api.auth.getSession().then((session) => {
-      if (session.apiUrl) setDefaultApiUrl(session.apiUrl);
-      setAuthenticated(session.authenticated);
-      setAuthChecked(true);
-    });
+    api.auth
+      .getSession()
+      .then((session) => {
+        if (session.apiUrl) setDefaultApiUrl(session.apiUrl);
+        setAuthenticated(session.authenticated);
+        setStartupProblem(session.startupProblem ?? null);
+        setAuthChecked(true);
+      })
+      .catch((err: Error) => {
+        // Never leave the window on "Loading...": say that something went wrong and offer to try again.
+        setStartupProblem({
+          kind: "unknown",
+          title: "Clynx couldn't start",
+          message: `Something went wrong while starting (${String(err?.message ?? err).split("\n")[0].slice(0, 140)}). Click Try again.`,
+          folder: null,
+        });
+        setAuthenticated(false);
+        setAuthChecked(true);
+      });
   }, []);
 
   useEffect(() => {
@@ -511,7 +527,7 @@ export default function App() {
           Loading...
         </div>
       ) : !authenticated ? (
-        <LoginScreen defaultApiUrl={defaultApiUrl} onAuthenticated={handleAuthenticated} />
+        <LoginScreen defaultApiUrl={defaultApiUrl} onAuthenticated={handleAuthenticated} startupProblem={startupProblem} onRetry={handleAuthenticated} />
       ) : (
         <>
           <Sidebar
