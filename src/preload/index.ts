@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { DiscoveryEntry } from "../main/discovery.js";
+import type { OnboardingState } from "../main/types.js";
 import type { Account, ActiveProductResearch, BlacklistedImage, BlacklistTerm, CloudStatus, Config, FeedbackVerdict, ListingRecord, LogLine, ProductImage, ProductProfile, ScrapeStatus, Watch, WatchMatch, WatchPlatform } from "../main/types.js";
 import type { ChatMessage, ChatContext, ChatAttachment } from "../main/chat.js";
 import type { MetricsSnapshot } from "../main/metrics.js";
@@ -51,6 +52,8 @@ const api = {
   },
   // Problems that need the user's attention (damaged files, Facebook logged out, a scan that keeps failing); see appNotices.ts.
   listNotices: (): Promise<AppNotice[]> => ipcRenderer.invoke("notices:list"),
+  // First-run checklist state.
+  updateOnboarding: (patch: Partial<OnboardingState>): Promise<void> => ipcRenderer.invoke("onboarding:update", patch),
   // Phone alerts (ntfy) setup.
   generateNtfyTopic: (): Promise<string> => ipcRenderer.invoke("ntfy:generateTopic"),
   sendTestNotification: (server: string, topic: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke("ntfy:sendTest", { server, topic }),

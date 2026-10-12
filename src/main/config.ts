@@ -188,6 +188,8 @@ export const DEFAULT_CONFIG: Config = {
   lowAiMode: true,
   // "Worth a look" finds stay in the Feed only unless this is turned on (then they are pushed quietly).
   notifyWorthALook: false,
+  // A brand-new install sees the checklist; loadConfig marks it already dismissed for a config file that predates it.
+  onboarding: { dismissed: false, facebookConnected: false, locationChosen: false, phoneSkipped: false },
   recentSearches: [],
   ebayStoreUsername: "",
   searchItems: [],
@@ -299,6 +301,11 @@ export function loadConfig(configPath: string): Config {
     const raw = read.value;
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("config.json is not a settings object");
     const merged: Config = { ...DEFAULT_CONFIG, ...raw };
+    // An existing customer upgrading must not suddenly be nagged with a first-run checklist: it starts dismissed (still in Config).
+    // Missing fields of a partly saved checklist fall back to "not done".
+    merged.onboarding = raw.onboarding && typeof raw.onboarding === "object"
+      ? { ...DEFAULT_CONFIG.onboarding!, ...raw.onboarding }
+      : { ...DEFAULT_CONFIG.onboarding!, dismissed: true };
 
     // Per explicit instruction — multiple Facebook accounts. A config
     // saved before this existed described its ONE location flatly

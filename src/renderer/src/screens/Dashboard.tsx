@@ -4,6 +4,7 @@ import { api } from "../lib/api.js";
 import { playStartSound, playStopSound } from "../lib/sound.js";
 import { Modal } from "../components/Modal.js";
 import { NoticesPanel, useNotices } from "../components/NoticesPanel.js";
+import { OnboardingChecklist } from "../components/OnboardingChecklist.js";
 import { describeScannerState } from "../lib/scannerState.js";
 import { explainScannerError } from "../../../main/scannerErrors.js";
 import { WatchFormFlow } from "../components/WatchFormFlow.js";
@@ -26,6 +27,7 @@ export function Dashboard({
   onStart,
   onStop,
   onGoToFeed,
+  onGoToConfig,
 }: {
   accounts: Account[];
   statusMap: Record<string, ScrapeStatus>;
@@ -33,6 +35,7 @@ export function Dashboard({
   onStart: (accountId: string) => void;
   onStop: (accountId: string) => void;
   onGoToFeed: () => void;
+  onGoToConfig: () => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   // Config's "Search Facebook Marketplace" master toggle (see Config.tsx) —
@@ -205,6 +208,8 @@ export function Dashboard({
           </div>
 
           <NoticesPanel notices={notices} statusMap={statusMap} />
+
+          <OnboardingChecklist accounts={accounts} statusMap={statusMap} onGoToConfig={onGoToConfig} />
 
           {accountsWithErrors.map((account) => (
             <div key={account.id} className="card enter" style={{ borderColor: "rgba(248,113,113,0.35)", color: "var(--danger)" }}>

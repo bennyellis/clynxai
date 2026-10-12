@@ -355,6 +355,9 @@ export interface Config {
   lowAiMode: boolean;
   // Also push "Worth a look" finds (quietly, low priority). Off by default: they stay in the Feed only.
   notifyWorthALook?: boolean;
+  // First-run checklist ("Get started" on the Dashboard). Which steps are done is worked out from the real state where it can be (a Facebook
+  // login, a search location, a product, a phone topic); these flags only remember what cannot be seen from the state.
+  onboarding?: OnboardingState;
   // The last products searched for (newest first) with their price ranges, kept across restarts so they can be added again in one
   // click (the Search For list itself resets every launch).
   recentSearches: RecentSearch[];
@@ -723,6 +726,17 @@ export type DealTier = "search" | "general" | null;
 //   worth_a_look    interesting but unverified (Feed only)   pass         not a deal
 // "Qualified" (a real Deal) means profitable_now or negotiation.
 export type DealStatus = "profitable_now" | "negotiation" | "worth_a_look" | "pass";
+
+export interface OnboardingState {
+  // The user closed the checklist. It stays reachable from Config > "Setup checklist".
+  dismissed: boolean;
+  // A Facebook login has been confirmed at least once on this install.
+  facebookConnected: boolean;
+  // The user confirmed a search location (including "nationwide is fine").
+  locationChosen: boolean;
+  // The user chose to skip phone alerts for now (they are optional).
+  phoneSkipped: boolean;
+}
 
 export interface GateReasonRecord {
   code: string;

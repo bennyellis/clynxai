@@ -673,6 +673,16 @@ export function ConfigScreen({
         </Section>
       )}
 
+      {tab === "account" && (
+        <Section title="Setup checklist" subtitle="The Get started steps shown on the Dashboard for a new install: connect Facebook, choose where to look, add a product, phone alerts.">
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <button className="icon" onClick={() => api.updateOnboarding({ dismissed: false })}>
+              Show the setup checklist on the Dashboard
+            </button>
+            <span style={{ fontSize: 13, color: "var(--text-dim)" }}>It ticks off each step from what you've already set up.</span>
+          </div>
+        </Section>
+      )}
       {tab === "account" && <CloudSyncSection onLoggedOut={onLoggedOut} />}
       </div>
     </div>

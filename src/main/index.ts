@@ -61,7 +61,7 @@ import { WatchSyncService } from "./watchSync.js";
 import { ListingIngestSyncService } from "./listingIngestSync.js";
 import { FeedbackSyncService } from "./feedbackSync.js";
 import { ProductSyncService } from "./productSync.js";
-import type { Account, ActiveProductResearch, CloudStatus, Config, EngineConfig, FeedbackVerdict, LogLine, ProductProfile, ScrapeStatus, SearchItem, Watch, WatchPlatform, WatchTerm } from "./types.js";
+import type { Account, ActiveProductResearch, CloudStatus, Config, EngineConfig, FeedbackVerdict, LogLine, OnboardingState, ProductProfile, ScrapeStatus, SearchItem, Watch, WatchPlatform, WatchTerm } from "./types.js";
 import { rmSync } from "node:fs";
 
 Menu.setApplicationMenu(null);
@@ -2429,6 +2429,12 @@ function createEngineForAccount(accountId: string): ScrapeEngine {
       void sendSystemAlert(config, `Clynx: ${info.title}`, info.message);
     },
     onStatus: (status) => {
+      // The first time any account is seen logged in, remember it for the first-run checklist.
+      if (status.loggedIn === true && config.onboarding && !config.onboarding.facebookConnected) {
+        config = { ...config, onboarding: { ...config.onboarding, facebookConnected: true } };
+        saveConfig(CONFIG_PATH, config);
+        sendToRenderer("config:updated", config);
+      }
       engineStatusMap.set(accountId, status);
       broadcastEngineStatusMap();
     },
@@ -3025,7 +3031,8 @@ app.whenReady().then(() => {
 
   ipcMain.handle("config:get", () => config);
   ipcMain.handle("config:save", (_e, next: Config) => {
-    config = { ...DEFAULT_CONFIG, ...next };
+    // The checklist state is owned by the main process (the Config screen has no control for it and may hold an older copy).
+    config = { ...DEFAULT_CONFIG, ...next, onboarding: config.onboarding ?? next.onboarding ?? DEFAULT_CONFIG.onboarding };
     saveConfig(CONFIG_PATH, config);
     // Safety net for the general save path — the dedicated accounts:*
     // handlers already call this themselves, but if the account roster
@@ -3100,6 +3107,15 @@ app.whenReady().then(() => {
   // used to have.
   ipcMain.handle("engine:statusMap", (): Record<string, ScrapeStatus> => Object.fromEntries(engineStatusMap));
   ipcMain.handle("notices:list", () => notices.list());
+  // The first-run checklist: remember what cannot be seen from the state (dismissed, skipped, "nationwide is fine").
+  ipcMain.handle("onboarding:update", (_e, patch: Partial<OnboardingState>) => {
+    const allowed: Array<keyof OnboardingState> = ["dismissed", "facebookConnected", "locationChosen", "phoneSkipped"];
+    const next = { ...(config.onboarding ?? DEFAULT_CONFIG.onboarding!) };
+    for (const key of allowed) if (typeof patch?.[key] === "boolean") next[key] = patch[key] as boolean;
+    config = { ...config, onboarding: next };
+    saveConfig(CONFIG_PATH, config);
+    sendToRenderer("config:updated", config);
+  });
   // Phone alerts (ntfy) setup: a new private topic, a test message to the server and topic typed on screen (saved or not), and a save
   // that touches only the ntfy settings. Existing topics (and Watches' own topics) are never changed by any of these on their own.
   ipcMain.handle("ntfy:generateTopic", (): string => generateNtfyTopic());

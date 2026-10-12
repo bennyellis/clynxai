@@ -300,6 +300,7 @@ export default function App() {
 
   const goToFeed = useCallback(() => handleSelectScreen("feed"), [handleSelectScreen]);
   const goToDashboard = useCallback(() => handleSelectScreen("dashboard"), [handleSelectScreen]);
+  const goToConfig = useCallback(() => handleSelectScreen("config"), [handleSelectScreen]);
   const scannerKind = useMemo(() => describeScannerState({ accounts, statusMap, notices, facebookEnabled }).kind, [accounts, statusMap, notices, facebookEnabled]);
 
   // A clicked desktop notification (a Watch found something) opens the screen it names.
@@ -575,6 +576,7 @@ export default function App() {
                 onStart={startAccount}
                 onStop={stopAccount}
                 onGoToFeed={goToFeed}
+                onGoToConfig={goToConfig}
               />
             </div>
             <div className="enter" style={{ display: screen === "activity" ? "block" : "none", height: "100%" }}>
