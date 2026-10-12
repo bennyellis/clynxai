@@ -32,14 +32,15 @@ export function describeDealNumbers(r: Input): DealNumbers | null {
   if (!r.dealStatus) return null; // never gated (older listing): the card shows what it always did
 
   const order = { bad: 0, warn: 1, info: 2, good: 3 } as const;
-  const shown = [...r.gateReasons]
+  const reasons = r.gateReasons ?? []; // tolerate a record that predates the field
+  const shown = [...reasons]
     .filter((x) => x.code !== "MARGIN_OK") // restates the figures shown beside it
     .sort((a, b) => order[a.severity] - order[b.severity])
     .map((x) => x.text)
     .filter((t) => t !== r.gateHeadline);
-  const base = { reasons: shown.slice(0, 2), allReasons: r.gateReasons.map((x) => x.text) };
+  const base = { reasons: shown.slice(0, 2), allReasons: reasons.map((x) => x.text) };
 
-  const f = r.gateFacts;
+  const f = r.gateFacts ?? null;
   if (!f) {
     return { hasFigures: false, resale: null, keep: null, profit: null, profitTone: "muted", margin: null, support: "The numbers behind this verdict weren't saved for this listing.", supportTone: "muted", atTarget: null, ...base };
   }

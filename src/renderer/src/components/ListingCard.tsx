@@ -55,7 +55,7 @@ function StarRating({ rating }: { rating: number }) {
 const DEFAULT_CARD_WIDTH = 300;
 const DEFAULT_IMAGE_HEIGHT = 260;
 // Taller than before (was 490) to make room for the resale / profit lines under the verdict chip.
-const DEFAULT_CARD_HEIGHT = 556;
+const DEFAULT_CARD_HEIGHT = 576;
 
 /** A card's height for a given card width (the Feed's size slider), so the Feed can lay cards out without rendering them. */
 export function listingCardHeight(cardWidth: number): number {
@@ -639,6 +639,7 @@ function ListingCardImpl({
             textDecoration: "none",
             display: "-webkit-box",
             WebkitLineClamp: 2,
+            flexShrink: 0, // never squeezed by the lines below it (the title lost its second line on cards with long explanations)
             WebkitBoxOrient: "vertical",
             overflow: "hidden",
             overflowWrap: "anywhere",
