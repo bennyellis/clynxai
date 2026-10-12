@@ -2414,6 +2414,18 @@ function createEngineForAccount(accountId: string): ScrapeEngine {
       notices.set({ id: noticeId, severity: "error", title: words.title, message: words.message, action: "open-facebook-login", actionLabel: "Open Facebook", accountId });
       void sendSystemAlert(config, `Clynx: ${words.title}`, words.short);
     },
+    // Scan cycles failing several times in a row: say why in plain words, with a Try again button, until one works. One phone push
+    // per cause, since a stalled scanner is exactly what the user cannot see from the couch.
+    onCycleFailing: (info) => {
+      const noticeId = `scan-failing:${accountId}`;
+      if (!info) {
+        notices.clear(noticeId);
+        return;
+      }
+      const label = currentAccount().label;
+      notices.set({ id: noticeId, severity: "error", title: `${info.title} (${label})`, message: info.message, action: "retry-scanner", actionLabel: "Try again", accountId });
+      void sendSystemAlert(config, `Clynx: ${info.title}`, info.message);
+    },
     onStatus: (status) => {
       engineStatusMap.set(accountId, status);
       broadcastEngineStatusMap();

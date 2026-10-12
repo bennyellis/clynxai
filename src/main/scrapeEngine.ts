@@ -2,6 +2,7 @@ import { powerSaveBlocker } from "electron";
 import { isLowAiMode } from "./aiMode.js";
 import type { BrowserContext, Page } from "playwright";
 import { openPersistentContext, isLoggedIn, politeDelay } from "./browser.js";
+import { explainScannerError, failureBackoffMs, FAILING_CYCLES_BEFORE_NOTICE, type ScannerErrorExplanation } from "./scannerErrors.js";
 import { classifyFacebookPage, describeSessionProblem, readPageSnapshot, looksLikeHealthyFacebookPage, type SessionProblem } from "./facebookSession.js";
 import { buildWatchSearchUrl, browseListings, searchMarketplace, fetchListingDetail, diagnoseEmptyPage, verifyOrSetRadius, readCurrentLocationLabel } from "./scraper.js";
 import {
@@ -274,6 +275,9 @@ export interface ScrapeEngineOptions {
   // Fired when this account's Facebook session is found to be unusable (logged out, or stopped by a security check), and again with
   // null once it is working again. Only on a change, never repeated, so the owner can raise and clear a persistent notice.
   onSessionProblem?: (problem: SessionProblem | null) => void;
+  // Fired when scan cycles keep failing (FAILING_CYCLES_BEFORE_NOTICE in a row), with a plain-words explanation, and with null once a
+  // cycle works again. Only on a change, so the owner can raise and clear a persistent notice.
+  onCycleFailing?: (info: (ScannerErrorExplanation & { failures: number }) | null) => void;
   // Fired for a live AI one-liner — a reaction to a deal, or a recap after
   // finishing a batch. Best-effort: narration failures are swallowed by
   // the caller so an OpenAI hiccup never breaks scraping.
@@ -536,6 +540,8 @@ export class ScrapeEngine {
   // The Facebook session problem found on the page the scanner is looking at (see guardSession). sessionBroken ends the current
   // cycle early; reportedProblem remembers what the owner was last told, so it hears about changes only.
   private sessionBroken = false;
+  private consecutiveFailures = 0;
+  private reportedFailureKind: string | null = null;
   private reportedProblem: SessionProblem | null = null;
   // Which Search For item currently gets the dedicated active search, and
   // how many listings have been evaluated for it since the last switch —
@@ -722,6 +728,32 @@ export class ScrapeEngine {
     this.setStatus({ loggedIn });
     this.noteSession(loggedIn ? null : "logged-out");
     return loggedIn;
+  }
+
+  // A cycle that threw: counted, and once it has happened FAILING_CYCLES_BEFORE_NOTICE times in a row the owner is told why in plain
+  // words (and again if the cause changes). A cycle that finishes without throwing resets the count and withdraws the notice.
+  private noteCycleFailed(message: string): void {
+    this.consecutiveFailures++;
+    if (this.consecutiveFailures < FAILING_CYCLES_BEFORE_NOTICE) return;
+    const explained = explainScannerError(message);
+    if (this.reportedFailureKind === explained.kind) return;
+    this.reportedFailureKind = explained.kind;
+    try {
+      this.opts.onCycleFailing?.({ ...explained, failures: this.consecutiveFailures });
+    } catch {
+      /* a notice that cannot be shown must not break scanning */
+    }
+  }
+
+  private noteCycleSucceeded(): void {
+    this.consecutiveFailures = 0;
+    if (this.reportedFailureKind === null) return;
+    this.reportedFailureKind = null;
+    try {
+      this.opts.onCycleFailing?.(null);
+    } catch {
+      /* see above */
+    }
   }
 
   // Tells the owner (once per change) what is wrong with the Facebook session, or that it is fine again.
@@ -3653,11 +3685,15 @@ export class ScrapeEngine {
 
   private async loop(): Promise<void> {
     while (!this.stopRequested) {
+      let cycleFailed = false;
       try {
         await this.runOnce();
+        this.noteCycleSucceeded();
       } catch (err) {
+        cycleFailed = true;
         this.setStatus({ lastError: (err as Error).message });
         this.log("error", `Cycle failed: ${(err as Error).message}`);
+        this.noteCycleFailed((err as Error).message);
       }
       if (this.stopRequested) break;
       // The wait between passes (Config > "Wait between passes"; 0 = none). While it lasts the Dashboard's Live panel says so
@@ -3665,9 +3701,12 @@ export class ScrapeEngine {
       const config = this.opts.getConfig();
       const lowMin = Math.max(0, config.pollIntervalMinutesMin);
       const highMin = Math.max(lowMin, config.pollIntervalMinutesMax);
-      const waitMin = lowMin + Math.random() * (highMin - lowMin);
+      let waitMin = lowMin + Math.random() * (highMin - lowMin);
+      // A cycle that failed is retried after a growing pause (30 s, 1, 2, 4 ... 10 min), even when "Wait between passes" is 0:
+      // retrying a broken browser or a dead connection in a tight loop helps nothing and can get an account flagged.
+      if (cycleFailed) waitMin = Math.max(waitMin, failureBackoffMs(this.consecutiveFailures) / 60_000);
       if (waitMin > 0) {
-        this.log("info", `Cycle done. Sleeping ~${waitMin.toFixed(1)} min.`);
+        this.log("info", `${cycleFailed ? "Cycle failed" : "Cycle done"}. ${cycleFailed ? "Trying again" : "Sleeping"} in ~${waitMin.toFixed(1)} min.`);
         // A wake request from a Watch that finished DURING the cycle just ended is
         // stale (the cycle already ran after it); only one arriving mid-wait counts.
         this.wakeRequested = false;

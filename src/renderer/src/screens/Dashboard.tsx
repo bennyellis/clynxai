@@ -3,6 +3,7 @@ import type { Account, Config, ListingRecord, ProductProfile, ScrapeStatus, Sear
 import { api } from "../lib/api.js";
 import { playStartSound, playStopSound } from "../lib/sound.js";
 import { Modal } from "../components/Modal.js";
+import { NoticesPanel, useNotices } from "../components/NoticesPanel.js";
 import { WatchFormFlow } from "../components/WatchFormFlow.js";
 import {
   FlameIcon,
@@ -80,7 +81,9 @@ export function Dashboard({
     }
   }
 
-  const accountsWithErrors = accounts.filter((a) => statusMap[a.id]?.lastError);
+  // A problem that has its own notice (Facebook logged out, scans failing) is shown there, with a button, not repeated as a bare error line.
+  const notices = useNotices();
+  const accountsWithErrors = accounts.filter((a) => statusMap[a.id]?.lastError && !notices.some((n) => n.accountId === a.id));
   // Per explicit instruction — back to a single green Start / red Stop
   // pair (not a per-account row each, not a separate "start all" bar on
   // top of that) — these two just act on every account at once now.
@@ -176,6 +179,8 @@ export function Dashboard({
             <StatCard label="Listings evaluated" value={totalListingsEvaluated} />
             <StatCard label="Deals in last 24h" value={dealsToday} accent="var(--success)" />
           </div>
+
+          <NoticesPanel notices={notices} statusMap={statusMap} />
 
           {accountsWithErrors.map((account) => (
             <div key={account.id} className="card enter" style={{ borderColor: "rgba(248,113,113,0.35)", color: "var(--danger)" }}>

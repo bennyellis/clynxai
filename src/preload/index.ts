@@ -3,6 +3,7 @@ import type { DiscoveryEntry } from "../main/discovery.js";
 import type { Account, ActiveProductResearch, BlacklistedImage, BlacklistTerm, CloudStatus, Config, FeedbackVerdict, ListingRecord, LogLine, ProductImage, ProductProfile, ScrapeStatus, Watch, WatchMatch, WatchPlatform } from "../main/types.js";
 import type { ChatMessage, ChatContext, ChatAttachment } from "../main/chat.js";
 import type { MetricsSnapshot } from "../main/metrics.js";
+import type { AppNotice } from "../main/appNotices.js";
 
 const api = {
   getConfig: (): Promise<Config> => ipcRenderer.invoke("config:get"),
@@ -47,6 +48,16 @@ const api = {
     ipcRenderer.on("engine:statusMap", listener);
     return () => ipcRenderer.removeListener("engine:statusMap", listener);
   },
+  // Problems that need the user's attention (damaged files, Facebook logged out, a scan that keeps failing); see appNotices.ts.
+  listNotices: (): Promise<AppNotice[]> => ipcRenderer.invoke("notices:list"),
+  dismissNotice: (id: string): Promise<void> => ipcRenderer.invoke("notices:dismiss", { id }),
+  onNotices: (cb: (notices: AppNotice[]) => void) => {
+    const listener = (_e: unknown, notices: AppNotice[]) => cb(notices);
+    ipcRenderer.on("notices:updated", listener);
+    return () => ipcRenderer.removeListener("notices:updated", listener);
+  },
+  // Moves a damaged database aside and restarts Clynx with a fresh one (the damaged file is kept).
+  recoverDatabase: (): Promise<void> => ipcRenderer.invoke("db:recover"),
   startEngine: (accountId: string): Promise<void> => ipcRenderer.invoke("engine:start", { accountId }),
   stopEngine: (accountId: string): Promise<void> => ipcRenderer.invoke("engine:stop", { accountId }),
   skipEngineWait: (accountId: string): Promise<void> => ipcRenderer.invoke("engine:skipWait", { accountId }),

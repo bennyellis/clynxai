@@ -4,3 +4,4 @@ export type { ChatMessage, ChatContext, ChatAttachment } from "../../../main/cha
 export type { DiscoveryEntry, DiscoveryThought, DiscoverySource } from "../../../main/discovery.js";
 export type { LocationDiscoveryResult } from "../../../main/locationDiscovery.js";
 export type { MetricsSnapshot, StageStats, EventStats } from "../../../main/metrics.js";
+export type { AppNotice } from "../../../main/appNotices.js";
