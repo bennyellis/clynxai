@@ -1,6 +1,7 @@
 import type { Config, ScoredListing, Watch } from "./types.js";
 import type { AlertSummary } from "./dealSummary.js";
 import { downloadImageBuffer } from "./webResearch.js";
+import { describeTopicStrength, explainNtfyFailure, type TestNotificationResult } from "./ntfySetup.js";
 
 // eBay Browse API integration — narrowed from EngineConfig (Config minus
 // accounts, plus one Account) down to just what this file actually reads.
@@ -109,6 +110,27 @@ export async function sendSystemAlert(config: NotifyConfig, title: string, messa
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * The "Send test notification" button: sends one clearly-labelled message to the given server and topic (the values typed on screen, saved or
+ * not) and says in plain words whether it went out. Validates first so a typo can never turn into a request to some other address.
+ */
+export async function sendTestNotification(config: NotifyConfig): Promise<TestNotificationResult> {
+  const server = (config.ntfy?.server ?? "").trim();
+  const topic = (config.ntfy?.topic ?? "").trim();
+  if (!topic) return { ok: false, message: "Enter a topic first (or press Generate private topic), then send the test." };
+  if (describeTopicStrength(topic) === "invalid") return { ok: false, message: "Topics can only use letters, numbers, dashes and underscores (up to 64 characters)." };
+  if (!/^https?:\/\/[^\s/?#]+(:\d+)?\/?$/i.test(server)) return { ok: false, message: "The server address should look like https://ntfy.sh" };
+  try {
+    await postNtfyMessage(
+      { ntfy: { server, topic } },
+      { title: "Clynx test notification", message: "It works! Clynx will send deal alerts to this phone.", click: "", priority: "default", tags: "white_check_mark", photoUrl: null, photoFilenamePrefix: "test" }
+    );
+    return { ok: true, message: "Test notification sent. It should appear on your phone within a few seconds. If it doesn't, check that the ntfy app is subscribed to exactly this topic." };
+  } catch (err) {
+    return { ok: false, message: explainNtfyFailure((err as Error).message ?? "") };
   }
 }
 

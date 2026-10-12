@@ -15,7 +15,8 @@ import { writeFileAtomicWithBackup } from "./safeFs.js";
 import { describeStartupFailure, type StartupProblem } from "./startupErrors.js";
 import { NoticeBoard } from "./appNotices.js";
 import { describeSessionProblem } from "./facebookSession.js";
-import { sendSystemAlert } from "./notify.js";
+import { sendSystemAlert, sendTestNotification } from "./notify.js";
+import { describeTopicStrength, generateNtfyTopic } from "./ntfySetup.js";
 import { openWithRecovery, requestRecovery, runIntegrityCheckInBackground } from "./dbIntegrity.js";
 import { loadConfig, saveConfig, takeConfigLoadNotice, DEFAULT_CONFIG, DEFAULT_BROWSE_URLS, DEFAULT_COUNTRY_CITIES } from "./config.js";
 import {
@@ -3099,6 +3100,19 @@ app.whenReady().then(() => {
   // used to have.
   ipcMain.handle("engine:statusMap", (): Record<string, ScrapeStatus> => Object.fromEntries(engineStatusMap));
   ipcMain.handle("notices:list", () => notices.list());
+  // Phone alerts (ntfy) setup: a new private topic, a test message to the server and topic typed on screen (saved or not), and a save
+  // that touches only the ntfy settings. Existing topics (and Watches' own topics) are never changed by any of these on their own.
+  ipcMain.handle("ntfy:generateTopic", (): string => generateNtfyTopic());
+  ipcMain.handle("ntfy:sendTest", (_e, args: { server: string; topic: string }) => sendTestNotification({ ntfy: { server: String(args?.server ?? ""), topic: String(args?.topic ?? "") } }));
+  ipcMain.handle("ntfy:save", (_e, args: { server: string; topic: string }): { ok: boolean; message?: string } => {
+    const topic = String(args?.topic ?? "").trim();
+    const server = String(args?.server ?? "").trim() || config.ntfy.server;
+    if (topic && describeTopicStrength(topic) === "invalid") return { ok: false, message: "Topics can only use letters, numbers, dashes and underscores (up to 64 characters)." };
+    config = { ...config, ntfy: { ...config.ntfy, server, topic } };
+    saveConfig(CONFIG_PATH, config);
+    sendToRenderer("config:updated", config);
+    return { ok: true };
+  });
   // "Show data folder" on the startup-problem screen: the folder holding the user's database and settings (kept files included).
   ipcMain.handle("app:showDataFolder", async () => {
     const folder = DB_PATH.startsWith(USERS_ROOT) ? path.dirname(DB_PATH) : USERS_ROOT;

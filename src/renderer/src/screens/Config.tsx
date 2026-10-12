@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { Account, CloudStatus, Config as ConfigType } from "../lib/api.js";
+import { NtfySetup } from "../components/NtfySetup.js";
 import { api } from "../lib/api.js";
 import { Modal } from "../components/Modal.js";
 import { setSoundEnabled } from "../lib/sound.js";
@@ -668,14 +669,7 @@ export function ConfigScreen({
             checked={cfg.notifyWorthALook === true}
             onChange={(v) => update("notifyWorthALook", v)}
           />
-          <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-            <Field label="Server">
-              <input value={cfg.ntfy.server} onChange={(e) => update("ntfy", { ...cfg.ntfy, server: e.target.value })} />
-            </Field>
-            <Field label="Topic (private, hard to guess)">
-              <input value={cfg.ntfy.topic} onChange={(e) => update("ntfy", { ...cfg.ntfy, topic: e.target.value })} />
-            </Field>
-          </div>
+          <NtfySetup server={cfg.ntfy.server} topic={cfg.ntfy.topic} onChange={(next) => update("ntfy", { ...cfg.ntfy, ...next })} />
         </Section>
       )}
 

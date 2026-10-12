@@ -51,6 +51,10 @@ const api = {
   },
   // Problems that need the user's attention (damaged files, Facebook logged out, a scan that keeps failing); see appNotices.ts.
   listNotices: (): Promise<AppNotice[]> => ipcRenderer.invoke("notices:list"),
+  // Phone alerts (ntfy) setup.
+  generateNtfyTopic: (): Promise<string> => ipcRenderer.invoke("ntfy:generateTopic"),
+  sendTestNotification: (server: string, topic: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke("ntfy:sendTest", { server, topic }),
+  saveNtfySettings: (server: string, topic: string): Promise<{ ok: boolean; message?: string }> => ipcRenderer.invoke("ntfy:save", { server, topic }),
   // Opens the folder holding the user's database and settings in Explorer (the startup-problem screen's "Show data folder").
   showDataFolder: (): Promise<void> => ipcRenderer.invoke("app:showDataFolder"),
   dismissNotice: (id: string): Promise<void> => ipcRenderer.invoke("notices:dismiss", { id }),
