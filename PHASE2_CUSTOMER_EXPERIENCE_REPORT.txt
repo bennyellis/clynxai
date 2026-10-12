@@ -1,0 +1,142 @@
+CLYNX: PHASE 2 REPORT (CUSTOMER EXPERIENCE AND ONBOARDING)
+===========================================================
+Rollback point: git tag checkpoint-before-phase2 (commit 4ff8b3b). Phase 2 is the commits after it, one per item.
+No billing or subscription work was started. No deal-qualification logic was changed (see "Deal-quality note").
+
+RESULT AT A GLANCE
+  Unit tests    18 files, all pass (5 new: ntfySetup, dealNumbers, scannerState, onboarding, startupErrors). Typecheck clean. Build ok.
+  Real app      8 sandboxed Electron runs, 183 checks, 0 failures (details in section 4). Earlier Phase 1 and deal-quality suites re-run: all pass.
+  Defects found by those runs and fixed along the way: 3 (section 5).
+  Not verified   live Facebook, a real phone receiving a notification, a packaged installer (section 6).
+
+
+1. WHAT WAS BUILT (per item)
+----------------------------
+1  First-run checklist ("Get started", top of the Dashboard)
+   Steps: Connect Facebook, Choose where to look, Add your first product, Get deal alerts on your phone (marked Recommended, skippable).
+   - Each step is ticked from REAL state, not from clicks: a live Facebook login (remembered once seen), a state/city/ZIP chosen (or
+     "Nationwide is fine"), something on the Search For list or in recent searches, a phone topic set (or skipped).
+   - Each step explains itself in plain words and has one button: Open Facebook and log in (uses the existing login window; says the password
+     goes to Facebook, never into Clynx); Choose a city or state (to Config) / Nationwide is fine; Add a product (small dialog with examples and
+     an optional price limit, through the same path as the Dashboard's own Add); Set up phone alerts (the new setup dialog) / Skip for now.
+   - Optional integrations (eBay, a free WatchCount login) are listed apart under "Optional extras (you can ignore these)", each marked Optional,
+     and do not count toward progress.
+   - Dismissible ("Hide checklist") and always reachable: a "Show the setup checklist" link on the Dashboard and a button in Config > Account.
+     Steps are an ordered list, status is words (Done / To do) as well as colour, progress is a status region.
+   - Existing customers are not nagged: a config saved before this existed loads with the checklist already dismissed (their settings untouched).
+2  Feed cards: resale value, net proceeds, profit, margin, why
+   Under the verdict chip: "Sells ~$600  Keep ~$504  Profit +$204 (41%)", a support line, and up to two short reasons.
+   - Support wording follows the evidence: "Based on 8 recent eBay sales." / "Based on 4 eBay sales." / "Rough estimate: only 2 sales to go on." /
+     "Rough estimate: asking prices only, no confirmed sales." / "From the reference price you set." / "No resale estimate yet: Clynx doesn't guess
+     one." (no figures at all). Verified extras are mentioned. A loss shows as a negative profit. A negotiation adds "At a $400 offer: about
+     +$104 profit".
+   - Nothing is recomputed on screen. The gate's own numbers are now saved with its verdict (new gate_facts column; old rows read as "numbers
+     weren't saved" and show no figures). Older, never-gated listings look exactly as before.
+   - Cards are 20 px taller (556 to 576 high at the default width) and titles use two lines instead of three, to fit the new lines.
+3  Phone alerts (ntfy) setup (Config > Notifications and the checklist)
+   - Step-by-step "how to connect your phone" (install ntfy, subscribe to the topic, press test).
+   - Generate private topic: "clynx-" plus 26 random characters from a cryptographic source (about 134 bits, unbiased sampling). Nothing is
+     generated or changed unless the user asks. An existing topic is never replaced without a confirmation that warns the phone must
+     re-subscribe; an easy-to-guess existing topic (for example the one already in use) only gets an honest warning.
+   - Send test notification: sends one labelled test to the server and topic on screen (saved or not), and answers in plain words: sent / no
+     topic / invalid topic / bad server address / too many messages / topic refused / can't reach the server / timed out. It validates first, so
+     a typo can never become a request to another address. Copy topic button. Watches with their own topic are never touched.
+4  Status and empty states
+   - One status line on the Dashboard: Scanner stopped / Starting up / Scanning / Waiting for the next pass / Waiting for you to log in to
+     Facebook / Scanning is failing / Facebook scanning is off / No Facebook account set up, each with the next step. It is a live region.
+   - The Feed's empty state says why it is empty and offers "Go to the Dashboard" where that helps; filters with nothing to show have their own
+     wording (no deals among N listings, nothing marked Worth a look, no Watch finds).
+   - The Dashboard's bare "last error" line now shows a plain explanation for recognised problems (Chrome missing, connection down, timeouts).
+5  The window closes from the login screen. The close request was only answered by the Config screen (mounted after login); the main process now
+   lets the window close when nobody is logged in. With a user logged in the unsaved-changes guard is unchanged.
+6  Database recovery failures are visible and actionable. A damaged database that cannot be moved aside (held open by antivirus, a backup tool, a
+   second copy), a full disk, or a locked data folder now produce a plain-words panel on the login screen: what happened, "Nothing was deleted",
+   what to try, Try again and Show data folder (role=alert). The renderer also catches a failed startup call, so it can never sit on "Loading...".
+
+
+2. FILES CHANGED (28 files, +1686 -55; full list: git diff checkpoint-before-phase2 --stat)
+------------------------------------------------------------------------------------------
+New (main):   ntfySetup.ts, ntfyTopic.ts (pure helpers shared with the screens), startupErrors.ts
+New (screen): components/OnboardingChecklist.tsx, components/NtfySetup.tsx, lib/onboarding.ts, lib/dealNumbers.ts, lib/scannerState.ts
+New tests:    ntfySetup, dealNumbers, scannerState, onboarding, startupErrors (.test.ts)
+Changed:      main/index.ts (close rule, startup-problem handling, ntfy and onboarding IPC, first-login flag), main/dbIntegrity.ts, main/notify.ts
+              (sendTestNotification), main/config.ts and types.ts (onboarding state, gate facts types), main/store.ts (gate_facts column,
+              parse), main/dealGate.ts (saves its facts, see below), preload/index.ts, renderer App.tsx, Dashboard.tsx, Feed.tsx, Config.tsx,
+              LoginScreen.tsx, ListingCard.tsx, lib/api.ts
+
+
+3. DEAL-QUALITY NOTE (what did and did not change)
+--------------------------------------------------
+No qualification decision, threshold, evidence rule, star rating or notification rule changed. dealGate.ts gained two bookkeeping fields
+(netProceedsUsd, netPercent) computed from the numbers it already had, and toGateSnapshot now also saves the gate's facts so the Feed can show
+them. All 8 deal-quality test files pass unchanged, and the real-app deal-quality compatibility run (verdict round trip, chips, filters,
+Dashboard count) passes.
+
+
+4. TESTS AND RESULTS
+--------------------
+Unit (npm test): 18 of 18 files pass. New files: ntfySetup 32 checks, dealNumbers 31, scannerState 29, onboarding 29, startupErrors 19.
+  Highlights: 2,000 generated topics all valid, distinct and evenly distributed; the card numbers equal the real gate's own arithmetic
+  (including condition factor, negotiation, AI-only, thin evidence, user reference); an old database gains the column and keeps its rows.
+
+Real Electron app, sandboxed (each run: its own user-data folder, database, browser profile; fake cloud server; Facebook answered by mock
+pages inside the real scan browser with DNS blocked; local mock of ntfy; no real account or data):
+  T7a  window close + recovery failure UI           13 of 13   X closes from the login screen; with a user the guard still works; a locked
+                                                               database gives the panel (not "Loading..."), original untouched byte for
+                                                               byte, no stray copy; Try again while locked repeats the panel; after the lock
+                                                               is released Try again completes recovery, old database kept identical
+  T7b  checklist + phone alerts                     41 of 41   0 of 4 on a new user; each step ticks from real state; product add; generated
+                                                               topic; test reaches the mock server at exactly that topic; failure message in
+                                                               plain words; Save; the Watch's own topic untouched; Facebook step ticks after
+                                                               a real engine login against the mock; all done message; hide, bring back
+                                                               (Dashboard link and Config); persists across restart; existing customer not
+                                                               nagged and existing topic untouched, replace needs confirmation
+  T7c  status line, empty Feed, card numbers        25 of 25   stopped, running, awaiting login, failing, recovered, stopped again, with the
+                                                               matching Feed text; seven listings with saved gate numbers: strong, negotiation,
+                                                               thin, AI-only, loss, no numbers, pre-gate; layout measured (no overlap) and
+                                                               checked on a screenshot
+  Phase 1 / earlier suites re-run on the final build:
+  T1 startup 18/18, T3 config and session recovery 20/20, T4 database recovery 22/22, T5 Facebook session expiry and failing scans 21/21,
+  T6 deal-quality compatibility 13/13. Stub screen scripts: smoke 10, assistantui 14, discovery 31, blacklist 7, watchmatches 8,
+  gatechip 6, notices 14 (all pass).
+  No unhandled exceptions and no renderer errors in any run.
+
+
+5. DEFECTS FOUND DURING THIS PHASE'S INTEGRATION RUNS (fixed, covered by tests)
+-------------------------------------------------------------------------------
+  1. A failed "start fresh" (database held open) used up the user's request: the marker file was deleted before the move was attempted, so the
+     next try silently opened the old database. The marker now stays until the database has really been moved aside. (unit test added)
+  2. A failed move also left a redundant full-size copy of the database behind each time. It is now removed (the original is still in place).
+  3. On cards with long explanations the title lost its second line (squeezed by the lines below it). The title no longer shrinks and the card
+     is slightly taller. The money lines also tolerate a record without the new fields (older Watch-match records).
+  Also noted, not a bug: adding a product asks the app's AI helper to expand search keywords (existing behaviour of the Dashboard's Add); in
+  the sandbox there is no AI so it falls back instantly.
+
+
+6. LIMITATIONS AND WHAT STILL NEEDS YOU
+---------------------------------------
+  - Listings gated before this update have no saved numbers: they show their chip and "numbers weren't saved" until the scanner re-checks them.
+    New scans save the numbers.
+  - The checklist's location step sends the user to Config for a city or state (the location picker drives Facebook and is not duplicated).
+    Detecting "done" for a city or state relies on the account's saved location.
+  - The Facebook step uses the existing login window; its tick appears once a login is confirmed. Real Facebook pages were not used.
+  - The test notification was verified against a local mock of ntfy, not a real phone. The wording about the phone app (screens, store names) is
+    the standard ntfy flow but was not tried on a device.
+  - A packaged installer was not tested (everything ran from the unpackaged build).
+  - Real-data fingerprint note: a before/after comparison of your real Clynx folders showed changes (config, session file, database timestamp, Chromium
+    cache files). They line up with your own Clynx being started at about 14:46 (session token rotated, config re-saved, none of my test runs was
+    active then, and the saved config has no checklist field, which only code from after that moment writes). No sandbox ever pointed at those paths,
+    but please tell me if you did not start Clynx around 14:46. Your real app runs from the rebuilt out/ folder, so its next start will: build
+    the small name index once (about 1 second), add the gate_facts column, and start with the checklist already dismissed.
+
+Manual checks worth doing (about 15 minutes, on your real install; none needs a throwaway account except the last):
+  1. Start Clynx, open the Dashboard: no checklist (you are an existing user), a "Show the setup checklist" link, and the status line "Scanner stopped".
+  2. Click the link: the checklist appears with your real state ticked (phone alerts ticked because you already have a topic).
+  3. Config > Notifications: your current topic is unchanged; the page warns "clynxai" is easy to guess. Click "Send test notification" and confirm it
+     reaches your phone. Do NOT press Replace unless you want a new topic (then re-subscribe the phone).
+  4. Start the scanner and watch the status line go Starting up, Scanning, Waiting for the next pass. Open Feed while it runs.
+  5. Look at a few Feed cards for a new deal: sells / keep / profit and the evidence line should match your expectations; tell me if any wording
+     reads wrong or misleading.
+  6. Close the window from the login screen (log out first): it should close.
+  7. With a throwaway Clynx account: create an empty file named scout.db.recover-requested next to that account's scout.db while another program
+     (for example a second Clynx) has it open, and check the "couldn't move it aside" panel and Try again.
