@@ -1,0 +1,182 @@
+CLYNX: PRODUCTION-READINESS PHASE 1 REPORT
+==========================================
+Scope: the six items from the prompt. Nothing outside them was changed; no deal-quality logic was touched (dealGate.ts, preAlert.ts,
+dealSummary.ts, resaleMath.ts are unchanged since the checkpoint).
+Rollback point: git tag checkpoint-before-phase1 (commit d535a1c). Phase 1 is commits 4b4c327 .. 73c2418, one per stage.
+
+RESULT AT A GLANCE
+  Tests         13 test files, all pass (5 new, 100+ new checks); typecheck clean; production build ok.
+  Screen checks 7 Electron scripts pass against the new build (6 existing + 1 new for the Dashboard notices, 14 checks).
+  Performance   fuzzy product match: 333 ms -> 1.4 to 5.7 ms per lookup (measured on a read-only copy of a real 541 MB database).
+  Not done      anything outside the six items (see REMAINING LIMITATIONS for what is only partly covered).
+
+
+1. FILES CHANGED
+----------------
+New (main process)
+  src/main/safeFs.ts          atomic write (temp file, flush, rename with retry), .bak of the last good copy, damaged-file handling
+  src/main/appNotices.ts      the "needs attention" notice board (one notice per problem id, errors first)
+  src/main/dbIntegrity.ts     fast database probe, background full check in a separate process, quarantine, recovery marker
+  src/main/facebookSession.ts login-wall / security-check recogniser (pure) + page snapshot (no navigation)
+  src/main/scannerErrors.ts   raw error -> plain words, retry backoff schedule
+New (screen)
+  src/renderer/src/components/NoticesPanel.tsx   Dashboard panel: each notice with a button that fixes or explains it
+New tests (src/main/__tests__)
+  safeFiles, dbIntegrity, productIndex, facebookSession, scannerErrors (.test.ts)
+Changed
+  src/main/config.ts          loadConfig/saveConfig use safeFs; a damaged config is restored/kept, never silently replaced
+  src/main/cloudClient.ts     session file read/write use safeFs (readSession/writeSession now exported for tests)
+  src/main/index.ts           atomic app-settings and .env writes; notice board; config + database recovery at login; background
+                              integrity check; session/failure notices wired to each account's engine; notices and db:recover IPC;
+                              name-only product lookups
+  src/main/store.ts           listProductIndex(); findMatchingProduct and listProductsSharingBase read names only; covering index
+                              idx_products_lookup; isSimilarProductName exported (for the equivalence test)
+  src/main/scrapeEngine.ts    session guard after each location is opened and after an empty browse; consecutive-failure tracking,
+                              retry backoff, escalation hook; login/checkLogin clear the session notice
+  src/main/notify.ts          sendSystemAlert (phone push about Clynx itself); Click header only sent when there is one
+  src/preload/index.ts, src/renderer/src/lib/api.ts   notices + recoverDatabase on the bridge
+  src/renderer/src/screens/Dashboard.tsx              shows the panel; no duplicate "last error" line for an account that has a notice
+  .gitignore                  *.bak, *.corrupt-*, *.unreadable-*, *.tmp-*, *.recover-requested (they can hold keys or tokens)
+
+
+2. BUGS FIXED (per item)
+------------------------
+Item 1  Non-atomic writes. config.json, cloud-session.json, app-settings.json and .env were written in place (writeFileSync), so a
+        crash or power loss mid-write left a truncated file. Now every write goes to a temp file, is flushed, then replaces the real
+        file in one step (retries if Windows has it briefly locked). A failed write throws and leaves the real file alone.
+
+Item 2  Silent reset to defaults. A damaged config.json made loadConfig return defaults, and bootstrap then saved those defaults over
+        the damaged file, permanently losing accounts, locations and thresholds with no message. Now the previous good file is kept as
+        config.json.bak on every save; a damaged file is moved aside as config.json.corrupt-<time> (or copied as .unreadable-<time> when
+        it parses but is not a settings object); the last good settings are restored; if there is none, defaults are used but the
+        damaged file is still on disk. The user sees a warning notice that says which happened. A truncated cloud-session.json no
+        longer logs the user out; the previous session is used.
+
+Item 3  Database damage. new Store(DB_PATH) had no error handling, so a damaged database failed the login flow and the user was stuck.
+        Now: a millisecond probe before opening (it is a SQLite file, header and schema readable); if opening still fails, one
+        recovery attempt. Recovery never deletes: the database and its journal files are moved to scout.db.corrupt-<time>, a fresh
+        database starts, and a notice explains. A full PRAGMA quick_check runs in a separate process 90 seconds after login (it cannot
+        freeze the app); if it finds damage, a red notice offers "Back up and start fresh" (confirmation dialog, then restart; the
+        open file is moved aside on the next start). A busy or locked database is treated as inconclusive, never as damage.
+
+Item 4  Fuzzy product matching. findMatchingProduct fell back to listProducts() (SELECT * with every product's ~90 KB base64 photo,
+        41 MB for 555 products) on every miss, and saveScored calls it for every listing. It now compares names only (listProductIndex)
+        and loads just the one matching row. Root cause found while measuring: even a names-only query was slow (52 ms) because SQLite
+        has to read past the photo to reach later columns (created_at, family, the eBay prices). A small covering index
+        (idx_products_lookup) answers those queries without touching the product rows. The Feed's name+price lookup uses the same
+        index. Results are identical to the old scan (verified against the old algorithm on 14 probe names, same tie order), and there
+        is no cache, so a product added or renamed a moment ago is seen immediately.
+        Other lookups changed to names only: sibling/variant discovery lists, the reference-photo audit's known-products list, the
+        image-feedback known-products list, listProductsSharingBase.
+
+Item 5  Expired Facebook session. The login check only ran while the "logged in" flag was not already true, and the flag was only reset
+        by Stop, so a session that expired mid-run was never noticed: every search read as "0 listings" forever. Now, right after each
+        location is opened (and after an empty browse), the page the scanner is on is classified: login URL, password box over the
+        page, login title, security-check URL or wording. Words on the page only count away from Marketplace, so a listing that says
+        "security check camera" is never mistaken for a checkpoint. On a problem: the account is marked logged out with a plain reason,
+        the cycle ends instead of searching a login wall, one red notice with an "Open Facebook" button appears, and one phone push is
+        sent (if a topic is set). It is reported once per change, and clears by itself when the next page is a normal logged-in one or
+        the user's login is confirmed. An unreadable or blank page never raises a problem (no stopping a scan on a guess).
+
+Item 6  Silent failing scanner. A cycle that threw was logged to Activity and the loop slept the normal time (zero if "Wait between
+        passes" was 0, i.e. a tight retry loop). Now failed cycles back off 30 s, 1, 2, 4, 8, up to 10 minutes; after 3 failures in a
+        row a persistent notice explains the cause in plain words (Chrome missing or won't start, Chrome window closed or crashed, can't
+        reach Facebook, pages timing out, profile in use by a leftover window, otherwise the first line of the error) with a "Try again"
+        button and one phone push per cause. One good cycle withdraws it. The raw exception text stays in Activity. The Dashboard shows
+        notices above the stats, errors first, each announced to screen readers (role="alert").
+
+
+3. TESTS RUN AND RESULTS
+------------------------
+npm test (13 files, all pass):
+  safeFiles.test.ts       37 checks  atomic write, no leftovers, interrupted-write simulation, backup rules, damaged/empty/missing file
+                                     reads, config restore/reset/"JSON but not settings", session truncation, notice board
+  dbIntegrity.test.ts     26 checks  probe (text file, empty, damaged header, missing), quarantine incl. journal and unique names,
+                                     user-requested recovery marker, the REAL Store recovering from garbage and from an open failure,
+                                     full check finds body damage the quick probe misses, event loop keeps running during the check
+  productIndex.test.ts    16 checks  identical answers to the old scan, covering-index query plans, no whole-table SELECT *, >5x faster
+                                     with photos, always current (add/rename/delete), index created on an older database
+  facebookSession.test.ts 29 checks  12 page classifications incl. false-positive guards, user wording, engine reports once / recovers /
+                                     ignores blank or closed pages, a cycle on a login wall does not search it
+  scannerErrors.test.ts   34 checks  7 realistic raw errors -> plain words (no jargon), backoff schedule, loop: silent for 2 failures,
+                                     one notice at 3, no repeats, cleared by a good cycle, waits grow even at "wait 0", healthy cycles
+                                     unchanged, system alert needs a topic, notice board behaviour
+  existing: ageRoutes, dealGate, gateRoutes, hiddenGems, listingAge, listingSource, qualification, storeGate (all still pass)
+npm run typecheck: clean (node + web).   npm run build: ok.
+Electron screen scripts against the new build: smoke (10), assistantui (14), discovery (31), blacklist (7), watchmatches (8),
+  gatechip (6), notices (14, new): all pass.
+Two of my own test mistakes were fixed along the way (a wrong field name that typecheck caught, and probe wording the similarity rule
+rejects); neither was a product bug. One real bug was found by measuring (names-only query still slow; see Item 4).
+No critical regression appeared at any stage; I did not need to stop.
+
+
+4. BEFORE / AFTER PERFORMANCE
+-----------------------------
+Method: a read-only COPY of a real user database (541,626,368 bytes, 555 products, 41.5 MB of thumbnails), a fresh copy per run, 30 calls
+averaged after a warm-up, Store opened exactly as the app does. Your live database was never opened.
+
+  fuzzy lookup, no match (full scan)      333.1 ms  ->   5.7 ms      (58x)
+  fuzzy lookup, differently phrased hit   334.9 ms  ->   1.4 ms      (240x)
+  fuzzy lookup, repeat of the same hit    313.4 ms  ->   1.5 ms
+  exact-name lookup (unchanged path)        0.6 ms  ->   0.5 ms
+  names-only list, before the covering index (intermediate step): 52.6 ms  ->  0.6 ms with it
+  Same match returned before and after ("Xbox one X controller console" -> "Xbox one X controller").
+  Synthetic test library (240 products with 150 KB photos): 56 ms -> 2.1 ms.
+
+Other measurements
+  one-time cost: creating the index on the first start after the update:   about 1.2 s (next opens: 6 ms)
+  database probe at startup (541 MB file):                                 1 ms
+  full integrity check (separate process): 0.5 s with a warm disk cache, 6.4 s cold; the app's event loop kept running (46 timer
+  ticks during the check), so it cannot freeze the window.
+  The remaining 1.4 to 5.7 ms is the name-similarity comparison itself over 555 names.
+
+
+5. REMAINING LIMITATIONS
+------------------------
+  - Database recovery means a FRESH database. The damaged file is kept and can be inspected or copied back, but Clynx does not repair
+    it or restore from a backup, because there are no scheduled database backups yet (audit item S3's second half). Watches and the
+    synced product fields come back from your account; reference photos, listings, the Library and Feed history do not.
+  - The full integrity check runs once, 90 seconds after login, not periodically. PRAGMA quick_check finds structural damage, not wrong
+    content. Damage found while scanning does not stop scanning; it is up to the user to choose "Back up and start fresh".
+  - Session detection is heuristic (URL, title, password box, wording) and was only tested against simulated pages, never live Facebook.
+    A security check shown as a pop-up over a normal Marketplace URL, with no password box, will not be recognised. Expiry in the middle
+    of one location's searches is caught when the next location is opened, not instantly.
+  - "Scanner failing" counts cycles that throw (browser won't start, connection down, timeouts). A cycle that runs but finds nothing for
+    another reason is not flagged; stalled-search detection is not in this phase.
+  - The main-process wiring (index.ts: login-time recovery, notices, IPC) is verified by the typechecker plus tests of every piece it
+    calls, and the screen is verified end to end with stubs, but I did not run the real main process: launching it from this project
+    folder would open your real session and database. The manual checks below cover that gap.
+  - Only matching and name-list paths were moved to the light index. Database and Activity screens still load whole products (all
+    thumbnails) through listProducts(), which is the separate audit item P3.
+  - .bak copies of cloud-session.json and .env hold the same secrets as the originals; they sit in the same folder and are now
+    git-ignored.
+  - Not addressed (other audit items): hosted login URL, installer/signing/updater, billing, Chrome preflight before first Start,
+    window-close behaviour, ntfy topic default and test button, accessibility basics, database backups.
+
+
+6. MANUAL TESTING YOU SHOULD DO
+-------------------------------
+Use a throwaway Clynx account (register a new one) for anything marked [destructive], so your real library is never at risk. Relaunch the
+app first so it runs the new build (it runs from out/); the very first start takes about a second longer once (index creation).
+
+ A. Smoke: log in. The Dashboard should look as before with no notices. Start the scanner and let it finish a cycle. Feed, Database,
+    Discovery and Watch should behave as before.
+ B. Facebook logout (the important one): while the scanner is running, log out of Facebook in the Chrome window Clynx opened (or delete
+    its cookies). At the next location Clynx opens you should get: a red card "Facebook logged <account> out" with an Open Facebook
+    button, the Dashboard account marked logged out, the cycle ending (no "found 0 listings" spam), and a phone push if ntfy is set.
+    Click Open Facebook, log in. Scanning should resume by itself at the next cycle and the card should disappear.
+    Also confirm a normal listing whose title contains "security check" or "login" does NOT trigger anything.
+ C. Scanner failing: during scanning, turn Wi-Fi off. After the 3rd failed cycle (roughly 3.5 minutes because of the backoff) a red card
+    "Clynx can't reach Facebook" should appear with Try again. Turn Wi-Fi on; the card should clear after the next good cycle.
+    Optional: temporarily rename Chrome's folder to see the "Chrome" message. Put it back afterwards.
+ D. [destructive, throwaway account] Settings recovery: close Clynx, open the user's config.json in your Clynx data folder, delete the
+    second half of the text, save, start Clynx and log in. You should see a yellow "settings file was damaged and restored" notice, your
+    earlier settings back, and a config.json.corrupt-<time> file next to config.json. Repeat after deleting config.json.bak to see the
+    "reset to defaults" wording.
+ E. [destructive, throwaway account] Database recovery: close Clynx, create an empty file named scout.db.recover-requested next to scout.db
+    (or overwrite the first 100 bytes of scout.db with text). On the next start the old file should be renamed scout.db.corrupt-<time>,
+    Clynx should open with an empty Database, and a yellow notice should explain. To test the in-app button, let a throwaway database be
+    corrupted in the middle of the file while Clynx is closed; 90 seconds after login a red "Your database has damage" card should appear.
+ F. Look in your Clynx data folder after normal use: there should be config.json plus config.json.bak, and no *.tmp-* files left over.
+ G. Speed feel: with a large library, scrolling the Feed and a busy scan should feel no worse, and ideally smoother (fewer short stalls
+    when a listing mentions a product that is not an exact Database name).
