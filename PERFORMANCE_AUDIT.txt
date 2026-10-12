@@ -1,0 +1,205 @@
+CLYNX: PERFORMANCE AND RESOURCE-USAGE AUDIT (READ-ONLY)
+=======================================================
+No project file was changed. Everything below was measured in sandboxed copies of the real, built app (own data folder, fake cloud server, mock
+Facebook pages inside the real scan browser, no real accounts, nothing of yours opened), on THIS PC: Intel UHD Graphics (0x9A68) driving a 144 Hz
+display, 12 cores, with an NVIDIA RTX 3050 Laptop GPU present but NOT used by Clynx (all of its 3D work lands on the one Intel adapter; shared memory).
+Measurement scripts are in the session scratchpad (scratchpad/integ/perf1..perf15); they are not part of the repository.
+
+THE SHORT ANSWER
+  Your suspicion is right about the GPU, but not for the reason it looks like. Of the GPU time Clynx uses, 80 to 90 percent is decorative: with every
+  decorative effect removed the app used 2.4 to 5 percent of the GPU's 3D engine, versus 13 percent (Lite, mouse still) and 25 to 38 percent (Lite
+  or High, mouse moving, scanning adds about 17 more). CPU, memory, the database and the scanner's browsers are NOT what makes the UI lag.
+  But the biggest contributors are not the animations you would guess (there is only ONE running CSS keyframe animation on the Dashboard). They are:
+     1. "transition: all" on every button, card, input and pill, which re-animates every property on hover and costs 10 to 20 GPU points whenever
+        the mouse moves (the single largest item, and it is present at every tier including Lite),
+     2. the full-window starfield canvas (about 10 points even at Lite),
+     3. the logo comet (about 5 points and visible frame drops at High and Balanced),
+     4. UI updates caused by scanning (about 12 React renders a second and +17 GPU points), including for screens you are not looking at.
+  Separately, STARTUP stalls the main process for about 1.4 seconds with a library the size of yours, because every screen loads the whole product
+  library (with all its photos) at launch.
+
+MEASUREMENT NOTES (read before trusting any single number)
+  - GPU figures are Windows "GPU Engine 3D" utilisation of the app's own processes, mean of one-second samples. They swing by about 5 to 10 points
+    run to run (other programs share this GPU; the starfield also has random flybys and meteors), so the important comparisons were interleaved
+    three times (A B C A B C ...) and averaged. Differences under about 5 points should be read as noise.
+  - "Mouse moving" is a synthetic wiggle over the page; "mouse still" is no input but not yet idle (the idle governor needs 30 s of nothing).
+  - Removing an effect for attribution was done by injecting CSS into the running page (no file change).
+  - Display refresh measured 144 Hz (rAF 144 fps when nothing animates).
+  - Real Facebook pages were never loaded, so the scanner's own Chrome windows are measured on a mock page (see item 8).
+
+-------------------------------------------------------------------------------------------------------------------------------------------------
+1. CONFIRMED FINDINGS (severity, evidence, where, fix, impact, risk to scanning)
+-------------------------------------------------------------------------------------------------------------------------------------------------
+
+F1  "transition: all 0.15s" on every interactive element           Severity HIGH   Fix S   Risk to scanning: none (CSS only)
+    Where: src/renderer/src/styles/global.css line 946-948 (`button, .card, input, select, textarea, .pill, .badge { transition: all ... }`), and
+           line 192 (`button { transition: all 0.15s ease; }`); also 448/971/1050/1072 add box-shadow/transform transitions on cards and nav items.
+    Evidence (Lite tier, Dashboard, canvas hidden to isolate it, interleaved x3, mouse moving):
+        as shipped                         25.3 percent GPU
+        .card transitions off              15.3   (about -10)
+        button / input / pill / nav off    24.6 / 25.1 / 25.8 / 24.6 (no effect on their own)
+        ALL transitions off                 5.8   (about -20)
+      With the mouse still the same page is 2.4 percent, so the cost is hover and state changes animating all properties. Style recalculations run
+      at about 100 per second in Lite while the mouse moves (11 per second when still). Lite as shipped: 32 percent moving vs 12.9 percent still.
+    Fix: replace `all` by the few properties that really change (background-color, border-color, color, opacity, transform), remove the transition
+         from `.card` (cards are large; their hover gives nothing), and switch hover transitions off entirely in Performance mode.
+    Expected impact: -10 to -20 GPU points whenever the mouse is over the window, at every tier; fewer frame misses.
+
+F2  Full-window starfield canvas                                      Severity HIGH   Fix M   Risk: none
+    Where: src/renderer/src/components/StarfieldBackground.tsx, `tick()` (about line 945-1125) and the TIERS table (line 218-222):
+           high {900 stars, 20 ms frames (50 fps), 2x pixel ratio, halo, extras}, balanced {420, 33 ms, 1.5x}, lite {160, 33 ms (30 fps), 1x}.
+           It draws aurora ribbons, the scrolling grid, stars, flybys, meteors, a satellite on a 1920x1009 canvas.
+    Evidence: Lite, mouse still: 12.9 percent GPU as shipped vs 2.4 percent with the canvas hidden (-10.5). Lite moving: 32 vs 22.9 (-9).
+              High Dashboard watching: 20.4 vs 9.0 (-11). Hidden-canvas runs also dropped GPU working memory from 0.9 GB (High, Activity) to 0.2 GB.
+              The tiers barely differ in measured cost (Dashboard, moving: High 46, Balanced 43, Lite 36 percent), so Lite is not a minimal mode.
+    Also: it keeps redrawing at full tier cadence while the window is visible but NOT focused (only the 30-second idle governor reduces it;
+          lib/performance.ts IDLE_AFTER_MS). `focused` in the file only feeds the quality governor.
+    Fix: Performance = render the backdrop ONCE to a static image (no loop, no rAF); Balanced = 15 to 20 fps, no glow/flybys/meteors, pixel ratio 1;
+         all tiers: throttle hard after the window loses focus for a few seconds, and stop while a modal/other screen fully covers it.
+    Expected impact: -9 to -11 GPU points (Lite and High), -0.4 to -0.7 GB GPU memory at High.
+
+F3  Logo comet animation                                              Severity MEDIUM  Fix S   Risk: none
+    Where: src/renderer/src/components/Sidebar.tsx ClynxMark (line 269-272) and global.css `.clynx-mark-comet`, `.clynx-mark-comet-band`,
+           `@keyframes clynxMarkComet` (about line 780-816). Runs forever at High and Balanced; the Lite tier already switches it off.
+    Evidence (High, Dashboard, mouse still): 208 style recalculations per second with it, 11 per second without; 134 fps vs 144 fps (frames over
+              20 ms: 2 to 5 vs 0); GPU 20.4 vs 15.3 percent (-5). The CSS comment says it is "compositor-only"; the numbers show it is not: a transform
+              animation inside a parent that carries the logo-shaped mask forces the masked layer to be redone every frame.
+    Fix: drop it at Balanced and Performance; at Visual make it an occasional (every 20 to 30 s) one-shot, or bake the band into a pre-masked sprite.
+    Expected impact: restores a steady 144 fps at High/Balanced and -5 GPU points.
+
+F4  Scanning updates re-render screens that are not visible          Severity MEDIUM  Fix M   Risk: none if only rendering is throttled
+    Where: App.tsx event handlers (onStatusMap flush every 200 ms, onLog batch every 250 ms, listing batch 300 ms) and the fact that every screen
+           (Dashboard, Activity, Feed, Watch, Database, Config) stays MOUNTED when hidden (`display:none`), so each state change re-renders all of
+           them; Dashboard LiveCard shows 6 live previews with photos; Activity renders a 300-line log.
+           main side: index.ts broadcastEngineStatusMap (120 ms coalescing, carries every account's status incl. 6 listing previews).
+    Evidence (replayed scan stream through the real IPC channels: status 8/s, logs 5/s, new listing every 2 s):
+        React commits per second: 0.4 to 0.8 idle -> about 12.3 with scanning, on EVERY screen (so hidden ones render too).
+        Dashboard High: GPU 31 -> 48 percent, fps 130 -> 119 ; Lite: 24 -> 41, fps 139 -> 125.
+        Activity High: renderer CPU 5.8 -> 11.4 percent, fps 128 -> 105 (frames over 20 ms: 7 -> 54).
+        Feed High: GPU 30 -> 32, fps 131 -> 127 (small, because the Feed is virtualised and the scanning panels are hidden).
+    Memory is fine: a 4-minute soak held renderer 161 MB, main 154 MB, JS heap 10 MB, DOM nodes plateauing at 1,928 (logs capped at 300).
+    Fix: render only the active screen's live parts (or keep screens mounted but give hidden ones a frozen props snapshot), update Dashboard/Activity
+         live panels at 1 to 2 Hz in Balanced and Performance, and keep raw events (deal sound, notifications, saves) untouched: they must never be
+         throttled, only the on-screen representation.
+    Expected impact: commits 12/s -> about 2/s when the screen is not being looked at; renderer CPU about -50 percent during scans.
+
+F5  Every screen loads the whole product library at launch          Severity HIGH   Fix S to M   Risk: none
+    Where: renderer/src/screens/Activity.tsx:116 (`api.listProducts()` only to turn a log line's product name into an id) and
+           Database.tsx:516 (`countProductsMissingPhotos`), 577, 582, 584 (`api.listProducts()` and a refetch); main: index.ts `products:list`,
+           `products:countMissingPhotos` -> `productsNeedingPhotos()` (index.ts:1958) -> store.countNormalImagesByProduct (store.ts:1605) +
+           store.listProducts (SELECT * incl. thumbnail data URIs), plus sweepBlankProducts (index.ts:2631) twice more.
+    Evidence (synthetic library of the same shape as yours: 431 MB, 555 products, 3,885 reference photos; timing every SQLite call at startup):
+        SELECT product_id, COUNT(*) FROM product_images WHERE kind='normal' GROUP BY product_id ... 351 ms (the `kind` column sits behind each
+          114 KB photo, so the scan has to read all of them; the Phase 1 covering index covers products, not product_images)
+        SELECT * FROM products ... 90 + 67 + 74 + 80 ms during launch and 81 ms again at 8 s
+        main-process event-loop stalls in the first 2 s after launch: 388, 216, 547, 244 ms (about 1.4 s blocked in total); a further 345 ms stall at
+          process start is module loading (see F9)
+        IPC: listProducts = 219 ms, 51.6 MB of JSON for 555 products, 173 ms main-process stall; the renderer keeps TWO copies (Activity and Database
+          state): JS heap 141 MB after launch (10 MB with a small library), renderer working set 300 MB, main process 386 MB (155 MB small library).
+        Every `products:updated` event (research, comps) pushes a whole product with its photo to both copies.
+    Fix: load products lazily (when the Database screen is first opened), give Activity a names-only endpoint (id + name; Phase 1's listProductIndex
+         already exists), count missing photos in SQL with a covering index on product_images(product_id, kind) instead of loading products,
+         send product updates without the image unless the Database screen is open.
+    Expected impact: about -0.9 s of main-process blocking at startup, about -100 MB renderer memory, no 51 MB IPC bursts.
+
+F6  GPU memory is large for what is drawn                           Severity MEDIUM  Fix S
+    Evidence: GPU process working set 0.9 to 1.05 GB at High while idle on busy screens, 0.2 to 0.3 GB at Lite (shared memory on the iGPU, so it
+              competes with the CPU and your other programs). Cause: 2x pixel-ratio full-window canvas (TIERS.high dprCap 2), large decorative layers.
+    Fix: pixel ratio 1 in Balanced and Performance; Performance has no canvas at all.
+
+F7  Minimised or hidden: fine; visible but unfocused: not throttled     (see F2)
+    Evidence (Windows' own occlusion tracking left ON, scan events still arriving): minimised: renderer 0.2 percent CPU, GPU 0 percent, main 0;
+            hidden (win.hide()): the same. So the app is already cheap when you cannot see it. The cost is while it IS visible, including when it is
+            on a second monitor or half covered and unfocused.
+    Idle (30 s with no input): GPU about 5 percent, 144 fps, CPU under 1 percent; the idle governor works.
+
+F8  The scanner's own browser                                           Severity LOW (not a defect)  Risk of changing: HIGH, so no change proposed
+    Evidence (one account, mock page): 10 Chrome processes headless / 8 headed, 598 / 503 MB working set in total; zero processes remain 6 s after
+              Stop and none after the app quits (cleanup is correct, no leaks). Memory is per account, so N accounts cost about N times that, and a
+              real Facebook page costs more than the blank mock.
+    Not recommended: blocking images/fonts/media in the scan browser to save memory could break photo analysis and valuation. If ever tried it must
+    be tested against recall before shipping; the performance modes below deliberately do NOT touch the scanner.
+
+F9  Process start                                                      Severity LOW   Fix M
+    Evidence: a 345 to 388 ms event-loop stall right at process start while the 835 KB main bundle and its native/browser dependencies (playwright,
+              sharp) load; the window appears at about 0.65 s and the Dashboard at about 1.0 s with a small library, about 1.6 to 1.9 s with a large one.
+    Fix: load playwright and sharp lazily (first scan, first image resize).
+
+F10 Unexplained one-off renderer crash                                  Severity MEDIUM (unknown cause)
+    Evidence: once, in about 40 page reloads while cycling tiers and screens at High after a long Lite run, the renderer reported "Target crashed"
+              (the driver lost the page). It did not recur in many later runs. No cause found (no OOM seen: renderer working set was about 200 MB;
+              suspect a GPU-process hang under load on the iGPU).
+    Fix: log render-process-gone and child-process-gone (reason and exit code) to a diagnostics file (this is also a Phase 1 audit item) so the
+         next occurrence on your PC explains itself.
+
+F11 Small steady wake-ups                                              Severity LOW
+    Evidence: React commits while "nothing is happening": 0.4 to 0.8 per second. Source: Dashboard.tsx:501 `setInterval(() => setNow(Date.now()), 1000)`
+              keeps ticking while the Dashboard is hidden; Config.tsx:731 polls cloud status every 5 s; DiscoveryTab 30 s; Activity's metrics poll
+              runs only while its panel is open (gated). CPU effect under 1 percent.
+    Fix: stop timers on hidden screens (visibility prop).
+
+-------------------------------------------------------------------------------------------------------------------------------------------------
+2. WHAT WAS CHECKED AND IS FINE (do not spend time here)
+-------------------------------------------------------------------------------------------------------------------------------------------------
+  - CPU: renderer 1 to 6 percent of one core (11 percent worst case, Activity during scanning), main process 0 to 1 percent, GPU process 1 to 10 percent.
+  - Feed with 600 listings and real photos served locally: IPC for 500 rows 25 to 33 ms and 1.15 MB, main stall 5 to 6 ms; scrolling 134 fps (High) and
+    144 fps (Lite); zero long tasks; only 24 images in the DOM; JS heap 14 to 17 MB. The virtualised Feed and URL-based listing rows work.
+  - Memory over time: flat over a 4-minute scanning soak (above). Working sets stay near 160 MB renderer / 155 MB main with a normal library.
+  - Renderer startup with the large library: two long tasks totalling about 190 ms, first contentful paint about 450 ms.
+  - Main-process loops: idle main-process event-loop delay maximum 8 to 25 ms on every screen; no busy timers in main beyond the cloud/sync/watch
+    timers (cloudClient 15-min token refresh, 60 s heartbeat, sync services, Watch scheduler, eBay engine).
+  - Image decoding: decoded images are bounded by the virtualised Feed; thumbnail shrinking exists. No leak seen.
+  - Not measured: IPC call counts per channel while idle (my instrumentation did not attach in this Electron version), a headed scan on real
+    Facebook, and anything over several hours.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------
+3. RECOMMENDED THREE-MODE SYSTEM (Visual, Balanced, Performance)
+-------------------------------------------------------------------------------------------------------------------------------------------------
+The app already has High / Balanced / Lite plus Auto (lib/performance.ts, html[data-perf]), but measured, the tiers differ by only 5 to 10 points and
+Lite is not minimal. Keep the mechanism, redefine what each tier switches off, and rename to Visual / Balanced / Performance in Config > Appearance.
+Per-machine setting (stays in localStorage, as now).
+
+  Visual (today's High, with the fixes F1 and F3 applied)
+     starfield canvas at up to 30 fps, glow, flybys, meteors, satellite; logo comet only as an occasional one-shot; hover transitions limited to
+     colour/opacity/transform; full ambient animation. Target on this PC: at most about 20 percent GPU with the mouse moving.
+  Balanced (new default on strong GPUs)
+     starfield at 15 to 20 fps, pixel ratio 1, no glow/flybys/meteors; no logo comet; hover transitions limited to colour/opacity, no card transition;
+     decorative CSS animations paused; live scan panels update at 2 Hz when not the active screen. Target about 10 percent.
+  Performance (new default on Intel iGPU, software rendering and weak machines, i.e. what Auto picks here)
+     NO continuous animation: the backdrop is rendered once to a static image, no canvas loop, no hover transitions, no decorative keyframes
+     (functional indicators such as the scanning dots may stay), live scan panels update at 1 Hz when hidden. Measured proxy (all of this injected
+     as CSS on the Lite page): 3.9 percent GPU with the mouse moving and 2.4 percent still, 143.7 fps, renderer CPU 0.9 percent, versus 32 and 12.9
+     percent for Lite as shipped.
+  All modes: throttle to a near-static frame a few seconds after the window loses focus; minimised/hidden already stops rendering.
+
+Guarantee for coverage and accuracy: the modes only change what the renderer draws and how often it re-renders. The scanner, valuation, Watch
+matching, deal gate, ntfy alerts, saves and the deal sound all run in the main process or on raw events and must not read the mode. The one
+rule to enforce in review: never throttle an event, only its on-screen representation (for example, the deal sound plays from the raw log line,
+App.tsx onLog, before batching; keep it that way). The scan browsers, their concurrency and their images are out of scope for every mode.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------
+4. PRIORITISED IMPLEMENTATION PLAN (largest measured gain first)
+-------------------------------------------------------------------------------------------------------------------------------------------------
+ #  Change                                                                           Gain (measured proxy)                     Effort  Risk
+ 1  F1: stop animating "all": explicit properties, no .card transition, none in    -10 to -20 GPU pts when the mouse moves,  S       none
+    Performance. (global.css 192, 946-948, 448, 971, 1050, 1072)                      all tiers
+ 2  F2: Performance backdrop = static image; Balanced canvas 15-20 fps, ratio 1;    -9 to -11 GPU pts; -0.4..0.7 GB GPU mem   M       none
+    throttle on blur (StarfieldBackground.tsx TIERS, tick, blur handler)
+ 3  F5: lazy product loading, names-only list for Activity, SQL missing-photo count  about -0.9 s startup stalls, -100 MB heap   S-M     none
+    with a covering index product_images(product_id, kind), no photo in updates
+ 4  F3: comet off at Balanced/Performance, one-shot at Visual                        144 fps back, -5 pts                      S       none
+ 5  F4: render only what is visible; hidden screens frozen; 1-2 Hz live panels      commits 12/s -> about 2/s, CPU about -50% M       low (UI only)
+    when not active; keep raw events untouched
+ 6  Mode plumbing and defaults: Visual / Balanced / Performance in Config, Auto      makes 1-5 reachable; Auto -> Performance  S       none
+    picks Performance on Intel iGPU/software rendering; acceptance test = the
+    interleaved measurements in this report (target: Performance <= 6% GPU moving,
+    <= 3% still, >= 140 fps; Balanced <= 12%; Visual <= 20%)
+ 7  F6: pixel ratio 1 outside Visual                                                 -0.4..0.7 GB GPU memory                   S       none
+ 8  F10: log render-process-gone / child-process-gone to a diagnostics file          explains the one-off crash                S       none
+ 9  F11: stop timers on hidden screens                                              < 1% CPU                                  S       none
+10  F9: lazy-load playwright and sharp                                              about -0.35 s process start               M       low
+Do items 1, 3 and 4 first: they are small, CSS or query level, carry no scanner risk, and together remove most of what you feel (hover lag,
+a stuttering logo, a slow first second).
+
+HOW TO VERIFY AFTER CHANGES: rerun scripts perf14 (tier floor), perf15 (transitions), perf5 (scanning stream), perf11/12 (startup stalls) in the
+scratchpad against the new build; a change is only kept if the interleaved averages move by more than the noise (about 5 points).
