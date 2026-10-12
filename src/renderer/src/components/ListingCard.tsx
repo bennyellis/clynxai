@@ -3,6 +3,7 @@ import type { ListingRecord, PhotoFlaw } from "../lib/api.js";
 import { FlameIcon, HotRing, OUTLINE_WIDTH_PX, SOURCE_NAMES, SourceLogo, isHotListing, listingOutlineColor } from "./ListingSourceMarks.js";
 import { api } from "../lib/api.js";
 import { Modal } from "./Modal.js";
+import { describeDealNumbers } from "../lib/dealNumbers.js";
 
 function timeAgo(ts: number): string {
   const diffMs = Date.now() - ts;
@@ -53,7 +54,8 @@ function StarRating({ rating }: { rating: number }) {
 // see cardWidth's own comment.
 const DEFAULT_CARD_WIDTH = 300;
 const DEFAULT_IMAGE_HEIGHT = 260;
-const DEFAULT_CARD_HEIGHT = 490;
+// Taller than before (was 490) to make room for the resale / profit lines under the verdict chip.
+const DEFAULT_CARD_HEIGHT = 556;
 
 /** A card's height for a given card width (the Feed's size slider), so the Feed can lay cards out without rendering them. */
 export function listingCardHeight(cardWidth: number): number {
@@ -338,6 +340,9 @@ function ListingCardImpl({
         : record.dealStatus === "worth_a_look"
           ? { label: "Worth a look", color: "var(--accent-3-text)", detail: record.gateHeadline ?? "Interesting, not fully verified" }
           : null;
+
+  // The money, from the numbers the gate saved with its verdict (null for listings that were never gated).
+  const dealNumbers = describeDealNumbers(record);
 
   // Facebook shows where the item is; eBay doesn't (it ships).
   const locationLine = record.source === "facebook" ? record.locationText : null;
@@ -633,7 +638,7 @@ function ListingCardImpl({
             color: "var(--text)",
             textDecoration: "none",
             display: "-webkit-box",
-            WebkitLineClamp: 3,
+            WebkitLineClamp: 2,
             WebkitBoxOrient: "vertical",
             overflow: "hidden",
             overflowWrap: "anywhere",
@@ -661,6 +666,43 @@ function ListingCardImpl({
               {verdictChip.label}
             </span>
             <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{verdictChip.detail}</span>
+          </div>
+        )}
+
+        {dealNumbers && (
+          <div
+            data-testid="deal-numbers"
+            title={dealNumbers.allReasons.join("\n")}
+            style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 12.5, lineHeight: 1.35, minWidth: 0 }}
+          >
+            {dealNumbers.hasFigures ? (
+              <div style={{ display: "flex", gap: "2px 12px", flexWrap: "wrap", color: "var(--text-muted)" }}>
+                <span>
+                  Sells <b style={{ color: "var(--text)" }}>{dealNumbers.resale}</b>
+                </span>
+                {dealNumbers.keep && (
+                  <span>
+                    Keep <b style={{ color: "var(--text)" }}>{dealNumbers.keep}</b>
+                  </span>
+                )}
+                {dealNumbers.profit && (
+                  <span>
+                    Profit{" "}
+                    <b style={{ color: dealNumbers.profitTone === "good" ? "var(--success)" : dealNumbers.profitTone === "bad" ? "var(--danger)" : "var(--text)" }}>
+                      {dealNumbers.profit}
+                      {dealNumbers.margin ? ` (${dealNumbers.margin})` : ""}
+                    </b>
+                  </span>
+                )}
+              </div>
+            ) : null}
+            <div style={{ color: dealNumbers.supportTone === "warn" ? "var(--warn)" : "var(--text-dim)" }}>{dealNumbers.support}</div>
+            {dealNumbers.atTarget && <div style={{ color: "var(--text-muted)" }}>{dealNumbers.atTarget}</div>}
+            {dealNumbers.reasons.map((text) => (
+              <div key={text} style={{ color: "var(--text-dim)", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+                {text}
+              </div>
+            ))}
           </div>
         )}
 

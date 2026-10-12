@@ -730,7 +730,31 @@ export interface GateReasonRecord {
   text: string;
 }
 
+// The numbers behind a verdict, saved with it so the Feed can show exactly what the gate used (never recomputed or guessed on screen).
+// Any number may be null when the gate had nothing to base it on: a null is shown as "unknown", never as zero.
+export interface GateFactsSnapshot {
+  // What the product sells for according to the evidence (before this listing's condition and extras).
+  valueUsd: number | null;
+  // What THIS listing is estimated to sell for: valueUsd adjusted for its condition, plus extras that were verified.
+  lotValueUsd: number | null;
+  // What the user keeps after eBay's cut (lotValueUsd x netPercent).
+  netProceedsUsd: number | null;
+  netPercent: number | null;
+  // Profit and margin at the asking price (shipping included in the cost).
+  profitAtAskUsd: number | null;
+  marginAtAskPercent: number | null;
+  // Negotiation only: profit if the seller accepts the target price.
+  profitAtTargetUsd: number | null;
+  extrasCountedUsd: number;
+  evidenceLevel: "strong" | "moderate" | "weak" | "none";
+  // sold: eBay sold comps. blend: sold nudged by asking prices. active: asking prices only. user: the user's own reference price.
+  basis: "sold" | "blend" | "active" | "user" | null;
+  sampleSize: number | null;
+}
+
 export interface GateSnapshot {
+  // null on listings saved before the numbers were kept.
+  facts?: GateFactsSnapshot | null;
   status: DealStatus;
   confidence: "high" | "medium" | "low";
   stars: number | null;
@@ -907,6 +931,8 @@ export interface ListingRecord {
   gateReasons: GateReasonRecord[];
   requiredDiscountPercent: number | null;
   targetPriceUsd: number | null;
+  // The numbers behind the verdict (null: never gated, or saved before the numbers were kept).
+  gateFacts: GateFactsSnapshot | null;
   // The listing's age in hours as parsed when it was scraped (null: unknown). Facebook's wording is approximate.
   listingAgeHours: number | null;
 }

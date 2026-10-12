@@ -145,6 +145,9 @@ export interface GateReason {
 export interface GateFacts {
   valueUsd: number | null;
   lotValueUsd: number | null;
+  // What the user keeps after eBay's cut, and the keep percentage used (shown on the Feed card; no effect on any decision).
+  netProceedsUsd: number | null;
+  netPercent: number | null;
   evidenceLevel: EvidenceLevel;
   basis: ValueEvidence["basis"];
   sampleSize: number | null;
@@ -179,6 +182,19 @@ export function toGateSnapshot(v: GateVerdict): GateSnapshot {
     reasons: v.reasons.map((r) => ({ code: r.code, severity: r.severity, text: r.text })),
     requiredDiscountPercent: v.facts.requiredDiscountPercent,
     targetPriceUsd: v.facts.targetPriceUsd,
+    facts: {
+      valueUsd: v.facts.valueUsd,
+      lotValueUsd: v.facts.lotValueUsd,
+      netProceedsUsd: v.facts.netProceedsUsd,
+      netPercent: v.facts.netPercent,
+      profitAtAskUsd: v.facts.profitAtAskUsd,
+      marginAtAskPercent: v.facts.marginAtAskPercent,
+      profitAtTargetUsd: v.facts.profitAtTargetUsd,
+      extrasCountedUsd: v.facts.extrasCountedUsd,
+      evidenceLevel: v.facts.evidenceLevel,
+      basis: v.facts.basis,
+      sampleSize: v.facts.sampleSize,
+    },
   };
 }
 
@@ -189,6 +205,8 @@ function emptyFacts(level: EvidenceLevel, input: GateInput): GateFacts {
   return {
     valueUsd: input.evidence?.valueUsd ?? null,
     lotValueUsd: null,
+    netProceedsUsd: null,
+    netPercent: null,
     evidenceLevel: level,
     basis: input.evidence?.basis ?? null,
     sampleSize: input.evidence?.sampleSize ?? null,
@@ -254,6 +272,8 @@ export function qualifyListing(input: GateInput): GateVerdict {
   const lot = baseValue + counted;
   const outcome = resaleOutcome(lot, input.priceUsd + shipping, settings.netPercent);
   facts.lotValueUsd = Math.round(lot);
+  facts.netProceedsUsd = Math.round(outcome.keepUsd);
+  facts.netPercent = settings.netPercent;
   facts.profitAtAskUsd = Math.round(outcome.profitUsd);
   facts.marginAtAskPercent = Math.round(outcome.marginPercent * 10) / 10;
   facts.extrasCountedUsd = Math.round(counted);

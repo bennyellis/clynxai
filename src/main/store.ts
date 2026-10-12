@@ -6,7 +6,7 @@ import path from "node:path";
 import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { timedSync, recordEvent } from "./metrics.js";
-import type { BlacklistedImage, BlacklistTerm, FeedbackExample, FeedbackVerdict, FlawFeedbackExample, GateReasonRecord, ListingRecord, MyStoreReference, PhotoFlaw, ProductImage, ProductProfile, ScoredListing, SellerRiskResult, Watch, WatchMatch, WatchPlatform, WatchSearchLink, WatchTerm } from "./types.js";
+import type { BlacklistedImage, BlacklistTerm, FeedbackExample, FeedbackVerdict, FlawFeedbackExample, GateFactsSnapshot, GateReasonRecord, ListingRecord, MyStoreReference, PhotoFlaw, ProductImage, ProductProfile, ScoredListing, SellerRiskResult, Watch, WatchMatch, WatchPlatform, WatchSearchLink, WatchTerm } from "./types.js";
 import { brokenVariantName, isBrokenVariantName } from "./brokenVariant.js";
 import { assessListingAge } from "./listingAge.js";
 
@@ -282,6 +282,7 @@ export class Store {
       ["gate_reasons", "TEXT"],
       ["required_discount_percent", "REAL"],
       ["target_price_usd", "REAL"],
+      ["gate_facts", "TEXT"],
       ["listing_age_hours", "REAL"],
       ["seller_name", "TEXT"],
       ["description", "TEXT"],
@@ -652,12 +653,12 @@ export class Store {
            seller_joined_year, seller_rating, seller_rating_count, seller_has_profile_photo,
            seller_risk_passed, seller_risk_reasons, location_text, listing_age, seller_name, description, product_id, source, just_listed,
            ebay_seller_feedback_percent, ebay_shipping_usd,
-           deal_status, gate_confidence, gate_stars, gate_headline, gate_reasons, required_discount_percent, target_price_usd, listing_age_hours)
+           deal_status, gate_confidence, gate_stars, gate_headline, gate_reasons, required_discount_percent, target_price_usd, listing_age_hours, gate_facts)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
            COALESCE((SELECT notified FROM listings WHERE id = ?), 0),
            COALESCE((SELECT first_seen_at FROM listings WHERE id = ?), ?),
            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-           ?, ?, ?, ?, ?, ?, ?, ?)`
+           ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         listing.id,
@@ -706,7 +707,8 @@ export class Store {
         scored.gate ? JSON.stringify(scored.gate.reasons) : null,
         scored.gate?.requiredDiscountPercent ?? null,
         scored.gate?.targetPriceUsd ?? null,
-        assessListingAge(listing.listingAge, null).hours
+        assessListingAge(listing.listingAge, null).hours,
+        scored.gate?.facts ? JSON.stringify(scored.gate.facts) : null
       );
     // Every saveScored call means this id is now definitively in the
     // listings table — remember it so a LATER hasSeenCached() check for the
@@ -2702,10 +2704,37 @@ function rowToRecord(row: any): ListingRecord {
     gateStars: row.gate_stars ?? null,
     gateHeadline: row.gate_headline ?? null,
     gateReasons: parseGateReasons(row.gate_reasons),
+    gateFacts: parseGateFacts(row.gate_facts),
     requiredDiscountPercent: row.required_discount_percent ?? null,
     targetPriceUsd: row.target_price_usd ?? null,
     listingAgeHours: row.listing_age_hours ?? null,
   };
+}
+
+function parseGateFacts(raw: unknown): GateFactsSnapshot | null {
+  if (typeof raw !== "string" || !raw) return null;
+  try {
+    const f = JSON.parse(raw);
+    if (!f || typeof f !== "object") return null;
+    const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    const level = f.evidenceLevel === "strong" || f.evidenceLevel === "moderate" || f.evidenceLevel === "weak" ? f.evidenceLevel : "none";
+    const basis = f.basis === "sold" || f.basis === "blend" || f.basis === "active" || f.basis === "user" ? f.basis : null;
+    return {
+      valueUsd: num(f.valueUsd),
+      lotValueUsd: num(f.lotValueUsd),
+      netProceedsUsd: num(f.netProceedsUsd),
+      netPercent: num(f.netPercent),
+      profitAtAskUsd: num(f.profitAtAskUsd),
+      marginAtAskPercent: num(f.marginAtAskPercent),
+      profitAtTargetUsd: num(f.profitAtTargetUsd),
+      extrasCountedUsd: num(f.extrasCountedUsd) ?? 0,
+      evidenceLevel: level,
+      basis,
+      sampleSize: num(f.sampleSize),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function parseGateReasons(raw: unknown): GateReasonRecord[] {

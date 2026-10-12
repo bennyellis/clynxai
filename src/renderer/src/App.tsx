@@ -43,7 +43,7 @@ function listingSignature(l: ListingRecord): string {
       l.id, l.source, l.title, l.price, textStamp(l.thumbnailUrl), imgs.length, textStamp(imgs[0]), textStamp(imgs[imgs.length - 1]),
       textStamp(l.description), l.locationText, l.listingAge, l.matchedItem, l.referencePriceUsd, l.discountPercent,
       l.conditionImpact, l.confidence, textStamp(l.reasoning), textStamp(l.extractedAttributes), l.shippingMentioned,
-      l.isDeal, l.dealTier, l.dealStatus, l.gateHeadline, l.gateStars, l.requiredDiscountPercent, l.targetPriceUsd, l.estimatedValueRange, l.notified, l.feedback, l.feedbackNote,
+      l.isDeal, l.dealTier, l.dealStatus, l.gateHeadline, l.gateStars, l.requiredDiscountPercent, l.targetPriceUsd, l.gateFacts?.lotValueUsd, l.gateFacts?.profitAtAskUsd, l.gateFacts?.sampleSize, l.gateFacts?.evidenceLevel, l.estimatedValueRange, l.notified, l.feedback, l.feedbackNote,
       l.sellerName, l.sellerJoinedYear, l.sellerRating, l.sellerRatingCount, l.sellerHasProfilePhoto, l.sellerRiskPassed,
       l.sellerRiskReasons?.length ?? 0, textStamp(l.photoAnalysis), l.photoAnalysisCheckedAt, l.photoFlaws?.length ?? 0,
       l.matchedProductAvgSoldPriceUsd, l.matchedProductAvgRunTimeDays, l.foundByAccountId,
