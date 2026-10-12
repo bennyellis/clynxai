@@ -6,6 +6,7 @@ import { Modal } from "../components/Modal.js";
 import { NoticesPanel, useNotices } from "../components/NoticesPanel.js";
 import { OnboardingChecklist } from "../components/OnboardingChecklist.js";
 import { describeScannerState } from "../lib/scannerState.js";
+import { useScreenActive } from "../lib/screenActive.js";
 import { explainScannerError } from "../../../main/scannerErrors.js";
 import { WatchFormFlow } from "../components/WatchFormFlow.js";
 import {
@@ -495,12 +496,13 @@ function LiveAccountTile({
   } = status ?? {};
   // While the scanner sits out its wait between passes: a live countdown, so the panel says what is really happening.
   const [now, setNow] = useState(() => Date.now());
+  const screenActive = useScreenActive();
   useEffect(() => {
-    if (!sleepingUntil) return;
+    if (!sleepingUntil || !screenActive) return; // no countdown ticking on a screen nobody is looking at
     setNow(Date.now());
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
-  }, [sleepingUntil]);
+  }, [sleepingUntil, screenActive]);
   const sleepLeftMs = running && sleepingUntil ? sleepingUntil - now : 0;
   const sleepText = (() => {
     const total = Math.max(1, Math.round(sleepLeftMs / 1000));

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { Account, CloudStatus, Config as ConfigType } from "../lib/api.js";
 import { NtfySetup } from "../components/NtfySetup.js";
+import { useScreenActive } from "../lib/screenActive.js";
 import { api } from "../lib/api.js";
 import { Modal } from "../components/Modal.js";
 import { setSoundEnabled } from "../lib/sound.js";
@@ -724,7 +725,9 @@ function CloudSyncSection({ onLoggedOut }: { onLoggedOut?: () => void }) {
   // not a new one. A slower interval than MetricsPanel's 2s is enough here:
   // the underlying data only changes on a heartbeat (60s) or sync tick
   // (60-120s depending on the service), not per-listing.
+  const screenActive = useScreenActive();
   useEffect(() => {
+    if (!screenActive) return; // the status readout is only polled while the Config screen is showing
     let cancelled = false;
     function poll() {
       api.cloud.getStatus().then((s) => {
@@ -737,7 +740,7 @@ function CloudSyncSection({ onLoggedOut }: { onLoggedOut?: () => void }) {
       cancelled = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [screenActive]);
 
   return (
     <Section title="Cloud Sync">

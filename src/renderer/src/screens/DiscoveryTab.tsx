@@ -183,7 +183,9 @@ export function DiscoveryTab({ products, onOpenProduct }: { products: ProductPro
     const off = api.onDiscoveryEntry((entry) => {
       setLive((prev) => [entry, ...prev.filter((e) => e.id !== entry.id)].sort((a, b) => b.startedAt - a.startedAt).slice(0, 40));
     });
-    const tick = setInterval(() => setNow(Date.now()), 30_000);
+    const tick = setInterval(() => {
+      if (!document.hidden) setNow(Date.now());
+    }, 30_000);
     return () => {
       cancelled = true;
       off();

@@ -12,6 +12,8 @@ import { Database } from "./screens/Database.js";
 import { LoginScreen } from "./screens/LoginScreen.js";
 import { useNotices } from "./components/NoticesPanel.js";
 import { describeScannerState } from "./lib/scannerState.js";
+import { FreezeWhenHidden, ScreenActive } from "./lib/screenActive.js";
+import { getTier } from "./lib/performance.js";
 import { api } from "./lib/api.js";
 import type { Account, ListingRecord, LogLine, ScrapeStatus, StartupProblem } from "./lib/api.js";
 import { playDealSound, playClickSound, playHoverSound, setSoundEnabled } from "./lib/sound.js";
@@ -122,6 +124,14 @@ const FeedMemo = React.memo(Feed);
 const WatchMemo = React.memo(WatchScreen);
 const DatabaseMemo = React.memo(Database);
 const ConfigMemo = React.memo(ConfigScreen);
+
+// How often the live scan panels may repaint, by performance mode: Visual as designed, Balanced about 1.6x slower, Performance 2.5x slower
+// (a log line is still on screen within about 0.6 s). Only the on-screen representation is throttled; every event is still received,
+// stored and acted on at once.
+function liveMs(base: number): number {
+  const tier = getTier();
+  return tier === "visual" ? base : Math.round(base * (tier === "balanced" ? 1.6 : 2.5));
+}
 
 export default function App() {
   // Multi-user login migration — the entire app (Dashboard/Config/Watch/
@@ -358,7 +368,7 @@ export default function App() {
     };
     const offLog = api.onLog((line) => {
       pendingLogs.push(line);
-      if (!logFlushTimer) logFlushTimer = setTimeout(flushLogs, 250);
+      if (!logFlushTimer) logFlushTimer = setTimeout(flushLogs, liveMs(250));
       // "deal" fires exactly once, right when evaluateListing first flags
       // something — unlike onListing below, which re-fires every time that
       // same record gets updated later (eBay comps, photo analysis), so
@@ -385,14 +395,28 @@ export default function App() {
     const offListingsRefresh = api.onListingsRefresh(refreshListings);
     let latestStatusMap: Record<string, ScrapeStatus> | null = null;
     let statusFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    // Only the fast-changing "what is it looking at right now" fields are throttled in the lighter modes. A change that matters at once
+    // (started/stopped, logged in/out, an error, the pause between passes) is always shown within 200 ms, in every mode.
+    let lastStatusSig = "";
+    let statusTimerSlow = false;
+    const statusSig = (map: Record<string, ScrapeStatus>) =>
+      Object.entries(map)
+        .map(([id, s]) => `${id}:${s.running}|${s.loggedIn}|${s.lastError ?? ""}|${s.sleepingUntil ?? ""}|${s.lastCycleFinishedAt ?? ""}`)
+        .join(";");
     const offStatus = api.onStatusMap((map) => {
       latestStatusMap = map;
-      if (statusFlushTimer) return;
+      const urgent = statusSig(map) !== lastStatusSig;
+      if (statusFlushTimer && !(urgent && statusTimerSlow)) return;
+      if (statusFlushTimer) clearTimeout(statusFlushTimer);
+      statusTimerSlow = !urgent && liveMs(200) > 200;
       statusFlushTimer = setTimeout(() => {
         statusFlushTimer = null;
-        if (latestStatusMap) setStatusMap(latestStatusMap);
+        if (latestStatusMap) {
+          lastStatusSig = statusSig(latestStatusMap);
+          setStatusMap(latestStatusMap);
+        }
         latestStatusMap = null;
-      }, 200);
+      }, urgent ? 200 : liveMs(200));
     });
     // Per explicit instruction — a chat-driven theme change (e.g. asking
     // the global assistant for dark mode) needs to actually repaint the
@@ -569,30 +593,54 @@ export default function App() {
                 animation, since a display:none element is removed from the
                 render tree entirely and gets a fresh one when it returns. */}
             <div className="enter" style={{ display: screen === "dashboard" ? "block" : "none", height: "100%" }}>
-              <DashboardMemo
-                accounts={accounts}
-                statusMap={statusMap}
-                listings={listings}
-                onStart={startAccount}
-                onStop={stopAccount}
-                onGoToFeed={goToFeed}
-                onGoToConfig={goToConfig}
-              />
+              <ScreenActive active={screen === "dashboard"}>
+                <FreezeWhenHidden active={screen === "dashboard"}>
+                  <DashboardMemo
+                    accounts={accounts}
+                    statusMap={statusMap}
+                    listings={listings}
+                    onStart={startAccount}
+                    onStop={stopAccount}
+                    onGoToFeed={goToFeed}
+                    onGoToConfig={goToConfig}
+                  />
+                </FreezeWhenHidden>
+              </ScreenActive>
             </div>
             <div className="enter" style={{ display: screen === "activity" ? "block" : "none", height: "100%" }}>
-              <ActivityMemo status={statusMap[accounts[0]?.id ?? ""] ?? EMPTY_STATUS} logs={logs} onGoToProduct={goToProduct} />
+              <ScreenActive active={screen === "activity"}>
+                <FreezeWhenHidden active={screen === "activity"}>
+                  <ActivityMemo status={statusMap[accounts[0]?.id ?? ""] ?? EMPTY_STATUS} logs={logs} onGoToProduct={goToProduct} />
+                </FreezeWhenHidden>
+              </ScreenActive>
             </div>
             <div className="enter" style={{ display: screen === "feed" ? "block" : "none", height: "100%" }}>
-              <FeedMemo active={screen === "feed"} listings={listings} onRefresh={refreshListingsNow} onGoToProduct={goToProduct} scannerKind={scannerKind} hasSearchItems={hasSearchItems} onGoToDashboard={goToDashboard} />
+              <ScreenActive active={screen === "feed"}>
+                <FreezeWhenHidden active={screen === "feed"}>
+                  <FeedMemo active={screen === "feed"} listings={listings} onRefresh={refreshListingsNow} onGoToProduct={goToProduct} scannerKind={scannerKind} hasSearchItems={hasSearchItems} onGoToDashboard={goToDashboard} />
+                </FreezeWhenHidden>
+              </ScreenActive>
             </div>
             <div className="enter" style={{ display: screen === "watch" ? "block" : "none", height: "100%" }}>
-              <WatchMemo active={screen === "watch"} />
+              <ScreenActive active={screen === "watch"}>
+                <FreezeWhenHidden active={screen === "watch"}>
+                  <WatchMemo active={screen === "watch"} />
+                </FreezeWhenHidden>
+              </ScreenActive>
             </div>
             <div className="enter" style={{ display: screen === "database" ? "block" : "none", height: "100%" }}>
-              <DatabaseMemo active={screen === "database" || openProductId !== null} requestedProductId={openProductId} onRequestedProductHandled={clearRequestedProduct} />
+              <ScreenActive active={screen === "database"}>
+                <FreezeWhenHidden active={screen === "database" || openProductId !== null}>
+                  <DatabaseMemo active={screen === "database" || openProductId !== null} requestedProductId={openProductId} onRequestedProductHandled={clearRequestedProduct} />
+                </FreezeWhenHidden>
+              </ScreenActive>
             </div>
             <div className="enter" style={{ display: screen === "config" ? "block" : "none", height: "100%" }}>
-              <ConfigMemo active={screen === "config"} onDirtyChange={setConfigDirty} shakeSignal={configShakeSignal} onLoggedOut={handleLoggedOut} />
+              <ScreenActive active={screen === "config"}>
+                <FreezeWhenHidden active={screen === "config"}>
+                  <ConfigMemo active={screen === "config"} onDirtyChange={setConfigDirty} shakeSignal={configShakeSignal} onLoggedOut={handleLoggedOut} />
+                </FreezeWhenHidden>
+              </ScreenActive>
             </div>
           </div>
           {/* Per explicit instruction — reachable from every screen except
