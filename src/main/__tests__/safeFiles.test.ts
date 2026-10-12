@@ -84,19 +84,19 @@ run(async () => {
   section("config.json: a damaged file is never silently replaced by defaults");
   {
     const p = file("config.json");
-    check("no config yet: defaults, no notice", (() => { const c = loadConfig(p); return c.pollIntervalSeconds === DEFAULT_CONFIG.pollIntervalSeconds && takeConfigLoadNotice() === null; })());
+    check("no config yet: defaults, no notice", (() => { const c = loadConfig(p); return c.minProfitMarginPercent === DEFAULT_CONFIG.minProfitMarginPercent && takeConfigLoadNotice() === null; })());
 
     const base = loadConfig(p);
-    saveConfig(p, { ...base, pollIntervalSeconds: 777 });
-    saveConfig(p, { ...base, pollIntervalSeconds: 778 });
-    check("a saved setting reads back", loadConfig(p).pollIntervalSeconds === 778);
+    saveConfig(p, { ...base, minProfitMarginPercent: 777 });
+    saveConfig(p, { ...base, minProfitMarginPercent: 778 });
+    check("a saved setting reads back", loadConfig(p).minProfitMarginPercent === 778);
     check("a normal load leaves no notice", takeConfigLoadNotice() === null);
 
     // The file is truncated mid-write (what the old non-atomic write could produce).
     writeFileSync(p, readFileSync(p, "utf-8").slice(0, 40));
     const restored = loadConfig(p);
     const n1 = takeConfigLoadNotice();
-    check("damaged config with a backup: the last good settings come back (777), not defaults", restored.pollIntervalSeconds === 777, restored.pollIntervalSeconds);
+    check("damaged config with a backup: the last good settings come back (777), not defaults", restored.minProfitMarginPercent === 777, restored.minProfitMarginPercent);
     check("and the user is told it was restored, with the damaged file kept", n1?.kind === "restored" && !!n1.savedCopy && existsSync(n1.savedCopy), n1);
 
     // No backup: remove it, damage the file.
@@ -104,7 +104,7 @@ run(async () => {
     writeFileSync(p, "{{{ nonsense");
     const reset = loadConfig(p);
     const n2 = takeConfigLoadNotice();
-    check("damaged config with no backup: defaults are used", reset.pollIntervalSeconds === DEFAULT_CONFIG.pollIntervalSeconds);
+    check("damaged config with no backup: defaults are used", reset.minProfitMarginPercent === DEFAULT_CONFIG.minProfitMarginPercent);
     check("but the user is told, and the damaged file is kept (not overwritten)", n2?.kind === "reset" && !!n2.savedCopy && readFileSync(n2.savedCopy, "utf-8") === "{{{ nonsense", n2);
     saveConfig(p, reset); // what bootstrapUserSession does next
     check("saving the defaults afterwards does not destroy the kept copy", !!n2?.savedCopy && existsSync(n2.savedCopy));
@@ -113,7 +113,7 @@ run(async () => {
     writeFileSync(p, "[1,2,3]");
     const odd = loadConfig(p);
     const n3 = takeConfigLoadNotice();
-    check("a file that is JSON but not settings: defaults + notice + a preserved copy", odd.pollIntervalSeconds === DEFAULT_CONFIG.pollIntervalSeconds && n3?.kind === "reset" && !!n3.savedCopy && readFileSync(n3.savedCopy, "utf-8") === "[1,2,3]", n3);
+    check("a file that is JSON but not settings: defaults + notice + a preserved copy", odd.minProfitMarginPercent === DEFAULT_CONFIG.minProfitMarginPercent && n3?.kind === "reset" && !!n3.savedCopy && readFileSync(n3.savedCopy, "utf-8") === "[1,2,3]", n3);
   }
 
   section("cloud-session.json: written atomically; a damaged file falls back to the last good session");
