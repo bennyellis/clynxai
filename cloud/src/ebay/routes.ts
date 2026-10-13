@@ -19,6 +19,7 @@ const searchSchema = z.object({
   filter: z.string().max(300).regex(/^[\w\s,.:|{}[\]()=-]*$/).optional(),
   sort: z.enum(["newlyListed", "price", "-price", "distance"]).optional(),
   category_ids: z.string().regex(/^\d+(,\d+)*$/).max(100).optional(),
+  fieldgroups: z.enum(["MATCHING_ITEMS", "EXTENDED"]).optional(),
   marketplace: z.enum(["EBAY_US", "EBAY_GB", "EBAY_CA", "EBAY_AU", "EBAY_DE"]).default("EBAY_US"),
 });
 
@@ -79,7 +80,7 @@ export async function ebayRoutes(app: FastifyInstance): Promise<void> {
       const q = searchSchema.safeParse(request.query);
       if (!q.success) return reply.code(400).send({ error: "Invalid search", details: q.error.flatten() });
       const p = new URLSearchParams({ q: q.data.q, limit: String(q.data.limit), offset: String(q.data.offset) });
-      for (const k of ["filter", "sort", "category_ids"] as const) if (q.data[k]) p.set(k, q.data[k] as string);
+      for (const k of ["filter", "sort", "category_ids", "fieldgroups"] as const) if (q.data[k]) p.set(k, q.data[k] as string);
       return paid(request, reply, "search", () => appGet("/buy/browse/v1/item_summary/search", p, q.data.marketplace));
     });
 

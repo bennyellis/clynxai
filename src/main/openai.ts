@@ -42,7 +42,14 @@ export function initOpenAIProxy(client: CloudClient): void {
   cloudClientRef = client;
 }
 
+// Where AI requests go. "shared": always through Clynx Cloud's company-managed OpenAI integration (a signed-in customer needs no key of their own, and a key saved on this computer is
+// kept but not used). "own": a key saved on this computer is used when there is one (local beta mode, and cloud accounts that have not chosen the shared service). Set by index.ts.
+let apiSource: () => "shared" | "own" = () => "own";
+export function setApiSource(fn: () => "shared" | "own"): void {
+  apiSource = fn;
+}
 function localApiKey(): string | null {
+  if (apiSource() === "shared") return null;
   return process.env.OPENAI_API_KEY?.trim() || null;
 }
 
@@ -70,6 +77,28 @@ export function openAICreditsExhausted(): boolean {
 // Clynx Cloud answers 429 "ai_daily_limit" (or 402 "plan_limit") when the account's plan has used up today's AI allowance. Same fail-fast shape as above, with its own
 // message: the fix is upgrading or waiting for tomorrow, not adding OpenAI credits.
 const PLAN_LIMIT_RETRY_MS = 15 * 60_000;
+
+/** What Clynx Cloud's shared AI service said no for, in words a customer can act on, and how long to stop asking. A transient "too many at once" is not a pause. */
+export function cloudRefusal(body: string): { code: string; message: string; pauseMs: number } | null {
+  const m = /"error"\s*:\s*"([a-z_]+)"/.exec(body);
+  const code = m?.[1];
+  switch (code) {
+    case "ai_daily_limit":
+    case "plan_limit":
+    case "user_budget_exhausted":
+      return { code, message: PLAN_LIMIT_MESSAGE, pauseMs: PLAN_LIMIT_RETRY_MS };
+    case "api_budget_exhausted":
+    case "paid_api_disabled":
+    case "provider_unavailable":
+    case "ai_not_configured":
+    case "ai_unavailable":
+      return { code, message: "Clynx's AI service is temporarily unavailable. It comes back by itself; nothing is wrong with your account.", pauseMs: 5 * 60_000 };
+    case "temporarily_blocked":
+      return { code, message: "Your AI access is paused for a while because of unusually heavy use. It resumes automatically.", pauseMs: 10 * 60_000 };
+    default:
+      return null;
+  }
+}
 let planLimitUntil = 0;
 export const PLAN_LIMIT_MESSAGE = "Today's AI allowance for your Clynx plan is used up. It resets tomorrow, or upgrade in Config > Account.";
 
@@ -138,10 +167,18 @@ export async function callOpenAI(kind: "chat" | "images", body: unknown, signal?
       .clone()
       .text()
       .catch(() => "");
-    if (/ai_daily_limit|plan_limit/i.test(text)) {
-      planLimitUntil = Date.now() + PLAN_LIMIT_RETRY_MS;
-      console.error("[openai] the Clynx plan's AI allowance is used up: AI features pause for a few minutes.");
-      throw new Error(PLAN_LIMIT_MESSAGE);
+    const refusal = cloudRefusal(text);
+    if (refusal) {
+      planLimitUntil = Date.now() + refusal.pauseMs;
+      console.error(`[openai] Clynx Cloud refused the AI request (${refusal.code}): AI features pause for a few minutes.`);
+      throw new Error(refusal.message);
+    }
+  }
+  if (result.response.status === 503) {
+    const refusal = cloudRefusal(await result.response.clone().text().catch(() => ""));
+    if (refusal) {
+      planLimitUntil = Date.now() + refusal.pauseMs;
+      throw new Error(refusal.message);
     }
   }
   return result.response;

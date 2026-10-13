@@ -603,6 +603,28 @@ export class CloudClient {
     return this.deviceId;
   }
 
+  /** A read of eBay's public listing data through Clynx Cloud (the company's eBay credentials stay on the server). Only the two Browse operations the server offers are mapped. */
+  async ebayRead<T>(path: string, params: Record<string, string>): Promise<T> {
+    let url: string;
+    if (path === "/item_summary/search") {
+      const p = new URLSearchParams();
+      for (const k of ["q", "filter", "sort", "category_ids"]) if (params[k]) p.set(k, params[k]);
+      p.set("limit", String(Math.min(Math.max(Number(params.limit) || 20, 1), 50)));
+      if (params.fieldgroups === "EXTENDED" || params.fieldgroups === "MATCHING_ITEMS") p.set("fieldgroups", params.fieldgroups);
+      url = `/ebay/search?${p.toString()}`;
+    } else if (path.startsWith("/item/")) {
+      url = `/ebay/item/${path.slice("/item/".length)}`;
+    } else {
+      throw new Error("eBay through Clynx Cloud does not offer that lookup.");
+    }
+    const r = await this.accountCall<T>("GET", url);
+    if (!r.ok || r.data === undefined) {
+      const msg = (r.data as { message?: string } | undefined)?.message;
+      throw new Error(msg ?? r.error ?? "eBay could not be reached through Clynx Cloud.");
+    }
+    return r.data;
+  }
+
   // --- Account and subscription (cloud/src/billing/routes.ts, cloud/src/auth/accountRoutes.ts) ---
   private async accountCall<T>(method: string, path: string, body?: unknown): Promise<CloudResult<T>> {
     const apiUrl = this.resolveApiUrl();

@@ -17,7 +17,11 @@ export function AboutBlock({ info }: { info: BetaInfo }) {
         {info.builtAt ? `, ${new Date(info.builtAt).toLocaleString()}` : ""}
       </div>
       <div style={{ color: "var(--text-dim)" }}>
-        {info.localMode ? "Local mode: everything stays on this computer. No Clynx Cloud account, plan or billing is used." : "Signed in to Clynx Cloud."}
+        {info.localMode
+          ? "Local mode: everything stays on this computer. No Clynx Cloud account, plan or billing is used, and AI and eBay need keys of your own."
+          : info.apiSource === "own"
+            ? "Cloud mode: signed in to Clynx Cloud, using the OpenAI and eBay keys saved on this computer."
+            : "Cloud mode: signed in to Clynx Cloud. AI and eBay are provided by Clynx; you do not need any keys."}
       </div>
     </div>
   );
@@ -111,6 +115,56 @@ export function KeysBlock({ info, onChanged }: { info: BetaInfo; onChanged: () =
           {note}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Cloud mode: AI and eBay come from Clynx. Keys saved from the beta are never deleted for you; the person moves off them, or deletes them, on purpose. */
+export function CloudApisBlock({ info, onChanged }: { info: BetaInfo; onChanged: () => void }) {
+  const [note, setNote] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const set = async (source: "shared" | "own") => {
+    const r = await api.setApiSource(source);
+    setNote(r.ok ? (source === "shared" ? "Using Clynx's shared AI and eBay. Your saved keys were kept but are not used." : "Using the keys saved on this computer.") : (r.error ?? "That did not work."));
+    onChanged();
+  };
+  return (
+    <div data-testid="cloud-apis" style={{ display: "flex", flexDirection: "column", gap: 12, fontSize: 14 }}>
+      {info.apiSource === "shared" ? (
+        <div data-testid="apis-shared">AI and eBay are provided by Clynx through your account. <strong>You do not need an OpenAI or eBay key.</strong> Usage is limited by your plan.</div>
+      ) : (
+        <div data-testid="apis-own">You are using the OpenAI and eBay keys saved on this computer (from the beta). Clynx also offers its own shared AI and eBay service with your account, so keys are optional.</div>
+      )}
+      {info.hasSavedKeys && (
+        <div className="muted" style={{ color: "var(--text-muted)" }}>
+          Keys (OpenAI and/or eBay) are saved on this computer. They stay here until you delete them.
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        {info.apiSource === "own" && (
+          <button className="ghost" data-testid="use-shared" onClick={() => void set("shared")}>
+            Use Clynx's shared AI and eBay (keeps my keys saved)
+          </button>
+        )}
+        {info.apiSource === "shared" && info.hasSavedKeys && (
+          <button className="ghost" data-testid="use-own" onClick={() => void set("own")}>
+            Use my own saved keys again
+          </button>
+        )}
+        {info.hasSavedKeys && !confirmDelete && (
+          <button className="ghost" data-testid="delete-keys" onClick={() => setConfirmDelete(true)}>
+            Delete my saved keys...
+          </button>
+        )}
+        {confirmDelete && (
+          <>
+            <span>Delete the OpenAI and eBay keys from this computer?</span>
+            <button className="danger-solid" data-testid="delete-keys-confirm" onClick={async () => { await api.deleteSavedKeys(); setConfirmDelete(false); setNote("Your saved keys were deleted from this computer."); onChanged(); }}>Delete them</button>
+            <button className="ghost" onClick={() => setConfirmDelete(false)}>Keep them</button>
+          </>
+        )}
+      </div>
+      {note && <div data-testid="apis-note" style={{ color: "var(--text-muted)" }}>{note}</div>}
     </div>
   );
 }

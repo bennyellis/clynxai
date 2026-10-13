@@ -23,8 +23,18 @@ function credentials(): { clientId: string; clientSecret: string } | null {
   return { clientId, clientSecret };
 }
 
+// A signed-in customer using Clynx's shared service reads eBay through Clynx Cloud (which holds the company's eBay credentials); index.ts installs this when that mode is on.
+export interface EbayTransport {
+  enabled(): boolean;
+  get<T>(path: string, params: Record<string, string>, baseUrl: string): Promise<T>;
+}
+let transport: EbayTransport | null = null;
+export function setEbayTransport(t: EbayTransport | null): void {
+  transport = t;
+}
+
 export function hasEbayCredentials(): boolean {
-  return credentials() !== null;
+  return transport?.enabled() === true || credentials() !== null;
 }
 
 // eBay's own best practice (rate-limits token MINTING far more tightly than
@@ -59,6 +69,7 @@ async function getAccessToken(): Promise<string> {
 }
 
 async function ebayGet<T>(path: string, params: Record<string, string>, baseUrl: string = EBAY_BROWSE_URL): Promise<T> {
+  if (transport?.enabled()) return transport.get<T>(path, params, baseUrl);
   const token = await getAccessToken();
   const url = new URL(`${baseUrl}${path}`);
   for (const [key, value] of Object.entries(params)) {

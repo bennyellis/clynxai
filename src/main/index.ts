@@ -9,8 +9,8 @@ import { colorsConflict, colorsIn } from "./colors.js";
 import { ScrapeEngine } from "./scrapeEngine.js";
 import { WatchScheduler } from "./watchScheduler.js";
 import { EbayEngine } from "./ebayEngine.js";
-import { hasEbayCredentials } from "./ebayClient.js";
-import { hasOpenAIAccess, initOpenAIProxy } from "./openai.js";
+import { hasEbayCredentials, setEbayTransport } from "./ebayClient.js";
+import { hasOpenAIAccess, initOpenAIProxy, setApiSource } from "./openai.js";
 import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
 import { writeFileAtomicWithBackup } from "./safeFs.js";
 import { describeStartupFailure, type StartupProblem } from "./startupErrors.js";
@@ -151,12 +151,15 @@ interface AppSettings {
   cloudApiUrl: string;
   // Beta builds only: the tester chose "use Clynx on this computer only" (no Clynx Cloud account, nothing leaves the computer except the tester's own scans and API calls).
   localMode?: boolean;
+  // Cloud accounts: where AI and eBay come from. "shared" = Clynx's company-managed service (no keys needed); "own" = keys saved on this computer. Unset: "own" when keys are
+  // already saved here (nothing changes until the person chooses), otherwise "shared".
+  aiSource?: "shared" | "own";
 }
 function loadAppSettings(): AppSettings {
   try {
     if (!existsSync(APP_SETTINGS_PATH)) return { cloudApiUrl: DEFAULT_CLOUD_API_URL };
     const raw = JSON.parse(readFileSync(APP_SETTINGS_PATH, "utf-8"));
-    return { cloudApiUrl: typeof raw?.cloudApiUrl === "string" && raw.cloudApiUrl.trim() ? raw.cloudApiUrl : DEFAULT_CLOUD_API_URL, localMode: raw?.localMode === true };
+    return { cloudApiUrl: typeof raw?.cloudApiUrl === "string" && raw.cloudApiUrl.trim() ? raw.cloudApiUrl : DEFAULT_CLOUD_API_URL, localMode: raw?.localMode === true, aiSource: raw?.aiSource === "shared" || raw?.aiSource === "own" ? raw.aiSource : undefined };
   } catch {
     return { cloudApiUrl: DEFAULT_CLOUD_API_URL };
   }
@@ -165,6 +168,14 @@ function loadAppSettings(): AppSettings {
 const buildInfo = readBuildInfo(app.getAppPath(), app.getVersion());
 const LOCAL_USER_ID = "local-beta";
 const isLocalMode = (): boolean => appSettings.localMode === true && buildInfo.localModeAllowed;
+const hasSavedKeys = (): boolean => !!process.env.OPENAI_API_KEY?.trim() || !!(process.env.EBAY_CLIENT_ID?.trim() && process.env.EBAY_CLIENT_SECRET?.trim());
+/** Which AI/eBay service this session uses: the tester's own keys (local mode), Clynx's shared service, or keys saved on this computer that the person has not yet moved off. */
+function effectiveApiSource(): "local" | "shared" | "own" {
+  if (isLocalMode()) return "local";
+  if (appSettings.aiSource === "shared") return "shared";
+  if (appSettings.aiSource === "own") return "own";
+  return hasSavedKeys() ? "own" : "shared";
+}
 function saveAppSettings(settings: AppSettings): void {
   writeFileAtomicWithBackup(APP_SETTINGS_PATH, JSON.stringify(settings, null, 2));
 }
@@ -221,6 +232,8 @@ const cloudClient = new CloudClient(() => config, CLOUD_SESSION_PATH);
 // when no local OPENAI_API_KEY is configured, instead of each needing its
 // own key on this machine.
 initOpenAIProxy(cloudClient);
+setApiSource(() => (effectiveApiSource() === "shared" ? "shared" : "own"));
+setEbayTransport({ enabled: () => effectiveApiSource() === "shared" && cloudClient.isAuthenticated(), get: (path, params) => cloudClient.ebayRead(path, params) });
 
 // Multi-user login migration — store and all 4 background sync services
 // used to be constructed once, unconditionally, at module scope. They're
@@ -3341,6 +3354,23 @@ app.whenReady().then(() => {
     syncAiKeyNotice();
     return { ok: true };
   });
+  // Cloud accounts choose where AI and eBay come from. Switching never deletes anything: saved keys stay on this computer until the person deletes them here.
+  ipcMain.handle("account:setApiSource", (_e, args: { source?: string }): { ok: boolean; error?: string } => {
+    if (isLocalMode()) return { ok: false, error: "In local mode you use your own keys." };
+    if (args?.source !== "shared" && args?.source !== "own") return { ok: false, error: "Choose shared or own." };
+    appSettings = { ...appSettings, aiSource: args.source };
+    saveAppSettings(appSettings);
+    syncAiKeyNotice();
+    return { ok: true };
+  });
+  ipcMain.handle("env:deleteSavedKeys", (): { ok: boolean } => {
+    for (const k of ["OPENAI_API_KEY", "EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET"]) {
+      saveEnvKey(k, "");
+      delete process.env[k];
+    }
+    syncAiKeyNotice();
+    return { ok: true };
+  });
   ipcMain.handle("env:saveEbayCredentials", (_e, args: { clientId?: string; clientSecret?: string }): { ok: boolean; error?: string } => {
     const id = String(args?.clientId ?? "").trim();
     const secret = String(args?.clientSecret ?? "").trim();
@@ -3557,6 +3587,8 @@ app.whenReady().then(() => {
       localMode: isLocalMode(),
       hasOpenAIKey: !!process.env.OPENAI_API_KEY,
       localDataExists: buildInfo.localModeAllowed && localDataExists(USERS_ROOT),
+      apiSource: effectiveApiSource(),
+      hasSavedKeys: hasSavedKeys(),
       browser: { ok: !!browsers.preferred, using: browsers.preferred?.label ?? null, found: browsers.found.map((b) => b.label), instructions: browsers.instructions, downloadUrl: CHROME_DOWNLOAD_URL },
     };
   });

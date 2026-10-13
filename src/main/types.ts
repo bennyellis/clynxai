@@ -762,6 +762,10 @@ export interface BetaInfo {
   hasOpenAIKey: boolean;
   /** There is local beta data on this computer that could be copied into an account (only when the person asks). */
   localDataExists?: boolean;
+  /** Where AI and eBay come from for this session. */
+  apiSource?: "local" | "shared" | "own";
+  /** Keys (OpenAI or eBay) are saved on this computer. */
+  hasSavedKeys?: boolean;
   browser: { ok: boolean; using: string | null; found: string[]; instructions: string; downloadUrl: string };
 }
 export interface BackupSummary {

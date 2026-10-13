@@ -40,6 +40,8 @@ const api = {
 
   hasOpenAIKey: (): Promise<boolean> => ipcRenderer.invoke("env:hasOpenAIKey"),
   saveOpenAIKey: (key: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("env:saveOpenAIKey", key),
+  setApiSource: (source: "shared" | "own"): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("account:setApiSource", { source }),
+  deleteSavedKeys: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("env:deleteSavedKeys"),
   saveEbayCredentials: (clientId: string, clientSecret: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("env:saveEbayCredentials", { clientId, clientSecret }),
   beta: {
     info: (): Promise<BetaInfo> => ipcRenderer.invoke("beta:info"),
