@@ -16,6 +16,7 @@ app-settings.json
 # Last-known-good copies and kept-aside damaged files written by safeFs.ts / dbIntegrity.ts (can hold keys or tokens)
 *.bak
 *.corrupt-*
+*.before-restore-*
 *.unreadable-*
 *.tmp-*
 *.recover-requested
@@ -31,3 +32,6 @@ audit/phase4_shadow/open_timing.cjs
 # Generated bundles of the read-only audit tools (built by audit/phase4_shadow/build.cjs; not kept in git)
 audit/phase4_shadow/*.cjs
 !audit/phase4_shadow/build.cjs
+*.restore-requested
+*.restoring
+*.partial

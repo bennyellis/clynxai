@@ -64,3 +64,17 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+  # Known-vulnerability review of the dependencies that ship (production only). Informational: a new advisory should be looked at, but must not block unrelated work.
+  audit:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm audit --omit=dev --audit-level=high
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      - run: npm audit --omit=dev --audit-level=high
+        working-directory: cloud

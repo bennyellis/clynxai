@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CloudClient } from "../cloudClient.js";
+import { CloudClient, isBillingStatus } from "../cloudClient.js";
 import { safeExternalUrl } from "../safeExternalUrl.js";
 import { describeSubscription } from "../../renderer/src/lib/subscriptionText.js";
 import type { BillingStatus, Config } from "../types.js";
@@ -33,6 +33,14 @@ run(async () => {
     check("file:, javascript: and custom protocols are refused", ["file:///C:/Windows/System32/calc.exe", "javascript:alert(1)", "ms-msdt:/id", "smb://host/share"].every((u) => safeExternalUrl(u).ok === false));
     check("garbage and non-strings are refused", safeExternalUrl("not a url").ok === false && safeExternalUrl(undefined).ok === false && safeExternalUrl({}).ok === false);
     check("credentials in the address are refused", safeExternalUrl("https://user:pw@example.com/").ok === false);
+  }
+
+  section("isBillingStatus: an unexpected server answer never reaches the screen");
+  {
+    check("a real status passes", isBillingStatus(base) && isBillingStatus(sub("active")));
+    check("an empty object, null, a string and an error body are refused", [{}, null, "x", { error: "nope" }, []].every((v) => !isBillingStatus(v)));
+    check("a status missing entitlements or usage is refused", !isBillingStatus({ ...base, entitlements: undefined }) && !isBillingStatus({ ...base, usage: undefined }));
+    check("an unknown plan name is refused", !isBillingStatus({ ...base, plan: "enterprise" }));
   }
 
   section("describeSubscription");

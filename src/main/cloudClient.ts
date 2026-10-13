@@ -24,6 +24,7 @@
 // which server (apiUrl) it belongs to, since index.ts needs that to decide
 // which per-user data folder to load *before* any per-user Config exists to
 // read an apiUrl from.
+import { protectSecret, revealSecret } from "./secretStore.js";
 import { readJsonFileSafe, writeFileAtomicWithBackup } from "./safeFs.js";
 import type { BillingPlanChoice, BillingStatus, Config, FeedbackVerdict, ListingRecord, ProductProfile, SyncStatus, Watch, WatchMatch } from "./types.js";
 
@@ -352,7 +353,7 @@ export function readSession(sessionPath: string): CloudSession {
     const raw = read.value;
     return {
       deviceId: typeof raw?.deviceId === "string" ? raw.deviceId : null,
-      refreshToken: typeof raw?.refreshToken === "string" ? raw.refreshToken : null,
+      refreshToken: typeof raw?.refreshToken === "string" ? revealSecret(raw.refreshToken) : null,
       userId: typeof raw?.userId === "string" ? raw.userId : null,
       email: typeof raw?.email === "string" ? raw.email : null,
       apiUrl: typeof raw?.apiUrl === "string" ? raw.apiUrl : null,
@@ -365,7 +366,9 @@ export function readSession(sessionPath: string): CloudSession {
 
 export function writeSession(sessionPath: string, session: CloudSession): void {
   try {
-    writeFileAtomicWithBackup(sessionPath, JSON.stringify(session, null, 2));
+    // the refresh token is the one long-lived secret in this file: encrypted with the operating system's key store when available (see secretStore.ts)
+    const onDisk = { ...session, refreshToken: session.refreshToken ? protectSecret(session.refreshToken) : null };
+    writeFileAtomicWithBackup(sessionPath, JSON.stringify(onDisk, null, 2));
   } catch (err) {
     console.error("[cloudClient] failed to write cloud-session.json:", err);
   }
@@ -391,6 +394,23 @@ async function safeFetch(url: string, init?: RequestInit): Promise<CloudResult<a
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// The server's /billing/status answer, checked for the fields the account screen reads (a different or older server must not be able to crash the screen).
+export function isBillingStatus(v: unknown): v is BillingStatus {
+  const b = v as Partial<BillingStatus> | null;
+  return (
+    !!b &&
+    typeof b === "object" &&
+    typeof b.configured === "boolean" &&
+    (b.plan === "free" || b.plan === "pro") &&
+    !!b.entitlements &&
+    typeof b.entitlements === "object" &&
+    !!b.usage &&
+    typeof b.usage === "object" &&
+    typeof b.usage.aiRequestsToday === "number" &&
+    (b.subscription === null || (typeof b.subscription === "object" && typeof b.subscription.phase === "string"))
+  );
 }
 
 export class CloudClient {

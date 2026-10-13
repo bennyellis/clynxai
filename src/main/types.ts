@@ -359,6 +359,8 @@ export interface Config {
   // the Database when it is opened; `backfill` (needs schema) fills them in small background steps a minute after startup. Nothing reads them to pick, merge
   // or value a product.
   identityFoundation?: { schema: boolean; backfill: boolean };
+  // Automatic safety copies of the Database (see dbBackups.ts). On unless explicitly turned off.
+  backups?: { enabled: boolean };
   // Veto-only identity safeguard (Phase 4). OFF by default and changed only by editing config.json (then restart). "shadow" evaluates every match the existing matcher
   // makes and writes the decision to logs/identity-safeguard.jsonl without changing anything; "enforce" additionally stops a match the evidence says is a materially
   // different product from being filed, valued or added to. It never chooses another product. Uncertainty is never a veto.
@@ -748,6 +750,13 @@ export interface BillingStatus {
   canManage: boolean;
   usage: { aiRequestsToday: number; aiImagesToday: number };
   trialDays: number;
+}
+export interface BackupSummary {
+  enabled: boolean;
+  folder: string;
+  backups: Array<{ name: string; takenAt: number; bytes: number }>;
+  ok?: boolean;
+  error?: string;
 }
 export type BillingPlanChoice = "pro_monthly" | "pro_yearly";
 export type BillingActionResult = { ok: true } | { ok: false; error: string };

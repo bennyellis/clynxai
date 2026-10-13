@@ -8,8 +8,58 @@
   "build": {
     "appId": "com.clynx.app",
     "productName": "Clynx",
+    "files": [
+      "out/**",
+      "resources/**",
+      "package.json",
+      "!**/*.map",
+      "!**/node_modules/*/{test,tests,__tests__,docs,example,examples}/**",
+      "!**/node_modules/.bin"
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "publish": null,
+    "directories": {
+      "output": "dist"
+    },
+    "artifactName": "Clynx-${version}-${os}-${arch}.${ext}",
     "win": {
-      "icon": "build/icon.ico"
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    },
+    "mac": {
+      "category": "public.app-category.business",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
     }
   },
   "scripts": {
@@ -20,7 +70,9 @@
     "test": "node scripts/run-tests.cjs",
     "preview": "electron-vite preview",
     "pack": "npm run build && electron-builder --win --dir",
-    "dist": "npm run build && electron-builder --win"
+    "dist": "npm run build && electron-builder --win",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

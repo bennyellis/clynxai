@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { AccountSection } from "./AccountSection.js";
+import { BackupsSection } from "./BackupsSection.js";
+import { SupportReportButton } from "./SupportReportButton.js";
 import type { Account, CloudStatus, Config as ConfigType } from "../lib/api.js";
 import { NtfySetup } from "../components/NtfySetup.js";
 import { useScreenActive } from "../lib/screenActive.js";
@@ -718,6 +720,16 @@ export function ConfigScreen({
       {tab === "account" && (
         <Section title="Your plan" subtitle="Your Clynx plan, what it includes, and billing.">
           <AccountSection onDeleted={onLoggedOut} />
+        </Section>
+      )}
+      {tab === "account" && (
+        <Section title="Database backups" subtitle="Clynx keeps safety copies of your Database on this computer. If something ever goes wrong you can go back to one.">
+          <BackupsSection enabled={cfg.backups?.enabled !== false} onToggle={(v) => update("backups", { enabled: v })} />
+        </Section>
+      )}
+      {tab === "account" && (
+        <Section title="Support report" subtitle="If something is not working, save a report and send it to us. It lists versions, settings and recent technical events; passwords, keys, tokens, email addresses, listings and photos are never included.">
+          <SupportReportButton />
         </Section>
       )}
       {tab === "account" && <CloudSyncSection onLoggedOut={onLoggedOut} />}

@@ -60,9 +60,9 @@ export function probeDatabaseFile(dbPath: string): { ok: true } | { ok: false; r
  * Falls back to copy-then-delete if a rename is refused; throws only if the original could not be removed (the caller must not
  * then open a "fresh" database on top of it).
  */
-export function quarantineDatabase(dbPath: string): string {
-  let dest = `${dbPath}.corrupt-${Date.now()}`;
-  for (let i = 2; existsSync(dest); i++) dest = `${dbPath}.corrupt-${Date.now()}-${i}`; // never overwrite an earlier kept copy
+export function quarantineDatabase(dbPath: string, label = "corrupt"): string {
+  let dest = `${dbPath}.${label}-${Date.now()}`;
+  for (let i = 2; existsSync(dest); i++) dest = `${dbPath}.${label}-${Date.now()}-${i}`; // never overwrite an earlier kept copy
   const move = (from: string, to: string) => {
     try {
       renameSync(from, to);

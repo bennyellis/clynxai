@@ -1,4 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, backup as sqliteBackup } from "node:sqlite";
 import { colorsConflict, colorsIn, isColorWord, sameColors } from "./colors.js";
 import { compMatchesSpecs, hasSingleModelLetter, modelLettersConflict } from "./compFilter.js";
 import type { ProductSignals } from "./dealSummary.js";
@@ -990,6 +990,11 @@ export class Store {
   backupDatabase(file: string): void {
     if (existsSync(file)) throw new Error("backup file already exists");
     this.db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+  }
+  /** Same as backupDatabase, but with SQLite's online-backup API: copied in small steps, yielding to the app between them, so a big Database never freezes the window. */
+  async backupDatabaseAsync(file: string): Promise<void> {
+    if (existsSync(file)) throw new Error("backup file already exists");
+    await sqliteBackup(this.db, file, { rate: 200 });
   }
   // A correction can change which entry a listing is filed under and what a value is: forget everything derived from the old state.
   private afterCorrection(): void {

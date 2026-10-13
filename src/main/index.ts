@@ -1,8 +1,8 @@
 import "dotenv/config";
 import { makePhotoCheck } from "./compPhotoCheck.js";
-import { app, BrowserWindow, ipcMain, shell, Menu, dialog, Notification } from "electron";
+import { app, BrowserWindow, ipcMain, safeStorage, session, shell, Menu, dialog, Notification } from "electron";
 import path from "node:path";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, cpSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, cpSync, statSync } from "node:fs";
 import { Store } from "./store.js";
 import { colorsConflict, colorsIn } from "./colors.js";
 import { ScrapeEngine } from "./scrapeEngine.js";
@@ -17,7 +17,8 @@ import { NoticeBoard } from "./appNotices.js";
 import { describeSessionProblem } from "./facebookSession.js";
 import { sendSystemAlert, sendTestNotification } from "./notify.js";
 import { describeTopicStrength, generateNtfyTopic } from "./ntfySetup.js";
-import { openWithRecovery, requestRecovery, runIntegrityCheckInBackground } from "./dbIntegrity.js";
+import { openWithRecovery, quarantineDatabase, requestRecovery, runIntegrityCheckInBackground } from "./dbIntegrity.js";
+import { applyPendingRestore, backupDirFor, createBackup, listBackups, requestRestore } from "./dbBackups.js";
 import { loadConfig, saveConfig, takeConfigLoadNotice, DEFAULT_CONFIG, DEFAULT_BROWSE_URLS, DEFAULT_COUNTRY_CITIES } from "./config.js";
 import {
   streamChat,
@@ -59,17 +60,25 @@ import { snapToFacebookRadius, snapToWatchInterval } from "./watchOptions.js";
 import { timed, getMetricsSnapshot, resetMetrics } from "./metrics.js";
 import { DiscoveryFeed, type DiscoverySource } from "./discovery.js";
 import { breakDownListing, valueBundle, type BundleValuation, type PricedBundleItem } from "./bundleBreakdown.js";
-import { CloudClient } from "./cloudClient.js";
+import { CloudClient, isBillingStatus } from "./cloudClient.js";
 import { safeExternalUrl } from "./safeExternalUrl.js";
+import { setSecretCodec } from "./secretStore.js";
+import { externalLinkTarget, isAppUrl, isTrustedIpcSender } from "./windowSecurity.js";
 import { WatchSyncService } from "./watchSync.js";
 import { ListingIngestSyncService } from "./listingIngestSync.js";
 import { FeedbackSyncService } from "./feedbackSync.js";
 import { ProductSyncService } from "./productSync.js";
 import type { Account, ActiveProductResearch, BillingActionResult, BillingStatus, CloudStatus, Config, EngineConfig, FeedbackVerdict, LogLine, OnboardingState, ProductProfile, ScrapeStatus, SearchItem, Watch, WatchPlatform, WatchTerm } from "./types.js";
 import { rmSync } from "node:fs";
+import os from "node:os";
+import { buildSupportReport } from "./supportReport.js";
+import { applicationMenuTemplate } from "./appMenu.js";
 import { createDiagnosticsLog, createRecoveryLimiter } from "./diagnostics.js";
 
-Menu.setApplicationMenu(null);
+{
+  const template = applicationMenuTemplate(process.platform, "Clynx");
+  Menu.setApplicationMenu(template ? Menu.buildFromTemplate(template) : null);
+}
 
 // Only one Clynx may run at a time. A second copy (double-clicking the exe
 // again, or the dev build alongside the packaged one) would share this
@@ -174,7 +183,7 @@ registerLowAiModeSource(() => config.lowAiMode !== false);
 const cloudClient = new CloudClient(() => config, CLOUD_SESSION_PATH);
 // Clynx Cloud — shared-key migration. See openai.ts's own doc comment: this
 // is what lets every OpenAI call site in the app (chat.ts, vision.ts,
-// scorer.ts, ...) fall back to proxying through Clynx Cloud's /ai/* routes
+// scorer.ts, ...) fall back to proxying through Clynx Cloud's /ai routes
 // when no local OPENAI_API_KEY is configured, instead of each needing its
 // own key on this machine.
 initOpenAIProxy(cloudClient);
@@ -2899,6 +2908,22 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   config = { ...config, cloud: { enabled: true, apiUrl: appSettings.cloudApiUrl } };
   saveConfig(CONFIG_PATH, config);
 
+  // A restore the user asked for last time is carried out first: the current database is moved aside (kept), and the chosen backup takes its place.
+  const restore = applyPendingRestore(DB_PATH, (p) => quarantineDatabase(p, "before-restore"));
+  if (restore) {
+    notices.set(
+      "error" in restore
+        ? { id: "db-restore", severity: "warning", title: "A backup could not be restored", message: restore.error, action: "dismiss", actionLabel: "Got it" }
+        : {
+            id: "db-restore",
+            severity: "info",
+            title: "Your Database was restored from a backup",
+            message: `Restored ${restore.restoredFrom}.${restore.keptCopy ? ` The Database you had before was kept as ${path.basename(restore.keptCopy)} in your Clynx data folder.` : ""}`,
+            action: "dismiss",
+            actionLabel: "Got it",
+          }
+    );
+  }
   // A damaged database is moved aside (never deleted) and a fresh one started, instead of the app failing to log in.
   const dbOpen = openWithRecovery(DB_PATH, () => new Store(DB_PATH, { identityFoundation: config.identityFoundation?.schema === true }));
   store = dbOpen.store;
@@ -2932,6 +2957,7 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
       });
     });
   }, 90_000);
+  scheduleDatabaseBackups();
   mergeDuplicateProductEntries();
   scheduleIdentityBackfill();
   // A little after startup, so the app is up and the first scan isn't competing with it.
@@ -3053,6 +3079,37 @@ function watchProcessHealth(): void {
   mainWindow?.on("responsive", () => diagnostics.record("window-responsive-again"));
 }
 
+// Where the app's own pages live (see windowSecurity.ts): the dev server when unpackaged, else the bundled renderer folder.
+function appOrigin() {
+  return { devUrl: process.env["ELECTRON_RENDERER_URL"] ?? null, rendererDir: path.join(__dirname, "../renderer") };
+}
+
+// Safety copies of the Database: one a day at most, taken a few minutes after start and re-checked every few hours, written next to the Database, rotated (dbBackups.ts).
+let backupTimer: ReturnType<typeof setInterval> | null = null;
+let backupRunning = false;
+async function runDatabaseBackup(force: boolean) {
+  if (backupRunning || !hasActiveUserSession || !store) return null;
+  if (!force && config.backups?.enabled === false) return null;
+  backupRunning = true;
+  const s = store;
+  try {
+    const r = await createBackup({ dbPath: DB_PATH, copyTo: (dest) => s.backupDatabaseAsync(dest), force });
+    if (!r.ok && !r.skipped) {
+      console.error("[backup] failed:", r.reason);
+      diagnostics.record("backup-failed", { reason: r.reason });
+    }
+    return r;
+  } finally {
+    backupRunning = false;
+  }
+}
+function scheduleDatabaseBackups() {
+  if (backupTimer) return; // one timer for the whole run; it always acts on the current user's database
+  setTimeout(() => void runDatabaseBackup(false), 5 * 60_000);
+  backupTimer = setInterval(() => void runDatabaseBackup(false), 6 * 3600_000);
+  backupTimer.unref?.();
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -3079,13 +3136,28 @@ function createWindow() {
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      webviewTag: false,
+      allowRunningInsecureContent: false,
     },
   });
 
+  // The window only ever shows the app's own pages: links open in the system browser (http/https only), and any navigation away from the app is refused.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    const target = externalLinkTarget(url);
+    if (target) void shell.openExternal(target);
     return { action: "deny" };
   });
+  const blockForeignNavigation = (event: Electron.Event, url: string) => {
+    if (!isAppUrl(url, appOrigin())) {
+      event.preventDefault();
+      const target = externalLinkTarget(url);
+      if (target) void shell.openExternal(target);
+    }
+  };
+  mainWindow.webContents.on("will-navigate", blockForeignNavigation);
+  mainWindow.webContents.on("will-redirect", blockForeignNavigation);
 
   // Per explicit instruction — the user has to actually deal with (save or
   // deliberately discard) unsaved Config changes before the app closes,
@@ -3113,6 +3185,32 @@ function createWindow() {
 app.whenReady().then(() => {
   if (!hasInstanceLock) return; // a second copy is already shutting itself down — don't build a window or register handlers
   diagnostics.beginSession({ version: app.getVersion(), electron: process.versions.electron, platform: process.platform, packaged: app.isPackaged });
+  // Renderer permissions (camera, microphone, location, notifications, ...) are never granted; webviews can never be attached; every IPC handler below refuses calls that
+  // do not come from the app's own top-level page.
+  setSecretCodec({ available: () => safeStorage.isEncryptionAvailable(), encrypt: (t) => safeStorage.encryptString(t), decrypt: (b) => safeStorage.decryptString(b) });
+  session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+  session.defaultSession.setPermissionCheckHandler(() => false);
+  app.on("web-contents-created", (_e, contents) => {
+    contents.on("will-attach-webview", (event) => event.preventDefault());
+  });
+  const rawHandle = ipcMain.handle.bind(ipcMain);
+  ipcMain.handle = ((channel: string, listener: (event: Electron.IpcMainInvokeEvent, ...args: any[]) => unknown) =>
+    rawHandle(channel, (event, ...args) => {
+      if (!isTrustedIpcSender(event.senderFrame, appOrigin())) {
+        diagnostics.record("ipc-refused", { channel, url: String(event.senderFrame?.url ?? "").slice(0, 200) });
+        throw new Error("This request did not come from the app.");
+      }
+      return listener(event, ...args);
+    })) as typeof ipcMain.handle;
+  const rawOn = ipcMain.on.bind(ipcMain);
+  ipcMain.on = ((channel: string, listener: (event: Electron.IpcMainEvent, ...args: any[]) => void) =>
+    rawOn(channel, (event, ...args) => {
+      if (!isTrustedIpcSender(event.senderFrame, appOrigin())) {
+        diagnostics.record("ipc-refused", { channel, url: String(event.senderFrame?.url ?? "").slice(0, 200) });
+        return;
+      }
+      listener(event, ...args);
+    })) as typeof ipcMain.on;
   createWindow();
   watchProcessHealth();
 
@@ -3223,6 +3321,59 @@ app.whenReady().then(() => {
     await shell.openPath(existsSync(folder) ? folder : baseDir);
   });
   ipcMain.handle("notices:dismiss", (_e, args: { id: string }) => notices.clear(args.id));
+  // Config > Account > Support report: a text file the user can send us. Secrets are removed (supportReport.ts); the user chooses where it is saved.
+  ipcMain.handle("support:saveReport", async (): Promise<{ ok: boolean; path?: string; error?: string }> => {
+    try {
+      const picked = await dialog.showSaveDialog(mainWindow as BrowserWindow, { title: "Save support report", defaultPath: path.join(app.getPath("documents"), `clynx-support-report-${new Date().toISOString().slice(0, 10)}.txt`), filters: [{ name: "Text", extensions: ["txt"] }] });
+      if (picked.canceled || !picked.filePath) return { ok: false };
+      let tail: string[] = [];
+      try {
+        tail = readFileSync(diagnostics.file, "utf-8").split(String.fromCharCode(10)).filter(Boolean).slice(-200);
+      } catch {
+        /* no diagnostics yet */
+      }
+      const backups = listBackups(backupDirFor(DB_PATH));
+      let dbBytes: number | null = null;
+      try {
+        dbBytes = statSync(DB_PATH).size;
+      } catch {
+        /* none */
+      }
+      const text = buildSupportReport({
+        generatedAt: new Date().toISOString(),
+        app: { version: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node, platform: process.platform, arch: process.arch, osRelease: os.release(), packaged: app.isPackaged },
+        config,
+        diagnosticsTail: tail,
+        notices: notices.list().map((n) => ({ id: n.id, severity: n.severity, title: n.title, message: n.message })),
+        cloud: cloudClient.getStatus(),
+        database: { bytes: dbBytes, backups: backups.length, newestBackupAt: backups[0] ? new Date(backups[0].takenAt).toISOString() : null },
+        homeDir: os.homedir(),
+      });
+      writeFileSync(picked.filePath, text, "utf-8");
+      return { ok: true, path: picked.filePath };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  // Config > Backups
+  const backupSummary = () => ({
+    enabled: config.backups?.enabled !== false,
+    folder: backupDirFor(DB_PATH),
+    backups: listBackups(backupDirFor(DB_PATH)).map((b) => ({ name: b.name, takenAt: b.takenAt, bytes: b.bytes })),
+  });
+  ipcMain.handle("backups:list", () => backupSummary());
+  ipcMain.handle("backups:now", async () => {
+    const r = await runDatabaseBackup(true);
+    return { ok: !!r && r.ok, error: r && !r.ok ? r.reason : r ? undefined : "A backup is already running.", ...backupSummary() };
+  });
+  ipcMain.handle("backups:restore", (_e, args: { name?: string }) => {
+    const r = requestRestore(DB_PATH, String(args?.name ?? ""));
+    if (!r.ok) return { ok: false, error: r.reason };
+    allowClose = true;
+    app.relaunch();
+    app.quit();
+    return { ok: true };
+  });
   // "Back up and start fresh": the open database cannot be renamed, so mark it and restart; the next start moves it aside.
   ipcMain.handle("db:recover", () => {
     requestRecovery(DB_PATH);
@@ -3361,7 +3512,7 @@ app.whenReady().then(() => {
   };
   ipcMain.handle("billing:status", async (): Promise<BillingStatus | null> => {
     const r = await cloudClient.getBillingStatus();
-    return r.ok && r.data ? r.data : null;
+    return r.ok && isBillingStatus(r.data) ? r.data : null; // an older or unexpected server answer is treated as "plan unavailable", never shown half-filled
   });
   ipcMain.handle("billing:checkout", async (_e, args: { plan?: string }): Promise<BillingActionResult> => {
     if (args?.plan !== "pro_monthly" && args?.plan !== "pro_yearly") return { ok: false, error: "Choose a plan." };
@@ -4498,7 +4649,9 @@ app.whenReady().then(() => {
 app.on("window-all-closed", async () => {
   await stopUserSession();
   if (hasActiveUserSession) store.close();
-  if (process.platform !== "darwin") app.quit();
+  // Quit on every platform, macOS included: closing the window ends the user's session and closes the database, so a "still running with no window" state (the macOS
+  // default) could not be reopened correctly.
+  app.quit();
 });
 
 app.on("before-quit", async () => {

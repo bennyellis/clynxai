@@ -41,7 +41,7 @@ export function AccountSection({ onDeleted }: { onDeleted?: () => void }) {
   }
   const d = describeSubscription(b);
   const hasLiveSub = b.subscription && ["trialing", "active", "canceling", "past_due_grace"].includes(b.subscription.phase);
-  const lim = b.entitlements.aiRequestsPerDay;
+  const lim = b.entitlements.aiRequestsPerDay ?? null;
   return (
     <div data-testid="account-section" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ border: `1px solid ${d.tone === "warn" ? "var(--warn)" : "var(--border)"}`, borderRadius: 12, padding: "14px 16px", background: d.tone === "warn" ? "var(--warn-bg)" : "var(--bg-card)" }}>
@@ -49,7 +49,7 @@ export function AccountSection({ onDeleted }: { onDeleted?: () => void }) {
         <div style={{ color: "var(--text-muted)", fontSize: 14, marginTop: 4 }}>{d.detail}</div>
         <div data-testid="account-usage" style={{ color: "var(--text-dim)", fontSize: 13, marginTop: 8 }}>
           AI requests today: {b.usage.aiRequestsToday}
-          {lim !== null ? ` of ${lim}` : " (no daily limit)"} · Watches: {b.entitlements.maxWatches === null ? "unlimited" : `up to ${b.entitlements.maxWatches}`} · Devices: {b.entitlements.maxDevices === null ? "unlimited" : `up to ${b.entitlements.maxDevices}`}
+          {lim !== null ? ` of ${lim}` : " (no daily limit)"} · Watches: {b.entitlements.maxWatches == null ? "unlimited" : `up to ${b.entitlements.maxWatches}`} · Devices: {b.entitlements.maxDevices == null ? "unlimited" : `up to ${b.entitlements.maxDevices}`}
         </div>
       </div>
 

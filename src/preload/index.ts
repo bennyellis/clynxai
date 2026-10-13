@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { DiscoveryEntry } from "../main/discovery.js";
 import type { ApplyResult, AuditEvent, DecideResult, ReviewSnapshot } from "../main/identityReview.js";
 import type { OnboardingState } from "../main/types.js";
-import type { Account, ActiveProductResearch, BillingActionResult, BillingPlanChoice, BillingStatus, BlacklistedImage, BlacklistTerm, CloudStatus, Config, FeedbackVerdict, ListingRecord, LogLine, ProductImage, ProductProfile, ScrapeStatus, Watch, WatchMatch, WatchPlatform } from "../main/types.js";
+import type { Account, ActiveProductResearch, BackupSummary, BillingActionResult, BillingPlanChoice, BillingStatus, BlacklistedImage, BlacklistTerm, CloudStatus, Config, FeedbackVerdict, ListingRecord, LogLine, ProductImage, ProductProfile, ScrapeStatus, Watch, WatchMatch, WatchPlatform } from "../main/types.js";
 import type { ChatMessage, ChatContext, ChatAttachment } from "../main/chat.js";
 import type { MetricsSnapshot } from "../main/metrics.js";
 import type { AppNotice } from "../main/appNotices.js";
@@ -405,6 +405,14 @@ const api = {
 
   // First UI status readout — Config.tsx's read-only Cloud Sync section
   // (see index.ts's cloud:getStatus and types.ts's CloudStatus).
+  support: {
+    saveReport: (): Promise<{ ok: boolean; path?: string; error?: string }> => ipcRenderer.invoke("support:saveReport"),
+  },
+  backups: {
+    list: (): Promise<BackupSummary> => ipcRenderer.invoke("backups:list"),
+    backupNow: (): Promise<BackupSummary> => ipcRenderer.invoke("backups:now"),
+    restore: (name: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("backups:restore", { name }),
+  },
   account: {
     getBilling: (): Promise<BillingStatus | null> => ipcRenderer.invoke("billing:status"),
     startCheckout: (plan: BillingPlanChoice): Promise<BillingActionResult> => ipcRenderer.invoke("billing:checkout", { plan }),
