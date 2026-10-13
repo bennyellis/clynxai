@@ -3,7 +3,7 @@ import { colorsConflict, colorsIn, isColorWord, sameColors } from "./colors.js";
 import { compMatchesSpecs, hasSingleModelLetter, modelLettersConflict } from "./compFilter.js";
 import type { ProductSignals } from "./dealSummary.js";
 import path from "node:path";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { timedSync, recordEvent } from "./metrics.js";
 import type { BlacklistedImage, BlacklistTerm, FeedbackExample, FeedbackVerdict, FlawFeedbackExample, GateFactsSnapshot, GateReasonRecord, ListingRecord, MyStoreReference, PhotoFlaw, ProductImage, ProductProfile, ScoredListing, SellerRiskResult, Watch, WatchMatch, WatchPlatform, WatchSearchLink, WatchTerm } from "./types.js";
@@ -14,6 +14,7 @@ import { assessCodes, CodeIndex, NO_CODES, type CodeAssessment, type EvidenceDoc
 import { IdentityFoundation } from "./identity/foundationStore.js";
 import { IdentitySafeguard, type SafeguardMode } from "./identity/safeguardRuntime.js";
 import type { ReviewInput } from "./identity/reviewFindings.js";
+import { applyPlan, undoBatch, type Outcome, type PlanItem } from "./identity/correctionJournal.js";
 
 // What a product is worth on eBay, as the total the BUYER pays (the sold item price plus the shipping they paid): the estimate when
 // there is one, else the sold average with its average shipping. The user keeps ~84% of that total (eBay's cut is on all of it).
@@ -968,6 +969,33 @@ export class Store {
       }
     }
     return { products, listings, photos, relations, aliases };
+  }
+
+  // --- Database review corrections (identityReview.ts). One approved suggestion at a time; the journal records the exact before-values so it can be undone.
+  applyCorrection(batchId: string, item: PlanItem): Outcome {
+    try {
+      return applyPlan(this.db, batchId, [item], new Set([item.id]))[0] ?? { id: item.id, status: "skipped-no-change" };
+    } finally {
+      this.afterCorrection();
+    }
+  }
+  undoCorrection(batchId: string, proposalId: string): Outcome[] {
+    try {
+      return undoBatch(this.db, batchId, new Set([proposalId]));
+    } finally {
+      this.afterCorrection();
+    }
+  }
+  /** A consistent copy of the whole Database in one file (SQLite VACUUM INTO). Refuses to overwrite an existing file. */
+  backupDatabase(file: string): void {
+    if (existsSync(file)) throw new Error("backup file already exists");
+    this.db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+  }
+  // A correction can change which entry a listing is filed under and what a value is: forget everything derived from the old state.
+  private afterCorrection(): void {
+    this.safeguard.invalidate();
+    this.ebayValueCache = null;
+    this.codeIndexCache = null;
   }
 
   // Listing titles and reference-photo titles as evidence documents (shared by the code index and the identity safeguard).

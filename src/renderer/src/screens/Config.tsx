@@ -688,6 +688,32 @@ export function ConfigScreen({
           </div>
         </Section>
       )}
+      {tab === "account" && (
+        <Section
+          title="Product matching safeguard (advanced)"
+          subtitle="Clynx sometimes files a listing under the wrong Database product (a game under its console, an accessory under the device). The safeguard checks each match and, only when the evidence is clear, stops that product's price from being used for the listing. It never picks a different product, and the listing is still found and shown."
+        >
+          <label style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: 520 }}>
+            <span style={{ fontWeight: 700 }}>Mode</span>
+            <select
+              data-testid="safeguard-mode"
+              value={cfg.identitySafeguard?.mode ?? "off"}
+              onChange={(e) => update("identitySafeguard", { mode: e.target.value as "off" | "shadow" | "enforce" })}
+            >
+              <option value="off">Off (default): nothing changes</option>
+              <option value="shadow">Watch only: record what it would do, change nothing</option>
+              <option value="enforce">On: withhold a clearly wrong product's price</option>
+            </select>
+            <span style={{ fontSize: 13, color: "var(--text-dim)" }}>
+              {(cfg.identitySafeguard?.mode ?? "off") === "enforce"
+                ? "On: a clearly wrong match no longer supplies a price or notes. Switch back to Off at any time."
+                : (cfg.identitySafeguard?.mode ?? "off") === "shadow"
+                  ? "Decisions are written to logs/identity-safeguard.jsonl next to your Clynx data so you can review them. Nothing changes in the app."
+                  : "Recommended: try “Watch only” for a few days before turning it on."}
+            </span>
+          </label>
+        </Section>
+      )}
       {tab === "account" && <CloudSyncSection onLoggedOut={onLoggedOut} />}
       </div>
     </div>

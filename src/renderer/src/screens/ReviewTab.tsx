@@ -3,7 +3,7 @@ import type { AuditEvent, ReviewFinding, ReviewProposal, ReviewSnapshot } from "
 import { api } from "../lib/api.js";
 
 // Database > Review: possible problems in the Database, with the evidence for each and a suggestion. REVIEW-ONLY. Nothing on this screen changes a Database entry, a listing, a
-// photo or a value; approving and rejecting are switched off until that has been validated (the buttons show why). There is no "approve all": a decision is about one suggestion.
+// photo or a value; approving and rejecting are switched off unless enabled in config.json (the buttons show why); applying a correction is a separate switch. There is no bulk approval: a decision is about one suggestion.
 
 type Category = ReviewFinding["category"];
 const CATEGORY_LABELS: Record<Category, string> = {
@@ -117,11 +117,27 @@ export function ReviewTab({ onOpenProduct }: { onOpenProduct: (id: string) => vo
     if (history) setHistory(await api.getIdentityReviewHistory());
   };
 
+  const applyOne = async (p: ReviewProposal) => {
+    if (!window.confirm(`Apply this correction to your Database?\n\n${ACTION_LABELS[p.action]}\n${p.preview.map((c) => `${c.rowLabel}: ${c.column} ${c.from} -> ${c.to}`).join("\n")}\n\nA backup of your Database is made first, and you can undo it from this screen.`)) return;
+    const r = await api.applyIdentityCorrection(p.id);
+    setNotice(r.ok ? "Applied. You can undo it below." : r.reason);
+    setSnap(await api.getIdentityReview());
+    if (history) setHistory(await api.getIdentityReviewHistory());
+  };
+  const undoOne = async (proposalId: string) => {
+    const r = await api.undoIdentityCorrection(proposalId);
+    setNotice(r.ok ? "Undone: the Database is back as it was." : r.reason);
+    setSnap(await api.getIdentityReview());
+    if (history) setHistory(await api.getIdentityReviewHistory());
+  };
+
   const toggleHistory = async () => {
     setHistory(history ? null : await api.getIdentityReviewHistory());
   };
 
   const decisionsEnabled = snap?.decisionsEnabled === true;
+  const applyEnabled = snap?.applyEnabled === true;
+  const appliedNow = useMemo(() => Object.entries(snap?.decisions ?? {}).filter(([, d]) => d.applied && !d.applied.undoneAt), [snap]);
 
   return (
     <div data-testid="review-tab" style={{ display: "flex", flexDirection: "column", gap: 14, minHeight: 0, flex: 1, overflowY: "auto", paddingRight: 4 }}>
@@ -129,11 +145,13 @@ export function ReviewTab({ onOpenProduct }: { onOpenProduct: (id: string) => vo
         data-testid="review-banner"
         style={{ background: "var(--warn-bg)", border: "1px solid var(--warn)", borderRadius: 12, padding: "12px 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", flexShrink: 0 }}
       >
-        <strong style={{ color: "var(--warn)" }}>{decisionsEnabled ? "Review mode: decisions are recorded, nothing is applied" : "Review only"}</strong>
+        <strong style={{ color: "var(--warn)" }}>{applyEnabled ? "Corrections are enabled, one at a time" : decisionsEnabled ? "Review mode: decisions are recorded, nothing is applied" : "Review only"}</strong>
         <span style={{ color: "var(--text-muted)", fontSize: 14.5, flex: 1, minWidth: 260 }}>
-          {decisionsEnabled
-            ? "Approving or rejecting is saved as a note about one suggestion. The app never changes your Database from this screen."
-            : "This screen changes nothing in your Database. Approving and rejecting are switched off until that has been validated, and there is no bulk approval."}
+          {applyEnabled
+            ? "Approve a suggestion, then apply it. Your Database is backed up first, every change is journaled and can be undone exactly, and nothing is ever applied in bulk."
+            : decisionsEnabled
+              ? "Approving or rejecting is saved as a note about one suggestion. The app does not change your Database from this screen."
+              : "This screen changes nothing in your Database. Approving and rejecting are switched off until that has been validated, and there is no bulk approval."}
         </span>
         <button className="primary" data-testid="review-run" onClick={() => void run()} disabled={running}>
           {running ? "Reading the Database…" : snap ? "Run the review again" : "Run the review"}
@@ -165,6 +183,21 @@ export function ReviewTab({ onOpenProduct }: { onOpenProduct: (id: string) => vo
         <div className="card" style={{ padding: 20, color: "var(--text-muted)", flexShrink: 0 }}>
           The review reads your Database (it does not change it) and lists entries that may be filed wrongly, duplicated, too broad, unclear, or valued on weak evidence, with the
           reason for each. Press “Run the review” to start.
+        </div>
+      )}
+
+      {snap && appliedNow.length > 0 && (
+        <div className="card" data-testid="review-applied" style={{ padding: 14, display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 }}>
+          <strong>Corrections you applied ({appliedNow.length})</strong>
+          {appliedNow.map(([id, d]) => (
+            <div key={id} style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap", fontSize: 14 }}>
+              <span style={{ flex: 1, minWidth: 260 }}>
+                <strong>{d.snapshot?.product}</strong> · {d.snapshot ? ACTION_LABELS[d.snapshot.action] : ""} · {dateText(d.applied!.at)}
+                {d.snapshot?.preview.map((c, i) => <div key={i} style={{ color: "var(--text-muted)" }}>{c.rowLabel}: {c.column} {c.from} → {c.to}</div>)}
+              </span>
+              <button className="ghost" data-testid="review-undo" onClick={() => void undoOne(id)}>Undo this correction</button>
+            </div>
+          ))}
         </div>
       )}
 
@@ -318,6 +351,9 @@ export function ReviewTab({ onOpenProduct }: { onOpenProduct: (id: string) => vo
                                 You {d.decision} this on {dateText(d.at)}.{" "}
                                 <button className="ghost" onClick={() => void decide(p, "clear")} style={{ padding: "2px 8px" }}>Undo my decision</button>
                               </span>
+                            )}
+                            {applyEnabled && d?.decision === "approved" && p.change && !(d.applied && !d.applied.undoneAt) && (
+                              <button className="primary" data-testid="review-apply" onClick={() => void applyOne(p)}>Apply this correction</button>
                             )}
                             {!decisionsEnabled && <span style={{ color: "var(--text-dim)", fontSize: 13 }}>Approve and Reject are off in review-only mode.</span>}
                           </div>

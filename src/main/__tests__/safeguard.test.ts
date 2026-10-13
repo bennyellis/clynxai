@@ -226,6 +226,35 @@ run(() => {
     s.close();
   }
 
+  section("the safeguard's view of the Database: built once, rebuilt at most every 30 s after a change and every 5 minutes, decisions cached");
+  {
+    let clock = 1_000_000;
+    let builds = 0;
+    const names = [{ id: "a", name: "Widget Alpha 100" }, { id: "b", name: "Widget Beta 200" }];
+    const sg = new IdentitySafeguard({ entries: () => { builds++; return [...names]; }, evidenceDocs: () => [] }, () => clock);
+    sg.setMode("enforce");
+    const ask = (title: string, entry: { id: string; name: string }) => sg.decide({ title, matchedName: null, entry, site: "t" });
+    ask("Widget Alpha 100 used", names[0]);
+    ask("Widget Alpha 100 used", names[0]);
+    check("the view is built once and an identical question is answered from the cache", builds === 1 && sg.stats.evaluated === 1 && sg.stats.contextBuilds === 1, sg.stats);
+    names.push({ id: "c", name: "Widget Gamma 300" });
+    sg.invalidate();
+    clock += 10_000;
+    const early = ask("Widget Gamma 300 boxed", names[2]);
+    check("within 30 s of a change the old view is kept (no rebuild storm); an entry it does not know yet is unsure, never a veto", builds === 1 && early?.decision !== "veto", { builds, early });
+    clock += 21_000;
+    const later = ask("Widget Gamma 300 boxed", names[2]);
+    check("after 30 s the view is rebuilt and the new entry is judged", builds === 2 && later?.decision === "allow", { builds, later });
+    clock += 301_000;
+    ask("Widget Beta 200", names[1]);
+    check("an old view is renewed after 5 minutes even without a change", builds === 3, builds);
+    sg.setMode("off");
+    check("switching off drops the view and the cache", sg.decide({ title: "Widget Alpha 100", matchedName: null, entry: names[0], site: "t" }) === null);
+    sg.setMode("enforce");
+    ask("Widget Alpha 100", names[0]);
+    check("switching on again starts clean", builds === 4, builds);
+  }
+
   section("the safeguard fails open and cannot break a scan");
   {
     const sg = new IdentitySafeguard({

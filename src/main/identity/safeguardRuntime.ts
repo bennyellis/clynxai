@@ -46,7 +46,7 @@ export class IdentitySafeguard {
   private log: ((record: Record<string, unknown>) => void) | null = null;
   readonly stats: SafeguardStats = { evaluated: 0, allow: 0, unsure: 0, veto: 0, errors: 0, totalMs: 0, maxMs: 0, contextBuilds: 0, contextBuildMs: 0 };
 
-  constructor(private source: SafeguardSource) {}
+  constructor(private source: SafeguardSource, private now: () => number = Date.now) {}
 
   setMode(mode: SafeguardMode, log?: ((record: Record<string, unknown>) => void) | null): void {
     this.mode = mode === "shadow" || mode === "enforce" ? mode : "off";
@@ -70,7 +70,7 @@ export class IdentitySafeguard {
   }
 
   private context() {
-    const now = Date.now();
+    const now = this.now();
     if (this.view && now - this.view.at < CONTEXT_MAX_AGE_MS && !(this.dirty && now - this.view.at >= CONTEXT_MIN_REBUILD_MS)) return this.view;
     this.dirty = false;
     const t = performance.now();
@@ -93,10 +93,11 @@ export class IdentitySafeguard {
     if (!title && !matched) return null;
     try {
       const key = `${args.entry.id}\u0001${title}\u0001${matched ?? ""}`;
-      const cached = this.decisions.get(key);
-      if (cached) return cached;
+      // the view is checked BEFORE trusting a cached answer: a stale view is renewed first (which also empties the decision cache)
       const t = performance.now();
       const view = this.context();
+      const cached = this.decisions.get(key);
+      if (cached) return cached;
       // Only entries that share a distinguishing word with the title, the extracted name or the matched entry can be what the text is about: the resolver reads those,
       // not the whole Database, so the cost stays flat as the library grows.
       const ids = new Set<string>([args.entry.id]);

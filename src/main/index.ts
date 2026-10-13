@@ -2017,9 +2017,14 @@ async function runPhotoBackfill(): Promise<number> {
 let identityReview: IdentityReview | null = null;
 function reviewService(): IdentityReview {
   identityReview ??= new IdentityReview(
-    { readReviewInput: () => store.readReviewInput() },
+    {
+      readReviewInput: () => store.readReviewInput(),
+      applyCorrection: (batchId, item) => store.applyCorrection(batchId, item),
+      undoCorrection: (batchId, proposalId) => store.undoCorrection(batchId, proposalId),
+      backupDatabase: (file) => store.backupDatabase(file),
+    },
     path.join(app.getPath("userData"), "identity-review"),
-    () => config.databaseReview?.decisions === true,
+    { decisionsEnabled: () => config.databaseReview?.decisions === true, applyEnabled: () => config.databaseReview?.apply === true },
   );
   return identityReview;
 }
@@ -3115,6 +3120,7 @@ app.whenReady().then(() => {
     // The checklist state is owned by the main process (the Config screen has no control for it and may hold an older copy).
     config = { ...DEFAULT_CONFIG, ...next, onboarding: config.onboarding ?? next.onboarding ?? DEFAULT_CONFIG.onboarding };
     saveConfig(CONFIG_PATH, config);
+    applyIdentitySafeguard(); // a changed matching-safeguard mode takes effect at once
     // Safety net for the general save path — the dedicated accounts:*
     // handlers already call this themselves, but if the account roster
     // ever changes via a plain config:save too, engines stay in sync
@@ -3696,6 +3702,17 @@ app.whenReady().then(() => {
   ipcMain.handle("review:history", () => reviewService().history());
   ipcMain.handle("review:decide", (_e, args: { proposalId: string; decision: "approved" | "rejected" | "clear"; note?: string | null }) =>
     reviewService().decide(args?.proposalId, args?.decision === "approved" || args?.decision === "rejected" ? args.decision : "clear", args?.note ?? null));
+  // One approved suggestion at a time; refused unless config.databaseReview.apply is on (see identityReview.ts).
+  ipcMain.handle("review:apply", (_e, args: { proposalId: string }) => {
+    const r = reviewService().apply(args?.proposalId);
+    if (r.ok) void reviewService().run();
+    return r;
+  });
+  ipcMain.handle("review:undo", (_e, args: { proposalId: string }) => {
+    const r = reviewService().undo(args?.proposalId);
+    if (r.ok) void reviewService().run();
+    return r;
+  });
   // The Database screen's own client-side cache of folder-level thumbnails
   // (see ensureGroupThumbnail above) — fetched once up front since this
   // dataset stays small (one row per distinct sub-grouping actually seen),

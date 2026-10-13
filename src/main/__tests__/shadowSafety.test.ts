@@ -63,11 +63,11 @@ run(() => {
   check("stage 3b and 6a audit block the network", ["stage3b_run.ts", "stage6a_audit.ts"].every((f) => /globalThis\.fetch\s*=/.test(strip(raw(`audit/phase4_shadow/${f}`)))));
   check("the audit itself contains no SQL that writes (the round-trip test is the only writer, on its own scratch copy)", !/(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s+TABLE|ALTER\s+TABLE)/i.test(strip(raw("audit/phase4_shadow/stage6a_audit.ts"))));
   {
-    const journal = strip(raw("audit/phase4_shadow/correction_journal.ts"));
+    const journal = strip(raw("src/main/identity/correctionJournal.ts"));
     check("the correction journal only allows one-row updates of named columns (no insert into data tables, no delete)", !/DELETE\s+FROM/i.test(journal) && !/INSERT\s+INTO\s+(?!correction_journal)/i.test(journal));
     const mainDir = path.join(process.cwd(), "src");
     const walk = (d: string): string[] => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : e.name.endsWith(".ts") || e.name.endsWith(".tsx") ? [path.join(d, e.name)] : []));
-    const offenders = walk(mainDir).filter((f) => !f.includes("__tests__") && /from\s+"[^"]*(correction_journal|phase4_shadow)[^"]*"/.test(fs.readFileSync(f, "utf8")));
-    check("nothing in the app imports the audit tools or the correction journal", offenders.length === 0, offenders);
+    const offenders = walk(mainDir).filter((f) => !f.includes("__tests__") && /from\s+"[^"]*(phase4_shadow)[^"]*"/.test(fs.readFileSync(f, "utf8")));
+    check("nothing in the app imports the audit tools", offenders.length === 0, offenders);
   }
 });

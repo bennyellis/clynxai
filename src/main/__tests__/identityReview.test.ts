@@ -19,9 +19,9 @@ const PRODUCTS: Array<[string, string, string, number | null, number | null]> = 
   ["r9", "xbox", "Games", 2130, 1], ["r10", "Xbox Series S 1TB", "Games", 230, 4], ["r11", "Terraria (Xbox One)", "Games", null, null], ["r12", "Apple iPhone 11", "Phones", 140, 1],
   ["r13", "iPhone 11", "Phones", 260, 6], ["r14", "Terraria", "Games", null, null], ["r15", "fender stratocaster", "Instruments", 450, 3],
 ];
-function seed(): void {
-  new Store(file).close();
-  const db = new DatabaseSync(file);
+function seed(target: string = file): void {
+  new Store(target).close();
+  const db = new DatabaseSync(target);
   const ins = db.prepare("INSERT INTO products (id, name, category, created_at, ebay_avg_sold_price_usd, ebay_comps_sample_size, image_url) VALUES (?, ?, ?, ?, ?, ?, NULL)");
   PRODUCTS.forEach(([id, name, cat, v, n], i) => ins.run(id, name, cat, 1_700_000_000_000 + i, v, n));
   const img = db.prepare("INSERT INTO product_images (id, product_id, image_data, source_title, created_at) VALUES (?, ?, 'data:x', ?, 1)");
@@ -118,15 +118,122 @@ run(async () => {
   section("the surface: no bulk approval, no apply");
   {
     const names = Object.getOwnPropertyNames(IdentityReview.prototype).filter((n) => n !== "constructor");
-    check("the only operations are read, run, history and decide (one)", JSON.stringify(names.sort()) === JSON.stringify(["audit", "decide", "get", "history", "persist", "run"]), names);
+    check("the only operations are read, run, history, decide, apply and undo (each takes one suggestion), plus private helpers", JSON.stringify(names.sort()) === JSON.stringify(["apply", "audit", "decide", "get", "history", "mode", "newestBackupAge", "persist", "run", "undo", "validId"]), names);
     const src = fs.readFileSync(path.join(process.cwd(), "src/main/identityReview.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
-    check("the backend contains no SQL that writes", !/\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s+TABLE|ALTER\s+TABLE)\b/i.test(src));
+    check("the backend itself contains no SQL (the journal does the one-row change, in identity/correctionJournal.ts)", !/\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s+TABLE|ALTER\s+TABLE|SELECT\s)/i.test(src));
     check("it does not import the Database layer (it is handed a reader)", !/from\s+"\.\/store\.js"/.test(src));
     const ui = fs.readFileSync(path.join(process.cwd(), "src/renderer/src/screens/ReviewTab.tsx"), "utf8");
-    check("the screen has no approve-all or apply control", !/approve all|apply all|apply (these|changes)|bulk/i.test(ui.replace(/there is no bulk approval/gi, "").replace(/no "approve all"/gi, "")));
+    check("the screen has no approve-all or apply-all control (apply is per suggestion)", !/approve all|apply all|apply (these|changes)|select all/i.test(ui) && !/bulk/i.test(ui.replace(/there is no bulk approval/gi, "").replace(/nothing is ever applied in bulk/gi, "")));
     const main = fs.readFileSync(path.join(process.cwd(), "src/main/index.ts"), "utf8");
-    check("the main process exposes only get / run / history / decide for the review", ["review:get", "review:run", "review:history", "review:decide"].every((c) => main.includes(`"${c}"`)) && (main.match(/ipcMain\.handle\("review:[a-z]+"/g) ?? []).length === 4);
+    check("the main process exposes only get / run / history / decide / apply / undo for the review (each one suggestion)", ["review:get", "review:run", "review:history", "review:decide", "review:apply", "review:undo"].every((c) => main.includes(`"${c}"`)) && (main.match(/ipcMain\.handle\("review:[a-z]+"/g) ?? []).length === 6);
   }
 
   store.close();
+
+  section("apply and undo of ONE approved suggestion (isolated databases; flag-gated; journaled; backed up)");
+  {
+    const dbPath = (n: string) => path.join(dir, `apply-${n}.db`);
+    const rowsOf2 = (f: string) => {
+      const d = new DatabaseSync(f, { readOnly: true });
+      const out = JSON.stringify([d.prepare("SELECT * FROM products ORDER BY id").all(), d.prepare("SELECT id, product_id, source_title FROM product_images ORDER BY id").all(), d.prepare("SELECT id, product_id FROM listings ORDER BY id").all()]);
+      d.close();
+      return out;
+    };
+    const setup = async (n: string, flags: { decisions: boolean; apply: boolean }) => {
+      const f = dbPath(n);
+      seed(f);
+      const st = new Store(f);
+      const rv = new IdentityReview(st, path.join(dir, `rv-${n}`), { decisionsEnabled: () => flags.decisions, applyEnabled: () => flags.apply, now: () => Date.now() });
+      const snap = await rv.run();
+      const move = snap.proposals.find((p) => p.action === "move-photo" && p.productId === "r4")!;
+      return { f, st, rv, move, snap };
+    };
+
+    {
+      const { f, st, rv, move } = await setup("off", { decisions: true, apply: false });
+      const before = rowsOf2(f);
+      rv.decide(move.id, "approved");
+      const r = rv.apply(move.id);
+      check("approved but apply switched off: refused, nothing changed", r.ok === false && rowsOf2(f) === before && rv.history()[0].type === "correction-refused", r);
+      check("no backup and no journal were created", !fs.existsSync(path.join(dir, "rv-off", "backups")) && (() => { const d = new DatabaseSync(f, { readOnly: true }); const t = d.prepare("SELECT name FROM sqlite_master WHERE name = 'correction_journal'").get(); d.close(); return !t; })());
+      st.close();
+    }
+    {
+      const { st, rv, move, snap } = await setup("gate", { decisions: true, apply: true });
+      check("a suggestion that was never approved cannot be applied", rv.apply(move.id).ok === false);
+      rv.decide(move.id, "rejected");
+      check("a rejected suggestion cannot be applied", rv.apply(move.id).ok === false);
+      const merge = snap.proposals.find((p) => p.action === "review-merge" || p.action === "gather-evidence")!;
+      rv.decide(merge.id, "approved");
+      check("an approved suggestion that changes no data has nothing to apply", rv.apply(merge.id).ok === false);
+      check("several ids at once are refused", rv.apply(`${move.id},${merge.id}`).ok === false);
+      st.close();
+    }
+    {
+      const { f, st, rv, move } = await setup("ok", { decisions: true, apply: true });
+      const before = rowsOf2(f);
+      rv.decide(move.id, "approved", "checked by hand");
+      const r = rv.apply(move.id);
+      check("an approved suggestion is applied", r.ok === true, r);
+      const after = rowsOf2(f);
+      const d = new DatabaseSync(f, { readOnly: true });
+      const img = d.prepare("SELECT id, product_id FROM product_images WHERE id = 'i1'").get() as { product_id: string };
+      const journal = d.prepare("SELECT * FROM correction_journal").all() as Array<{ before_json: string; after_json: string }>;
+      d.close();
+      const changedPhotos = (JSON.parse(after)[1] as Array<{ product_id: string }>).filter((x, i) => x.product_id !== (JSON.parse(before)[1] as Array<{ product_id: string }>)[i].product_id).length;
+      check("exactly that one field of that one row changed", img.product_id === "r3" && after !== before && changedPhotos === 1 && JSON.stringify(JSON.parse(after)[0]) === JSON.stringify(JSON.parse(before)[0]) && JSON.stringify(JSON.parse(after)[2]) === JSON.stringify(JSON.parse(before)[2]));
+      check("the journal holds the exact before and after values", journal.length === 1 && JSON.parse(journal[0].before_json).product_id === "r4" && JSON.parse(journal[0].after_json).product_id === "r3");
+      const bdir = path.join(dir, "rv-ok", "backups");
+      const backups = fs.existsSync(bdir) ? fs.readdirSync(bdir) : [];
+      check("a Database backup was made first and it holds the OLD state", backups.length === 1 && rowsOf2(path.join(bdir, backups[0])) === before, backups);
+      check("the history says what was applied, the preview and the backup", rv.history().some((e) => e.type === "correction-applied" && !!e.detail.backup && Array.isArray(e.detail.preview)));
+      check("applying again is refused", rv.apply(move.id).ok === false);
+      check("an applied correction cannot be re-decided until it is undone", rv.decide(move.id, "rejected").ok === false);
+      const u = rv.undo(move.id);
+      check("undo restores the Database exactly", u.ok === true && rowsOf2(f) === before, u);
+      check("the undo is in the history", rv.history()[0].type === "correction-undone");
+      check("undoing twice is refused", rv.undo(move.id).ok === false);
+      check("it can be applied again after an undo (still approved), with no second backup inside the window", rv.apply(move.id).ok === true && fs.readdirSync(bdir).length === 1);
+      st.close();
+    }
+    {
+      const { f, st, rv, move } = await setup("stale", { decisions: true, apply: true });
+      rv.decide(move.id, "approved");
+      const d = new DatabaseSync(f);
+      d.prepare("UPDATE product_images SET product_id = 'r1' WHERE id = 'i1'").run();
+      d.close();
+      const r = rv.apply(move.id);
+      check("a suggestion the Database has moved on from is refused, not forced", r.ok === false && /changed since/i.test((r as { reason: string }).reason), r);
+      const d2 = new DatabaseSync(f, { readOnly: true });
+      check("and the row keeps the person's edit", (d2.prepare("SELECT product_id FROM product_images WHERE id = 'i1'").get() as { product_id: string }).product_id === "r1");
+      d2.close();
+      st.close();
+    }
+    {
+      const { f, st, rv, move } = await setup("edit", { decisions: true, apply: true });
+      rv.decide(move.id, "approved");
+      rv.apply(move.id);
+      const d = new DatabaseSync(f);
+      d.prepare("UPDATE product_images SET product_id = 'r1' WHERE id = 'i1'").run();
+      d.close();
+      const u = rv.undo(move.id);
+      const d2 = new DatabaseSync(f, { readOnly: true });
+      check("an undo never overwrites an edit made after the correction", u.ok === false && (d2.prepare("SELECT product_id FROM product_images WHERE id = 'i1'").get() as { product_id: string }).product_id === "r1", u);
+      d2.close();
+      st.close();
+    }
+    {
+      const { f, st, rv, snap } = await setup("val", { decisions: true, apply: true });
+      const clear = snap.proposals.find((p) => p.action === "clear-valuation" && p.productId === "r9")!;
+      const before = rowsOf2(f);
+      rv.decide(clear.id, "approved");
+      check("a stored value is cleared only after approval", rv.apply(clear.id).ok === true);
+      const d = new DatabaseSync(f, { readOnly: true });
+      const row = d.prepare("SELECT ebay_avg_sold_price_usd AS v, ebay_comps_sample_size AS n FROM products WHERE id = 'r9'").get() as { v: number | null; n: number | null };
+      d.close();
+      check("the number is gone", row.v === null && row.n === null);
+      check("its undo restores the value exactly", rv.undo(clear.id).ok === true && rowsOf2(f) === before);
+      st.close();
+    }
+  }
 });

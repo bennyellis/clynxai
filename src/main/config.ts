@@ -190,7 +190,7 @@ export const DEFAULT_CONFIG: Config = {
   notifyWorthALook: false,
   identityFoundation: { schema: false, backfill: false },
   identitySafeguard: { mode: "off" },
-  databaseReview: { decisions: false },
+  databaseReview: { decisions: false, apply: false },
   // A brand-new install sees the checklist; loadConfig marks it already dismissed for a config file that predates it.
   onboarding: { dismissed: false, facebookConnected: false, locationChosen: false, phoneSkipped: false },
   recentSearches: [],
