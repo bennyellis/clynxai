@@ -1,0 +1,593 @@
+CLYNX - PHASE 4 AUDIT: UNIVERSAL PRODUCT IDENTIFICATION AND VALUATION ACCURACY
+==============================================================================
+Date: 2026-10-12.   READ-ONLY: no application code was changed. Two kinds of new files exist: this report, and audit/phase4_repro/ (small
+scripts that run the app's real matching, pricing and Deal Quality Gate code on made-up data; they never touch your real database, config,
+browser profiles or Facebook, and make no network calls).
+
+SHORT ANSWER
+------------
+The Xbox 360 controller is not a one-off bug. It is what the current design does with ANY product whose Database entry is named more
+generally than the listing in front of it. Five things combine:
+
+  1. The photo-analysis prompt tells the AI to name products with a generic retailer name and to "fall back to the plain base name" when
+     unsure, so details like "360" and "1403" are thrown away at the very first step.
+  2. Identity is just a name. The code that decides "same Database product?" (isSimilarProductName) says yes whenever the shorter name's
+     words are all inside the longer one, and ignores generation numbers and model numbers. In my test, 18 of 41 pairs of DIFFERENT products
+     were treated as the same product (Xbox 360 vs plain Xbox controller, Galaxy S21 vs S21 Ultra, RTX 3060 vs 3060 Ti, Honda Civic vs Civic Si,
+     F-150 vs F-150 Raptor, a Milwaukee battery vs a 5.0 Ah one, ...).
+  3. Every "is it the same product?" check is one-directional. It asks "does the listing contain everything in the Database name?" and never
+     "does the listing say something the Database name does not?". A generic Database name therefore accepts every variant. This is also how
+     the price comparisons (sold comps) are filtered.
+  4. The Deal Quality Gate is given a price and an evidence level but nothing about whether the product identity is exact. So a wrongly
+     matched listing is judged with full confidence.
+  5. Several of the guards that exist are patches for specific examples (Series S vs X, black vs white, "no console") that do not help the
+     next unfamiliar product.
+
+Demonstrated end to end (section A, test 2): with a Database entry "Xbox Wireless Controller" valued like a Series X|S pad ($48), the 360
+pad listed at $15 (a real 360 pad sells for roughly $15-25) is scored by the app's real code as "Profitable Now, about $25 profit" and would be
+pushed as a deal. It is a bad deal.
+
+I could not look inside YOUR Database (read-only rule), so I cannot say how many entries are already polluted. Section D has a read-only way to
+check on a copy, and section G lists what I could not verify.
+
+CONTENTS
+  A. Root-cause analysis (stages, files, functions, evidence)
+  B. Proposed architecture (universal identity, Exact Product Identity Gate, aliases, comparable sales, Deal Quality Gate integration)
+  C. Performance and cost
+  D. Migration and compatibility
+  E. Incremental implementation plan, tests, benchmarks, rollback
+  F. Risks and limitations
+  G. What I could not verify, and manual checks for you
+  Appendix 1. Full results of the reproductions
+  Appendix 2. Test design (categories, edge cases, held-out discipline)
+
+
+=====================================================================================================================================
+A. ROOT-CAUSE ANALYSIS
+=====================================================================================================================================
+
+A.0 How a listing turns into a Database identity and a value today (the pipeline as it actually runs)
+-------------------------------------------------------------------------------------------------------
+  1. Scrape: title, description, photos, price (scraper.ts / scrapeEngine.ts evaluateListing).
+  2. Search match (scorer.ts matchSearchItem): does the title contain all words of a "Search For" phrase? If so, the listing's identity IS
+     the Search For item's name ("matchedItem"), no AI involved.
+  3. Photo analysis (vision.ts analyzeListingPhotos, one AI call): returns identifiedProducts = a list of canonical names, plus photo
+     attribution. This is where an identity gets a name.
+  4. Filing (scrapeEngine.ts ~2262-2445): for each identified name, findMatchingProduct(name) (store.ts) looks for an existing entry by
+     name. If found, the identity second look (productIdentity.ts) runs only if the title has 2+ words the entry name lacks; then note and
+     photo are filed into that entry. If not found, a new entry is created (index.ts createPlainProduct / createSpecificModel).
+  5. Research of a new entry (index.ts runProductLookup -> products.ts lookupProduct -> webResearch.ts; then fetchAndStoreEbayComps):
+     a search query is derived, WatchCount sold comps and eBay asking prices are fetched, filtered (compFilter.ts, watchcount.ts,
+     compPhotoCheck.ts), averaged (marketValue.ts) and stored on the Database entry.
+  6. Valuation of later listings: scorer.ts asks the Database for "the eBay value of the product named X" (store.getEbayValueForProductName)
+     where X is the Search For item name (or the product whose name appears whole in the title), never the listing's own identity.
+  7. Deal Quality Gate (preAlert.ts + dealGate.ts): value + evidence level (sample size, age) + condition + price => Profitable Now /
+     Negotiation / Worth a look / Pass. Alerts are titled with the Database entry's name (dealSummary.focalProductName).
+
+A.1 Root causes, in the order they act
+--------------------------------------
+
+RC1. The photo-analysis prompt deletes the details that define the product                                  [vision.ts ~358-361]
+   The prompt says: name each product "using ONLY its own canonical, generic model name - the name a retailer would use"; "NEVER fold ... the
+   listing's own throwaway phrasing ... into the name"; for controllers "If you can't tell which specific edition it is, fall back to the plain
+   base name rather than guessing". There is no instruction to capture model numbers (1403), generations (360), or any other attribute as data.
+   Result: "Official Microsoft Xbox 360 & Windows Black Wireless Controller 1403" -> "Xbox Wireless Controller", which is exactly the reported
+   classification. The prompt also teaches by example (Elite Series 2 vs plain, DualSense Edge vs standard, Series S colors): it fixes those
+   examples and says nothing about the next product family. The name is then the ONLY thing carried forward; nothing structured survives.
+
+RC2. Identity is a free-text name, and name matching is subset containment                                   [store.ts isSimilarProductName]
+   Two names are "the same product" when the shorter one's words (minus filler) are all in the longer one, with three escape hatches:
+   a short fixed list of variant words (pro, slim, max, plus, mini, lite, se, xl, oled, air), a color conflict, and a storage capacity
+   (gb/tb/mb) in the extra words. Everything else in the extra words is ignored: generation numbers (360), model numbers (1403), letters
+   (Ti, XT, Ultra, FE, Si, Raptor, Edition names), amp-hours, sizes, dimensions. Measured (Appendix 1): 18 of 41 different-product pairs merge.
+   Three different hand-written variant lists exist and disagree: store.ts (10 words), scorer.ts (9 words, no "slim"), compFilter.ts TIER_WORDS
+   (16 words incl. ti/xt/ultra/fe). So "RTX 3060 Ti" is a different product to the comp filter and the same product to the Database.
+   The reverse failure also exists: the same product under different wording does not merge ("PS5 Digital Edition" vs "Sony PlayStation 5
+   Digital Edition", "AirPods Pro 2" vs "AirPods Pro 2nd Gen" - 3 of 6 same-product pairs missed). The code comment calls this a "known gap".
+
+RC3. Every identity check is one-directional                          [compFilter.ts compMatchesSpecs, titleLooksLikeProduct; store.ts moreSpecificProductForTitle; productIdentity.ts listingHasExtraDetail]
+   compMatchesSpecs(reference, title) requires every number-bearing word of the REFERENCE to be in the title, the capacity not to differ, and
+   a fixed list of tier words to agree. It never looks at what the TITLE has that the reference lacks. With a generic reference ("Xbox Wireless
+   Controller" has no digits) it passes the Series X|S pad, the Xbox One pad, the Elite Series 2, and the 360 pad (Appendix 1). With
+   "2018 Honda Civic" it passes LX, Type R and Si; with "Milwaukee M18 Battery" it passes XC5.0, CP2.0 and 8.0 High Output.
+   The AI half of the comp filter (watchcount.ts judgeSameProduct) is told: "If the product name above does NOT name a manufacturer or model
+   line (it is a generic name...), then any manufacturer's version counts." A generic Database name is therefore an explicit instruction to
+   accept all variants.
+   titleLooksLikeProduct (the no-AI judge used in low-AI mode, which is ON by default - aiMode.ts) is the same one-directional test.
+
+RC4. The identity "second look" is thin, easily skipped, and biased toward "generic"                 [productIdentity.ts; scrapeEngine.ts ~2375-2440]
+   - It runs only when the title has at least two words the entry name lacks (listingHasExtraDetail), ignoring colors, filler and 1-2 digit
+     numbers. "Xbox One controller" vs entry "Xbox Wireless Controller" has ONE extra word ("one") -> no check at all, the listing is
+     filed as the generic product. The reported 360 title has several, so the AI is asked.
+   - The prompt then says: use "generic" when the listing "gives no brand/model detail" and "Never guess a brand or model you can't support";
+     "generic" => file the photo and note under the generic entry. "match / medium" => note only. "new" needs a nameable model, but the
+     naming comes from the same model that already collapsed 360 into "Xbox Wireless Controller" (RC1).
+   - Only the entry's siblings and children are candidates (root + children + same-base colors), so the AI can't consider a better entry
+     elsewhere in the Database.
+   - With lowAiMode on (default) and no photo analysis for this listing, the whole filing step is skipped (scrapeEngine ~2352).
+
+RC5. In the search path, the listing's identity is the user's search phrase, and the value is the Database value of that phrase    [scorer.ts scoreListing; store.ts getEbayValueForProductName]
+   A listing whose title contains all words of the Search For phrase (e.g. "xbox wireless controller") gets matchedItem = that phrase and a
+   reference price = the Database value of the entry with that name. The only refinement is moreSpecificProductForTitle: if the Database
+   already holds a product with more words whose words ALL appear in the title, that one's value is used. That only works when (a) the
+   specific entry already exists, (b) the title spells every word of its name (an abbreviated "X360 wireless controller 1403" fails; Appendix 1,
+   repro3), and (c) it is not ambiguous. The AI is not involved, so no model can correct it.
+
+RC6. Comps: the entry's value is only as exact as its name, and the first listing defines the entry              [index.ts researchEbayComps; watchcount.ts deriveWatchCountQuery, analyzeEbayComps]
+   - The search query is derived from the listing that created the entry (good, it keeps model wording) - but only when AI is allowed. In
+     low-AI mode (default) the query is simply the entry name (watchcount.ts, first lines of deriveWatchCountQuery), so the model number is
+     gone before eBay is even asked.
+   - The filter then checks comps against the QUERY/ENTRY NAME (RC3), so a generic name admits comps of every generation. Both directions
+     are harmed: a Series X|S pad is judged against a value dragged down by $18 360 pads; a 360 pad is judged against a value pulled up.
+   - The photo cross-check (compPhotoCheck.ts) compares comp photos with the entry's own reference photos - which are the same polluted
+     gallery (RC4), so it can confirm the contamination instead of catching it.
+   - The estimate (marketValue.ts) is an outlier-trimmed mean of whatever survived. Averages can't separate two populations (e.g. $18 and
+     $48 pads): the number lands between and fits neither.
+   - There is no record of WHY comps were kept or rejected, or of which product variants a mixed entry contains.
+
+RC7. Ambiguity is resolved by creation order, not by best fit                                         [store.ts findMatchingProduct, enrichManyWithMatchedProductPricing, getEbayValueForProductName]
+   Lookups take the first fuzzy hit in "newest entry first" order. Measured (repro3): with a generic and a specific entry both present, the
+   360 listing resolves to the specific one if it was created second, and to the generic one if it was created first. So adding the specific
+   entry later does NOT reliably fix anything, and a bad value can appear or disappear when an unrelated entry is added.
+
+RC8. Nothing in the data model can express "how sure am I that this is exactly that product"                 [store.ts schema; dealGate.ts ValueEvidence; preAlert.ts]
+   - products has name, family, category, notes, prices. No aliases, no identity attributes, no identity confidence, no provenance of which
+     listing/photo/source established a name.
+   - ValueEvidence handed to the Deal Quality Gate has value, basis, sample size, age. Identity exactness is not an input, so an
+     approximate match gets the same confidence as an exact one.
+   - isExactProduct (index.ts) decides "exact" from the Database NAME only (name equals matchedItem and the name's numbers appear in the
+     title). A generic name makes every listing "exact" (Appendix 1: titleLooksLikeProduct = true for the 360 title).
+   - Listings are linked to products by name text: listings.matched_item holds the name, and listings.product_id is re-resolved by fuzzy name on
+     EVERY re-save (store.saveScored), so a listing's product link silently changes when entries are added or renamed. Search For items and
+     alerts also refer to products by name. Only mergeDuplicateProducts (exact same word set) ever merges entries.
+   - Alerts and the Feed name the product with the Database name (dealSummary.focalProductName: signals.name first), not what the listing is.
+
+RC9. Domain knowledge is patched in by example, so it does not extend to new categories
+   Hard-coded in code: COLOR_WORDS (colors.ts); single-letter model rule (Series S/X, One S/X, Galaxy Z) in compFilter.modelLetters;
+   ACCESSORY_WORDS (motherboard, controller, joystick, fan, headset, battery, charger, cable...) and NOT_THE_PRODUCT_WORDS in compFilter;
+   ACCESSORY_ONLY_TITLE_SIGNALS in scorer.ts ("no console", "console not included", "controller only"...); capacity tokens recognise only
+   tb/gb/mb (compFilter CAPACITY_TOKEN), not Ah, cu ft, inches, mAh, V, hp, cc; the vision prompt examples (RC1). Each was added after a real
+   miss (the memory notes list RTX 3060 Ti, Series S/X, black/white). That is why held-out categories fail (Appendix 1: vehicles, tool
+   batteries, furniture, collectibles all show wrong merges or admit-all comps).
+
+RC10. Free structured identity data is not used
+   eBay listing data and the eBay category taxonomy carry brand, model/MPN, and item-specifics (e.g. platform, compatible model, generation).
+   The app stores eBay results as title + price + category names only (ebayClient.ts EbayRawItem). WatchCount cards are parsed the same way.
+   Facebook gives no structure, but the listing text, the photos (model plates, box text), and the seller description do contain model codes.
+   [Whether specific fields are returned by the Browse API search vs item endpoint must be confirmed in a small spike - see G.]
+
+A.2 Answer to "does it contaminate naming, identities, comps, valuations, profit?"
+---------------------------------------------------------------------------------
+  Naming         YES. Vision names it generically (RC1); alerts show the Database name, not the product (RC8).
+  DB identity    YES. isSimilarProductName routes it to the generic entry (RC2); the AI second look can attach it as "generic/high"
+                 or "match/high" (RC4). Its photo and notes then enter the generic entry's gallery and notes, which later feed photo cross-checks.
+  Comps          YES. A generic entry admits 360/One/Series/Elite comps (RC3, RC6); in default low-AI mode the query itself loses the model number.
+  Valuation      YES, both ways. Demonstrated: generic $48 value applied to a 360 pad; and a polluted mixed average (RC6) misjudges real Series pads.
+  Profit / Gate  YES. Demonstrated (test 2 below): a $15 360 pad becomes "Profitable Now, ~$25 profit". The Gate has no way to know (RC8).
+  Persistence    YES. listing rows keep matched_item/product_id of the generic entry; notes and reference photos persist; products sync to the cloud
+                 (productSync.ts), so a polluted entry can propagate to other devices [confirm].
+  Not affected (checked): the Gate thresholds, the margin arithmetic, and the age/hard-cap/placeholder rules are correct given their inputs.
+  The failure is entirely upstream: what the inputs claim to be.
+
+A.3 Evidence (all run read-only; scripts in audit/phase4_repro/)
+----------------------------------------------------------------
+Test 1 - isSimilarProductName over 47 name pairs in 12 categories (repro1). "Truth" is my judgement of whether two names are one product.
+  Wrong merges (different products treated as the same Database entry): 18 of 41 different pairs, e.g.
+    Xbox 360 Wireless Controller 1403 | Xbox Wireless Controller          Xbox One Wireless Controller | Xbox Wireless Controller
+    Xbox Elite Wireless Controller Series 2 | Xbox Wireless Controller    PS5 DualSense Edge | PS5 DualSense
+    Xbox 360 Console | Xbox Console       Xbox One X | Xbox One       Nintendo Switch 2 | Nintendo Switch
+    Galaxy S21 Ultra / S21 FE / S21+ | Galaxy S21       RTX 3060 Ti | RTX 3060       RX 6700 XT | RX 6700
+    2018 Civic Si | 2018 Civic       F-150 Raptor | F-150       M18 XC 5.0 battery | M18 battery
+    IKEA Kallax 2x4 | Kallax      Funko Pop Batman Chase Variant | Funko Pop Batman
+  Correctly kept apart: all capacity differences (64GB vs 128GB), numeric model differences (M12 vs M18, DCD771 vs DCD791, 55" vs 65", 4.5 vs
+  5.2 cu ft, i7 12700 vs 12700K, Pixel 7 vs 7a, iPhone 12 vs 12 Pro / 13 mini, sizes in clothing). Digits save it; words do not.
+  Missed aliases: 3 of 6 same-product pairs (PS5 Slim vs PlayStation 5 Slim, PS5 Digital Edition vs Sony PlayStation 5 Digital Edition, AirPods
+  Pro 2 vs AirPods Pro 2nd Gen).
+
+Test 2 - the reported listing through real code, throw-away database (repro2):
+  Database entry "Xbox Wireless Controller" valued $48. Listing "Official Microsoft Xbox 360 & Windows Black Wireless Controller 1403 OEM
+  gamepad", asking $15.
+    findMatchingProduct("Microsoft Xbox 360 Wireless Controller 1403")   -> "Xbox Wireless Controller"
+    listingHasExtraDetail(title, "Xbox Wireless Controller")             -> true (the AI is asked)
+    AI answers generic/high  -> photo + note filed into the generic entry
+    AI answers match/high    -> photo + note filed into the generic entry
+    AI answers match/medium  -> note only
+    AI answers new/high ("Microsoft Xbox 360 Wireless Controller") -> a new, correct entry (the only good outcome)
+    scoreListing:  matchedItem "Xbox Wireless Controller", reference value $48, isDeal = true
+                   "buying it for $15 leaves about $25 profit"
+    Deal Quality Gate: status "profitable_now", qualified = true, headline "Priced far under sold value, about $25 profit"
+    titleLooksLikeProduct / compMatchesSpecs for the 360 title against the generic name: true / true ("this exact product")
+    getProductSignals: alert named "Xbox Wireless Controller", value $48, 40 sales
+
+Test 3 - comp gate with generic references (repro1, section 3): every Xbox generation passes; for "2018 Honda Civic" LX / Type R / Si all pass;
+  for "Milwaukee M18 Battery" XC5.0 / CP2.0 / HO 8.0 all pass. (Where the reference has digits or one of the 16 tier words, it works: Galaxy S21
+  rejects Ultra/FE; RTX 3060 rejects 3060 Ti.)
+
+Test 4 - which entry wins (repro3): creation order decides (RC7), abbreviated titles ("X360 ...") fall back to the generic value ($48).
+
+A.4 Why the existing safeguards did not catch it
+------------------------------------------------
+  - Photo mismatch (matchesClaim): compares the photo with the CLAIMED item ("Xbox Wireless Controller"). A 360 pad IS "a wireless controller
+    for Xbox", so it is not a mismatch. The check asks "is it the claimed thing?", with the claim already too generic.
+  - Series S/X letter rule and color rule: fire only on those two cases.
+  - Capacity rule: a 360 pad has no capacity.
+  - The AI identity check: depends on the same prompt discipline that produced the generic name.
+
+
+=====================================================================================================================================
+B. PROPOSED ARCHITECTURE
+=====================================================================================================================================
+Design goals: (1) works for categories nobody has thought of, with no per-category code; (2) never silently treats "I don't know whether
+generation/model matches" as "it matches"; (3) no thresholds change in the Deal Quality Gate; (4) mostly deterministic and free, AI only
+where it adds information; (5) everything is explainable after the fact and reversible.
+
+B.1 The core idea: identity = a set of attributes with evidence, compared symmetrically
+-------------------------------------------------------------------------------------
+Replace "a name string" with a ProductIdentity, and replace subset-containment with an attribute-by-attribute agreement test that looks in BOTH directions.
+
+ProductIdentity (for a Database entry, a listing, or a sold comp - the same shape for all three, so they can be compared):
+  level            "exact" | "line" | "category" | "unknown"      how far identification got
+  category         path (reuses today's category / family)
+  attributes[]     each: key, value (normalized), source, confidence, weight
+                     key      e.g. brand, line, generation, model_code, capacity, size, edition, color (keys are DATA, see B.2)
+                     source   title | description | photo_text (printed on the item/box) | photo_visual | seller_structured (eBay specifics) | comps | user
+                     weight   "defining" (two items differing here are different products) | "price_moving" (changes value, not identity)
+                              | "cosmetic" | "unknown"
+  identity_key     normalized hash of the DEFINING attributes; null while any required defining attribute is unresolved
+  display_name     text for humans only; never used as a key or for matching
+  condition_state  new / used / for-parts / incomplete (missing pieces) - kept SEPARATE from identity, as a value modifier
+  aliases[]        normalized alternate names pointing at this entry, each with source and confidence
+
+Agreement test between two identities, per defining attribute:
+  agree      both have it and equal
+  conflict   both have it and different                           -> not the same product
+  one-sided  only one side states it                              -> UNRESOLVED (this is the case the current code silently treats as "match")
+Result: EXACT (no conflict, no unresolved defining attribute) | LINE (same line, some defining attributes unresolved) | DIFFERENT | UNKNOWN.
+The Xbox case: listing {line: wireless controller, generation: 360, model_code: 1403}; generic entry {line: wireless controller, generation: unresolved}.
+-> LINE at best, never EXACT. The current code returns "same product".
+
+B.2 Deciding which attributes define identity WITHOUT category rules
+-------------------------------------------------------------------
+Three layers, none of which names a category in code:
+  1. Generic extraction patterns (deterministic, free). Pull candidate values from title, description and OCR'd text using patterns that are the
+     same for every product: tokens mixing letters and digits ("1403", "DCD791", "M18", "RTX3060"), numbers with units (a unit list learned
+     from the Database and comps text rather than hard-coded: GB, Ah, V, inch, cu ft, hp, oz, cc ...), edition/qualifier words that
+     appear in the SAME slot across many comps of the same line, years, and a vocabulary of values previously confirmed for this family.
+  2. A per-family attribute schema, learned once and cached (the only AI use at this layer). One small AI call per FAMILY (not per listing)
+     asks: "For <family>, which attributes make two items sell for materially different prices, and what are typical values?" Stored in a new
+     table, editable by the user, reused for every listing in that family. Unknown family -> a minimal default schema {brand, line,
+     generation/version, model_code, capacity/size, edition}.
+  3. Empirical confirmation from the app's own comps (arithmetic, free). For a family with enough comps, parse each comp's attributes with
+     layer 1 and measure whether an attribute separates the prices (between-value price spread large relative to within-value spread). Promote a
+     attribute to "defining/price_moving" when it does, demote when it doesn't (e.g. color for most items; color for a black vs white Series S).
+     This replaces every hand-kept list: variant words, color rules, single-letter model rule, accessory words.
+  Cold start (new family, few comps): treat every digit-bearing or qualifier token the two sides do not share as UNRESOLVED => LINE level, which
+  is the safe direction (B.4).
+
+B.3 Evidence, provenance, confidence, conflicts
+-----------------------------------------------
+  - Each attribute value carries every source that supports it. Source reliability (ordered; tunable data, not logic): text printed on the item
+    or box read from a photo > model/part code in the title > code in the description > structured eBay specifics (for comps) > photo-visual
+    judgement > the user's Search For phrase > a name inferred from a similar entry.
+  - Confidence of a value = combination of its supporting sources; a conflict is two independent sources of weight >= "title/description"
+    disagreeing. Conflicts (title says Series X, photo text says 360; seller says "works", photo shows cracked screen) produce state AMBIGUOUS =
+    treated like LINE for valuation and flagged "needs a look" in the Feed; both readings are saved.
+  - Wrong seller descriptions: a description claim contradicted by photo_text is down-weighted and recorded as a conflict, not overwritten.
+  - Missing information: stays UNRESOLVED; never guessed. Rare products with no comps still get an identity; they simply have no exact
+    comps (B.5).
+  - The per-listing result is persisted (attributes, sources, level, candidate entries considered and why one won) so any decision can be
+    explained and re-run later.
+
+B.4 Exact Product Identity Gate (sits BEFORE valuation, filing, and naming)
+--------------------------------------------------------------------------
+  EXACT       identity_key equals an entry's key (or alias).      May: file photos/notes into the entry, use its exact-comps value, name the
+                                                                  alert with that entry.
+  LINE        same line/family, some defining attribute           May: file note + photo into a LINE-level entry only, or create a new
+              unresolved.                                         specific entry when the evidence names the missing attribute. Value =
+                                                                  conservative substitute (B.5) at "approximate" quality only.
+  AMBIGUOUS   conflicting evidence.                               Same as LINE; both readings stored; surfaced to the user.
+  UNKNOWN     nothing usable.                                     No filing into any entry; no Database value; the existing "no resale
+                                                                  numbers" path applies.
+  Resolution of candidate entries is by best attribute agreement score, never "newest first" (fixes RC7), and a name that merely CONTAINS another is
+  only a candidate generator (isSimilarProductName stays as a cheap pre-filter, no longer a decision).
+
+B.5 Comparable-sale filtering: exact vs approximate substitutes
+--------------------------------------------------------------
+  - Each comp title (sold or asking) is run through the same extractor and agreement test against the target identity.
+  - Exact comps (EXACT agreement) are the only ones that form the product's market value (the sold-comps average; existing trimmed mean).
+  - Approximate substitutes (same line, a defining attribute differs or is unresolved) are kept SEPARATELY, never mixed into the exact average.
+    They are used for one thing: if there are no exact comps, a conservative floor = the lowest sibling median (never mean, never the
+    generic average), marked basis "approximate". A premium sibling can therefore never inflate a cheaper product's value, and the reverse
+    mixing (cheap siblings dragging a premium product down) is shown as a range in the Database instead of one wrong number.
+  - Asking prices stay what they are today (basis "active", weak evidence) and are never counted as sold; the new rule adds only that
+    asking prices obey the same exact/approximate split.
+  - Query generation uses the target identity's defining attributes as mandatory terms, plus the attributes of known siblings as exclusions
+    (query for the 360 pad: "xbox 360 wireless controller 1403", excluding "series", "one", "elite"). In low-AI mode this is deterministic,
+    so the default configuration also keeps the model number (fixes the low-AI query loss in RC6).
+  - Every rejected comp stores a reason code (generation mismatch, capacity mismatch, bundle, parts, photo mismatch, ...). The Database page
+    can show "40 comps seen, 22 exact, 11 approximate, 7 rejected" and why.
+  - Photo cross-check keeps its role but compares against EXACT reference photos only (those filed under an exact identity).
+
+B.6 Database identity and alias strategy
+----------------------------------------
+  - Entry = stable id + ProductIdentity. Names are display text.
+  - New table product_aliases(alias_norm, product_id, source, confidence, created_at): "PS5 Digital Edition" and "Sony PlayStation 5 Digital
+    Edition" resolve to one entry when their identities agree (or by explicit alias), instead of two entries or a missed link. Aliases are
+    learned (a confirmed match adds the new wording as an alias) and reversible.
+  - Lookup order: alias exact -> identity_key equal -> best attribute-agreement candidate above a threshold -> create. Merges only on
+    identity_key equality or an explicit user/alias merge; never on name containment.
+  - Listings and Search For items link by product_id (the Search For item already has linkedProductId). A listing's product_id is written once
+    with the resolution result and its confidence, and is not silently re-resolved on every save.
+  - Specific vs generic entries coexist as parent (line) and children (exact), which the Database already supports (parent_product_id).
+    A LINE-level parent never carries a "value" of its own beyond a range of its children.
+
+B.7 Integration with the Deal Quality Gate WITHOUT changing thresholds
+---------------------------------------------------------------------
+The Gate already has the right seam: ValueEvidence {valueUsd, basis, sampleSize, ageDays} -> evidenceLevel (strong/moderate/weak/none) -> existing
+rules (weak evidence => Worth a look unless the margin is at least 2x the minimum, then Profitable at low confidence, etc.). None of those numbers
+change. The only change is what is fed in (preAlert.resolveEvidence):
+  EXACT identity + exact comps           -> evidence exactly as today.
+  LINE / AMBIGUOUS with exact sibling data -> value = the conservative floor, basis "approximate" which evidenceLevel maps to "weak".
+  UNKNOWN or no usable value             -> evidence null, which the Gate already turns into Worth a look (NO_EVIDENCE).
+Effect on the reported listing: it would be at best Worth a look (or a Profitable-at-low-confidence find only if even the floor value leaves a
+margin >= 2x your minimum). It would not be a confident push. The Gate's reason list gains one line ("matched at line level: generation not
+confirmed") so the Feed explains it. Stars/confidence already derive from evidence level, so they follow automatically.
+Alert titles use the identity's display name (what the listing is), with the entry name only as a secondary line.
+
+B.8 What stays as it is
+-----------------------
+Scanning, search coverage, Watch matching (a Watch keeps its keywords and linked product), eBay scanner, bundles, broken variants (the
+"(For Parts / Broken)" child becomes a condition_state of an exact identity), the general AI discovery path, hidden-gem logic, Gate thresholds,
+notification logic, Phase 3 performance modes, profiles and settings. Existing hand-written guards stay in place, running underneath until each
+is proven redundant by the golden corpus.
+
+
+=====================================================================================================================================
+C. PERFORMANCE AND COST
+=====================================================================================================================================
+Today (per code reading; call counts are by code path, not measured against OpenAI):
+  - scoring in the search path: 0 AI calls. General path: 1 call per unmatched listing that gets that far.
+  - photo analysis: 1 vision call per evaluated listing (up to 8 photos).
+  - identity second look: +1 call whenever the title has 2+ unfamiliar words vs the matched entry.
+  - new entry: web research + summary (2-3 calls) + query derivation (1, skipped in low-AI mode) + comp judging (1 per batch; skipped in
+    low-AI mode, deterministic instead) + photo cross-check (1 per 14 comps).
+  - market check before an alert: reuses the Database if checked within 3 days.
+Proposed:
+  - No new AI call per listing. The attribute list is added to the JSON the existing photo-analysis call already returns (roughly +150-250
+    output tokens; I have not measured the dollar effect, see G).
+  - The identity second look is replaced by deterministic agreement for most listings. The AI is only a tie-breaker for AMBIGUOUS/LINE cases,
+    expected to be fewer calls than today because the 2-extra-words trigger disappears; this needs measuring (E, Stage 0).
+  - One family-schema call per new family, cached (tens of calls in total over the life of a Database, not per listing).
+  - Comp parsing is deterministic and free; judgeSameProduct is only needed for comps the extractor leaves UNRESOLVED.
+  - Low-AI mode keeps working with no AI: extraction from text, deterministic agreement, conservative LINE/UNKNOWN outcomes (=> Worth a look).
+    That is strictly safer than today's low-AI behavior.
+  - Caching: attributes per normalized-text hash (a re-listed item costs nothing); family schemas; per-comp parse results stored with the comp.
+  - Memory: an in-memory inverted index (defining-attribute value -> product ids) alongside the name index added in Phase 1; thousands of
+    entries is a few hundred KB. Lookup is O(candidates), not O(all products x all names) like today's find() scans.
+  - Latency: agreement tests are string/set operations (microseconds). The scan loop does a handful per listing.
+  - Startup: backfill (D) is a background, rate-limited job, never at startup, so Phase 3's startup gains are preserved.
+  - Storage: attributes JSON per product and per evaluated listing (hundreds of bytes each); the existing photos dominate the database by far.
+
+=====================================================================================================================================
+D. MIGRATION AND COMPATIBILITY
+=====================================================================================================================================
+Principles: additive only; nothing existing is rewritten or deleted without being copied aside; every step is switchable off; listings and
+Watches keep working throughout; no mass WatchCount refresh (its anonymous cap is about 20 lookups a day, per the earlier notes).
+  1. Schema (additive, nullable): products.identity_json, products.identity_key, products.identity_level; table product_aliases; table
+     identity_schemas(family, attrs_json, source, updated_at); listings.identity_json. Old code ignores them. Local-only first (like the
+     eBay active-price fields); cloud sync of identity fields is a later, separate decision.
+  2. Backfill, read-only first. A background "identity audit" reads every entry's name, notes, the source titles of its reference photos
+     (product_images.source_title) and the titles of listings filed under it, and extracts attributes. It writes only identity_json/level.
+  3. Detecting already-misclassified entries: an entry is flagged "mixed" when its filed titles/photos span 2+ values of a defining attribute
+     (e.g. titles containing "360" and "Series"; "Civic LX" and "Civic Si"). Nothing is split automatically. The Database shows "Needs review:
+     looks like 2 different products" with the proposed split. The user approves (one click), or the app auto-splits only when the evidence is
+     overwhelming and every moved item is reversible.
+  4. Splitting a mixed entry: create exact children; move photos/notes by their source_title attributes; the old entry becomes the LINE parent;
+     its old value is kept but marked "mixed - not used for deals" so the Gate treats it as no evidence until the children have their own
+     comps. Re-research of children is queued under the WatchCount cap, newest-seen first. The original rows are kept in a backup table so the
+     split can be undone.
+  5. Saved listings: existing rows keep matched_item/product_id exactly as saved. New identity_json is filled when a listing is next evaluated or
+     viewed; old Feed cards show no change until then. Nothing in history is rewritten silently.
+  6. Search For items and Watches: keep their name text and linked product; on first resolution a stable product id is stored; if the target
+     entry was split, they stay attached to the LINE parent and show "choose which one you mean" instead of guessing.
+  7. Existing guards (Series S/X, colors, tier words) remain until the golden corpus proves the attribute method covers them; they are then
+     retired one at a time behind the flag.
+  8. Cloud: the server and other devices continue to see the same product fields; identity fields are local at first, so an old client and a
+     new client interoperate. Needs a check of the cloud API before any sync of the new fields [G].
+
+=====================================================================================================================================
+E. INCREMENTAL IMPLEMENTATION PLAN
+=====================================================================================================================================
+Every stage ships behind a flag (identityV2.<stage>), keeps the old path available, and has its own tests, benchmark and rollback. Stages are
+ordered so the biggest harm is cut first and nothing depends on an unproven later stage.
+
+Stage 0 - Measure before changing anything (no behavior change)
+  Files: new src/main/identity/ (types only), a shadow-mode hook in scrapeEngine.ts and index.ts that computes the new result next to the old one.
+  Work: build the golden corpus (Appendix 2); add AI-call counters around callOpenAI; log old-vs-new disagreements to a table.
+  Tests: corpus runs against today's code to record the baseline failure rate by category. Benchmarks: AI calls per 100 listings, matching latency
+  at 1k/10k entries. Rollback: delete the hook. Exit: a number for "wrong merges", "wrong comps admitted", "false profitable pushes" on the corpus.
+
+Stage 1 - Symmetric agreement for comps (the part that moves money)
+  Files: new identity/extract.ts, identity/agree.ts; compFilter.ts, watchcount.ts (analyzeEbayComps, judgeSameProduct input), brokenVariant.ts untouched.
+  Work: extractor + symmetric agreement; comps split into exact / approximate / rejected with reason codes; generic references no longer admit
+  siblings; low-AI query keeps the defining attributes of the source title.
+  Tests: unit (symmetry, order independence, idempotence), corpus comps cases, existing compFilter behavior kept (Ti, Series S/X, colors, capacity).
+  Benchmark: comp analysis time per 100 comps. Rollback: flag off restores compMatchesSpecs/titleLooksLikeProduct.
+
+Stage 2 - Capture attributes at the source
+  Files: vision.ts (prompt + parser), types.ts (PhotoAnalysisResult.attributes), scrapeEngine.ts.
+  Work: remove "fall back to the plain base name" and the category-specific examples; ask for attributes with the source of each (text printed on
+  the item/box vs inferred); keep names as display text. No new AI call.
+  Tests: prompt-contract tests with recorded model outputs; corpus photo cases (with a held-out set the prompt was never tuned on).
+  Rollback: previous prompt string kept under the flag.
+
+Stage 3 - Database identity, aliases, best-fit resolution
+  Files: store.ts (new tables, resolveProduct(), replace first-hit lookups in findMatchingProduct / getEbayValueForProductName /
+  getProductSignals / enrichMany...), productIdentity.ts (second look becomes agreement + tie-breaker), index.ts creation sites.
+  Work: additive schema; resolver returns {product, level, candidates}; listings.product_id written with confidence and not re-resolved on save.
+  Tests: resolution is independent of creation order (property test), merges only on identity_key, alias round trips, Phase 1 name-index tests.
+  Benchmark: lookup latency at 10k entries (must not regress vs Phase 1 index). Rollback: flag falls back to name matching; tables are inert.
+
+Stage 4 - Valuation seam into the Deal Quality Gate
+  Files: preAlert.ts (resolveEvidence), dealGate.ts (one new basis value "approximate" in evidenceLevel, no threshold edits), dealSummary.ts naming,
+  scorer.ts valueFor path.
+  Work: exact vs approximate evidence mapping as in B.7; Gate reason line; alert naming from the identity.
+  Tests: all existing gate/qualification/dealNumbers/storeGate tests must pass UNCHANGED (this is the proof thresholds did not move); new cases:
+  the Xbox 360 scenario (repro2) must no longer qualify as Profitable Now with full confidence.
+  Rollback: flag off feeds the old evidence.
+
+Stage 5 - Learned attribute schemas and empirical weights
+  Files: identity/schema.ts (family schema call + cache), identity/weights.ts (price-separation statistic).
+  Work: replaces the hand-kept variant/accessory/color lists with learned ones; user can edit a family's schema.
+  Tests: held-out categories only (never used to design the rules), statistics unit tests on synthetic comps. Rollback: default schema.
+
+Stage 6 - Migration, review UI, re-research queue
+  Files: store.ts backfill job, Database.tsx "needs review" panel, queue in index.ts.
+  Work: section D. Tests: migration on a COPY of a large fixture database; undo test; Phase 3 startup benchmark must not regress.
+
+Stage 7 - Structured identifiers
+  Files: ebayClient.ts / ebayEngine.ts (brand/MPN/specifics where the API provides them), identity/extract.ts (use them as the strongest
+  source), watchcount parsing.
+  Work: a short spike first to confirm which fields exist on which endpoints (G).
+
+Regression suite (kept growing across stages)
+  - Golden corpus (Appendix 2), run in CI via the existing no-framework test runner. Report per category and per scenario.
+  - Property tests: agreement is symmetric; word order and case do not change a result; adding a conflicting defining attribute never raises
+    confidence; merging is transitive-safe (no chains of A~B~C where A and C differ).
+  - "No category literals" guard: a test that scans src/main/identity/** for brand/category words and fails the build if any appear, enforcing
+    "no hardcoded category rules" mechanically.
+  - Existing suites unchanged: unit tests (20 files), Phase 1/2/3 real-Electron suites (t1-t11), deal-quality suites (t6, gate tests).
+  - Real-Electron integration: the mock-Facebook harness drives listings for the corpus through the real scan engine and checks the saved
+    listing, the Database entry chosen, the comps kept and the Gate verdict.
+  - Shadow-mode comparison on your own data, read-only, only if you export a copy (G).
+Benchmarks per stage: AI calls per 100 listings; $ estimate; matching latency at 1k/10k entries; peak memory; startup time with the large
+fixture library (reuse the Phase 3 harness); Feed refresh time.
+Rollback per stage: flag off; additive tables stay inert; backup table restores split entries.
+
+=====================================================================================================================================
+F. RISKS AND LIMITATIONS
+=====================================================================================================================================
+  1. More precision means fewer exact comps per entry (an entry that was one blended number becomes several thinner ones). Mitigation: sibling
+     floors and ranges, and the Gate's existing weak-evidence rules keep finds visible as Worth a look instead of losing them.
+  2. Deals will get FEWER pushes for ambiguous listings. That is the intended trade (a false "Profitable Now" costs money and trust), but it
+     should be measured on the corpus and on your history so the change in alert volume is known before it ships.
+  3. AI extraction can still be wrong (misread plate, hallucinated generation). Mitigations: source-weighted confidence, conflicts surface as
+     AMBIGUOUS, AI never overrides printed text, low-confidence values stay UNRESOLVED.
+  4. Learned schemas can be wrong for an odd family; mitigation: user-editable, empirical check from comps, conservative default.
+  5. Unfamiliar categories with few comps: identity can only reach LINE; valuation falls back to approximate/none. That is correct but means
+     more Worth a look in niche categories.
+  6. WatchCount's anonymous limit (about 20 lookups/day) makes re-researching a large split backlog slow (days to weeks); the queue must prioritize
+     what is currently being scanned.
+  7. Rename/split of entries touches Search For items, Watches and listing history; mitigated by stable ids, no silent rewrites, backups.
+  8. Cloud sync: an old client that doesn't know identity fields could re-create merged entries; local-only first, then a versioned sync.
+  9. Photo ambiguity and wrong seller descriptions can never be fully solved; the design records the conflict instead of picking a side.
+ 10. The empirical-weight statistic needs enough comps; below a minimum it must not promote or demote attributes (fall back to the schema).
+ 11. This is a large change. Stage 1 (comps) alone removes the most dangerous behavior, and can ship without the later stages.
+
+=====================================================================================================================================
+G. WHAT I COULD NOT VERIFY, AND MANUAL CHECKS FOR YOU
+=====================================================================================================================================
+Not verified (no live AI, no live eBay/WatchCount, no access to your data in this read-only audit):
+  - What the vision model actually returns for the real 1403 listing today. The prompt reading (RC1) matches your report ("generic Xbox
+    Wireless Controller"), but I did not call the model.
+  - How often the identity second look returns generic/match/new in practice (only the policy code for each answer was tested).
+  - How many Database entries are already mixed (A.2 says the mechanism, not the count).
+  - Which structured fields (MPN, specifics) the eBay Browse API returns on the search endpoint vs the item endpoint, and what WatchCount cards
+    show (RC10).
+  - Whether cloud sync carries any state that would be affected (D.8).
+  - AI cost numbers (C): token counts are estimates.
+
+Manual checks on your real PC, safe and read-only:
+  1. Database > search "Xbox Wireless Controller": open the entry. Look at the reference photos (do any show a 360-style pad with the green
+     ring/different bumpers?), the photo captions ("Facebook listing: ... 360 ..."), and the notes. Look at the number of eBay comps and the value.
+  2. Activity: search the log for "isn't the same product as" and "kept its photo out of the Database": these are the lines that show the identity
+     second look working. Their absence for a 360-titled listing means it was filed without that check.
+  3. Feed: find the Xbox 360 listing and read its Deal Quality line and "avg. sale". If it says Profitable with a ~$40+ sale value, that is this
+     bug on real data.
+  4. To check how widespread it is, close Clynx and COPY scout.db to another folder; then I can run the identity audit (Stage 0/6) on the copy
+     without touching the original. I will not open the live file.
+
+=====================================================================================================================================
+APPENDIX 1. FULL RESULTS OF THE REPRODUCTIONS
+=====================================================================================================================================
+Run with:  node audit/phase4_repro/build.cjs repro1  then  node audit/phase4_repro/repro1.cjs   (same for repro2, repro3).
+
+repro1 - isSimilarProductName (true = treated as the same Database product). "truth" = my judgement.
+ category    sim    truth  A | B
+ controller  true   diff   Microsoft Xbox 360 Wireless Controller 1403 | Xbox Wireless Controller      WRONG MERGE
+ controller  true   diff   Xbox One Wireless Controller | Xbox Wireless Controller                      WRONG MERGE
+ controller  true   diff   Xbox Elite Wireless Controller Series 2 | Xbox Wireless Controller           WRONG MERGE
+ controller  true   same   Xbox Series X Wireless Controller | Xbox Wireless Controller                 (acceptable: Series X|S is the current pad)
+ controller  true   diff   PlayStation 3 DualShock 3 Controller | PlayStation DualShock Controller     WRONG MERGE
+ controller  true   diff   PS5 DualSense Edge Controller | PS5 DualSense Controller                    WRONG MERGE
+ controller  false  diff   Nintendo Switch Pro Controller | Nintendo Switch Controller
+ console     true   diff   Xbox 360 Console | Xbox Console                                              WRONG MERGE
+ console     true   diff   Xbox One X | Xbox One                                                        WRONG MERGE
+ console     false  diff   Xbox Series S | Xbox Series X
+ console     false  diff   PlayStation 4 Console | PlayStation 3 Console
+ console     true   diff   Nintendo Switch 2 | Nintendo Switch                                           WRONG MERGE
+ console     false  diff   Nintendo 3DS XL | Nintendo 3DS
+ console     false  same   PS5 Slim | PlayStation 5 Slim                                                 missed alias
+ phone       false  diff   iPhone 12 Pro | iPhone 12            phone  false diff  iPhone 13 Mini | iPhone 13
+ phone       true   same   Apple iPhone 12 | iPhone 12           phone  false diff  iPhone 12 128GB | 64GB
+ phone       true   diff   Samsung Galaxy S21 Ultra | S21       WRONG MERGE      (also S21 FE, S21+)
+ phone       false  diff   Google Pixel 7a | 7                  phone  false diff  iPhone SE 2nd | 3rd Generation
+ pc          true   diff   RTX 3060 Ti | RTX 3060               WRONG MERGE      (also RX 6700 XT | RX 6700)
+ pc          false  diff   i7 12700K | 12700; 12700KF | 12700K; 980 Pro 1TB | 500GB; 32GB | 16GB RAM    (kept apart by digits)
+ vehicle     true   diff   2018 Honda Civic Si | Civic          WRONG MERGE      (Ford F-150 Raptor | F-150 also)
+ vehicle     false  diff   Civic EX-L | LX                      (kept apart only because neither name contains the other)
+ tools       true   diff   Milwaukee M18 XC 5.0 Battery | M18 Battery   WRONG MERGE
+ tools       false  diff   M18 | M12; 20V 5Ah | 2Ah; DCD791 | DCD771                                   (digits)
+ appliance   false  diff   LG 5.2 | 4.5 cu ft; Samsung 65" | 55"                                       (digits)
+ furniture   true   diff   IKEA Kallax 2x4 | Kallax             WRONG MERGE
+ collectible true   diff   Funko Pop Batman Chase Variant | Funko Pop Batman    WRONG MERGE
+ collectible false  diff   Charizard 1st Edition Shadowless | Base Set                                  (kept apart only because neither name contains the other)
+ alias       true   same   Microsoft Xbox Series X Console | Xbox Series X
+ alias       false  same   Sony PlayStation 5 Digital Edition | PS5 Digital Edition                     missed alias
+ alias       false  same   Apple AirPods Pro 2nd Gen | AirPods Pro 2                                     missed alias
+ Summary: 18 of 41 different-product pairs merged; 3 of 6 same-product pairs missed.
+
+repro1 - identity pre-check listingHasExtraDetail (true = the AI is consulted):
+   360 1403 title vs "Xbox Wireless Controller": true      "Xbox One controller" vs same entry: false (one extra word, no check)
+   "Milwaukee M18 5.0 battery xc" vs "Milwaukee M18 Battery": false      "Samsung galaxy s21 ultra 128" vs "Samsung Galaxy S21": true
+
+repro1 - deterministic comp gate with a generic reference (PASSES = counted as the same product):
+   "Xbox Wireless Controller":  Series X|S, 360 1403, One 1708, Elite Series 2, Mars Red Special Edition  -> ALL PASS
+   "Samsung Galaxy S21":        S21 5G 128GB pass; S21 Ultra, S21 FE, S20 rejected
+   "NVIDIA GeForce RTX 3060":   3060 12GB pass; 3060 Ti, 3070 rejected
+   "Milwaukee M18 Battery":     XC5.0, CP2.0, HO 8.0 pass; M12 rejected
+   "2018 Honda Civic":          LX, Type R, Si ALL PASS
+
+repro2 - the reported listing through real code: see A.3 Test 2.
+repro3 - lookup order dependence: see A.3 Test 4. Specific entry created first: "Microsoft Xbox 360 Wireless Controller 1403" resolves to the
+generic entry ($48). Generic created first: resolves to the specific one ($18). Abbreviated title ("X360 wireless controller 1403") gets $48 either way.
+
+=====================================================================================================================================
+APPENDIX 2. TEST DESIGN
+=====================================================================================================================================
+Golden corpus (JSON, one case per line, run by the existing test runner; text cases need no network, photo cases use recorded model outputs):
+  case = { id, category, familiarity: "familiar" | "held-out", listing { title, description, photoTexts[], price },
+           database { entries[] }, expect { level, attributes, mustMerge[], mustNotMerge[], compsExact[], compsRejected[], gate } }
+Familiarity discipline: the "familiar" set (Xbox, iPhone, PlayStation, GPUs) may be used while designing; the "held-out" set (vehicles, tool
+battery platforms, appliance capacities, furniture dimensions, collectible editions, clothing variants, unusual one-off products) is written
+BEFORE the rules, never used to tune them, and is reported separately. A rule that improves familiar but not held-out is rejected.
+
+Required scenarios (each in several categories):
+  - Controllers across generations/editions (360 / One / Series / Elite / third-party) with and without model numbers
+  - Console generations and revisions (Xbox 360 / One / Series; PS3/4/5, Slim/Pro/Digital; Switch / Lite / OLED / 2)
+  - iPhone/phone generations and storage tiers; Pro/Max/Mini/Plus variants; carrier-locked vs unlocked
+  - Similar PC components (3060 vs 3060 Ti vs 3070; 12700 / K / KF; RAM kits by capacity and speed)
+  - Vehicle trims and years; tool battery platforms (M12/M18/20V/60V) and amp-hour tiers; appliance capacities; furniture dimensions
+  - Collectible editions (1st edition / shadowless / chase variant), clothing variants (size/colorway), unusual single products
+  - Identical products with different names (aliases, abbreviations, word order, "Microsoft" prefix)
+  - Near-identical names for different products (S21 vs S21+ vs S21 Ultra; Switch vs Switch 2)
+  - Missing model info (generic title) -> LINE/UNKNOWN, never EXACT; photo text rescuing missing title info
+  - Conflicting images vs description; wrong seller descriptions; ambiguous or low-quality photos
+  - Rare products with no comps -> identity yes, value none, Gate = Worth a look
+  - Bundles and incomplete items (missing controller/cable) -> identity of the focal item, condition_state separate
+  - Previously misclassified Database entries -> flagged "mixed", not auto-corrupted; split undoable
+  - Preservation: Search For matching, Watch matching, eBay scanner path, hidden gems, broken variants, notifications unchanged on the existing
+    fixtures (Gate suites byte-for-byte same results).
+
+Measures reported per stage: wrong-merge rate, missed-alias rate, wrong-comp admit rate, false "Profitable Now" rate, Worth-a-look rate, AI
+calls per 100 listings, matching latency at 1k/10k entries, memory, startup.
