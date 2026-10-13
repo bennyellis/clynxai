@@ -24,6 +24,10 @@ export interface BillingProvider {
   createPortalSession(customerId: string, returnUrl: string): Promise<{ url: string }>;
   /** Cancels a subscription immediately (used when an account is deleted, so nobody keeps being charged). */
   cancelSubscription(subscriptionId: string): Promise<void>;
+  /** Moves a live subscription to another price (monthly <-> yearly), prorated. The result reaches us as a webhook event like any other change. */
+  changePrice(subscriptionId: string, priceId: string): Promise<void>;
+  /** Schedules (true) or undoes (false) cancellation at the end of the paid period. */
+  setCancelAtPeriodEnd(subscriptionId: string, cancel: boolean): Promise<void>;
   /** Verifies the signature of a webhook delivery over the RAW body and returns the parsed event, or null when it is not authentic. */
   verifyWebhook(rawBody: Buffer, signatureHeader: string | undefined, nowSeconds?: number): ProviderEvent | null;
 }
@@ -84,6 +88,24 @@ export class StripeProvider implements BillingProvider {
       throw new Error(`Stripe request failed: ${msg}`);
     }
     return data;
+  }
+
+  private async get(path: string): Promise<Record<string, unknown>> {
+    const res = await this.fetchFn(`https://api.stripe.com/v1/${path}`, { headers: { Authorization: `Bearer ${this.cfg.secretKey}` }, signal: AbortSignal.timeout(15_000) });
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok) throw new Error(`Stripe request failed: ${(data.error as { message?: string } | undefined)?.message ?? `HTTP ${res.status}`}`);
+    return data;
+  }
+
+  async changePrice(subscriptionId: string, priceId: string): Promise<void> {
+    const sub = await this.get(`subscriptions/${encodeURIComponent(subscriptionId)}`);
+    const itemId = ((sub.items as { data?: Array<{ id?: unknown }> } | undefined)?.data ?? [])[0]?.id;
+    if (typeof itemId !== "string") throw new Error("Stripe subscription has no item to change");
+    await this.post(`subscriptions/${encodeURIComponent(subscriptionId)}`, { "items[0][id]": itemId, "items[0][price]": priceId, proration_behavior: "create_prorations", cancel_at_period_end: "false" });
+  }
+
+  async setCancelAtPeriodEnd(subscriptionId: string, cancel: boolean): Promise<void> {
+    await this.post(`subscriptions/${encodeURIComponent(subscriptionId)}`, { cancel_at_period_end: cancel ? "true" : "false" });
   }
 
   async createCheckoutSession(req: CheckoutRequest): Promise<{ id: string; url: string }> {

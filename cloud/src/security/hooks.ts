@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { config } from "../config.js";
 
 // Response headers for an API that never serves pages, a non-leaking error handler, and in-process request counters for /metrics.
 
@@ -16,7 +17,9 @@ export function registerSecurity(app: FastifyInstance): void {
     reply.header("X-Frame-Options", "DENY");
     reply.header("Referrer-Policy", "no-referrer");
     reply.header("Cross-Origin-Resource-Policy", "same-origin");
-    reply.header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
+    // (the website's pages and the simulated payment pages set their own policy; everything else is an API that serves no page)
+    if (!reply.hasHeader("Content-Security-Policy")) reply.header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
+    if (config.web.secureCookies) reply.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
     // an API answer (tokens, account data) must never be cached by a proxy or the client
     if (!reply.hasHeader("Cache-Control")) reply.header("Cache-Control", "no-store");
     return payload;

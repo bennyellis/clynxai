@@ -36,6 +36,29 @@ const envSchema = z.object({
   BILLING_RETURN_URL: z.string().url().default("https://example.com/clynx/billing/return"),
   TRIAL_DAYS: z.coerce.number().int().min(0).max(90).default(7),
   PAST_DUE_GRACE_DAYS: z.coerce.number().int().min(0).max(30).default(7),
+  // ---- website / customer platform (all optional; the defaults are for local development)
+  // The public address of the website (used in emails, cookies and the same-origin check). In production this is the https address.
+  PUBLIC_URL: z.string().url().default("http://localhost:8787"),
+  // "true" forces the Secure cookie flag, "false" turns it off (local http only); unset: Secure exactly when PUBLIC_URL is https.
+  COOKIE_SECURE: z.enum(["true", "false", "1", "0", ""]).optional(),
+  SESSION_TTL_DAYS: z.coerce.number().int().min(1).max(90).default(14),
+  // Outgoing email. Without SMTP_URL every email is only recorded in the outbox (visible to tests and, in development, to the developer); nothing is sent.
+  SMTP_URL: z.string().optional(),
+  MAIL_FROM: z.string().default("Clynx <no-reply@clynx.invalid>"),
+  SUPPORT_EMAIL: z.string().default("support@clynx.invalid"),
+  // The built website (website/dist). Served by this server when the folder exists.
+  WEBSITE_DIR: z.string().default("../website/dist"),
+  // Where uploaded installers are kept (a local folder; the storage module is the boundary for a later object store).
+  RELEASES_DIR: z.string().default("./data/releases"),
+  MAX_RELEASE_BYTES: z.coerce.number().int().positive().default(600 * 1024 * 1024),
+  // DEVELOPMENT ONLY: a local stand-in for Stripe (simulated hosted checkout and portal). Refused when NODE_ENV=production.
+  BILLING_FAKE: bool,
+  // Checkout needs a verified email address (staged: off by default so existing accounts keep working).
+  REQUIRE_VERIFIED_EMAIL_FOR_BILLING: bool,
+  // Text shown on the pricing page for each plan price. Left unset, the website shows a clearly marked placeholder: prices are NOT invented here.
+  PLAN_PRICE_PRO_MONTHLY_DISPLAY: z.string().optional(),
+  PLAN_PRICE_PRO_YEARLY_DISPLAY: z.string().optional(),
+  NODE_ENV: z.string().optional(),
 });
 
 function loadConfig() {
@@ -60,6 +83,21 @@ function loadConfig() {
     metricsToken: d.METRICS_TOKEN ?? null,
     accessTokenTtlSeconds: 15 * 60, // 15 minutes
     refreshTokenTtlSeconds: 30 * 24 * 60 * 60, // 30 days
+    web: {
+      publicUrl: d.PUBLIC_URL.replace(/\/+$/, ""),
+      secureCookies: d.COOKIE_SECURE === undefined || d.COOKIE_SECURE === "" ? d.PUBLIC_URL.startsWith("https://") : d.COOKIE_SECURE === "true" || d.COOKIE_SECURE === "1",
+      sessionTtlDays: d.SESSION_TTL_DAYS,
+      smtpUrl: d.SMTP_URL ?? null,
+      mailFrom: d.MAIL_FROM,
+      supportEmail: d.SUPPORT_EMAIL,
+      websiteDir: d.WEBSITE_DIR,
+      releasesDir: d.RELEASES_DIR,
+      maxReleaseBytes: d.MAX_RELEASE_BYTES,
+      requireVerifiedEmailForBilling: d.REQUIRE_VERIFIED_EMAIL_FOR_BILLING,
+      priceDisplay: { proMonthly: d.PLAN_PRICE_PRO_MONTHLY_DISPLAY ?? null, proYearly: d.PLAN_PRICE_PRO_YEARLY_DISPLAY ?? null },
+      production: d.NODE_ENV === "production",
+    },
+    billingFake: d.BILLING_FAKE && d.NODE_ENV !== "production",
     billing: {
       configured: billingConfigured,
       stripeSecretKey: d.STRIPE_SECRET_KEY ?? null,

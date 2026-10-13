@@ -15,6 +15,13 @@ import { aiRoutes } from "./ai/routes.js";
 import { billingRoutes } from "./billing/routes.js";
 import { StripeProvider, type BillingProvider } from "./billing/provider.js";
 import { registerSecurity } from "./security/hooks.js";
+import { webAuthRoutes } from "./web/authRoutes.js";
+import { registerWebsite } from "./web/static.js";
+import { supportRoutes } from "./support/routes.js";
+import { releaseRoutes } from "./releases/routes.js";
+import { adminRoutes } from "./admin/routes.js";
+import { plansRoutes } from "./web/plans.js";
+import { FakeStripe } from "./billing/fakeProvider.js";
 
 export interface BuildOptions {
   /** The billing provider. Omitted: Stripe when it is configured in the environment, otherwise none (billing endpoints answer "billing_not_configured"). Tests pass a fake. */
@@ -22,6 +29,8 @@ export interface BuildOptions {
 }
 
 export function defaultBillingProvider(): BillingProvider | null {
+  // DEVELOPMENT ONLY: BILLING_FAKE=true swaps in the local Stripe stand-in (never in production; see config.ts).
+  if (config.billingFake) return new FakeStripe();
   const b = config.billing;
   return b.configured && b.stripeSecretKey && b.stripeWebhookSecret ? new StripeProvider({ secretKey: b.stripeSecretKey, webhookSecret: b.stripeWebhookSecret }) : null;
 }
@@ -46,6 +55,14 @@ export function buildApp(options: BuildOptions = {}) {
   app.register(entitlementsRoutes);
   app.register(aiRoutes);
   app.register(billingRoutes(billing));
+  // website / customer platform
+  app.register(webAuthRoutes);
+  app.register(supportRoutes);
+  app.register(releaseRoutes);
+  app.register(adminRoutes);
+  app.register(plansRoutes);
+  if (billing instanceof FakeStripe) app.register(billing.routes());
+  registerWebsite(app);
 
   return app;
 }

@@ -135,6 +135,10 @@ export async function rotateRefreshToken(rawToken: string): Promise<{ userId: st
     throw new RefreshTokenError("Refresh token expired", "expired");
   }
 
+  // a disabled account (or one whose device was removed: its tokens are gone) cannot keep a session alive
+  const disabled = await query<{ disabled_at: Date | null }>("SELECT disabled_at FROM users WHERE id = $1", [row.user_id]);
+  if (!disabled.rows[0] || disabled.rows[0].disabled_at) throw new RefreshTokenError("Account unavailable", "invalid");
+
   const revoked = await query<{ id: string }>(
     `UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL RETURNING id`,
     [row.id]

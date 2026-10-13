@@ -74,18 +74,23 @@ async function applyInTransaction(client: PoolClient, e: ProviderEvent): Promise
       if (!userId) return "ignored-unknown-user";
       if (row && Number(row.last_event_created) > e.created) return "ignored-stale";
       const status = e.type === "customer.subscription.deleted" ? "canceled" : (str(o.status) ?? "incomplete");
+      // which price (and so monthly or yearly) the subscription is on, from the provider's subscription object
+      const price = ((o.items as { data?: Array<{ price?: { id?: unknown; recurring?: { interval?: unknown } } }> } | undefined)?.data ?? [])[0]?.price;
+      const priceId = str(price?.id);
+      const interval = str(price?.recurring?.interval);
       // past_due_since marks the moment payment first failed; it clears when the account is healthy again
       const pastDueSince = status === "past_due" ? (row?.status === "past_due" && row.past_due_since ? row.past_due_since : new Date(e.created * 1000)) : null;
       await client.query(
-        `INSERT INTO subscriptions (user_id, provider_customer_id, provider_subscription_id, status, current_period_end, trial_end, cancel_at_period_end, past_due_since, last_event_created)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        `INSERT INTO subscriptions (user_id, provider_customer_id, provider_subscription_id, status, current_period_end, trial_end, cancel_at_period_end, past_due_since, last_event_created, price_id, billing_interval)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          ON CONFLICT (user_id) DO UPDATE SET
            provider_customer_id = COALESCE(EXCLUDED.provider_customer_id, subscriptions.provider_customer_id),
            provider_subscription_id = COALESCE(EXCLUDED.provider_subscription_id, subscriptions.provider_subscription_id),
            status = EXCLUDED.status, current_period_end = EXCLUDED.current_period_end, trial_end = EXCLUDED.trial_end,
            cancel_at_period_end = EXCLUDED.cancel_at_period_end, past_due_since = EXCLUDED.past_due_since,
-           last_event_created = EXCLUDED.last_event_created, updated_at = now()`,
-        [userId, customerId, subscriptionId, status, secs(o.current_period_end), secs(o.trial_end), o.cancel_at_period_end === true, pastDueSince, e.created]
+           last_event_created = EXCLUDED.last_event_created, price_id = COALESCE(EXCLUDED.price_id, subscriptions.price_id),
+           billing_interval = COALESCE(EXCLUDED.billing_interval, subscriptions.billing_interval), updated_at = now()`,
+        [userId, customerId, subscriptionId, status, secs(o.current_period_end), secs(o.trial_end), o.cancel_at_period_end === true, pastDueSince, e.created, priceId, interval]
       );
       return "applied";
     }

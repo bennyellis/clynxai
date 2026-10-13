@@ -10,6 +10,18 @@ const MIGRATIONS_DIR = join(__dirname, "migrations");
 // schema_migrations and applies any new .sql files (in migrations/, in
 // filename order) inside their own transaction.
 export async function runMigrations(): Promise<void> {
+  // Only one process (an API replica starting, a test worker, the migrate command) may migrate at a time: the others wait here and then find nothing left to do.
+  const lock = await pool.connect();
+  try {
+    await lock.query("SELECT pg_advisory_lock(727274001)");
+    await applyMigrations();
+  } finally {
+    await lock.query("SELECT pg_advisory_unlock(727274001)").catch(() => undefined);
+    lock.release();
+  }
+}
+
+async function applyMigrations(): Promise<void> {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       filename TEXT PRIMARY KEY,

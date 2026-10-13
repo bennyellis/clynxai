@@ -29,6 +29,14 @@ class FakeBilling implements BillingProvider {
     if (this.failCancel) throw new Error("provider down");
     this.cancelled.push(id);
   }
+  changed: Array<{ id: string; priceId: string }> = [];
+  cancelFlags: Array<{ id: string; cancel: boolean }> = [];
+  async changePrice(id: string, priceId: string) {
+    this.changed.push({ id, priceId });
+  }
+  async setCancelAtPeriodEnd(id: string, cancel: boolean) {
+    this.cancelFlags.push({ id, cancel });
+  }
   verifyWebhook(raw: Buffer, sig: string | undefined, now = Math.floor(Date.now() / 1000)): ProviderEvent | null {
     if (!verifyStripeSignature(raw, sig, SECRET, now)) return null;
     const e = JSON.parse(raw.toString("utf8"));
