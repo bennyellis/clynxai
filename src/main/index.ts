@@ -42,6 +42,7 @@ import {
 } from "./vision.js";
 import { lookupTopCitiesInState } from "./locationDiscovery.js";
 import { analyzeEbayComps, deriveWatchCountQuery, type CompAnalysis } from "./watchcount.js";
+import { codesMissingFrom, specificNameFor } from "./identity/codes.js";
 import { fetchActiveAsks } from "./ebayActive.js";
 import { resolveIdentityTarget } from "./productIdentity.js";
 import { buyerTotalUsd, estimateMarketValue } from "./marketValue.js";
@@ -1583,6 +1584,7 @@ async function researchEbayComps(
     activeSampleSize: active.sampleSize,
     estimatedValueUsd: estimate.valueUsd,
     estimateBasis: estimate.basis,
+    identity: analysis.identity ?? "exact",
   });
   getPrimaryEngine().markEbayCompsResearched(id);
   await refreshMyStoreReference(id, fallbackName);
@@ -1622,6 +1624,8 @@ const MARKET_CHECK_TIMEOUT_MS = 150_000;
 const marketChecksInFlight = new Map<string, Promise<MarketCheck | null>>();
 
 function isExactProduct(productName: string, matchedItem: string | null, title: string): boolean {
+  // A listing that states a model number / generation the product's name lacks may be a more specific product (identity/codes.ts).
+  if (codesMissingFrom(productName, title).length > 0) return false;
   const sameName = !!matchedItem && matchedItem.trim().toLowerCase() === productName.trim().toLowerCase();
   if (sameName && compMatchesSpecs(productName, title) && !modelLettersConflict(productName, title)) return true;
   return titleLooksLikeProduct(productName, title);
@@ -1641,10 +1645,13 @@ async function checkMarketBeforeAlert(listing: { title: string; matchedItem: str
     };
   }
   if (!config.watchCountEnabled) return null; // turned off in Config: the Database's own numbers decide
+  // A listing more specific than the entry it matched is priced under a name of its own, so the general entry's value is not overwritten
+  // with the specific product's comps.
+  const moreSpecific = signals && !exact && listing.purpose !== "bundle" && codesMissingFrom(signals.name, listing.title).length > 0 ? specificNameFor(signals.name, listing.title) : null;
   const name =
     signals && exact
       ? signals.name
-      : listing.matchedItem?.trim() || focalProductName({ signalName: null, matchedItem: null, category: null, title: listing.title });
+      : moreSpecific || listing.matchedItem?.trim() || focalProductName({ signalName: null, matchedItem: null, category: null, title: listing.title });
   if (!name) return null;
   const key = name.toLowerCase();
   const running = marketChecksInFlight.get(key);
@@ -1880,6 +1887,7 @@ function describeCompsFindings(productId: string, result: CompsResearchResult): 
   const soldTotal = buyerTotalUsd(result.avgSoldPriceUsd, result.avgShippingUsd);
   const thrownOut = result.rejectedCount + result.photoRejected;
   if (thrownOut > 0) discovery.note(productId, "step", `I threw out ${plural(thrownOut, "listing")} that weren't really this exact product (wrong edition, bundle or photos).`);
+  if (result.identityNote) discovery.note(productId, "warn", `The sold prices mixed different versions of this product: ${result.identityNote}.`);
   const evidence: string[] = [];
   if (soldTotal !== null && result.sampleSize > 0) evidence.push(`${plural(result.sampleSize, "sale")} averaging ${money0(soldTotal)} with shipping`);
   if (result.activeMedianUsd !== null && result.activeSampleSize > 0) evidence.push(`${plural(result.activeSampleSize, "listing")} asking about ${money0(result.activeMedianUsd)}`);

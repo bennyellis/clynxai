@@ -5,6 +5,8 @@ import { compMatchesSpecs, sanitizeSearchQuery, specReference, titleLooksLikePro
 import { titleLooksLikeBrokenProduct } from "./brokenVariant.js";
 import { isLowAiMode } from "./aiMode.js";
 import { trimmedMean } from "./marketValue.js";
+import { codesMissingFrom } from "./identity/codes.js";
+import { splitByPriceSeparators } from "./identity/populations.js";
 
 export interface EbayComp {
   title: string;
@@ -158,7 +160,13 @@ export async function searchSoldComps(page: Page, query: string): Promise<EbayCo
 // throws, since a fallback to the existing name is always a valid result.
 export async function deriveWatchCountQuery(fallbackName: string, sourceTitle: string | null, imageDataUri: string | null): Promise<string> {
   // The Database entry's own name is a fine search query; asking the AI to re-derive it costs credits every research.
-  if (isLowAiMode()) return sanitizeSearchQuery(fallbackName) || fallbackName;
+  if (isLowAiMode()) {
+    // No AI: the entry's own name, plus the model numbers / generations the listing it came from states and the name lacks, so a generic name
+    // does not turn into a search for every version of the product (the comp filter then requires those codes too).
+    const base = sanitizeSearchQuery(fallbackName) || fallbackName;
+    const extra = sourceTitle ? codesMissingFrom(fallbackName, sourceTitle) : [];
+    return extra.length ? `${base} ${extra.join(" ")}` : base;
+  }
   if (!sourceTitle && !imageDataUri) return fallbackName;
 
   try {
@@ -225,9 +233,13 @@ export interface CompAnalysis {
   dominantCondition: string | null;
   // How many of the results WatchCount returned were thrown out as not being this product.
   rejectedCount: number;
+  // Whether the comps are the market of exactly the product asked about. "approximate": the name was generic and the comps mix several
+  // products, so the cheapest group stood in as a floor. "unresolved": mixed, and nothing could stand in. Absent = exact.
+  identity?: "exact" | "approximate" | "unresolved";
+  identityNote?: string | null;
 }
 
-const EMPTY_ANALYSIS: CompAnalysis = { photoRejected: 0, avgSoldPriceUsd: null, avgRunTimeDays: null, avgShippingUsd: null, sampleSize: 0, dominantCondition: null, rejectedCount: 0 };
+const EMPTY_ANALYSIS: CompAnalysis = { identity: "exact", identityNote: null, photoRejected: 0, avgSoldPriceUsd: null, avgRunTimeDays: null, avgShippingUsd: null, sampleSize: 0, dominantCondition: null, rejectedCount: 0 };
 
 // The AI half of "is this listing the SAME product": brand/partner, edition, bundle, and anything else that
 // isn't a plain model number or capacity (those are checked in code first, see compFilter.ts). Returns the
@@ -309,8 +321,20 @@ export async function analyzeEbayComps(query: string, comps: EbayComp[], product
     photoRejected = matched.length - survivors.length;
     matched = survivors;
   }
+  // A generic name pulls in every version of the product; averaging them fits none. Split the set along the words that actually separate the
+  // prices and keep the part that matches what the name says (see identity/populations.ts).
+  let identity: CompAnalysis["identity"] = "exact";
+  let identityNote: string | null = null;
+  if (!broken && matched.length > 0) {
+    const split = splitByPriceSeparators(matched, `${query} ${productName}`);
+    if (split.separators.length > 0) {
+      identity = split.state;
+      identityNote = split.note;
+      matched = split.chosen;
+    }
+  }
   const rejectedCount = comps.length - matched.length - photoRejected;
-  if (matched.length === 0) return { ...EMPTY_ANALYSIS, rejectedCount, photoRejected };
+  if (matched.length === 0) return { ...EMPTY_ANALYSIS, rejectedCount, photoRejected, identity, identityNote };
 
   // Condition-awareness — segment the confirmed matches by each comp's own condition and average the LARGEST
   // segment (the condition a resale item is overwhelmingly likely to be in), falling back to everything when no
@@ -351,5 +375,7 @@ export async function analyzeEbayComps(query: string, comps: EbayComp[], product
     dominantCondition: !broken && useSegment && dominantKey !== "unknown" ? dominantKey : null,
     rejectedCount,
     photoRejected,
+    identity,
+    identityNote,
   };
 }

@@ -26,6 +26,10 @@ export interface ProductSignals {
   storeValueUsd?: number | null;
   // What the value rests on: sold comps, sold nudged by asking prices ("blend"), or asking prices only ("active"). null: unknown.
   basis?: "sold" | "blend" | "active" | null;
+  // Whether the comps behind the value are the market of exactly this product ("approximate": mixed comps, the cheapest group stood in).
+  identity?: "exact" | "approximate" | "unresolved" | null;
+  // Defining codes the listing states that the product's name lacks (see identity/codes.ts); empty/absent = nothing unconfirmed.
+  unconfirmedCodes?: string[];
 }
 
 export interface SignalSource {

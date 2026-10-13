@@ -9,6 +9,7 @@ import { timedSync, recordEvent } from "./metrics.js";
 import type { BlacklistedImage, BlacklistTerm, FeedbackExample, FeedbackVerdict, FlawFeedbackExample, GateFactsSnapshot, GateReasonRecord, ListingRecord, MyStoreReference, PhotoFlaw, ProductImage, ProductProfile, ScoredListing, SellerRiskResult, Watch, WatchMatch, WatchPlatform, WatchSearchLink, WatchTerm } from "./types.js";
 import { brokenVariantName, isBrokenVariantName } from "./brokenVariant.js";
 import { assessListingAge } from "./listingAge.js";
+import { codesMissingFrom } from "./identity/codes.js";
 
 // What a product is worth on eBay, as the total the BUYER pays (the sold item price plus the shipping they paid): the estimate when
 // there is one, else the sold average with its average shipping. The user keeps ~84% of that total (eBay's cut is on all of it).
@@ -465,6 +466,7 @@ export class Store {
       ["ebay_active_sample_size", "INTEGER"],
       ["ebay_est_value_usd", "REAL"],
       ["ebay_est_basis", "TEXT"],
+      ["ebay_comps_identity", "TEXT"],
       ["parent_product_id", "TEXT"],
       ["my_store_ref", "TEXT"],
     ]) {
@@ -914,8 +916,8 @@ export class Store {
   // it sells for on eBay, how fast, and from how many sales. Feeds the star rating in ntfy alerts (dealSummary.ts).
   getProductSignals(matchedItem: string | null, title: string): ProductSignals | null {
     const rows = this.db
-      .prepare(`SELECT id, name, ${EBAY_VALUE_SQL} AS value, ebay_avg_run_time_days AS run, ebay_comps_sample_size AS n, ebay_comps_checked_at AS at, my_store_ref AS store, ebay_est_basis AS basis FROM products`)
-      .all() as Array<{ id: string; name: string; value: number | null; run: number | null; n: number | null; at: number | null; store: string | null; basis: string | null }>;
+      .prepare(`SELECT id, name, ${EBAY_VALUE_SQL} AS value, ebay_avg_run_time_days AS run, ebay_comps_sample_size AS n, ebay_comps_checked_at AS at, my_store_ref AS store, ebay_est_basis AS basis, ebay_comps_identity AS ident FROM products`)
+      .all() as Array<{ id: string; name: string; value: number | null; run: number | null; n: number | null; at: number | null; store: string | null; basis: string | null; ident: string | null }>;
     const toSignals = (r: (typeof rows)[number]): ProductSignals => ({
       id: r.id,
       name: r.name,
@@ -925,6 +927,10 @@ export class Store {
       checkedAt: r.at ?? null,
       storeValueUsd: parseMyStore(r.store)?.medianUsd ?? null,
       basis: r.basis === "sold" || r.basis === "blend" || r.basis === "active" ? r.basis : null,
+      identity: r.ident === "exact" || r.ident === "approximate" || r.ident === "unresolved" ? r.ident : null,
+      // Defining codes (model numbers, generations) the listing states that this product's name does not: the listing may be a more
+      // specific product than the entry it matched, so the entry's value is not known to apply to it.
+      unconfirmedCodes: codesMissingFrom(r.name, title),
     });
     if (matchedItem) {
       const lower = matchedItem.toLowerCase();
@@ -1152,6 +1158,7 @@ export class Store {
       activeSampleSize?: number | null;
       estimatedValueUsd?: number | null;
       estimateBasis?: "sold" | "blend" | "active" | null;
+      identity?: "exact" | "approximate" | "unresolved" | null;
     }
   ): void {
     const now = Date.now();
@@ -1159,7 +1166,7 @@ export class Store {
     this.db
       .prepare(
         `UPDATE products SET ebay_avg_sold_price_usd = ?, ebay_avg_run_time_days = ?, ebay_avg_shipping_usd = ?, ebay_comps_sample_size = ?, ebay_comps_checked_at = ?,
-           ebay_active_median_usd = ?, ebay_active_sample_size = ?, ebay_est_value_usd = ?, ebay_est_basis = ?, updated_at = ? WHERE id = ?`
+           ebay_active_median_usd = ?, ebay_active_sample_size = ?, ebay_est_value_usd = ?, ebay_est_basis = ?, ebay_comps_identity = ?, updated_at = ? WHERE id = ?`
       )
       .run(
         data.avgSoldPriceUsd,
@@ -1171,6 +1178,7 @@ export class Store {
         data.activeSampleSize ?? null,
         data.estimatedValueUsd ?? null,
         data.estimateBasis ?? null,
+        data.identity ?? null,
         now,
         id
       );
@@ -2871,6 +2879,7 @@ function rowToProduct(row: any): ProductProfile {
     ebayActiveSampleSize: row.ebay_active_sample_size ?? null,
     ebayEstimatedValueUsd: row.ebay_est_value_usd ?? null,
     ebayEstimateBasis: row.ebay_est_basis ?? null,
+    ebayCompsIdentity: row.ebay_comps_identity === "exact" || row.ebay_comps_identity === "approximate" || row.ebay_comps_identity === "unresolved" ? row.ebay_comps_identity : null,
     myStore: parseMyStore(row.my_store_ref),
     parentProductId: row.parent_product_id ?? null,
     loading: !!row.loading,

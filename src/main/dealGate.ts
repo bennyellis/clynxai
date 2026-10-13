@@ -40,6 +40,8 @@ export interface ValueEvidence {
   sampleSize: number | null;
   // How old the comps are, in days (null: unknown).
   ageDays: number | null;
+  // The comps mixed several products and a stand-in group was used (see identity/populations.ts): never better than weak evidence.
+  approximate?: boolean;
 }
 
 export const EVIDENCE_RULES = {
@@ -60,6 +62,7 @@ function lower(level: EvidenceLevel): EvidenceLevel {
 
 export function evidenceLevel(e: ValueEvidence | null | undefined): EvidenceLevel {
   if (!e || e.valueUsd === null || !(e.valueUsd > 0)) return "none";
+  if (e.approximate) return "weak";
   if (e.basis === "user") return "moderate";
   if (e.basis === "active") return "weak";
   const samples = e.sampleSize ?? 0;
@@ -79,6 +82,7 @@ export function evidenceFromSignals(signals: ProductSignals | null | undefined, 
     basis: signals.basis ?? (signals.compSample ? "sold" : null),
     sampleSize: signals.compSample ?? null,
     ageDays: signals.checkedAt ? Math.max(0, (now - signals.checkedAt) / 86_400_000) : null,
+    ...(signals.identity === "approximate" || signals.identity === "unresolved" ? { approximate: true } : {}),
   };
 }
 
@@ -106,6 +110,10 @@ export interface GateInput {
   // A broken / for-parts copy priced from its own Database variant (no further condition discount).
   broken?: boolean;
   evidence: ValueEvidence | null;
+  // Defining codes the listing states that the matched product's name lacks (e.g. "360", "1403" against "Xbox Wireless Controller"): the
+  // listing may be a more specific product than the one whose value is being used. Caps the evidence at weak and rules out the
+  // "big gap on thin evidence" shortcut, so it can be a Worth a look but never a confident deal until the specific product is priced.
+  identityUnconfirmed?: string[];
   extras?: GateExtras | null;
   age: AgeAssessment;
   // The model (not the arithmetic) called this a deal: used to explain an unverified AI find.
@@ -128,6 +136,7 @@ export type GateReasonCode =
   | "NO_EVIDENCE"
   | "AI_UNVERIFIED"
   | "WEAK_EVIDENCE"
+  | "IDENTITY_UNCONFIRMED"
   | "RARE_FIND"
   | "MARGIN_OK"
   | "NEEDS_DISCOUNT"
@@ -230,7 +239,9 @@ function verdict(status: DealStatus, level: EvidenceLevel, facts: GateFacts, rea
 }
 
 export function qualifyListing(input: GateInput): GateVerdict {
-  const level = evidenceLevel(input.evidence);
+  const unconfirmed = input.identityUnconfirmed ?? [];
+  let level = evidenceLevel(input.evidence);
+  if (unconfirmed.length > 0 && level !== "none") level = "weak";
   const facts = emptyFacts(level, input);
   const reasons: GateReason[] = [];
   const settings = input.settings;
@@ -321,6 +332,11 @@ export function qualifyListing(input: GateInput): GateVerdict {
       input.evidence.basis === "active"
         ? "That value comes from asking prices only: nothing has confirmed what it actually sells for."
         : `Only ${plural(input.evidence.sampleSize ?? 0, "sale")} to go on${input.evidence.ageDays !== null && input.evidence.ageDays > EVIDENCE_RULES.staleDays ? ", and they are old" : ""}.`;
+    if (unconfirmed.length > 0) {
+      const text = `This looks like a more specific version (${unconfirmed.join(", ")}) than the product it matched, so that product's price can't be trusted for it yet.`;
+      reasons.push({ code: "IDENTITY_UNCONFIRMED", severity: "warn", text });
+      return verdict("worth_a_look", level, facts, reasons, text, null, "low");
+    }
     if (base === "profitable_now" && bigGap) {
       // Scarce comparables on a big price gap is exactly what a rare or undervalued product looks like: keep it, at low confidence.
       reasons.push({ code: "RARE_FIND", severity: "warn", text: `${why} The gap is large, so it stays a deal, at low confidence.` });

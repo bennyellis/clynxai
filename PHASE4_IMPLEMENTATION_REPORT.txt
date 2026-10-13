@@ -1,0 +1,79 @@
+CLYNX - PHASE 4 IMPLEMENTATION REPORT (first slice: Stages 0, 1, 2 and the Gate seam)
+=====================================================================================
+Date: 2026-10-12.  Checkpoint before the work: git tag checkpoint-before-phase4 (commit 220a2cc).  Rollback: git checkout checkpoint-before-phase4 && npm run build.
+
+WHAT THIS SLICE DOES, IN ONE PARAGRAPH
+--------------------------------------
+The reported Xbox 360 controller can no longer become a confident "Profitable Now" deal against the generic Xbox Wireless Controller's
+value. Re-running the audit's simulation (audit/phase4_repro/repro2.ts) on the same data: BEFORE, status "profitable_now", "about $25 profit"
+at $15; AFTER, "worth_a_look" with the reason "This looks like a more specific version (360, 1403) than the product it matched, so that product's
+price can't be trusted for it yet." It stays visible in the Feed and is not pushed. The scanner then prices the specific product under its own
+name, so a genuine bargain is still found (at $10 it IS a deal, judged on the 360 pad's own ~$18 value).
+
+WHAT IS NOT DONE YET (deliberately held for your next go)
+--------------------------------------------------------
+Stage 3 (Database identity columns, aliases table, best-fit resolution instead of "newest entry wins"), Stage 5 (learned attribute schemas),
+Stage 6 (migration of already-mixed entries, "needs review" screen, re-research queue), Stage 7 (eBay structured identifiers). So:
+  - An existing Database entry that is already mixed is NOT repaired by this slice. New and re-researched comps are split correctly, and
+    listings that state a model number the entry lacks are no longer trusted, but old mixed numbers stay until Stage 6.
+  - Two generic-vs-specific entries can still resolve in creation order (audit RC7) until Stage 3.
+  - Names like "Xbox One controller" (a generation WORD without digits) are separated only by the price-based split of the comps, not by the
+    listing check, which looks for model-number-like codes.
+
+FILES CHANGED
+-------------
+New module src/main/identity/ (no brand or category words in it; a test enforces that):
+  codes.ts        defining codes (letter+digit words, 3+ digit numbers; not capacities, years, small counts), a TWO-WAY comparison
+                  (equal / candidate-has-more / reference-has-more / conflict), specificNameFor() ("Xbox Wireless Controller" + listing -> "Xbox Wireless Controller 360 1403")
+  populations.ts  splits a mixed comp set by the words that actually separate prices (no word lists), describes each group by its own
+                  characteristic words, picks the group matching what the name says, or the cheapest sizeable group as a floor (flagged approximate) when it says nothing
+Changed:
+  watchcount.ts   analyzeEbayComps splits mixed comps (reports identity exact / approximate / unresolved); the default no-AI search query now keeps the
+                  listing's model numbers; broken / for-parts research untouched
+  store.ts        new column products.ebay_comps_identity (additive, nullable); getProductSignals reports identity and unconfirmedCodes
+  types.ts, productSync.ts, dealSummary.ts   the matching fields
+  dealGate.ts     evidence can be "approximate" (never better than weak); GateInput.identityUnconfirmed; new reason code IDENTITY_UNCONFIRMED.
+                  NO threshold, margin or rule was changed: with no doubt the same inputs give the same verdict (a test pins this)
+  preAlert.ts     passes the doubt to the Gate; clears it when the market check priced the product under a name that covers the listing's codes
+  index.ts        isExactProduct is false when the listing states codes the name lacks; the pre-alert market check prices a more specific listing under
+                  its own specific name instead of overwriting the general entry; comps identity saved; Discovery tab notes mixed comps
+  productIdentity.ts   the AI identity second look is also asked whenever the title states a code the entry lacks
+  vision.ts       Stage 2: the three naming prompts no longer say "generic model name" or "fall back to the plain base name"; they now say to keep the
+                  generation, version or model number whenever the listing states it or it can be read on the item/box, for every kind of product
+Tests added: identity.test.ts (25), identityGate.test.ts (19), identityRoutes.test.ts (9, the real scan-engine route), visionPromptContract.test.ts (6).
+audit/phase4_repro/ stays as the read-only demonstration scripts (plus bench.ts).
+
+RESULTS
+-------
+Unit tests: 24 files, all pass (20 existing + 4 new). Typecheck and build clean.
+Real-Electron suites on the final build, all pass with the same counts as before this slice (nothing regressed): t1 18, t3 20, t4 22, t5 21,
+t6 (deal quality) 13, t7a 13, t7b 41, t7c 25, t8a 22, t8b 10, t9 21, t10 13, t11 10.
+Deal Quality Gate: dealGate / dealNumbers / gateRoutes / qualification / hiddenGems / storeGate suites unchanged and passing.
+
+Held-out categories (rules were written without tuning to them) in identity.test.ts: vehicle trims (LX vs Si vs Type R), tool-battery capacities,
+appliance capacities, collectible editions. A generic vehicle name is valued at the cheapest trim as a floor, a named trim gets its own comps, the
+common and the rare collectible are no longer averaged, and a single-product comp set is untouched.
+
+Cost and speed (measured): the two-way check is about 16 microseconds per product; splitting 60 comps about 1 ms. No new AI call anywhere.
+Default low-AI mode got better, not worse: its search query now keeps the model numbers, and the splitting is deterministic.
+
+THINGS TO KNOW (honest limits)
+------------------------------
+  1. The vision prompt change is checked by a wording test, not against the live model. Whether the model now returns "Xbox 360 Wireless
+     Controller" for your real listing needs one real scan to confirm. Even if it does not, the Gate seam above still stops the false deal.
+  2. More caution means more "Worth a look" for listings that state a model number their matched entry lacks (for example a code like HEG-001
+     on a Switch OLED). They are still shown in the Feed and the scanner prices the specific version for next time, but until that comp lookup
+     succeeds they are not pushed. WatchCount's anonymous cap (about 20 lookups a day) bounds how many specific versions can be priced per day.
+  3. A generic entry with mixed comps is now valued at the cheapest group (a floor) and marked approximate. It undervalues the premium version
+     until Stage 3 gives each version its own entry. Undervaluing was chosen over overvaluing because it cannot create a false deal.
+  4. I did not open your real database or run anything against Facebook/eBay/WatchCount or OpenAI. Everything ran on made-up data in temp folders.
+
+HOW TO CHECK ON YOUR PC
+-----------------------
+  1. Restart Clynx (it runs from out/, already rebuilt).
+  2. Find the Xbox 360 controller listing in the Feed (or wait for the next one): its Deal Quality line should read "Worth a look" with the
+     "more specific version (360, 1403)" explanation, not "Profitable Now".
+  3. Discovery tab: after a pre-alert check you may see a new entry such as "Xbox Wireless Controller 360 1403" with its own price, and a warning
+     note if its sold prices mixed several versions.
+  4. For a real-model check of the Stage 2 wording: scan a listing that clearly states a generation and look at the name Clynx files it under.
+  Tell me what you see; Stage 3 (aliases, best-fit lookup, repairing mixed entries) is next on your word.

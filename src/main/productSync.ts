@@ -72,6 +72,7 @@ function cloudProductToLocal(cp: CloudProduct): ProductProfile {
     ebayActiveSampleSize: null,
     ebayEstimatedValueUsd: null,
     ebayEstimateBasis: null,
+    ebayCompsIdentity: null,
     myStore: null,
     parentProductId: null,
     loading: false,

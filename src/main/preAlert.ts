@@ -12,6 +12,7 @@
 import { buildAlertSummary, composeGateAlert, composeWatchAlert, type AlertSummary, type SignalSource } from "./dealSummary.js";
 import { evidenceFromSignals, qualifyListing, toGateSnapshot, userEvidence, type GateExtras, type GateVerdict, type ValueEvidence } from "./dealGate.js";
 import { assessListingAge } from "./listingAge.js";
+import { codesMissingFrom } from "./identity/codes.js";
 import { isSuspiciousPrice } from "./placeholderPrice.js";
 import type { ResaleSettings } from "./resaleMath.js";
 import type { ScoredListing } from "./types.js";
@@ -81,13 +82,16 @@ export function resolveEvidence(scored: ScoredListing, source: SignalSource | nu
   return evidenceFromSignals(signals, now);
 }
 
-function gateOnce(args: QualifyArgs, evidence: ValueEvidence | null, scored: ScoredListing): GateVerdict {
+function gateOnce(args: QualifyArgs, evidence: ValueEvidence | null, scored: ScoredListing, identityUnconfirmed?: string[]): GateVerdict {
   const { listing, extraction } = scored;
+  let unconfirmed: string[] = identityUnconfirmed ?? [];
   let market: { runTimeDays: number | null; fbAvgPriceUsd: number | null; fbSample: number | null } | undefined;
   try {
     const signals = args.source?.getProductSignals(extraction.brokenVariant ?? extraction.matchedItem, listing.title) ?? null;
     const fb = signals && args.source && listing.source !== "ebay" ? args.source.getFacebookPriceStats(signals.id) : null;
     market = { runTimeDays: signals?.runTimeDays ?? null, fbAvgPriceUsd: fb?.avgPriceUsd ?? null, fbSample: fb?.sampleSize ?? null };
+    // Only a Database value can be the wrong product's value; a reference price the user typed stands as typed.
+    if (identityUnconfirmed === undefined && evidence && evidence.basis !== "user") unconfirmed = signals?.unconfirmedCodes ?? [];
   } catch {
     market = undefined;
   }
@@ -98,6 +102,7 @@ function gateOnce(args: QualifyArgs, evidence: ValueEvidence | null, scored: Sco
     conditionImpact: extraction.conditionImpact,
     broken: !!extraction.brokenVariant,
     evidence,
+    identityUnconfirmed: unconfirmed,
     extras: args.extras ?? null,
     age: assessListingAge(listing.listingAge, args.maxAgeHours),
     aiFlagged: scored.isDeal && scored.referencePriceUsd === null,
@@ -139,7 +144,9 @@ export async function qualifyScoredListing(args: QualifyArgs): Promise<Qualifica
       evidence = fresh && fresh.valueUsd ? fresh : { valueUsd: market.valueUsd, basis: evidence?.basis ?? "blend", sampleSize: evidence?.sampleSize ?? null, ageDays: 0 };
       const ref = evidence.valueUsd as number;
       scored = { ...scored, referencePriceUsd: ref, discountPercent: scored.listing.price !== null ? ((ref - scored.listing.price) / ref) * 100 : scored.discountPercent };
-      verdict = gateOnce(args, evidence, scored);
+      // The check priced a product under its own name: if the listing states nothing more than that name does, the doubt is gone.
+      const checked = market.productName ? codesMissingFrom(market.productName, scored.listing.title) : undefined;
+      verdict = gateOnce(args, evidence, scored, evidence.basis === "user" ? [] : checked);
     }
   }
 

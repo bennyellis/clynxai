@@ -1109,6 +1109,9 @@ export interface ProductProfile {
   // "active" (no sold comps, asking prices only). null until researched.
   ebayEstimatedValueUsd: number | null;
   ebayEstimateBasis: "sold" | "blend" | "active" | null;
+  // Whether the comps behind the value are the market of exactly this product: "approximate" = the name is generic and the comps mixed several
+  // products, so the cheapest group stood in as a floor. null/"exact" = no reason to doubt it.
+  ebayCompsIdentity: "exact" | "approximate" | "unresolved" | null;
   // What the user's own linked eBay store lists this product for (separate from the market numbers above). null when no
   // store is linked or none of its listings is this product.
   myStore: MyStoreReference | null;

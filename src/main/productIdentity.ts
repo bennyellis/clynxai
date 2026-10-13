@@ -9,6 +9,7 @@
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 import type { ProductProfile } from "./types.js";
 import { colorsIn, isColorWord } from "./colors.js";
+import { codesMissingFrom } from "./identity/codes.js";
 
 export interface IdentityCandidate {
   id: string;
@@ -69,6 +70,8 @@ export function listingHasExtraDetail(title: string, entryName: string): boolean
   // An entry that names a color ("Xbox Series S (Black)") is a claim about color: any listing headed for it gets
   // checked (the photo shows what the title may not say).
   if (entryColors.size > 0) return true;
+  // A model number / generation the title states and the entry's name lacks is always worth the check, however few other words differ.
+  if (codesMissingFrom(entryName, title).length > 0) return true;
   const known = new Set(words(entryName));
   // For an entry with no color in its name, a color in the title is no detail worth a check.
   const extra = words(title).filter((w) => !known.has(w) && !FILLER.has(w) && !isColorWord(w) && !/^\d{1,2}$/.test(w));
