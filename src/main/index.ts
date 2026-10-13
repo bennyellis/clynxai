@@ -169,6 +169,22 @@ function saveAppSettings(settings: AppSettings): void {
 }
 let appSettings: AppSettings = loadAppSettings();
 
+// Without an OpenAI key (and no Clynx Cloud account to proxy through) listings are still collected but nothing can judge them. Say so once, in plain words, until a key is added.
+function syncAiKeyNotice(): void {
+  if (hasOpenAIAccess()) {
+    notices.clear("no-ai-key");
+    return;
+  }
+  notices.set({
+    id: "no-ai-key",
+    severity: "warning",
+    title: "Add your OpenAI key so Clynx can judge listings",
+    message: "Clynx finds listings without any key, but deciding which ones are deals uses OpenAI, and the beta does not include a key. Add your own in Config > Account > Your API keys (OpenAI bills you directly; a small amount lasts a long time because Clynx saves credits by default). Until then listings are collected but not judged.",
+    action: "dismiss",
+    actionLabel: "Got it",
+  });
+}
+
 function saveEnvKey(varName: string, key: string): void {
   const trimmed = key.trim();
   let lines: string[] = [];
@@ -2903,6 +2919,7 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   config = loadConfig(CONFIG_PATH);
   const localOnly = isLocalMode();
   // Scanning needs Google Chrome or Microsoft Edge on this computer (an installed Clynx carries no browser of its own): say so plainly, with a way to fix it.
+  syncAiKeyNotice();
   const browserCheck = checkBrowsers();
   if (!browserCheck.preferred) {
     notices.set({ id: "no-browser", severity: "error", title: "Clynx needs Google Chrome", message: browserCheck.instructions, action: "open-browser-download", actionLabel: "Get Google Chrome" });
@@ -3315,10 +3332,12 @@ app.whenReady().then(() => {
     if (k === "") {
       saveEnvKey("OPENAI_API_KEY", "");
       delete process.env.OPENAI_API_KEY;
+      syncAiKeyNotice();
       return { ok: true };
     }
     if (!/^sk-[A-Za-z0-9_-]{16,}$/.test(k)) return { ok: false, error: "That does not look like an OpenAI API key (it starts with sk- and has no spaces)." };
     saveEnvKey("OPENAI_API_KEY", k);
+    syncAiKeyNotice();
     return { ok: true };
   });
   ipcMain.handle("env:saveEbayCredentials", (_e, args: { clientId?: string; clientSecret?: string }): { ok: boolean; error?: string } => {

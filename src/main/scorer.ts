@@ -4,7 +4,7 @@ import { looksBroken } from "./brokenVariant.js";
 import { withinNegotiationReach } from "./profitGate.js";
 import { modelLettersConflict } from "./compFilter.js";
 import { DEFAULT_RESALE_SETTINGS, isGoodResale, keepRangeUsd, resaleOutcome, resaleSettingsFrom, type ResaleSettings } from "./resaleMath.js";
-import { OPENAI_MODEL, callOpenAI } from "./openai.js";
+import { OPENAI_MODEL, callOpenAI, hasOpenAIAccess } from "./openai.js";
 
 // If you didn't separately fill in match keywords, fall back to the item
 // name itself — otherwise an item added with just a name and price (the
@@ -559,7 +559,8 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
       estimatedValueRangeUsd: "",
       confidence: "low",
       conditionImpact: "unknown",
-      reasoning: "Clynx couldn't read its own analysis of this listing",
+      // With no OpenAI key (a new tester's normal state) every listing lands here; say why instead of blaming the listing.
+      reasoning: hasOpenAIAccess() ? "Clynx couldn't read its own analysis of this listing" : "Not judged: Clynx has no OpenAI key to judge listings with. Add yours in Config > Account > Your API keys.",
       offTopicSuggestion: null,
     };
   }
