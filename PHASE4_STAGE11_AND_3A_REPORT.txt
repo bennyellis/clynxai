@@ -1,0 +1,193 @@
+CLYNX - PHASE 4: STAGE 1.1 (NOISY IDENTITY WARNINGS) AND STAGE 3a (ADDITIVE DATABASE IDENTITY FOUNDATION)
+=========================================================================================================
+Date: 2026-10-13.  Stopped after Stage 3a as instructed: no Stage 3b, no automatic matching, alias promotion, merging, splitting or revaluation.
+Nothing was applied to your live Database. Both pieces of new database behaviour are OFF by default (see "How to switch it on" at the end).
+
+0. SUMMARY
+----------
+  Stage 1.1: the rule that downgraded listings for "extra model numbers" fired on 6.2% of your matched listings and was right 1 time in 9. It now only
+  counts an identifier when evidence shows it is a real model or version marker. In your data: 9 warnings -> 1 (the real one, iPhone 16e), 6 seller-code
+  cases become a note with no effect on the deal, 1 short form ("PS5") and 1 ordinal ("13th") are recognised as not being models. Genuinely different
+  models stay protected (details in section 3).
+  Stage 3a: a category-free identity foundation now exists as extra Database tables (identity attributes with provenance, candidate relations between
+  products including "references without being", unconfirmed alias candidates, an audit log with revert, an indexed candidate lookup and a background
+  backfill). On a copy of your Database it passes 24 migration checks: every existing table byte-for-byte unchanged, repeatable, resumable after a crash,
+  fully reversible. Nothing in the app reads these tables to choose, merge or value a product.
+
+1. EXACT CHANGES AND COMMITS
+----------------------------
+  Checkpoints (git tags): checkpoint-before-phase4-stage0b (d26a79b), checkpoint-before-phase4-stage3a (60c536d). Earlier: checkpoint-before-phase4 (220a2cc).
+  60c536d  Stage 1.1
+  5323f96  Stage 3a
+  5eb003e  housekeeping (generated bundles removed from git)
+
+  Stage 1.1 files
+    NEW   src/main/identity/credibility.ts      evidence index (CodeIndex), assessCodes(): credible / unverified / dismissed, specificResearchName()
+    CHG   src/main/identity/codes.ts            identifiers no longer include ordinals, times, quantities, prices/discounts, 8+ digit ids; aliasCovered(); accents folded
+    CHG   src/main/identity/resolver.ts         alias pairing only when it explains the WHOLE difference ("ds" inside "division" no longer pairs); possessives; accents
+    CHG   src/main/store.ts                     lazy cached evidence index (names, other sellers' listings, reference-photo titles); signals carry credible and unverified codes
+    CHG   src/main/dealGate.ts                  new note-only reason IDENTITY_UNVERIFIED (confidence shown "medium" instead of "high"); NO threshold or rule changed
+    CHG   src/main/preAlert.ts, dealSummary.ts, scrapeEngine.ts   the photo-analysis product names are passed in as independent evidence
+    CHG   src/main/index.ts                     only credible codes make a listing "more specific"; a known sibling entry is researched by its own name
+    CHG   src/main/watchcount.ts                the default (no-AI) search query adds only credible codes: a seller's code never reaches WatchCount
+    CHG   src/main/productIdentity.ts           the (paid) AI identity check is asked for a code only when it is credible
+    tools audit/phase4_shadow/doubt_rule_check.ts, protection_check.ts (read-only, copy only, refuse the live data folder)
+  Stage 3a files
+    NEW   src/main/identity/foundation.ts       pure builders: identity attributes + provenance, host splitting, relation classification, alias candidates
+    NEW   src/main/identity/foundationStore.ts  the tables, the backfill, indexed candidate retrieval, decisions, audit log, revert, drop/export (writes ONLY identity tables)
+    CHG   src/main/store.ts                     optional `identity` handle created only when the flag is on; deleting a product also removes its identity rows
+    CHG   src/main/types.ts, config.ts          Config.identityFoundation { schema, backfill }, both false
+    CHG   src/main/index.ts                     opens the Store with the flag; schedules the backfill (a minute after startup, 20 ms steps, 100 ms pauses) only when both flags are on
+    tools audit/phase4_shadow/migration_test.ts, bench_10k.ts, open_timing.ts
+  Tests added or changed: codeCredibility.test.ts (33 checks), identityFoundation.test.ts (78), resolver.test.ts (51), plus updated identityGate, identityRoutes,
+  visionPromptContract. Real-Electron: t12_identity_foundation (16).
+
+2. STAGE 1.1: FALSE WARNINGS, BEFORE AND AFTER (your Database copy, 145 listings that match an entry)
+-----------------------------------------------------------------------------------------------------
+  Before: 9 listings (6.2%) downgraded and sent for extra price research; 1 justified. 8 wasted lookups.
+  After:  1 credible (iPhone 16e, justified); 6 unverified (note only); 1 short form; "13th" no longer an identifier. Wasted lookups: 0.
+  The nine cases:
+    "13th"  (Friday the 13th in an Xbox Series X bundle)  -> ignored: an ordinal is never a model number
+    "16e"   iPhone 16e vs entry iPhone 16                  -> CREDIBLE: the Database already has an "iPhone 16e" entry. The listing is priced under that entry by name
+    "o1766" Xbox Series S 512GB ... O1766                   -> unverified: the code appears nowhere else
+    "t3586" Xbox Series S 1TB Black ... T3586               -> unverified
+    "jtm7"  Xbox Series S JTM7-CE                            -> unverified
+    "z7ux"  Xbox Series S Console Z7UX                       -> unverified
+    "d6306" Xbox Series S White D6306                        -> unverified
+    "2k27"  NBA 2K27 with an Xbox Series S                   -> unverified (and games that only name the console in brackets can never vouch for their own code)
+    "ps5"   Playstation 5 PS5 ... vs "PlayStation 5 Slim"    -> short form of the name: not an extra at all
+  What "unverified" does: it neither claims the match is exact nor suppresses the deal. The listing keeps its verdict; a "high" confidence is shown as
+  "medium" with the note "the title also states Z7UX, which nothing confirms is a model or version marker". No research is started for it, and its code is
+  never put in a WatchCount query.
+  Evidence rules (all category-free): a code is credible only if (a) a Database entry that carries it also says everything the matched entry says, or is a
+  related model of the same family; (b) the photo analysis of THIS listing names it; or (c) two or more documents from different sources (other sellers'
+  listings, other entries, reference-photo titles) carry it next to the product's own words. The same seller repeating a code counts once. Documents that
+  merely mention the product ("Game (Console)", "Cable for Console") do not vouch for the mentioning item's code.
+
+3. EVIDENCE THAT GENUINELY DIFFERENT MODELS STAY PROTECTED
+---------------------------------------------------------
+  - The reported Xbox 360 controller: "360" is credible (many entries carry it), so it is still "Worth a look" instead of "Profitable Now" (engine-level test
+    through the real scan route). With an EMPTY Database, the photo analysis naming "Xbox 360 Wireless Controller" is enough evidence.
+  - Held-out categories in codeCredibility.test.ts: power-tool model (DCD791), camera body (R5), stand-mixer model seen on two sellers, guitar part number
+    (0114012, seven digits: a part number, not a phone number), bike tier (SL5). All credible. Also: the same seller repeating a code is NOT corroboration;
+    games naming a console in brackets do NOT vouch; a short form (ps5) does not hide a different real model (CFI 7000 stays credible).
+  - Leave-one-out on your data (protection_check): 74 Database entries are genuinely narrower models carrying a code their generic entry lacks. With the
+    narrower entry known (normal operation) 67 (91%) are credible. With it HIDDEN (a real model seen for the first time) 53 (72%) are still credible from
+    other evidence. Of the 17 that are not: about 10 are correctly not credible (games such as "NBA 2K15 (Xbox One)", a third-party accessory, short forms),
+    and about 7 are real first-sightings with no other evidence (iPhone 16e x3, WD D10, MacBook M1, PS5 CFI-1200, Switch V2). Those are the honest cost:
+    they are neither flagged nor suppressed, and in the live app the photo analysis normally vouches for them.
+  - The Deal Quality Gate is unchanged (dealGate / dealNumbers / gateRoutes / qualification / hiddenGems / storeGate suites pass untouched; the only addition
+    is the note-only reason). The earlier 47-pair labelled cross-category corpus is unchanged.
+  - Trade-off to know: in default low-AI mode with no photo analysis, a brand-new variant seen for the first time with no other evidence is not downgraded.
+
+4. STAGE 3a: SCHEMA AND RELATIONSHIP DESIGN
+-------------------------------------------
+  Switches (config.json, both false): identityFoundation.schema creates the tables when the Database is opened; identityFoundation.backfill (needs schema)
+  fills them a minute after startup. Off: no table exists and no code runs. Only the Store opens the foundation; no scoring, matching or valuation module reads it.
+  Tables (no FOREIGN KEY to any existing table, nothing existing altered):
+    identity_meta        key/value (schema version, backfill phase and cursor, timestamps)
+    product_identity     one row per product: level (exact / line / unknown), identity_key, confidence, attributes_json, unresolved_json, evidence_json, source_hash
+    identity_terms       (product_id, term, kind) with an index on term: the candidate index
+    product_relations    from, to, relation, role, status, confidence, evidence_json, ambiguity_json, decided_at/by/note; unique per (from, to, relation)
+    product_aliases      alias text/norm -> product, status, source, confidence, evidence_json, decided_at/by/note; unique per (alias, product)
+    listing_identity     per listing: its own best-fit entry beside the link it already has, level, confidence, extras (credible / unverified / dismissed), unresolved
+    identity_audit       append-only: who/what/when, before and after of every proposal, decision, revert and removal
+  Identity representation (category-agnostic): each attribute has a kind (word, code, capacity, number, host), a value, a source (name, filed title, listing
+  title, photo analysis, user), a confidence and a weight ("likely-defining" or "unknown": what an attribute is worth in telling products apart is NOT decided
+  yet, that needs price evidence). Level: "exact" when the name states a model, version, size or capacity identifier; "line" when it only describes;
+  "unknown" otherwise. Confidence is uncalibrated and used for ordering only. The bracketed part of a name ("(Nintendo 3DS)") is stored as a separate "host".
+  Relations (all start as CANDIDATE; nothing in the app acts on them):
+    references     one product names another as what it goes with or runs on (brackets, "for", "with"): a game for a console, a cable for a console. NOT the same
+                   product, never a parent. Role says how ("for", "with", "includes").
+    narrower-than  the first states more than the second. Always stored with its ambiguity: it could be a more specific version OR an accessory, component or bundle.
+    same-as        identical wording, or equal only if a short form means the longer word (lower confidence). Never created between a referencing product and its host.
+  Aliases: short forms found in titles filed under a product ("ps5" under "PlayStation 5 Slim") are stored as candidates with their support.
+  Decisions: decideRelation / decideAlias record who and why; backfill never touches a decided row; revertAudit restores the previous state (only the most
+  recent change to an item, otherwise it refuses); exportDecisions then drop() removes the whole foundation; deleting a product removes its identity rows and
+  keeps what they were in the audit log. There is NO code path that promotes a candidate without an explicit call.
+  Indexed candidate retrieval: through the term index only (EXPLAIN shows index use), skipping terms that nearly every product has; no table scan.
+  Backfill: phases products -> relations -> aliases -> listings; each step is time-boxed (20 ms by the app), one transaction, saves its cursor, every write is an
+  upsert, so it can be stopped at any moment and resumed.
+  Not in 3a (as instructed): no resolver for live selection, no merging, no alias promotion, no revaluation, no UI.
+
+5. MIGRATION RESULTS ON THE ISOLATED DATABASE COPY (24 of 24 checks)
+-------------------------------------------------------------------
+  Source: C:\Users\biggt\ClynxDbCopy\scout.db, SHA-256 fec13e6888d97cc48a6d65d76faa1db5c4394d2b421d30573728dd59edb28e6d, identical before and after every run. All work
+  was on scratch copies of that copy (deleted afterwards). The live Database was never opened or copied.
+  - Opening with the foundation OFF (today's behaviour): no table created, no existing table changed.
+  - Enabling it: all 7 tables created; row counts of every existing table identical; content SHA-256 of every existing table identical; product / listing /
+    photo / Watch / parent relationships identical (checked by counts of orphans and links); repeated opens idempotent.
+  - Backfill: 579 products -> 579 identity rows, 2,809 index terms; 230 listings -> 230 listing records; 412 relations (322 narrower-than, 88 references, 2 same-as),
+    all candidates, 0 decided; 6 alias candidates, 0 decided; 418 audit entries. 260 products "exact", 291 "line", 28 "unknown". For 7 listings the best fit differs from the
+    stored link (recorded beside it, nothing changed). Time: 1.1 s in 41 steps (p95 29 ms, worst 30 ms); a repeat run 0.9 s (worst 89 ms).
+  - Idempotent: resetting and re-running gives identical content (hash of every identity table); existing tables still identical.
+  - Crash recovery: a child process running the backfill was killed part-way (during "products"); after a restart it resumed and finished with identical content;
+    that copy's existing tables were identical to the pristine ones and passed SQLite's integrity check.
+  - Rollback: exportDecisions then drop(): every identity table gone, every existing table identical to the original, integrity_check "ok", zero foreign-key
+    violations, and the app opens the rolled-back file normally with the foundation off.
+  - Schema creation 70-90 ms warm (5-8 ms once present). One earlier run showed 9.9 s once (cold file right after copying 556 MB); five repeats did not reproduce it.
+  Quality of what it concluded (my reading of a sample, not ground truth): about 3 in 4 "references" are clearly right ("Seagate expansion card for Xbox Series X|S",
+  "Splatoon (Nintendo 3DS)"); wrong cases include a bracket that is an edition theme ("Special Edition (Halo Infinite)") or a repeated product name ("(PS5 Slim Digital
+  848GB)"). Brand-level entries ("Nintendo", "xbox", "iPhone") attract many low-value narrower-than candidates. Two alias candidates are wrong ("ps4" -> a game,
+  "ps4" -> a controller). That is exactly why they are unconfirmed candidates with their ambiguity attached.
+
+6. TEST RESULTS
+---------------
+  Unit tests: 28 files, all pass. Typecheck and build clean.
+  Real Electron app in an isolated sandbox (mock Facebook inside the real scan browser, throw-away data, fake cloud server), all 0 failures on the final build:
+    t1 startup 18 | t3 config 20 | t4 database 22 | t5 Facebook session / failing scans 21 | t6 deal quality 13 | t7a close+recovery 13 | t7b onboarding 41
+    t7c status/feed 25 | t8a modes 22 | t8b lazy library 10 | t9 hidden screens 21 | t10 diagnostics 13 | t11 leaks/cleanup 10 | t12 identity foundation 16 (new)
+  t12 covers: OFF creates nothing and changes nothing; ON creates the tables, backfills in the background, the Database screen works meanwhile, no renderer or
+  identity errors, worst main-process stall 93 ms, the app's data identical, game/cable recorded as "references" and never "same-as", seller code noted as
+  unverified with the stored link kept; a restart is idempotent; switching OFF again leaves the app normal and its data unchanged.
+  Two transient failures during the Stage 1.1 regression, neither caused by the change: t6 failed once and passed 13/13 on rerun; t8a failed because the sandbox
+  window had been minimised by the desktop (a minimised window ignores resizing). The test now restores the window first; 22/22 on repeated runs.
+  Held-out coverage: unfamiliar categories were added in this stage (bikes, cameras, cookware, furniture, audio, grills, watches, trading cards, clothing, power
+  tools, instruments), with expectations written from the design before looking at the output. That surfaced two real gaps, both fixed: small plain numbers in a
+  product name ("iPhone 12", "12 inch skillet") were not counted as identifiers, and accented letters split words ("Pokémon" -> "pok" "mon"). It also showed one
+  wrong expectation of mine (a kit "with 2 batteries" is a bundle containing the product, not something that goes with it).
+  Nothing here proves universal accuracy: the Database copy is 55% video games, and the held-out sets are small and written by me.
+
+7. PERFORMANCE AND API COST
+---------------------------
+  API/AI cost: no new AI call anywhere. Stage 1.1 REMOVES paid calls: the AI identity check and the WatchCount lookups are no longer triggered by codes with no evidence
+  (8 wasted lookups in 145 listings -> 0). The backfill makes no network or AI calls at all.
+  Startup (396 MB library fixture, 555 products, 3 launches): foundation OFF (the default) Dashboard ready in 165-192 ms, main-process stalls 263-308 ms total,
+  main memory 128-131 MB, identical to Phase 3. Foundation ON (this window includes the backfill itself starting 3 s in): Dashboard 217-301 ms, stalls 343-431 ms total,
+  main memory 128-152 MB.
+  Backfill steps on your Database copy: p50 25 ms, p95 29 ms, worst 30 ms (89 ms once). Synthetic library of 10,000 products and 2,000 listings: whole backfill 29 s in
+  about 1,060 steps (p50 25 ms, p95 36 ms; 19 steps, 1.8%, between 50 ms and 268 ms, which are disk-commit stalls); 1,000 products: 1.5 s, worst 30 ms.
+  Candidate retrieval: 10,000 products p50 1.7 ms, p95 2.2 ms, worst 10 ms, the named product found in the top 20 for 490 of 500 queries (500/500 at 1,000 products).
+  Memory in that benchmark: JS heap 5 MB after garbage collection (nothing retained); process RSS rose from 84 to 285 MB during the 10,000-product backfill (native
+  database and statement memory, transient and only at that scale). Prepared statements are cached.
+  GPU/UI: untouched; the Phase 3 mode, hidden-screen and leak suites (t8a, t9, t11) pass.
+
+8. REMAINING RISKS AND LIMITATIONS
+----------------------------------
+  - Candidates are only candidates. The classifier is heuristic: brackets can be an edition or a repeated name; brand-level entries create low-value relations; some alias
+    candidates are wrong. Nothing may be promoted automatically; a review step is needed before anything is used.
+  - First sightings of a genuinely new model with no sibling entry, no other listing and no photo-analysis name stay "unverified" (about 7 of 74 on your data).
+  - The evidence index counts documents; a seller using different titles with the same invented code on several accounts could appear as two sources.
+  - Identity "level" and "confidence" are uncalibrated; attribute weights are unknown until price evidence is used (Stage 5).
+  - The Database copy is dominated by video games; accuracy outside them is unproven on real data.
+  - Backfill spikes: occasional disk-commit stalls of 100-270 ms (about 2% of steps at 10,000 products) in a one-off background job.
+  - Existing mixed entries are NOT repaired; this stage only records evidence. The relations table can be large for big libraries (about 0.12 per product here).
+  - Cloud sync: the new tables are local-only and not synced; the server and other devices are unaffected.
+  - Scratch data on this PC: C:\Users\biggt\ClynxDbCopy (your copy), ClynxShadowOutput, ClynxShadowOutput_run1, ClynxShadowOutput_stage11, ClynxShadowOutput_stage3a and
+    ClynxShadowOutput_stdout* contain your product names and listing titles. Please delete them when you no longer need them.
+
+9. RECOMMENDED NEXT PHASE 4 STAGE
+---------------------------------
+  Stage 3b-shadow, still without changing any live behaviour: use the stored relations and the indexed candidates to answer, for every listing and entry in your copy, "which
+  entry would the foundation choose", compare that with the current choice, and have you or me review the disagreements, exactly like Stage 0b but with the real foundation and
+  its audit trail. In parallel a read-only "possibly mixed entries" review list (Stage 6a) built from the stored relations and filed titles, so you can see and approve or
+  reject candidates (that is the safe place to add explicit decisions and a small confirm/undo UI). Before any live use, improve the classifier on the errors found
+  above (editions in brackets, brand-level entries, alias candidates that point at games and accessories) and re-measure on held-out categories. Only after that should value
+  lookups be switched, one site at a time, behind a flag, keeping the old path.
+
+HOW TO SWITCH IT ON (only when you decide to; it is off now)
+-----------------------------------------------------------
+  Close Clynx, make a backup copy of your data folder's scout.db, then in your user folder's config.json add
+      "identityFoundation": { "schema": true, "backfill": true }
+  and start Clynx. To undo: set both to false (the tables stay but nothing uses them); to remove them entirely a drop() is available and tested on the copy.
+  Do not enable it on the live Database until you have authorized that separately.
