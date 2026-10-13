@@ -2,23 +2,28 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { Readable } from "node:stream";
 import { requireAuth } from "../auth/middleware.js";
 import { config } from "../config.js";
-import { aiAllowed, planLimitReply, recordAiUsage, type AiKind } from "../entitlements/enforce.js";
+import { aiAllowed, planLimitReply, type AiKind } from "../entitlements/enforce.js";
+import { getOpenAICredentials, recordVerification } from "../integrations/credentials.js";
+import { type Authorization, authorizePaidSpend, costUsd, estimatePromptTokens, imageCostUsd, noteRefusal } from "../integrations/controls.js";
+import { outboundFetch } from "../integrations/http.js";
+import { VaultError } from "../integrations/vault.js";
+import { query } from "../db/client.js";
 import { hit } from "../security/rateLimit.js";
 
 const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
 const OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations";
 
-// A shared reverse proxy to ONE OpenAI key that lives only on this server (the real key never reaches a client machine). It forwards what the desktop app sends, with these guards:
-//   * only allow-listed models (a stolen or abused account cannot run an expensive model on this key),
-//   * output-token and image-count ceilings, so one request cannot be made enormous,
-//   * a per-user per-minute rate limit and (when entitlements are enforced) a daily quota by plan,
-//   * every request is metered (user, kind, model, status, token counts - never prompt or response text),
-//   * an upstream timeout, and retries with backoff for rate-limit and server errors on non-streaming calls.
-// Streaming (chat with stream: true) is piped through untouched once the upstream answers.
+// The shared, company-managed OpenAI integration. Customers never hold or see a key: the key is the Owner's, stored encrypted on this server (see ../integrations), and every request is
+// attributed to the customer who made it. Before a request leaves the server it must pass:
+//   * allow-listed models only, output-token and image-count ceilings (nobody can ask for an enormous request),
+//   * a per-customer per-minute rate limit and, when plan limits are enforced, the plan's daily request quota,
+//   * the cost controls (../integrations/controls.ts): emergency switch, global and per-customer spending ceilings with a worst-case RESERVATION, concurrency limits, abuse blocks.
+// Every call is metered (customer, kind, model, status, tokens, estimated cost - never prompt or response text). Streaming chat is piped through once the provider answers.
 
 const PER_MINUTE = 60;
 const UPSTREAM_TIMEOUT_MS = 180_000;
 const MAX_ATTEMPTS = 3;
+const DEFAULT_OUTPUT_ESTIMATE = 8000;
 
 type Body = Record<string, unknown>;
 
@@ -39,13 +44,13 @@ export function clampImageBody(body: Body): Body {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function callUpstream(url: string, body: Body, stream: boolean): Promise<Response> {
+async function callUpstream(url: string, body: Body, stream: boolean, apiKey: string): Promise<Response> {
   let last: Response | null = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const res = await fetch(url, {
+      const res = await outboundFetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.openaiApiKey}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
       });
@@ -54,7 +59,7 @@ async function callUpstream(url: string, body: Body, stream: boolean): Promise<R
     } catch (err) {
       if (attempt === MAX_ATTEMPTS) throw err;
     }
-    await sleep(500 * 2 ** (attempt - 1) + Math.floor(Math.random() * 250));
+    await sleep(Number(process.env.AI_RETRY_BASE_MS ?? 500) * 2 ** (attempt - 1) + Math.floor(Math.random() * 250));
   }
   return last as Response;
 }
@@ -63,10 +68,17 @@ function refuse(reply: FastifyReply, status: number, error: string, extra: Recor
   return reply.code(status).send({ error, ...extra });
 }
 
+async function recordUsage(userId: string, row: { kind: AiKind; model: string | null; status: number; promptTokens?: number | null; completionTokens?: number | null; costUsd: number }): Promise<void> {
+  await query("INSERT INTO ai_usage (user_id, kind, model, status, prompt_tokens, completion_tokens, cost_usd_est) VALUES ($1, $2, $3, $4, $5, $6, $7)", [
+    userId, row.kind, row.model, row.status, row.promptTokens ?? null, row.completionTokens ?? null, row.costUsd,
+  ]).catch(() => undefined);
+}
+
 export async function aiRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", requireAuth);
 
-  async function guard(request: { userId?: string; body: unknown }, reply: FastifyReply, kind: AiKind): Promise<Body | null> {
+  /** Everything a request must pass BEFORE it may leave this server. On success the caller owns the reservation and must finish() it. */
+  async function guard(request: { userId?: string; body: unknown }, reply: FastifyReply, kind: AiKind): Promise<{ body: Body; auth: Authorization; reserveUsd: number } | null> {
     const body = request.body;
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       refuse(reply, 400, "Invalid request body");
@@ -77,56 +89,131 @@ export async function aiRoutes(app: FastifyInstance): Promise<void> {
       refuse(reply, 400, "model_not_allowed", { message: "That model is not available through Clynx." });
       return null;
     }
-    const rl = await hit(`ai:${request.userId}`, PER_MINUTE, 60);
+    const userId = request.userId as string;
+    const rl = await hit(`ai:${userId}`, PER_MINUTE, 60);
     if (!rl.allowed) {
       reply.header("Retry-After", String(rl.retryAfterSec));
+      await noteRefusal(userId);
       refuse(reply, 429, "rate_limited", { retryAfterSec: rl.retryAfterSec });
       return null;
     }
-    const allowed = await aiAllowed(request.userId as string, kind);
+    const allowed = await aiAllowed(userId, kind);
     if (!allowed.ok) {
       if (allowed.reason === "ai_disabled") planLimitReply(reply, allowed.plan, "aiResearchEnabled");
       else refuse(reply, 429, "ai_daily_limit", { plan: allowed.plan, limit: allowed.limit, used: allowed.used, message: "You have reached today's AI limit for your plan." });
       return null;
     }
-    return body as Body;
+    // worst case for this request: the whole prompt plus the largest answer it may ask for
+    let reserveUsd: number;
+    if (kind === "image") reserveUsd = imageCostUsd(typeof (body as Body).n === "number" ? Math.min(2, (body as Body).n as number) : 1);
+    else {
+      const clamped = clampChatBody(body as Body, config.aiMaxOutputTokens);
+      const maxOut = Math.min(config.aiMaxOutputTokens, (typeof clamped.max_completion_tokens === "number" ? clamped.max_completion_tokens : typeof clamped.max_tokens === "number" ? clamped.max_tokens : DEFAULT_OUTPUT_ESTIMATE) as number);
+      reserveUsd = costUsd(model, estimatePromptTokens(clamped), maxOut);
+    }
+    const auth = await authorizePaidSpend(userId, reserveUsd);
+    if (!auth.ok) {
+      if (auth.retryAfterSec) reply.header("Retry-After", String(auth.retryAfterSec));
+      refuse(reply, auth.status, auth.error, { message: auth.message, retryAfterSec: auth.retryAfterSec });
+      return null;
+    }
+    return { body: body as Body, auth, reserveUsd };
+  }
+
+  /** The key to use, or an answer to send instead (and the reservation released). */
+  async function keyFor(reply: FastifyReply, auth: Authorization): Promise<string | null> {
+    try {
+      const c = await getOpenAICredentials();
+      if (c) return c.creds.apiKey;
+      await auth.finish(0);
+      refuse(reply, 503, "ai_not_configured", { message: "AI features are not set up on this server yet." });
+      return null;
+    } catch (err) {
+      await auth.finish(0);
+      app.log.error({ err: err instanceof VaultError ? err.code : "unreadable" }, "the stored OpenAI credential could not be read");
+      refuse(reply, 503, "ai_unavailable", { message: "AI features are temporarily unavailable." });
+      return null;
+    }
+  }
+
+  /** What to tell a customer about an upstream failure. A provider's own account problems (a rejected key, no credit) are the company's to fix, not the customer's, and are not forwarded. */
+  async function translateUpstream(status: number, data: unknown): Promise<{ status: number; body: unknown } | null> {
+    const err = (data as { error?: { code?: string; type?: string } } | null)?.error;
+    if (status === 401 || status === 403) {
+      await recordVerification("openai", false, "OpenAI rejected the key while serving a customer request.", null).catch(() => undefined);
+      return { status: 503, body: { error: "provider_unavailable", message: "AI features are temporarily unavailable." } };
+    }
+    if (status === 429 && (err?.code === "insufficient_quota" || err?.type === "insufficient_quota")) {
+      await recordVerification("openai", false, "The OpenAI account has no remaining credit.", null).catch(() => undefined);
+      return { status: 503, body: { error: "provider_unavailable", message: "AI features are temporarily unavailable." } };
+    }
+    return null;
   }
 
   app.post("/ai/chat/completions", async (request, reply) => {
-    const body = await guard(request, reply, "chat");
-    if (!body) return reply;
-    const clamped = clampChatBody(body, config.aiMaxOutputTokens);
+    const g = await guard(request, reply, "chat");
+    if (!g) return reply;
+    const userId = request.userId as string;
+    const apiKey = await keyFor(reply, g.auth);
+    if (!apiKey) return reply;
+    const clamped = clampChatBody(g.body, config.aiMaxOutputTokens);
     const streaming = clamped.stream === true;
+    const model = String(clamped.model);
     let upstream: Response;
     try {
-      upstream = await callUpstream(OPENAI_CHAT_URL, clamped, streaming);
+      upstream = await callUpstream(OPENAI_CHAT_URL, clamped, streaming, apiKey);
     } catch {
-      await recordAiUsage(request.userId as string, { kind: "chat", model: String(clamped.model), status: 504 });
+      await recordUsage(userId, { kind: "chat", model, status: 504, costUsd: 0 });
+      await g.auth.finish(0);
       return refuse(reply, 504, "upstream_unavailable");
     }
-    if (streaming && upstream.body) {
-      await recordAiUsage(request.userId as string, { kind: "chat", model: String(clamped.model), status: upstream.status });
+    if (streaming && upstream.body && upstream.ok) {
+      // the cost of a stream is not known until it ends, so the reserved worst case is what is recorded (conservative)
+      await recordUsage(userId, { kind: "chat", model, status: upstream.status, costUsd: g.reserveUsd });
+      const node = Readable.fromWeb(upstream.body as never);
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        void g.auth.finish(null);
+      };
+      node.on("end", settle).on("close", settle).on("error", settle);
       reply.code(upstream.status).header("Content-Type", upstream.headers.get("content-type") ?? "text/event-stream");
-      return reply.send(Readable.fromWeb(upstream.body as never));
+      return reply.send(node);
     }
     const data = (await upstream.json().catch(() => null)) as { usage?: { prompt_tokens?: number; completion_tokens?: number } } | null;
-    await recordAiUsage(request.userId as string, { kind: "chat", model: String(clamped.model), status: upstream.status, promptTokens: data?.usage?.prompt_tokens, completionTokens: data?.usage?.completion_tokens });
+    const pt = data?.usage?.prompt_tokens ?? null;
+    const ct = data?.usage?.completion_tokens ?? null;
+    const cost = upstream.ok ? (pt !== null && ct !== null ? costUsd(model, pt, ct) : g.reserveUsd) : 0;
+    await recordUsage(userId, { kind: "chat", model, status: upstream.status, promptTokens: pt, completionTokens: ct, costUsd: cost });
+    await g.auth.finish(cost);
+    const translated = upstream.ok ? null : await translateUpstream(upstream.status, data);
+    if (translated) return reply.code(translated.status).send(translated.body);
     return reply.code(upstream.status).send(data ?? { error: "Upstream OpenAI request failed" });
   });
 
   app.post("/ai/images/generations", async (request, reply) => {
-    const body = await guard(request, reply, "image");
-    if (!body) return reply;
-    const clamped = clampImageBody(body);
+    const g = await guard(request, reply, "image");
+    if (!g) return reply;
+    const userId = request.userId as string;
+    const apiKey = await keyFor(reply, g.auth);
+    if (!apiKey) return reply;
+    const clamped = clampImageBody(g.body);
+    const model = String(clamped.model);
     let upstream: Response;
     try {
-      upstream = await callUpstream(OPENAI_IMAGES_URL, clamped, false);
+      upstream = await callUpstream(OPENAI_IMAGES_URL, clamped, false, apiKey);
     } catch {
-      await recordAiUsage(request.userId as string, { kind: "image", model: String(clamped.model), status: 504 });
+      await recordUsage(userId, { kind: "image", model, status: 504, costUsd: 0 });
+      await g.auth.finish(0);
       return refuse(reply, 504, "upstream_unavailable");
     }
     const data = await upstream.json().catch(() => null);
-    await recordAiUsage(request.userId as string, { kind: "image", model: String(clamped.model), status: upstream.status });
+    const cost = upstream.ok ? g.reserveUsd : 0;
+    await recordUsage(userId, { kind: "image", model, status: upstream.status, costUsd: cost });
+    await g.auth.finish(cost);
+    const translated = upstream.ok ? null : await translateUpstream(upstream.status, data);
+    if (translated) return reply.code(translated.status).send(translated.body);
     return reply.code(upstream.status).send(data ?? { error: "Upstream OpenAI request failed" });
   });
 }

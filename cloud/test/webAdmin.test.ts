@@ -7,6 +7,7 @@ import type { FastifyInstance } from "fastify";
 import { buildApp } from "../src/index.js";
 import { closePool, pool } from "../src/db/client.js";
 import { config } from "../src/config.js";
+import { redisConnection } from "../src/queue/connection.js";
 import { asWeb, makeAdmin, PASSWORD, signup, uniqueEmail, type WebUser } from "./helpers/web.js";
 
 // Administration (role-based access control, audit trail, secrets never exposed), support requests and the release lifecycle.
@@ -17,6 +18,7 @@ const bytes = Buffer.from("MZ pretend installer ".repeat(5000));
 const sha = createHash("sha256").update(bytes).digest("hex");
 
 beforeAll(async () => {
+  for (const k of await redisConnection.keys("rl:support:*")) await redisConnection.del(k);
   releasesDir = fs.mkdtempSync(path.join(os.tmpdir(), "clynx-releases-"));
   config.web.releasesDir = releasesDir;
   app = buildApp({ billing: null });

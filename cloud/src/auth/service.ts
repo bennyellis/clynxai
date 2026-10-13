@@ -1,7 +1,7 @@
 import { randomBytes, createHash } from "node:crypto";
 import argon2 from "argon2";
 import { SignJWT, jwtVerify } from "jose";
-import { query } from "../db/client.js";
+import { getClient, query } from "../db/client.js";
 import { config } from "../config.js";
 
 const accessSecretKey = new TextEncoder().encode(config.jwtAccessSecret);
@@ -121,8 +121,8 @@ export async function revokeRefreshToken(rawToken: string): Promise<void> {
 // presentation, and the other deterministically lands in the reuse path.
 export async function rotateRefreshToken(rawToken: string): Promise<{ userId: string; accessToken: string; refreshToken: string }> {
   const tokenHash = hashRawToken(rawToken);
-  const lookup = await query<RefreshTokenRow>(
-    `SELECT id, user_id, device_id, expires_at, revoked_at FROM refresh_tokens WHERE token_hash = $1`,
+  const lookup = await query<RefreshTokenRow & { disabled_at: Date | null }>(
+    `SELECT t.id, t.user_id, t.device_id, t.expires_at, t.revoked_at, u.disabled_at FROM refresh_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = $1`,
     [tokenHash]
   );
 
@@ -136,23 +136,36 @@ export async function rotateRefreshToken(rawToken: string): Promise<{ userId: st
   }
 
   // a disabled account (or one whose device was removed: its tokens are gone) cannot keep a session alive
-  const disabled = await query<{ disabled_at: Date | null }>("SELECT disabled_at FROM users WHERE id = $1", [row.user_id]);
-  if (!disabled.rows[0] || disabled.rows[0].disabled_at) throw new RefreshTokenError("Account unavailable", "invalid");
+  if (row.disabled_at) throw new RefreshTokenError("Account unavailable", "invalid");
 
-  const revoked = await query<{ id: string }>(
-    `UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL RETURNING id`,
-    [row.id]
-  );
-
-  if ((revoked.rowCount ?? 0) === 0) {
-    // Lost the race, or this token was already revoked at some earlier
-    // point — either way, treat it as reuse and fail closed.
-    await revokeAllTokensForUser(row.user_id);
-    throw new RefreshTokenError("Refresh token reuse detected; all sessions revoked", "reused");
+  // Revoke-and-reissue happens in ONE transaction that holds a per-user lock. Two requests presenting the same token are therefore strictly one after the other: the second one
+  // always finds the token already used, and its revoke-all then also covers the token the first one just issued (it can never slip in between).
+  const client = await getClient();
+  let newRawToken = "";
+  let reused = false;
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [row.user_id]);
+    const revoked = await client.query<{ id: string }>(`UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL RETURNING id`, [row.id]);
+    if ((revoked.rowCount ?? 0) === 0) {
+      // already consumed (an earlier rotation, a logout, or the request that just won): treat it as reuse and fail closed
+      await client.query(`UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, [row.user_id]);
+      reused = true;
+    } else {
+      newRawToken = generateRawToken();
+      await client.query(`INSERT INTO refresh_tokens (user_id, device_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)`, [
+        row.user_id, row.device_id, hashRawToken(newRawToken), new Date(Date.now() + config.refreshTokenTtlSeconds * 1000),
+      ]);
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
   }
+  if (reused) throw new RefreshTokenError("Refresh token reuse detected; all sessions revoked", "reused");
 
-  const issued = await issueRefreshToken(row.user_id, row.device_id);
   const accessToken = await issueAccessToken(row.user_id);
-
-  return { userId: row.user_id, accessToken, refreshToken: issued.rawToken };
+  return { userId: row.user_id, accessToken, refreshToken: newRawToken };
 }

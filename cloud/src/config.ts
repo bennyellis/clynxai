@@ -15,7 +15,8 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(8787),
   REDIS_URL: z.string().min(1, "REDIS_URL is required"),
   // A single shared key, held ONLY here, so every authenticated desktop user's AI calls proxy through this server (see ../ai/routes.ts) instead of each needing their own key.
-  OPENAI_API_KEY: z.string().min(1, "OPENAI_API_KEY is required"),
+  // OPTIONAL: the Owner normally saves the key in the console (stored encrypted, see integrations/). This variable is only a fallback for a server that has never had one saved.
+  OPENAI_API_KEY: z.string().min(1).optional(),
   // The only models the AI proxy will forward (comma separated). A request for any other model is refused, so a stolen or abused account cannot run an expensive model on this key.
   AI_ALLOWED_MODELS: z.string().default("gpt-5-mini,gpt-5,gpt-4.1-mini,gpt-4.1,gpt-4o-mini,gpt-4o,gpt-image-1"),
   // Upper bound the proxy puts on the output tokens one request may ask for.
@@ -75,7 +76,7 @@ function loadConfig() {
     jwtRefreshSecret: d.JWT_REFRESH_SECRET,
     port: d.PORT,
     redisUrl: d.REDIS_URL,
-    openaiApiKey: d.OPENAI_API_KEY,
+    openaiApiKey: d.OPENAI_API_KEY ?? null,
     aiAllowedModels: d.AI_ALLOWED_MODELS.split(",").map((m) => m.trim()).filter(Boolean),
     aiMaxOutputTokens: d.AI_MAX_OUTPUT_TOKENS,
     enforceEntitlements: d.ENFORCE_ENTITLEMENTS,
