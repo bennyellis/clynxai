@@ -14,7 +14,7 @@ existing/suggested, the exact data that would change, and an audit history, with
 1. EXACT FILES CHANGED AND COMMITS
 ======================================================================
 Rollback checkpoint (before this stage): tag checkpoint-before-phase4-veto (= commit 671521e, the Stage 3b/6a report).
-This stage: @@COMMIT@@
+This stage: commit 15a18d0 ("Phase 4: optional veto-only identity safeguard ... and a review-only Database > Review screen"). The commit that adds this line to the report follows it.
 
 New, in src/main:
   identity/safeguard.ts          the decision: allow / veto / unsure for one (listing, matched entry). Pure.
