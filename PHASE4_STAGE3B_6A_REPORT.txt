@@ -259,7 +259,7 @@ written to any Database that belongs to you.
 9. COMMITS AND TEST RESULTS
 ======================================================================
 Rollback checkpoint (before this work): tag checkpoint-before-phase4-stage3b (= commit e804dbb).
-This work: @@COMMIT@@
+This work: commit 68a9af6 ("Phase 4 stage 3b (shadow only) and stage 6a (read-only audit) ..."). The commit that adds this line to the report follows it.
 Files added: src/main/identity/foundationResolver.ts (pure, no I/O); tests foundationResolver.test.ts (39 checks), foundationHeldOut.test.ts (21 checks);
 shadowSafety.test.ts extended (the new resolver is pure, nothing in the app imports it or the audit tools, the tools refuse the live folders, block the network,
 hash the source before/after, and the audit contains no write SQL); audit tools stage3b_run.ts, stage6a_audit.ts, stage6a_roundtrip.ts, correction_journal.ts,
