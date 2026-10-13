@@ -35,3 +35,4 @@ audit/phase4_shadow/*.cjs
 *.restore-requested
 *.restoring
 *.partial
+resources/build-info.json

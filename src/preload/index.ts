@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { DiscoveryEntry } from "../main/discovery.js";
 import type { ApplyResult, AuditEvent, DecideResult, ReviewSnapshot } from "../main/identityReview.js";
 import type { OnboardingState } from "../main/types.js";
-import type { Account, ActiveProductResearch, BackupSummary, BillingActionResult, BillingPlanChoice, BillingStatus, BlacklistedImage, BlacklistTerm, CloudStatus, Config, FeedbackVerdict, ListingRecord, LogLine, ProductImage, ProductProfile, ScrapeStatus, Watch, WatchMatch, WatchPlatform } from "../main/types.js";
+import type { Account, ActiveProductResearch, BackupSummary, BetaInfo, BillingActionResult, BillingPlanChoice, BillingStatus, BlacklistedImage, BlacklistTerm, CloudStatus, Config, FeedbackVerdict, ListingRecord, LogLine, ProductImage, ProductProfile, ScrapeStatus, Watch, WatchMatch, WatchPlatform } from "../main/types.js";
 import type { ChatMessage, ChatContext, ChatAttachment } from "../main/chat.js";
 import type { MetricsSnapshot } from "../main/metrics.js";
 import type { AppNotice } from "../main/appNotices.js";
@@ -39,7 +39,11 @@ const api = {
   removeRecentSearch: (search: { item: string; minPriceUsd: number | null; maxPriceUsd: number | null; includeBroken?: boolean }): Promise<void> => ipcRenderer.invoke("searches:removeRecent", search),
 
   hasOpenAIKey: (): Promise<boolean> => ipcRenderer.invoke("env:hasOpenAIKey"),
-  saveOpenAIKey: (key: string): Promise<void> => ipcRenderer.invoke("env:saveOpenAIKey", key),
+  saveOpenAIKey: (key: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("env:saveOpenAIKey", key),
+  saveEbayCredentials: (clientId: string, clientSecret: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("env:saveEbayCredentials", { clientId, clientSecret }),
+  beta: {
+    info: (): Promise<BetaInfo> => ipcRenderer.invoke("beta:info"),
+  },
   hasEbayCredentials: (): Promise<boolean> => ipcRenderer.invoke("env:hasEbayCredentials"),
 
   // Per explicit instruction — multiple Facebook accounts, each its own
@@ -440,6 +444,7 @@ const api = {
     register: (apiUrl: string, email: string, password: string): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem }> =>
       ipcRenderer.invoke("auth:register", { apiUrl, email, password }),
     logout: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("auth:logout"),
+    startLocal: (): Promise<{ ok: boolean; error?: string; startupProblem?: StartupProblem }> => ipcRenderer.invoke("auth:startLocal"),
   },
 
   listBlacklistedImages: (): Promise<BlacklistedImage[]> => ipcRenderer.invoke("blacklistImages:list"),

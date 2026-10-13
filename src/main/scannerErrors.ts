@@ -17,8 +17,8 @@ export function explainScannerError(raw: string): ScannerErrorExplanation {
   if (/executable doesn'?t exist|playwright install|chrome.*(?:not found|is not installed)|failed to launch.*chrome|ENOENT.*chrome/i.test(text)) {
     return {
       kind: "chrome-missing",
-      title: "Clynx can't start Google Chrome",
-      message: "Clynx scans through Google Chrome and couldn't open it. Install or repair Google Chrome (chrome.google.com), then click Try again.",
+      title: "Clynx can't start Google Chrome or Microsoft Edge",
+      message: "Clynx scans through Google Chrome (or Microsoft Edge) and couldn't open either. Install or repair Google Chrome (google.com/chrome), then restart Clynx and click Try again.",
     };
   }
   if (/profile.*(?:in use|locked)|singleton.*lock|user data directory is already in use|processsingleton/i.test(text)) {

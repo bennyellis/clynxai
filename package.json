@@ -1,9 +1,9 @@
 {
   "name": "marketplace-scout",
   "productName": "Clynx",
-  "version": "0.2.0",
+  "version": "0.3.0-beta.1",
   "private": true,
-  "description": "Desktop app that watches Facebook Marketplace searches, screens listings with AI against your reference prices, and alerts you to deals.",
+  "description": "Clynx - finds undervalued Marketplace listings",
   "main": "./out/main/index.js",
   "build": {
     "appId": "com.clynx.app",
@@ -22,7 +22,7 @@
     "directories": {
       "output": "dist"
     },
-    "artifactName": "Clynx-${version}-${os}-${arch}.${ext}",
+    "artifactName": "Clynx-Beta-Setup-${version}.${ext}",
     "win": {
       "icon": "build/icon.ico",
       "target": [
@@ -38,7 +38,12 @@
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Clynx",
+      "runAfterFinish": true,
+      "uninstallDisplayName": "Clynx (beta)"
     },
     "mac": {
       "category": "public.app-category.business",
@@ -72,7 +77,8 @@
     "pack": "npm run build && electron-builder --win --dir",
     "dist": "npm run build && electron-builder --win",
     "dist:win": "npm run build && electron-builder --win",
-    "dist:mac": "npm run build && electron-builder --mac"
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:beta": "node scripts/build-info.cjs beta && npm run build && electron-builder --win --x64"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
@@ -93,5 +99,6 @@
     "electron-vite": "^2.3.0",
     "typescript": "^5.7.3",
     "vite": "^5.4.11"
-  }
+  },
+  "author": "Clynx"
 }

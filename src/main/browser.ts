@@ -1,4 +1,5 @@
 import type { BrowserContext, Page } from "playwright";
+import { checkBrowsers } from "./browserCheck.js";
 import { getStealthChromium } from "./stealthBrowser.js";
 
 // Uses your real installed Google Chrome (not Playwright's own bundled
@@ -14,16 +15,35 @@ import { getStealthChromium } from "./stealthBrowser.js";
 // regardless of which channel actually ends up being used.
 export async function openPersistentContext(profileDir: string, headless: boolean): Promise<BrowserContext> {
   const stealthChromium = await getStealthChromium();
-  try {
-    const ctx = await stealthChromium.launchPersistentContext(profileDir, {
-      headless,
-      channel: "chrome",
-      viewport: { width: 1280, height: 900 },
-    });
-    console.log("[browser] Launched via chrome channel.");
-    return ctx;
-  } catch (err) {
-    console.warn(`[browser] chrome channel failed (${(err as Error).message}) — falling back to bundled Chromium.`);
+  // An installed copy of Clynx has no browser of its own: it uses Google Chrome, or Microsoft Edge (a Chromium browser that ships with Windows 10/11).
+  const check = checkBrowsers();
+  let lastError: unknown = null;
+  for (const browser of check.found) {
+    try {
+      const ctx = await stealthChromium.launchPersistentContext(profileDir, {
+        headless,
+        channel: browser.channel,
+        viewport: { width: 1280, height: 900 },
+      });
+      console.log(`[browser] Launched via ${browser.label}.`);
+      return ctx;
+    } catch (err) {
+      lastError = err;
+      console.warn(`[browser] ${browser.label} failed (${(err as Error).message}).`);
+    }
+  }
+  if (check.found.length === 0) {
+    // Not found by path: let Playwright try its own lookup of Chrome (other install locations), then the bundled Chromium that only developer machines have.
+    try {
+      const ctx = await stealthChromium.launchPersistentContext(profileDir, { headless, channel: "chrome", viewport: { width: 1280, height: 900 } });
+      console.log("[browser] Launched via chrome channel.");
+      return ctx;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  console.warn(`[browser] no usable installed browser (${lastError instanceof Error ? lastError.message : String(lastError)}) — trying bundled Chromium.`);
+  {
     return stealthChromium.launchPersistentContext(profileDir, {
       headless,
       viewport: { width: 1280, height: 900 },

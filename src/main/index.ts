@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { config as loadDotenv } from "dotenv";
 import { makePhotoCheck } from "./compPhotoCheck.js";
 import { app, BrowserWindow, ipcMain, safeStorage, session, shell, Menu, dialog, Notification } from "electron";
 import path from "node:path";
@@ -61,6 +62,8 @@ import { timed, getMetricsSnapshot, resetMetrics } from "./metrics.js";
 import { DiscoveryFeed, type DiscoverySource } from "./discovery.js";
 import { breakDownListing, valueBundle, type BundleValuation, type PricedBundleItem } from "./bundleBreakdown.js";
 import { CloudClient, isBillingStatus } from "./cloudClient.js";
+import { readBuildInfo } from "./buildInfo.js";
+import { checkBrowsers, CHROME_DOWNLOAD_URL } from "./browserCheck.js";
 import { safeExternalUrl } from "./safeExternalUrl.js";
 import { setSecretCodec } from "./secretStore.js";
 import { externalLinkTarget, isAppUrl, isTrustedIpcSender } from "./windowSecurity.js";
@@ -120,6 +123,9 @@ const LEGACY_DB_PATH = path.join(baseDir, "data", "scout.db");
 const DATA_ROOT = path.join(baseDir, "data");
 const USERS_ROOT = path.join(DATA_ROOT, "users");
 const ENV_PATH = path.join(baseDir, ".env");
+// An installed copy keeps the user's own API keys in .env in its data folder (the line above); `dotenv/config` only looks in the working directory, which for an installed app
+// is the install folder, so without this a key saved in Config would be forgotten at the next start. Variables that are already set are not overridden.
+loadDotenv({ path: ENV_PATH, quiet: true });
 // Batch 2 Fix A — see cloudClient.ts's readSession/writeSession. Same
 // directory as .env/config.json, same "userData in a packaged build, app
 // dir in dev" posture as everything else on baseDir. Deliberately install-
@@ -137,16 +143,22 @@ const APP_SETTINGS_PATH = path.join(baseDir, "app-settings.json");
 const DEFAULT_CLOUD_API_URL = "http://localhost:8787";
 interface AppSettings {
   cloudApiUrl: string;
+  // Beta builds only: the tester chose "use Clynx on this computer only" (no Clynx Cloud account, nothing leaves the computer except the tester's own scans and API calls).
+  localMode?: boolean;
 }
 function loadAppSettings(): AppSettings {
   try {
     if (!existsSync(APP_SETTINGS_PATH)) return { cloudApiUrl: DEFAULT_CLOUD_API_URL };
     const raw = JSON.parse(readFileSync(APP_SETTINGS_PATH, "utf-8"));
-    return { cloudApiUrl: typeof raw?.cloudApiUrl === "string" && raw.cloudApiUrl.trim() ? raw.cloudApiUrl : DEFAULT_CLOUD_API_URL };
+    return { cloudApiUrl: typeof raw?.cloudApiUrl === "string" && raw.cloudApiUrl.trim() ? raw.cloudApiUrl : DEFAULT_CLOUD_API_URL, localMode: raw?.localMode === true };
   } catch {
     return { cloudApiUrl: DEFAULT_CLOUD_API_URL };
   }
 }
+// Which build this is, and whether it may offer the local beta mode (only builds made with `npm run dist:beta` can; see buildInfo.ts).
+const buildInfo = readBuildInfo(app.getAppPath(), app.getVersion());
+const LOCAL_USER_ID = "local-beta";
+const isLocalMode = (): boolean => appSettings.localMode === true && buildInfo.localModeAllowed;
 function saveAppSettings(settings: AppSettings): void {
   writeFileAtomicWithBackup(APP_SETTINGS_PATH, JSON.stringify(settings, null, 2));
 }
@@ -2884,6 +2896,12 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
 
   notices.clearAll(); // a different user (or a fresh start) must not inherit the last one's problems
   config = loadConfig(CONFIG_PATH);
+  const localOnly = isLocalMode();
+  // Scanning needs Google Chrome or Microsoft Edge on this computer (an installed Clynx carries no browser of its own): say so plainly, with a way to fix it.
+  const browserCheck = checkBrowsers();
+  if (!browserCheck.preferred) {
+    notices.set({ id: "no-browser", severity: "error", title: "Clynx needs Google Chrome", message: browserCheck.instructions, action: "open-browser-download", actionLabel: "Get Google Chrome" });
+  }
   const configNotice = takeConfigLoadNotice();
   if (configNotice) {
     const where = configNotice.savedCopy ? ` The damaged file was kept as ${path.basename(configNotice.savedCopy)} in your Clynx data folder.` : "";
@@ -2905,7 +2923,7 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   // the LoginScreen actually authenticated against (appSettings.cloudApiUrl,
   // kept in sync with whatever server was used at login — see the auth:login/
   // auth:register handlers), not something set through the Config screen.
-  config = { ...config, cloud: { enabled: true, apiUrl: appSettings.cloudApiUrl } };
+  config = { ...config, cloud: { enabled: !localOnly, apiUrl: appSettings.cloudApiUrl } };
   saveConfig(CONFIG_PATH, config);
 
   // A restore the user asked for last time is carried out first: the current database is moved aside (kept), and the chosen backup takes its place.
@@ -3038,18 +3056,21 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   // interactive login that got us into bootstrapUserSession at all is what
   // authenticates cloudClient now, so this just starts the pieces that used
   // to wait on that.
-  cloudClient.checkHealth().then((health) => {
-    if (!health.ok) console.warn("[cloud] health check failed at startup:", health.error);
-  });
-  if (!cloudHeartbeatTimer) {
-    cloudHeartbeatTimer = setInterval(() => {
-      cloudClient.sendHeartbeat().catch((err) => console.error("[cloud] heartbeat threw unexpectedly:", err));
-    }, 60_000);
+  // Local beta mode talks to no Clynx Cloud server at all: no health check, heartbeat or sync.
+  if (!localOnly) {
+    cloudClient.checkHealth().then((health) => {
+      if (!health.ok) console.warn("[cloud] health check failed at startup:", health.error);
+    });
+    if (!cloudHeartbeatTimer) {
+      cloudHeartbeatTimer = setInterval(() => {
+        cloudClient.sendHeartbeat().catch((err) => console.error("[cloud] heartbeat threw unexpectedly:", err));
+      }, 60_000);
+    }
+    watchSyncService.start();
+    listingIngestSyncService.start();
+    feedbackSyncService.start();
+    productSyncService.start();
   }
-  watchSyncService.start();
-  listingIngestSyncService.start();
-  feedbackSyncService.start();
-  productSyncService.start();
 
   hasActiveUserSession = true;
   currentUserId = userId;
@@ -3284,7 +3305,25 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle("env:hasOpenAIKey", () => !!process.env.OPENAI_API_KEY);
-  ipcMain.handle("env:saveOpenAIKey", (_e, key: string) => saveEnvKey("OPENAI_API_KEY", key));
+  ipcMain.handle("env:saveOpenAIKey", (_e, key: string): { ok: boolean; error?: string } => {
+    const k = String(key ?? "").trim();
+    if (k === "") {
+      saveEnvKey("OPENAI_API_KEY", "");
+      delete process.env.OPENAI_API_KEY;
+      return { ok: true };
+    }
+    if (!/^sk-[A-Za-z0-9_-]{16,}$/.test(k)) return { ok: false, error: "That does not look like an OpenAI API key (it starts with sk- and has no spaces)." };
+    saveEnvKey("OPENAI_API_KEY", k);
+    return { ok: true };
+  });
+  ipcMain.handle("env:saveEbayCredentials", (_e, args: { clientId?: string; clientSecret?: string }): { ok: boolean; error?: string } => {
+    const id = String(args?.clientId ?? "").trim();
+    const secret = String(args?.clientSecret ?? "").trim();
+    if (!/^[A-Za-z0-9._-]{8,200}$/.test(id) || !/^[A-Za-z0-9._-]{8,200}$/.test(secret)) return { ok: false, error: "Enter both the eBay App ID (client id) and Cert ID (client secret) exactly as eBay shows them." };
+    saveEnvKey("EBAY_CLIENT_ID", id);
+    saveEnvKey("EBAY_CLIENT_SECRET", secret);
+    return { ok: true };
+  });
   ipcMain.handle("env:hasEbayCredentials", () => hasEbayCredentials());
 
   // Per explicit instruction — multiple Facebook accounts: every engine
@@ -3347,6 +3386,15 @@ app.whenReady().then(() => {
         notices: notices.list().map((n) => ({ id: n.id, severity: n.severity, title: n.title, message: n.message })),
         cloud: cloudClient.getStatus(),
         database: { bytes: dbBytes, backups: backups.length, newestBackupAt: backups[0] ? new Date(backups[0].takenAt).toISOString() : null },
+        build: { version: buildInfo.version, channel: buildInfo.channel, commit: buildInfo.commit, builtAt: buildInfo.builtAt, localMode: isLocalMode() },
+        browser: (() => {
+          const b = checkBrowsers();
+          return { ok: !!b.preferred, using: b.preferred?.label ?? null, found: b.found.map((f) => f.label) };
+        })(),
+        recentProblems: recentLogs
+          .filter((l) => l.level === "warn" || l.level === "error")
+          .slice(-60)
+          .map((l) => `${new Date(l.ts).toISOString()} ${l.level}: ${l.message.slice(0, 300)}`),
         homeDir: os.homedir(),
       });
       writeFileSync(picked.filePath, text, "utf-8");
@@ -3414,8 +3462,14 @@ app.whenReady().then(() => {
   let sessionCheckInFlight: Promise<SessionCheck> | null = null;
   async function checkOrRestoreSession(): Promise<SessionCheck> {
     if (hasActiveUserSession && currentUserId) {
+      if (isLocalMode()) return { authenticated: true, userId: currentUserId, email: null, apiUrl: null };
       const info = cloudClient.getSessionInfo();
       return { authenticated: true, userId: currentUserId, email: info.email, apiUrl: info.apiUrl ?? appSettings.cloudApiUrl };
+    }
+    if (isLocalMode()) {
+      const opened = await bootstrapOrExplain(LOCAL_USER_ID, "");
+      if (!opened.ok) return { authenticated: false, userId: null, email: null, apiUrl: null, startupProblem: opened.problem };
+      return { authenticated: true, userId: LOCAL_USER_ID, email: null, apiUrl: null };
     }
     const restored = await cloudClient.restoreSession();
     if (restored.ok && restored.userId) {
@@ -3436,6 +3490,35 @@ app.whenReady().then(() => {
       });
     }
     return sessionCheckInFlight;
+  });
+
+  // Beta builds only. Starts (or resumes) a session that lives entirely on this computer: its own folder, its own empty Database, no Clynx Cloud account. It grants access to
+  // nothing but that local folder, and a build that was not made for the beta (no build-info with channel "beta") refuses it.
+  ipcMain.handle("auth:startLocal", async (): Promise<{ ok: boolean; error?: string; startupProblem?: StartupProblem }> => {
+    if (!buildInfo.localModeAllowed) return { ok: false, error: "This build of Clynx requires a Clynx account." };
+    appSettings = { ...appSettings, localMode: true };
+    saveAppSettings(appSettings);
+    const opened = await bootstrapOrExplain(LOCAL_USER_ID, "");
+    if (!opened.ok) {
+      appSettings = { ...appSettings, localMode: false };
+      saveAppSettings(appSettings);
+      return { ok: false, error: opened.problem.message, startupProblem: opened.problem };
+    }
+    return { ok: true };
+  });
+  // What the Beta panel and the login screen need to know.
+  ipcMain.handle("beta:info", () => {
+    const browsers = checkBrowsers();
+    return {
+      version: buildInfo.version,
+      channel: buildInfo.channel,
+      commit: buildInfo.commit,
+      builtAt: buildInfo.builtAt,
+      localModeAllowed: buildInfo.localModeAllowed,
+      localMode: isLocalMode(),
+      hasOpenAIKey: !!process.env.OPENAI_API_KEY,
+      browser: { ok: !!browsers.preferred, using: browsers.preferred?.label ?? null, found: browsers.found.map((b) => b.label), instructions: browsers.instructions, downloadUrl: CHROME_DOWNLOAD_URL },
+    };
   });
 
   ipcMain.handle(
@@ -3483,6 +3566,10 @@ app.whenReady().then(() => {
     activeResearch.clear();
     config = { ...DEFAULT_CONFIG };
     cloudClient.logout();
+    if (appSettings.localMode) {
+      appSettings = { ...appSettings, localMode: false }; // leaving local mode; the data stays in its folder and is there again on the next "use on this computer"
+      saveAppSettings(appSettings);
+    }
     return { ok: true };
   });
 

@@ -41,6 +41,7 @@ export function NoticesPanel({ notices, statusMap }: { notices: AppNotice[]; sta
     setBusy(notice.id);
     try {
       if (notice.action === "dismiss") await api.dismissNotice(notice.id);
+      else if (notice.action === "open-browser-download") window.open("https://www.google.com/chrome/"); // the app hands links to the system browser
       else if (notice.action === "open-facebook-login" && notice.accountId) await api.login(notice.accountId);
       else if (notice.action === "retry-scanner" && notice.accountId) {
         // Running: end the pause between attempts and try right now. Stopped: start it.

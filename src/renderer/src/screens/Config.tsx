@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { AccountSection } from "./AccountSection.js";
 import { BackupsSection } from "./BackupsSection.js";
+import { AboutBlock, BrowserBlock, KeysBlock, LocalLogoutSection, useBetaInfo } from "./BetaSection.js";
 import { SupportReportButton } from "./SupportReportButton.js";
 import type { Account, CloudStatus, Config as ConfigType } from "../lib/api.js";
 import { NtfySetup } from "../components/NtfySetup.js";
@@ -113,6 +114,7 @@ export function ConfigScreen({
   // take effect anyway (dotenv loads once at startup), so a fresher check
   // here wouldn't reflect reality any better.
   const [hasEbayCredentials, setHasEbayCredentials] = useState(true);
+  const [betaInfo, reloadBeta] = useBetaInfo();
 
   useEffect(() => {
     api.getConfig().then((c) => {
@@ -681,6 +683,18 @@ export function ConfigScreen({
         </Section>
       )}
 
+      {tab === "account" && betaInfo && (
+        <Section title={betaInfo.channel === "beta" ? "About this beta" : "About"} subtitle="Which build you are running, and what it needs to scan.">
+          <AboutBlock info={betaInfo} />
+          <div style={{ height: 12 }} />
+          <BrowserBlock info={betaInfo} />
+        </Section>
+      )}
+      {tab === "account" && betaInfo && (betaInfo.localMode || !betaInfo.hasOpenAIKey) && (
+        <Section title="Your API keys" subtitle="Optional, and yours: Clynx ships with none.">
+          <KeysBlock info={betaInfo} onChanged={reloadBeta} />
+        </Section>
+      )}
       {tab === "account" && (
         <Section title="Setup checklist" subtitle="The Get started steps shown on the Dashboard for a new install: connect Facebook, choose where to look, add a product, phone alerts.">
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -717,7 +731,14 @@ export function ConfigScreen({
           </label>
         </Section>
       )}
-      {tab === "account" && (
+      {tab === "account" && betaInfo?.localMode && (
+        <Section title="Your plan" subtitle="Plans and billing are not part of the beta.">
+          <div data-testid="local-mode-plan" style={{ fontSize: 14, color: "var(--text-muted)", lineHeight: 1.5 }}>
+            You are using Clynx in local mode: there is no Clynx Cloud account, no plan and no billing. Your data stays on this computer.
+          </div>
+        </Section>
+      )}
+      {tab === "account" && betaInfo && !betaInfo.localMode && (
         <Section title="Your plan" subtitle="Your Clynx plan, what it includes, and billing.">
           <AccountSection onDeleted={onLoggedOut} />
         </Section>
@@ -728,11 +749,16 @@ export function ConfigScreen({
         </Section>
       )}
       {tab === "account" && (
-        <Section title="Support report" subtitle="If something is not working, save a report and send it to us. It lists versions, settings and recent technical events; passwords, keys, tokens, email addresses, listings and photos are never included.">
+        <Section title="Report a bug" subtitle="If something is not working, save a support report and send it to whoever invited you to the beta, together with a short description of what you were doing. It lists versions, settings and recent technical events; passwords, keys, tokens, email addresses, listings and photos are never included.">
           <SupportReportButton />
         </Section>
       )}
-      {tab === "account" && <CloudSyncSection onLoggedOut={onLoggedOut} />}
+      {tab === "account" && betaInfo && !betaInfo.localMode && <CloudSyncSection onLoggedOut={onLoggedOut} />}
+      {tab === "account" && betaInfo?.localMode && (
+        <Section title="Leave local mode" subtitle="Return to the start screen.">
+          <LocalLogoutSection onLoggedOut={onLoggedOut ?? (() => {})} />
+        </Section>
+      )}
       </div>
     </div>
   );

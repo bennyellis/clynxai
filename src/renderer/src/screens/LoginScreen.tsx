@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api.js";
-import type { StartupProblem } from "../lib/api.js";
+import type { BetaInfo, StartupProblem } from "../lib/api.js";
 
 // Multi-user login migration — blocks the ENTIRE app until authenticated
 // (see App.tsx, which renders this instead of everything else until
@@ -56,6 +56,34 @@ export function LoginScreen({
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Beta builds lead with "use Clynx on this computer" and keep the Clynx Cloud form behind a link.
+  const [beta, setBeta] = useState<BetaInfo | null>(null);
+  const [showCloud, setShowCloud] = useState(false);
+  useEffect(() => {
+    void api.beta.info().then(setBeta).catch(() => setBeta(null));
+  }, []);
+
+  async function startLocal() {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.auth.startLocal();
+      if (!r.ok && r.startupProblem) {
+        setProblem(r.startupProblem);
+        return;
+      }
+      if (!r.ok) {
+        setError(r.error ?? "Clynx could not start.");
+        return;
+      }
+      onAuthenticated();
+    } catch (err) {
+      setError((err as Error).message || "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -92,6 +120,48 @@ export function LoginScreen({
     } finally {
       setBusy(false);
     }
+  }
+
+  if (beta?.localModeAllowed && !showCloud) {
+    return (
+      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", position: "relative", zIndex: 1 }}>
+        <div className="card" data-testid="beta-welcome" style={{ width: 440, padding: 28, display: "flex", flexDirection: "column", gap: 16 }}>
+          <div>
+            <h1 style={{ margin: 0, fontSize: 26 }}>
+              Clynx <span style={{ fontSize: 13, fontWeight: 800, padding: "2px 8px", borderRadius: 999, background: "var(--warn-bg)", color: "var(--warn)", verticalAlign: "middle" }}>BETA {beta.version}</span>
+            </h1>
+            <p style={{ color: "var(--text-muted)", margin: "8px 0 0", fontSize: 14, lineHeight: 1.5 }}>
+              Welcome to the Clynx beta. There is no account to create: Clynx runs on this computer with its own empty Database and your own Facebook login. Plans and billing are not part of the beta.
+            </p>
+          </div>
+          {problem && (
+            <div role="alert" style={{ display: "flex", flexDirection: "column", gap: 8, padding: 12, borderRadius: 10, border: "1px solid var(--danger)", background: "var(--danger-bg)" }}>
+              <strong style={{ color: "var(--danger)" }}>{problem.title}</strong>
+              <span style={{ fontSize: 13.5, lineHeight: 1.5 }}>{problem.message}</span>
+              {problem.folder && (
+                <div>
+                  <button type="button" className="icon ghost" onClick={() => api.showDataFolder()}>
+                    Show data folder
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+          {!beta.browser.ok && (
+            <div role="alert" data-testid="beta-no-browser" style={{ padding: 12, borderRadius: 10, border: "1px solid var(--warn)", fontSize: 13.5, lineHeight: 1.5 }}>
+              <strong>Google Chrome or Microsoft Edge is needed for scanning.</strong> {beta.browser.instructions}
+            </div>
+          )}
+          {error && <p style={{ margin: 0, fontSize: 13.5, color: "var(--danger)", background: "var(--danger-bg)", padding: "8px 10px", borderRadius: 8 }}>{error}</p>}
+          <button type="button" className="primary" data-testid="start-local" disabled={busy} onClick={() => void startLocal()}>
+            {busy ? "Starting..." : "Start Clynx"}
+          </button>
+          <button type="button" className="ghost" disabled={busy} onClick={() => setShowCloud(true)} style={{ fontSize: 12.5, color: "var(--text-dim)" }}>
+            I have a Clynx Cloud account
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (

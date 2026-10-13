@@ -49,6 +49,10 @@ export interface SupportReportInput {
   notices: Array<{ id: string; severity: string; title: string; message: string }>;
   cloud?: unknown;
   database?: { bytes: number | null; backups: number; newestBackupAt: string | null };
+  build?: { version: string; channel: string; commit: string; builtAt: string | null; localMode: boolean };
+  browser?: { ok: boolean; using: string | null; found: string[] };
+  /** Recent scanner warnings and errors from the Activity log (no deals, no listing titles). */
+  recentProblems?: string[];
   homeDir?: string;
 }
 
@@ -60,10 +64,13 @@ export function buildSupportReport(i: SupportReportInput): string {
     `Created: ${i.generatedAt}`,
     "This file lists versions, settings and recent technical events. Passwords, API keys, tokens, email addresses, listings and photos are NOT included.",
     section("App", json(i.app)),
+    section("Build", json(i.build ?? {})),
+    section("Browser for scanning", json(i.browser ?? {})),
     section("Database", json(i.database ?? {})),
     section("Needs-attention notices", i.notices.length ? json(i.notices) : "(none)"),
     section("Cloud account", json(i.cloud ?? {})),
     section("Settings (secrets removed)", json(i.config)),
+    section("Recent scanner warnings and errors (newest last)", i.recentProblems?.length ? i.recentProblems.map((l) => scrubText(l, i.homeDir)).join("\n") : "(none)"),
     section("Recent technical events (newest last)", i.diagnosticsTail.length ? i.diagnosticsTail.map((l) => scrubText(l, i.homeDir)).join("\n") : "(none)"),
   ];
   return parts.join("\n");

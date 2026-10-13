@@ -751,6 +751,17 @@ export interface BillingStatus {
   usage: { aiRequestsToday: number; aiImagesToday: number };
   trialDays: number;
 }
+// What the Beta panel and login screen show: which build this is, whether local mode is on, and whether a browser for scanning was found.
+export interface BetaInfo {
+  version: string;
+  channel: "dev" | "beta" | "production";
+  commit: string;
+  builtAt: string | null;
+  localModeAllowed: boolean;
+  localMode: boolean;
+  hasOpenAIKey: boolean;
+  browser: { ok: boolean; using: string | null; found: string[]; instructions: string; downloadUrl: string };
+}
 export interface BackupSummary {
   enabled: boolean;
   folder: string;
