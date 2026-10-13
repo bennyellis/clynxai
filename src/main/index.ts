@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { config as loadDotenv } from "dotenv";
+import { parse as parseDotenv } from "dotenv";
 import { makePhotoCheck } from "./compPhotoCheck.js";
 import { app, BrowserWindow, ipcMain, safeStorage, session, shell, Menu, dialog, Notification } from "electron";
 import path from "node:path";
@@ -125,7 +125,12 @@ const USERS_ROOT = path.join(DATA_ROOT, "users");
 const ENV_PATH = path.join(baseDir, ".env");
 // An installed copy keeps the user's own API keys in .env in its data folder (the line above); `dotenv/config` only looks in the working directory, which for an installed app
 // is the install folder, so without this a key saved in Config would be forgotten at the next start. Variables that are already set are not overridden.
-loadDotenv({ path: ENV_PATH, quiet: true });
+try {
+  // (a variable that is set but empty counts as not set)
+  for (const [k, v] of Object.entries(parseDotenv(readFileSync(ENV_PATH, "utf-8")))) if (!process.env[k] && v) process.env[k] = v;
+} catch {
+  /* no .env yet: the tester has not saved a key */
+}
 // Batch 2 Fix A — see cloudClient.ts's readSession/writeSession. Same
 // directory as .env/config.json, same "userData in a packaged build, app
 // dir in dev" posture as everything else on baseDir. Deliberately install-
