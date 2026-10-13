@@ -81,7 +81,7 @@ export async function getEbayCredentials(): Promise<{ creds: EbayCredentials; so
     }
     const id = process.env.EBAY_CLIENT_ID?.trim();
     const secret = process.env.EBAY_CLIENT_SECRET?.trim();
-    return id && secret ? { creds: { clientId: id, clientSecret: secret, environment: process.env.EBAY_ENV === "SANDBOX" ? ("SANDBOX" as const) : ("PRODUCTION" as const), ruName: process.env.EBAY_RUNAME?.trim() || undefined }, source: "environment" as const } : null;
+    return id && secret ? { creds: { clientId: id, clientSecret: secret, environment: process.env.EBAY_ENV?.trim().toUpperCase() === "SANDBOX" ? ("SANDBOX" as const) : ("PRODUCTION" as const), ruName: process.env.EBAY_RUNAME?.trim() || undefined }, source: "environment" as const } : null;
   });
 }
 

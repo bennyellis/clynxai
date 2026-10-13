@@ -1,0 +1,23 @@
+# Example TLS reverse proxy for the single-address setup (website + API on one domain). Caddy obtains and renews the certificate automatically.
+# Replace the domain, point its DNS A/AAAA record at your server, and run:  caddy run --config Caddyfile
+your-domain.example {
+	encode zstd gzip
+
+	# installers can be several hundred MB: allow uploads from the console
+	request_body {
+		max_size 700MB
+	}
+
+	# Caddy adds X-Forwarded-For itself; the API uses it for rate limits because docker-compose.prod.yml sets TRUST_PROXY=true
+	reverse_proxy 127.0.0.1:8787
+
+	# the API already sets its own security headers (CSP, HSTS when the address is https, frame and sniffing protection); do not add duplicates here
+	log {
+		output file /var/log/caddy/clynx-access.log
+	}
+}
+
+# Optional: a staging copy on its own subdomain with its own database, its own .env, its own Stripe TEST keys.
+# staging.your-domain.example {
+#	reverse_proxy 127.0.0.1:8788
+# }

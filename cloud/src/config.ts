@@ -63,7 +63,9 @@ const envSchema = z.object({
 });
 
 function loadConfig() {
-  const parsed = envSchema.safeParse(process.env);
+  // A variable that is present but blank (as in a freshly copied .env.prod) counts as not set, so optional values can simply be left empty.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== ""));
+  const parsed = envSchema.safeParse(env);
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `  - ${i.path.join(".")}: ${i.message}`).join("\n");
     throw new Error(`Invalid/missing environment configuration:\n${issues}\n\nSee cloud/.env.example for the required variables.`);

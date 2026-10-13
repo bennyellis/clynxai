@@ -64,6 +64,64 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+  # The public website and customer portal: type-check, unit tests and the production build.
+  website:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+  # The same website driven in a real browser (Chrome) against a real Clynx Cloud server, with a simulated payment provider and captured email: nothing contacts Stripe, OpenAI, eBay or any mail service.
+  website-e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: clynx
+          POSTGRES_PASSWORD: clynx_dev_password
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U clynx" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://clynx:clynx_dev_password@localhost:5432/clynx_cloud
+      REDIS_URL: redis://localhost:6379
+      JWT_ACCESS_SECRET: ci-access-secret-ci-access-secret
+      JWT_REFRESH_SECRET: ci-refresh-secret-ci-refresh-secret
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm ci
+        working-directory: cloud
+      - run: npm ci && npm run build
+        working-directory: website
+      - run: node website/e2e/e2e.cjs
+  # The deployable image builds (nothing is pushed anywhere).
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f cloud/Dockerfile -t clynx-cloud:ci .
   # Known-vulnerability review of the dependencies that ship (production only). Informational: a new advisory should be looked at, but must not block unrelated work.
   audit:
     runs-on: ubuntu-latest
@@ -78,3 +136,5 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
       - run: npm audit --omit=dev --audit-level=high
         working-directory: cloud
+      - run: npm audit --omit=dev --audit-level=high
+        working-directory: website

@@ -1,0 +1,16 @@
+# The cloud image is built from the repository root (it also builds the website). Only these two folders are ever sent to Docker; nothing from the desktop app,
+# its data, reports, keys or browser profiles can end up in an image.
+*
+!cloud
+!website
+**/node_modules
+**/dist
+**/data
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.prod.example
+!**/.env.preview.example
+**/*.log
+cloud/test
+website/e2e

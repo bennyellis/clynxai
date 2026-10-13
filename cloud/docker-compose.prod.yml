@@ -34,7 +34,9 @@ services:
     mem_limit: 512m
 
   api:
-    build: .
+    build:
+      context: ..
+      dockerfile: cloud/Dockerfile
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
@@ -45,15 +47,20 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       PORT: 8787
       TRUST_PROXY: "true"
+      NODE_ENV: production
     # bound to localhost: your reverse proxy (Caddy / nginx, see DEPLOYMENT.md) terminates TLS and forwards here
     ports:
       - "127.0.0.1:8787:8787"
     # migrations are idempotent (schema_migrations), so running them on every start is safe
     command: sh -c "node dist/db/migrate.js && node dist/index.js"
+    volumes:
+      - releases_data:/data
     mem_limit: 512m
 
   worker:
-    build: .
+    build:
+      context: ..
+      dockerfile: cloud/Dockerfile
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
@@ -70,3 +77,4 @@ services:
 volumes:
   pg_data:
   redis_data:
+  releases_data:

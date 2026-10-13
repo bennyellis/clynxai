@@ -37,3 +37,6 @@ audit/phase4_shadow/*.cjs
 *.partial
 resources/build-info.json
 beta-release/
+
+# Backup copies of .env made when saved API keys are protected (may hold the old plain-text keys)
+.env.backup-*
