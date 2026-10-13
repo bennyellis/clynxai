@@ -255,8 +255,16 @@ showing up or titles/prices look wrong:
 - `npm run dev` — run the app in development
 - `npm run build` — build main/preload/renderer bundles
 - `npm run typecheck` — typecheck main+preload and renderer separately
+- `npm test` — run all unit tests (`npm test -- name` runs the files whose name contains `name`)
 - `npm run pack` — build an unpacked Windows app (for testing)
-- `npm run dist` — build an installable Windows app
+- `npm run dist:win` / `npm run dist:mac` — build the installer for that platform. Nothing is published: see [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md). On Windows, building needs Windows Developer Mode (or an administrator shell) so the signing tools can unpack.
+
+## More documentation
+
+- [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) — everything a person does to ship a build (signing, macOS, updates, publishing)
+- [`BETA_PLAN.md`](BETA_PLAN.md) — controlled beta rollout plan (a plan only; no beta has been run)
+- [`SECURITY_REVIEW.md`](SECURITY_REVIEW.md) — Electron hardening, secret storage, dependency review, update design, known gaps
+- [`cloud/DEPLOYMENT.md`](cloud/DEPLOYMENT.md) — deploying and operating Clynx Cloud (including Stripe test-mode setup)
 
 ## Clynx Cloud
 
