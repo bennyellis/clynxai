@@ -75,6 +75,14 @@ export function AccountSection({ onDeleted }: { onDeleted?: () => void }) {
           <button className="ghost" onClick={load}>Refresh</button>
         </div>
       )}
+      <div className="row" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <button className="ghost" data-testid="account-website" onClick={() => void api.auth.openWebsite("account")}>
+          Open my account on the website
+        </button>
+        <button className="ghost" onClick={() => void api.auth.openWebsite("devices")}>
+          My devices
+        </button>
+      </div>
       {note && <div data-testid="account-note" style={{ color: "var(--text-muted)", fontSize: 14 }}>{note}</div>}
 
       <details>

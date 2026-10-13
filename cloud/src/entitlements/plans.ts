@@ -25,6 +25,11 @@ const ENTITLEMENTS_BY_PLAN: Record<Plan, Entitlements> = {
   pro: { maxWatches: null, maxDevices: null, maxSearchItems: null, aiResearchEnabled: true, aiRequestsPerDay: 3000, aiImagesPerDay: 100 },
 };
 
+/** The Owner has every feature, with no count limits and no daily request quota. (Infrastructure safety limits - spending caps, concurrency, rate limits - still apply to the Owner; see ../integrations/controls.ts.) */
+export function getOwnerEntitlements(): Entitlements {
+  return { maxWatches: null, maxDevices: null, maxSearchItems: null, aiResearchEnabled: true, aiRequestsPerDay: null, aiImagesPerDay: null };
+}
+
 export function isPlan(value: unknown): value is Plan {
   return value === "free" || value === "pro";
 }

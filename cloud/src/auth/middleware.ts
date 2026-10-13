@@ -9,6 +9,8 @@ declare module "fastify" {
     /** How the caller proved who they are: the desktop app's bearer token, or the website's session cookie. */
     authVia?: "bearer" | "cookie";
     sessionId?: string;
+    /** Set by requireAdmin / requireOwner. */
+    role?: "admin" | "owner";
     csrfToken?: string;
   }
 }
@@ -47,5 +49,13 @@ export async function requireAdmin(request: FastifyRequest, reply: FastifyReply)
   if (reply.sent) return;
   if (request.authVia !== "cookie") return reply.code(403).send({ error: "forbidden" });
   const r = await query<{ role: string; disabled_at: Date | null }>("SELECT role, disabled_at FROM users WHERE id = $1", [request.userId]);
-  if (!r.rows[0] || r.rows[0].role !== "admin" || r.rows[0].disabled_at) return reply.code(403).send({ error: "forbidden" });
+  if (!r.rows[0] || !["admin", "owner"].includes(r.rows[0].role) || r.rows[0].disabled_at) return reply.code(403).send({ error: "forbidden" });
+  request.role = r.rows[0].role as "admin" | "owner";
+}
+
+/** The Owner only: an ordinary administrator is refused. Website session required, role read from the database on every request. */
+export async function requireOwner(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  await requireAdmin(request, reply);
+  if (reply.sent) return;
+  if (request.role !== "owner") return reply.code(403).send({ error: "forbidden", message: "Only the Owner can do this." });
 }

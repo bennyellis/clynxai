@@ -59,6 +59,7 @@ export function LoginScreen({
   // Beta builds lead with "use Clynx on this computer" and keep the Clynx Cloud form behind a link.
   const [beta, setBeta] = useState<BetaInfo | null>(null);
   const [showCloud, setShowCloud] = useState(false);
+  const [importLocal, setImportLocal] = useState(false);
   useEffect(() => {
     void api.beta.info().then(setBeta).catch(() => setBeta(null));
   }, []);
@@ -95,8 +96,8 @@ export function LoginScreen({
       const trimmedEmail = email.trim();
       const result =
         mode === "login"
-          ? await api.auth.login(trimmedUrl, trimmedEmail, password)
-          : await api.auth.register(trimmedUrl, trimmedEmail, password);
+          ? await api.auth.login(trimmedUrl, trimmedEmail, password, importLocal && !!beta?.localDataExists)
+          : await api.auth.register(trimmedUrl, trimmedEmail, password, importLocal && !!beta?.localDataExists);
       if (!result.ok && result.startupProblem) {
         setProblem(result.startupProblem);
         return;
@@ -224,6 +225,14 @@ export function LoginScreen({
           />
         </Field>
 
+        {beta?.localDataExists && (
+          <label data-testid="import-local" style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13.5, lineHeight: 1.4 }}>
+            <input type="checkbox" checked={importLocal} onChange={(e) => setImportLocal(e.target.checked)} style={{ marginTop: 3 }} />
+            <span>
+              Copy my local beta data (Database, settings and Facebook login) into this account. <span style={{ color: "var(--text-dim)" }}>It is copied, not moved: your local data stays where it is and you can go back to local mode at any time.</span>
+            </span>
+          </label>
+        )}
         {showServer ? (
           <Field label="Server URL">
             <input value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} placeholder={defaultApiUrl} autoComplete="off" spellCheck={false} />

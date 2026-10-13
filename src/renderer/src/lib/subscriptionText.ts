@@ -8,6 +8,7 @@ export function describeSubscription(b: BillingStatus): { headline: string; deta
   if (!s) return { headline: planName, detail: b.plan === "pro" ? "Pro is included with your account." : "No subscription.", tone: "plain" };
   switch (s.phase) {
     case "trialing":
+      if (s.cancelAtPeriodEnd) return { headline: "Clynx Pro — free trial", detail: s.trialEnd ? `Your trial ends ${dateText(s.trialEnd)} and you will not be charged: cancellation is scheduled.` : "Your trial will end without a charge: cancellation is scheduled.", tone: "warn" };
       return { headline: "Clynx Pro — free trial", detail: s.trialEnd ? `Your trial ends ${dateText(s.trialEnd)}. You will be charged then unless you cancel.` : "You are on a free trial.", tone: "ok" };
     case "active":
       return { headline: "Clynx Pro", detail: s.currentPeriodEnd ? `Renews ${dateText(s.currentPeriodEnd)}.` : "Active.", tone: "ok" };

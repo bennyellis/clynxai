@@ -12,6 +12,8 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
       pricesApproved: !!(config.web.priceDisplay.proMonthly || config.web.priceDisplay.proYearly),
       trialDays: config.billing.trialDays,
       billingAvailable: config.billing.configured || config.billingFake,
+      billingMode: config.billingFake ? "simulated" : config.billing.configured ? "provider" : "none",
+      supportEmail: config.web.supportEmail,
       limitsEnforced: config.enforceEntitlements,
       plans: [
         { id: "free", name: "Free", price: { monthly: null, yearly: null }, entitlements: getEntitlementsForPlan("free") },

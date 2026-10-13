@@ -172,6 +172,17 @@ export default function App() {
     checkSession();
   }, [checkSession]);
 
+  // The server ended this computer's sign-in (removed on the website, password reset, account disabled): back to the sign-in screen, with the reason.
+  useEffect(
+    () =>
+      api.auth.onSignedOut((info) => {
+        setStartupProblem({ kind: "unknown", title: "You were signed out", message: info.reason, folder: null });
+        setAuthenticated(false);
+        setAuthChecked(true);
+      }),
+    []
+  );
+
   // Passed to LoginScreen — re-checks session state after a successful
   // login/register rather than just trusting that call's own result,
   // matching the app's existing "re-fetch from main after a mutation"

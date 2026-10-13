@@ -2,30 +2,34 @@ import type { FastifyReply } from "fastify";
 import { config } from "../config.js";
 import { query } from "../db/client.js";
 import { resolveSubscription, type Resolution, type SubscriptionState } from "../billing/plan.js";
-import { getEntitlementsForPlan, higherPlan, isPlan, type Entitlements, type Plan } from "./plans.js";
+import { getEntitlementsForPlan, getOwnerEntitlements, higherPlan, isPlan, type Entitlements, type Plan } from "./plans.js";
 
 export interface EffectivePlan {
   plan: Plan;
   /** The plan stored on the user (set by an operator; every account starts on "free"). */
   basePlan: Plan;
+  /** The permanent Owner: every feature, no subscription needed. Decided here, on the server, from the database role only. */
+  owner: boolean;
   subscription: Resolution & { status: string | null; currentPeriodEnd: Date | null; trialEnd: Date | null; cancelAtPeriodEnd: boolean; hasCustomer: boolean };
   entitlements: Entitlements;
 }
 
 /** The plan a user gets right now: the better of their stored base plan and what their subscription entitles them to at this moment. */
 export async function effectivePlanFor(userId: string, now: Date = new Date()): Promise<EffectivePlan | null> {
-  const u = await query<{ plan: string }>("SELECT plan FROM users WHERE id = $1", [userId]);
+  const u = await query<{ plan: string; role: string }>("SELECT plan, role FROM users WHERE id = $1", [userId]);
   if (!u.rows[0]) return null;
+  const owner = u.rows[0].role === "owner";
   const basePlan: Plan = isPlan(u.rows[0].plan) ? u.rows[0].plan : "free";
   const s = await query<SubscriptionState & { provider_customer_id: string | null }>("SELECT * FROM subscriptions WHERE user_id = $1", [userId]);
   const row = s.rows[0] ?? null;
   const res = resolveSubscription(row, now, config.billing.pastDueGraceDays);
-  const plan = higherPlan(basePlan, res.plan);
+  const plan = owner ? "pro" : higherPlan(basePlan, res.plan);
   return {
     plan,
+    owner,
     basePlan,
     subscription: { ...res, status: row?.status ?? null, currentPeriodEnd: row?.current_period_end ?? null, trialEnd: row?.trial_end ?? null, cancelAtPeriodEnd: row?.cancel_at_period_end ?? false, hasCustomer: !!row?.provider_customer_id },
-    entitlements: getEntitlementsForPlan(plan),
+    entitlements: owner ? getOwnerEntitlements() : getEntitlementsForPlan(plan),
   };
 }
 

@@ -63,6 +63,7 @@ import { DiscoveryFeed, type DiscoverySource } from "./discovery.js";
 import { breakDownListing, valueBundle, type BundleValuation, type PricedBundleItem } from "./bundleBreakdown.js";
 import { CloudClient, isBillingStatus } from "./cloudClient.js";
 import { readBuildInfo } from "./buildInfo.js";
+import { importLocalData, localDataExists } from "./localMigration.js";
 import { checkBrowsers, CHROME_DOWNLOAD_URL } from "./browserCheck.js";
 import { safeExternalUrl } from "./safeExternalUrl.js";
 import { setSecretCodec } from "./secretStore.js";
@@ -3496,6 +3497,20 @@ app.whenReady().then(() => {
       return { authenticated: true, userId: LOCAL_USER_ID, email: null, apiUrl: null };
     }
     const restored = await cloudClient.restoreSession();
+    // The server could not be reached (but never said the sign-in is over): carry on with this computer's data for that account; syncing resumes by itself when the connection returns.
+    if (restored.offline && restored.userId) {
+      const opened = await bootstrapOrExplain(restored.userId, restored.email ?? "");
+      if (!opened.ok) return { authenticated: false, userId: null, email: null, apiUrl: restored.apiUrl, startupProblem: opened.problem };
+      notices.set({
+        id: "cloud-offline",
+        severity: "info",
+        title: "You're working offline",
+        message: "Clynx can't reach your Clynx account right now, so it is using the data on this computer. Syncing and your plan are picked up again by themselves when the connection is back.",
+        action: "dismiss",
+        actionLabel: "Got it",
+      });
+      return { authenticated: true, userId: restored.userId, email: restored.email, apiUrl: restored.apiUrl };
+    }
     if (restored.ok && restored.userId) {
       if (restored.apiUrl && restored.apiUrl !== appSettings.cloudApiUrl) {
         appSettings = { ...appSettings, cloudApiUrl: restored.apiUrl };
@@ -3541,35 +3556,58 @@ app.whenReady().then(() => {
       localModeAllowed: buildInfo.localModeAllowed,
       localMode: isLocalMode(),
       hasOpenAIKey: !!process.env.OPENAI_API_KEY,
+      localDataExists: buildInfo.localModeAllowed && localDataExists(USERS_ROOT),
       browser: { ok: !!browsers.preferred, using: browsers.preferred?.label ?? null, found: browsers.found.map((b) => b.label), instructions: browsers.instructions, downloadUrl: CHROME_DOWNLOAD_URL },
     };
   });
 
   ipcMain.handle(
     "auth:login",
-    async (_e, args: { apiUrl: string; email: string; password: string }): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem }> => {
+    async (_e, args: { apiUrl: string; email: string; password: string; importLocal?: boolean }): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem; imported?: string }> => {
       const apiUrl = (args.apiUrl || appSettings.cloudApiUrl).trim();
       const result = await cloudClient.login(apiUrl, args.email.trim(), args.password);
       if (!result.ok || !result.data) return { ok: false, error: result.error ?? "Login failed" };
-      appSettings = { ...appSettings, cloudApiUrl: apiUrl };
+      appSettings = { ...appSettings, cloudApiUrl: apiUrl, localMode: false };
       saveAppSettings(appSettings);
+      const imported = args.importLocal === true && buildInfo.localModeAllowed ? importLocalData(USERS_ROOT, result.data.userId) : null;
       const opened = await bootstrapOrExplain(result.data.userId, result.data.email);
       if (!opened.ok) return { ok: false, error: opened.problem.message, startupProblem: opened.problem };
-      return { ok: true, userId: result.data.userId, email: result.data.email };
+      if (imported) {
+        notices.set({
+          id: "local-import",
+          severity: imported.copied ? "info" : "warning",
+          title: imported.copied ? "Your local data was copied into this account" : "Your local data was not copied",
+          message: imported.copied ? "The original is still on this computer; nothing was deleted. Your Watches and products now sync with your account." : imported.reason,
+          action: "dismiss",
+          actionLabel: "Got it",
+        });
+      }
+      return { ok: true, userId: result.data.userId, email: result.data.email, imported: imported ? (imported.copied ? "Your local data was copied into this account. The original stays on this computer." : imported.reason) : undefined };
     }
   );
 
   ipcMain.handle(
     "auth:register",
-    async (_e, args: { apiUrl: string; email: string; password: string }): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem }> => {
+    async (_e, args: { apiUrl: string; email: string; password: string; importLocal?: boolean }): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem; imported?: string }> => {
       const apiUrl = (args.apiUrl || appSettings.cloudApiUrl).trim();
       const result = await cloudClient.register(apiUrl, args.email.trim(), args.password);
       if (!result.ok || !result.data) return { ok: false, error: result.error ?? "Registration failed" };
-      appSettings = { ...appSettings, cloudApiUrl: apiUrl };
+      appSettings = { ...appSettings, cloudApiUrl: apiUrl, localMode: false };
       saveAppSettings(appSettings);
+      const imported = args.importLocal === true && buildInfo.localModeAllowed ? importLocalData(USERS_ROOT, result.data.userId) : null;
       const opened = await bootstrapOrExplain(result.data.userId, result.data.email);
       if (!opened.ok) return { ok: false, error: opened.problem.message, startupProblem: opened.problem };
-      return { ok: true, userId: result.data.userId, email: result.data.email };
+      if (imported) {
+        notices.set({
+          id: "local-import",
+          severity: imported.copied ? "info" : "warning",
+          title: imported.copied ? "Your local data was copied into this account" : "Your local data was not copied",
+          message: imported.copied ? "The original is still on this computer; nothing was deleted. Your Watches and products now sync with your account." : imported.reason,
+          action: "dismiss",
+          actionLabel: "Got it",
+        });
+      }
+      return { ok: true, userId: result.data.userId, email: result.data.email, imported: imported ? (imported.copied ? "Your local data was copied into this account. The original stays on this computer." : imported.reason) : undefined };
     }
   );
 
@@ -3578,7 +3616,8 @@ app.whenReady().then(() => {
   // duplicating it, then clears every other bit of per-user in-memory state
   // and the persisted cloud session so a relaunch's own auth:getSession
   // correctly reports "not authenticated" and shows the LoginScreen again.
-  ipcMain.handle("auth:logout", async (): Promise<{ ok: boolean }> => {
+  // Ends the signed-in session on this computer (the data stays in its folder). Used by "Log out" and when the server ends the sign-in.
+  const endSession = async (): Promise<void> => {
     await stopUserSession();
     if (hasActiveUserSession) store.close();
     hasActiveUserSession = false;
@@ -3594,6 +3633,29 @@ app.whenReady().then(() => {
       appSettings = { ...appSettings, localMode: false }; // leaving local mode; the data stays in its folder and is there again on the next "use on this computer"
       saveAppSettings(appSettings);
     }
+  };
+  ipcMain.handle("auth:logout", async (): Promise<{ ok: boolean }> => {
+    await endSession();
+    return { ok: true };
+  });
+  // The server said this sign-in is over (this computer was removed from the account on the website, the password was reset, the account was disabled): sign out cleanly and say why.
+  cloudClient.setSessionListener({
+    onRejected: () => {
+      void (async () => {
+        if (!hasActiveUserSession || isLocalMode()) return;
+        await endSession();
+        sendToRenderer("auth:signedOut", { reason: "This computer was signed out of your Clynx account (it was removed on the website, your password was changed, or the account was disabled). Your data is still on this computer. Sign in again to continue." });
+      })();
+    },
+    onOnline: () => notices.clear("cloud-offline"),
+  });
+  // Opens the person's account on the website in their own browser (only an address on the server they signed in to, https or local development).
+  ipcMain.handle("account:openWebsite", (_e, args: { page?: string }): { ok: boolean; error?: string } => {
+    const allowed: Record<string, string> = { account: "/account", billing: "/account/billing", devices: "/account/devices", download: "/download", support: "/support" };
+    const base = (cloudClient.getSessionInfo().apiUrl ?? appSettings.cloudApiUrl ?? "").replace(/\/+$/, "");
+    const safe = safeExternalUrl(base + (allowed[args?.page ?? "account"] ?? "/account"));
+    if (!safe.ok) return { ok: false, error: safe.error };
+    void shell.openExternal(safe.url);
     return { ok: true };
   });
 

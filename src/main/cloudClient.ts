@@ -957,7 +957,26 @@ export class CloudClient {
   // prompting for a password again. index.ts calls this from auth:getSession
   // before deciding whether to show the LoginScreen.
   private restoreInFlight: Promise<{ ok: boolean; userId: string | null; email: string | null; apiUrl: string | null }> | null = null;
-  restoreSession(): Promise<{ ok: boolean; userId: string | null; email: string | null; apiUrl: string | null }> {
+  // Told when the server answers for good that this sign-in is over (the computer was removed on the website, the password was reset, the account was disabled) and when a
+  // connection that was down comes back. Used by index.ts to sign the person out cleanly / clear the "working offline" notice.
+  private sessionListener: { onRejected?: () => void; onOnline?: () => void } = {};
+  setSessionListener(l: { onRejected?: () => void; onOnline?: () => void }): void {
+    this.sessionListener = l;
+  }
+  private offlineRetry: ReturnType<typeof setTimeout> | null = null;
+  private scheduleOfflineRetry(): void {
+    if (this.offlineRetry) return;
+    this.offlineRetry = setTimeout(() => {
+      this.offlineRetry = null;
+      if (!this.accessToken && this.refreshToken) void this.refreshAccessToken();
+    }, CloudClient.OFFLINE_RETRY_MS);
+    this.offlineRetry.unref?.();
+  }
+  static OFFLINE_RETRY_MS = 60_000;
+  /** Pauses between the short retries at start-up while the server cannot be reached (changeable so tests do not wait). */
+  static RESTORE_RETRY_DELAYS_MS = [2000, 4000, 8000];
+
+  restoreSession(): Promise<{ ok: boolean; userId: string | null; email: string | null; apiUrl: string | null; offline?: boolean }> {
     // Single-flight: the refresh token is single-use, so two overlapping
     // restores would make the second look like token reuse to the server.
     if (!this.restoreInFlight) {
@@ -968,7 +987,7 @@ export class CloudClient {
     return this.restoreInFlight;
   }
 
-  private async restoreSessionOnce(): Promise<{ ok: boolean; userId: string | null; email: string | null; apiUrl: string | null }> {
+  private async restoreSessionOnce(): Promise<{ ok: boolean; userId: string | null; email: string | null; apiUrl: string | null; offline?: boolean }> {
     try {
       const session = readSession(this.sessionPath);
       if (!session.refreshToken || !session.apiUrl || !session.userId) {
@@ -978,6 +997,7 @@ export class CloudClient {
       this.userId = session.userId;
       this.email = session.email;
       this.sessionApiUrl = session.apiUrl;
+      this.refreshToken = session.refreshToken;
 
       // Per explicit instruction ("logging in each time is tedious") — a
       // network-level failure here (most commonly: the local cloud stack
@@ -988,7 +1008,7 @@ export class CloudClient {
       // falling back to the LoginScreen — verified live: Docker's containers
       // were consistently reachable again within a few seconds of the
       // daemon itself becoming ready.
-      const RETRY_DELAYS_MS = [2000, 4000, 8000];
+      const RETRY_DELAYS_MS = CloudClient.RESTORE_RETRY_DELAYS_MS;
       let refreshed = await this.doRefresh(session.apiUrl, session.refreshToken);
       for (let attempt = 0; !refreshed.ok && refreshed.networkFailure && attempt < RETRY_DELAYS_MS.length; attempt++) {
         console.warn(`[cloudClient] restoreSession: cloud unreachable (attempt ${attempt + 1}/${RETRY_DELAYS_MS.length + 1}), retrying:`, refreshed.error);
@@ -1005,13 +1025,18 @@ export class CloudClient {
           // app once the cloud is actually up) can still succeed with this
           // exact same refresh token.
           console.warn("[cloudClient] restoreSession: cloud still unreachable, keeping session for a later retry:", refreshed.error);
-          return { ok: false, userId: null, email: null, apiUrl: session.apiUrl };
+          // OFFLINE: the session itself was never rejected, so the person keeps working on this computer's data; the connection is retried in the background and syncing
+          // resumes by itself. (Nothing is trusted that the server has not said: while offline there is simply no access token, so no cloud call is made.)
+          this.startAuthRefreshTimer();
+          this.scheduleOfflineRetry();
+          return { ok: false, offline: true, userId: session.userId, email: session.email, apiUrl: session.apiUrl };
         }
         // A real response came back and genuinely rejected this token
         // (expired, revoked, reused) — this session really is done.
         console.warn("[cloudClient] persisted refresh token rejected:", refreshed.error);
         this.userId = null;
         this.email = null;
+        this.refreshToken = null;
         return { ok: false, userId: null, email: null, apiUrl: session.apiUrl };
       }
       await this.ensureDeviceRegistered();
@@ -1042,7 +1067,7 @@ export class CloudClient {
     writeSession(this.sessionPath, { deviceId: null, refreshToken: null, userId: null, email: null, apiUrl: null });
   }
 
-  private async doRefresh(apiUrl: string, refreshToken: string): Promise<{ ok: boolean; error?: string; networkFailure?: boolean }> {
+  private async doRefresh(apiUrl: string, refreshToken: string): Promise<{ ok: boolean; error?: string; networkFailure?: boolean; status?: number }> {
     const result = await safeFetch(`${apiUrl}/auth/refresh`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1058,7 +1083,7 @@ export class CloudClient {
       // — it's undefined when safeFetch's catch fired, a real network-level
       // failure. That's the exact, reliable signal for "this session might
       // still be perfectly valid, we just couldn't check."
-      return { ok: false, error: result.error ?? "Refresh failed", networkFailure: result.status === undefined };
+      return { ok: false, error: result.error ?? "Refresh failed", networkFailure: result.status === undefined, status: result.status };
     }
     this.accessToken = result.data.accessToken;
     // Rotation — the cloud issues a brand-new refresh token on every use
@@ -1119,7 +1144,19 @@ export class CloudClient {
     if (!this.refreshToken || !this.sessionApiUrl) return;
     this.refreshingAuth = true;
     try {
+      const wasOffline = !this.accessToken;
       const result = await this.doRefresh(this.sessionApiUrl, this.refreshToken);
+      if (result.ok) {
+        if (!this.deviceId) await this.ensureDeviceRegistered();
+        if (wasOffline) this.sessionListener.onOnline?.();
+      } else if (result.networkFailure) {
+        if (wasOffline) this.scheduleOfflineRetry();
+      } else if (result.status === 401 || result.status === 403) {
+        // The server answered, and the answer is "this sign-in is no longer valid" (device removed, password reset, account disabled): end it here and now.
+        console.warn("[cloudClient] the server ended this sign-in:", result.error);
+        this.logout();
+        this.sessionListener.onRejected?.();
+      }
       if (!result.ok) {
         // Leave the existing (soon-to-expire) accessToken in place rather
         // than clearing it — a still-valid token keeps working until it

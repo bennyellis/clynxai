@@ -46,6 +46,7 @@ export function billingRoutes(provider: BillingProvider | null) {
         const verified = await query<{ email_verified_at: Date | null }>("SELECT email_verified_at FROM users WHERE id = $1", [request.userId]);
         return reply.code(200).send({
           configured: !!provider,
+          owner: eff.owner,
           interval: subRow.rows[0]?.billing_interval ?? null,
           // a free trial is offered once: only an account that has never had a subscription can start one
           trialEligible: !subRow.rows[0] && config.billing.trialDays > 0,
@@ -66,6 +67,13 @@ export function billingRoutes(provider: BillingProvider | null) {
           usage: { aiRequestsToday: usage.requests, aiImagesToday: usage.images },
           trialDays: config.billing.trialDays,
         });
+      });
+
+      // The Owner needs no subscription: every purchase or change is refused for that account (nothing is sent to the payment provider).
+      authed.addHook("preHandler", async (request, reply) => {
+        if (!request.url.startsWith("/billing/") || request.method === "GET") return;
+        const r = await query<{ role: string }>("SELECT role FROM users WHERE id = $1", [request.userId]);
+        if (r.rows[0]?.role === "owner") return reply.code(409).send({ error: "owner_no_payment_needed", message: "The Owner account has full access and needs no subscription." });
       });
 
       authed.post("/billing/checkout", async (request, reply) => {

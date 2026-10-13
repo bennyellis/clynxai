@@ -439,10 +439,18 @@ const api = {
   auth: {
     getSession: (): Promise<{ authenticated: boolean; userId: string | null; email: string | null; apiUrl: string | null; startupProblem?: StartupProblem }> =>
       ipcRenderer.invoke("auth:getSession"),
-    login: (apiUrl: string, email: string, password: string): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem }> =>
-      ipcRenderer.invoke("auth:login", { apiUrl, email, password }),
-    register: (apiUrl: string, email: string, password: string): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem }> =>
-      ipcRenderer.invoke("auth:register", { apiUrl, email, password }),
+    login: (apiUrl: string, email: string, password: string, importLocal?: boolean): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem; imported?: string }> =>
+      ipcRenderer.invoke("auth:login", { apiUrl, email, password, importLocal }),
+    register: (apiUrl: string, email: string, password: string, importLocal?: boolean): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem; imported?: string }> =>
+      ipcRenderer.invoke("auth:register", { apiUrl, email, password, importLocal }),
+    onSignedOut: (cb: (info: { reason: string }) => void) => {
+      const listener = (_e: unknown, info: { reason: string }) => cb(info);
+      ipcRenderer.on("auth:signedOut", listener);
+      return () => {
+        ipcRenderer.removeListener("auth:signedOut", listener);
+      };
+    },
+    openWebsite: (page: "account" | "billing" | "devices" | "download" | "support"): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("account:openWebsite", { page }),
     logout: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("auth:logout"),
     startLocal: (): Promise<{ ok: boolean; error?: string; startupProblem?: StartupProblem }> => ipcRenderer.invoke("auth:startLocal"),
   },

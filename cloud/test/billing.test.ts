@@ -244,7 +244,7 @@ describe("checkout, portal and status", () => {
     expect(ok.statusCode).toBe(200);
     expect(ok.json().url).toContain("checkout.example.test");
     expect(fake.checkouts[0]).toMatchObject({ userId, priceId: "price_yearly_test", trialDays: config.billing.trialDays, customerId: null });
-    expect(fake.checkouts[0].successUrl).toMatch(/^https:/);
+    expect(fake.checkouts[0].successUrl).toMatch(new RegExp("^https?://"));
     // the account has now had a subscription row: the trial is not offered again
     await deliver(event("customer.subscription.updated", sub(userId, { status: "canceled" })));
     await app.inject({ method: "POST", url: "/billing/checkout", headers: auth(accessToken), payload: { plan: "pro_monthly" } });

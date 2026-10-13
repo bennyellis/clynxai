@@ -46,6 +46,7 @@ async function profileOf(userId: string) {
     isBetaTester: u.is_beta_tester,
     createdAt: u.created_at,
     plan: eff?.plan ?? "free",
+    owner: eff?.owner ?? false,
   };
 }
 

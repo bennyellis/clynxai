@@ -19,7 +19,7 @@ export function accountRoutes(provider: BillingProvider | null) {
       const u = await query<{ id: string; email: string; created_at: Date }>("SELECT id, email, created_at FROM users WHERE id = $1", [request.userId]);
       if (!u.rows[0]) return reply.code(404).send({ error: "User not found" });
       const eff = await effectivePlanFor(request.userId as string);
-      return reply.code(200).send({ userId: u.rows[0].id, email: u.rows[0].email, createdAt: u.rows[0].created_at, plan: eff?.plan ?? "free" });
+      return reply.code(200).send({ userId: u.rows[0].id, email: u.rows[0].email, createdAt: u.rows[0].created_at, plan: eff?.plan ?? "free", owner: eff?.owner ?? false });
     });
 
     app.post("/me/password", async (request, reply) => {
@@ -43,8 +43,9 @@ export function accountRoutes(provider: BillingProvider | null) {
       if (!parsed.success) return reply.code(400).send({ error: "Send your password and confirm: \"DELETE\"" });
       const rl = await hit(`delete:${request.userId}`, 5, 900);
       if (!rl.allowed) return reply.code(429).send({ error: "rate_limited", retryAfterSec: rl.retryAfterSec });
-      const u = await query<{ password_hash: string }>("SELECT password_hash FROM users WHERE id = $1", [request.userId]);
+      const u = await query<{ password_hash: string; role: string }>("SELECT password_hash, role FROM users WHERE id = $1", [request.userId]);
       if (!u.rows[0] || !(await verifyPassword(u.rows[0].password_hash, parsed.data.password))) return reply.code(401).send({ error: "Invalid credentials" });
+      if (u.rows[0].role === "owner") return reply.code(409).send({ error: "owner_account_protected", message: "The Owner account cannot be deleted from the website. Remove the Owner role with the server tool first." });
       const sub = await query<{ provider_subscription_id: string | null; status: string }>("SELECT provider_subscription_id, status FROM subscriptions WHERE user_id = $1", [request.userId]);
       const live = sub.rows[0]?.provider_subscription_id && !["canceled", "incomplete_expired"].includes(sub.rows[0].status);
       if (live) {

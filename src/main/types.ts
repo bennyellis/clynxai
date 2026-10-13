@@ -760,6 +760,8 @@ export interface BetaInfo {
   localModeAllowed: boolean;
   localMode: boolean;
   hasOpenAIKey: boolean;
+  /** There is local beta data on this computer that could be copied into an account (only when the person asks). */
+  localDataExists?: boolean;
   browser: { ok: boolean; using: string | null; found: string[]; instructions: string; downloadUrl: string };
 }
 export interface BackupSummary {

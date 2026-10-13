@@ -125,7 +125,8 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     if (!p.success || !b.success) return reply.code(400).send({ error: "Invalid request" });
     const target = await query<{ role: string }>("SELECT role FROM users WHERE id = $1", [p.data.id]);
     if (!target.rows[0]) return reply.code(404).send({ error: "Not found" });
-    if (p.data.id === request.userId || target.rows[0].role === "admin") return reply.code(409).send({ error: "cannot_disable_admin" });
+    // the Owner can never be disabled from here; an administrator can be disabled only by the Owner; nobody disables themselves
+    if (p.data.id === request.userId || target.rows[0].role === "owner" || (target.rows[0].role === "admin" && request.role !== "owner")) return reply.code(409).send({ error: "cannot_disable_admin" });
     await query("UPDATE users SET disabled_at = $1 WHERE id = $2", [b.data.value ? new Date() : null, p.data.id]);
     if (b.data.value) {
       await query("UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL", [p.data.id]);
