@@ -126,6 +126,16 @@ beforeAll(async () => {
   await makeAdmin(admin.id);
 });
 afterAll(async () => {
+  // leave nothing behind for the other test files: no stored credentials, default controls, no Owner
+  await pool.query("DELETE FROM integration_credentials");
+  await pool.query("DELETE FROM ebay_user_tokens");
+  await pool.query("UPDATE api_controls SET paid_api_enabled = true, disabled_reason = NULL, global_daily_usd = 20, global_monthly_usd = 200, user_daily_usd_free = 0.25, user_daily_usd_pro = 3, owner_daily_usd = 25 WHERE id = 1");
+  await pool.query("DELETE FROM api_user_blocks");
+  invalidateCredentialCache();
+  invalidateControls();
+  resetEbayTokens();
+  configureVault(null);
+  delete process.env.AI_RETRY_BASE_MS;
   await revokeOwner(owner.email).catch(() => undefined);
   setOutboundFetch(null);
   await app?.close();
