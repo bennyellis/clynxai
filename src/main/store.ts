@@ -12,6 +12,8 @@ import { assessListingAge } from "./listingAge.js";
 import { codesMissingFrom } from "./identity/codes.js";
 import { assessCodes, CodeIndex, NO_CODES, type CodeAssessment, type EvidenceDoc } from "./identity/credibility.js";
 import { IdentityFoundation } from "./identity/foundationStore.js";
+import { IdentitySafeguard, type SafeguardMode } from "./identity/safeguardRuntime.js";
+import type { ReviewInput } from "./identity/reviewFindings.js";
 
 // What a product is worth on eBay, as the total the BUYER pays (the sold item price plus the shipping they paid): the estimate when
 // there is one, else the sold average with its average shipping. The user keeps ~84% of that total (eBay's cut is on all of it).
@@ -45,11 +47,25 @@ export type CloudSyncedWatch = Omit<
   | "minSellerRatingPercent"
 > & { platform?: WatchPlatform; minSellerRatingPercent?: number | null };
 
+// A reference photo's source title as the listing title it came from: photos found on eBay are saved as "eBay listing: <title>"; the label is not part of the title.
+export function sourceTitleText(title: string): string {
+  return title.replace(/^\s*ebay listing:\s*/i, "").trim();
+}
+
 export class Store {
   private db: DatabaseSync;
   // The Database identity foundation (identity/foundationStore.ts): extra tables of candidate relations and evidence, created only when switched on in the
   // config. Null when off: no table exists and nothing reads or writes any.
   identity: IdentityFoundation | null = null;
+  // The veto-only identity safeguard (identity/safeguardRuntime.ts): "off" unless config.json says otherwise, and then it only ever REMOVES a match the existing matcher
+  // made (nothing is put in its place). Every Store path that turns a matched name into a product for filing or valuation asks it first.
+  readonly safeguard: IdentitySafeguard = new IdentitySafeguard({
+    entries: () => this.db.prepare("SELECT id, name FROM products").all() as Array<{ id: string; name: string }>,
+    evidenceDocs: () => this.extraEvidenceDocs(),
+  });
+  setIdentitySafeguard(mode: SafeguardMode, log?: ((record: Record<string, unknown>) => void) | null): void {
+    this.safeguard.setMode(mode, log);
+  }
   // Per explicit instruction — an in-memory accelerator in front of the
   // hasSeen() SQLite lookup below, benchmarked (not assumed) against the
   // plain DB-only path via metrics.ts's db_dedup_lookup/dedup_cache_check
@@ -658,7 +674,10 @@ export class Store {
     // needed at any of saveScored's several call sites. Same
     // findMatchingProduct fuzzy-name lookup used everywhere else in this
     // app to connect a plain matched-item name to a real Database entry.
-    const productId = extraction.matchedItem ? (this.findMatchingProduct(extraction.matchedItem)?.id ?? null) : null;
+    let matchedProduct = extraction.matchedItem ? this.findMatchingProduct(extraction.matchedItem) : null;
+    // Veto-only identity safeguard: a match the evidence says is a materially different product is not filed (the listing is still saved and shown).
+    if (matchedProduct && this.safeguard.vetoes({ title: listing.title, matchedName: extraction.matchedItem, entry: matchedProduct, seller: listing.seller?.name ?? null, site: "filing" })) matchedProduct = null;
+    const productId = matchedProduct?.id ?? null;
     this.db
       .prepare(
         `INSERT OR REPLACE INTO listings
@@ -855,19 +874,20 @@ export class Store {
   // up once, and only the few columns needed (name + the two prices) are read, in
   // the same order and with the same exact-then-fuzzy rule as findMatchingProduct.
   private enrichManyWithMatchedProductPricing(records: ListingRecord[]): ListingRecord[] {
-    const byName = new Map<string, { sold: number | null; run: number | null } | null>();
-    let candidates: Array<{ name: string; sold: number | null; run: number | null }> | null = null;
+    type Found = { id: string; name: string; sold: number | null; run: number | null };
+    const byName = new Map<string, Found | null>();
+    let candidates: Found[] | null = null;
     // The estimate (sold comps, nudged by asking prices when sold data is thin) when there is one, else the plain sold average.
-    const columns = `name, ${EBAY_VALUE_SQL} AS sold, ebay_avg_run_time_days AS run`;
-    const lookup = (name: string) => {
+    const columns = `id, name, ${EBAY_VALUE_SQL} AS sold, ebay_avg_run_time_days AS run`;
+    const lookup = (name: string): Found | null => {
       if (byName.has(name)) return byName.get(name)!;
-      let found: { sold: number | null; run: number | null } | null = null;
+      let found: Found | null = null;
       const exact = this.db.prepare(`SELECT ${columns} FROM products WHERE LOWER(name) = LOWER(?)`).get(name) as any;
-      if (exact) found = { sold: exact.sold ?? null, run: exact.run ?? null };
+      if (exact) found = { id: exact.id, name: exact.name, sold: exact.sold ?? null, run: exact.run ?? null };
       else {
         candidates ??= this.db.prepare(`SELECT ${columns} FROM products ORDER BY created_at DESC`).all() as any[];
         const similar = candidates.find((p) => isSimilarProductName(name, p.name));
-        if (similar) found = { sold: similar.sold ?? null, run: similar.run ?? null };
+        if (similar) found = { id: similar.id, name: similar.name, sold: similar.sold ?? null, run: similar.run ?? null };
       }
       byName.set(name, found);
       return found;
@@ -877,6 +897,8 @@ export class Store {
       // A listing titled "Xbox Series S" that was matched to the "Xbox Series X" entry must not show the Series X's price.
       if (modelLettersConflict(record.matchedItem, record.title)) return { ...record, matchedProductAvgSoldPriceUsd: null, matchedProductAvgRunTimeDays: null };
       const product = lookup(record.matchedItem);
+      // Veto-only identity safeguard: a vetoed match's price is not shown as this listing's market value.
+      if (product && this.safeguard.vetoes({ title: record.title, matchedName: record.matchedItem, entry: { id: product.id, name: product.name }, seller: record.sellerName, site: "display" })) return { ...record, matchedProductAvgSoldPriceUsd: null, matchedProductAvgRunTimeDays: null };
       return { ...record, matchedProductAvgSoldPriceUsd: product?.sold ?? null, matchedProductAvgRunTimeDays: product?.run ?? null };
     });
   }
@@ -884,13 +906,13 @@ export class Store {
   // What eBay says a product is worth (the estimate, else the sold average), looked up by a product's name for the
   // deal scoring that runs on every listing. Same exact-then-fuzzy rule as findMatchingProduct, but over just a name
   // and a number (not whole product rows with their photos), kept for a few seconds between lookups.
-  private ebayValueCache: { at: number; rows: Array<{ name: string; value: number | null }> } | null = null;
+  private ebayValueCache: { at: number; rows: Array<{ id: string; name: string; value: number | null }> } | null = null;
   getEbayValueForProductName(name: string, title?: string): number | null {
     const now = Date.now();
     if (!this.ebayValueCache || now - this.ebayValueCache.at > 10_000) {
       const rows = this.db
-        .prepare(`SELECT name, ${EBAY_VALUE_SQL} AS value FROM products`)
-        .all() as Array<{ name: string; value: number | null }>;
+        .prepare(`SELECT id, name, ${EBAY_VALUE_SQL} AS value FROM products`)
+        .all() as Array<{ id: string; name: string; value: number | null }>;
       this.ebayValueCache = { at: now, rows };
     }
     const rows = this.ebayValueCache.rows;
@@ -902,6 +924,8 @@ export class Store {
       const specific = this.moreSpecificProductForTitle(rows, found.name, title);
       if (specific) return specific.value !== null && specific.value > 0 ? specific.value : null;
     }
+    // Veto-only identity safeguard: a value taken from an entry the evidence says is a different product is not used (no value is better than a wrong one).
+    if (title && found && this.safeguard.vetoes({ title, matchedName: name, entry: { id: found.id, name: found.name }, site: "valuation" })) return null;
     return found && found.value !== null && found.value > 0 ? found.value : null;
   }
 
@@ -926,6 +950,37 @@ export class Store {
   // Evidence for deciding whether a code in a listing title is a real model / version marker (identity/credibility.ts): entry names, other
   // sellers' listing titles and reference-photo titles. Built the first time a listing states a code its entry lacks (most never do), kept for ten
   // minutes, and rebuilt when the number of entries changes.
+  /** What the Database review reads: names, filing, stored values, titles, and the candidate aliases and relations when the identity foundation is on. Reads only; no photo bytes. */
+  readReviewInput(): ReviewInput {
+    const products = this.db
+      .prepare("SELECT id, name, category, ebay_avg_sold_price_usd AS sold, ebay_comps_sample_size AS soldN, ebay_est_value_usd AS est, ebay_est_basis AS basis FROM products")
+      .all() as unknown as ReviewInput["products"];
+    const listings = this.db.prepare("SELECT id, title, product_id AS productId, seller_name AS seller FROM listings").all() as unknown as ReviewInput["listings"];
+    const photos = (this.db.prepare("SELECT id, product_id AS productId, source_title AS sourceTitle FROM product_images").all() as unknown as ReviewInput["photos"]).map((p) => ({ ...p, sourceTitle: p.sourceTitle ? sourceTitleText(p.sourceTitle) : p.sourceTitle }));
+    let relations: ReviewInput["relations"] = [];
+    let aliases: ReviewInput["aliases"] = [];
+    if (this.identity) {
+      try {
+        relations = this.db.prepare("SELECT from_product_id AS 'from', to_product_id AS 'to', relation, status FROM product_relations").all() as unknown as ReviewInput["relations"];
+        aliases = this.db.prepare("SELECT alias_text AS text, product_id AS productId, status FROM product_aliases").all() as unknown as ReviewInput["aliases"];
+      } catch {
+        /* the identity tables are not there yet */
+      }
+    }
+    return { products, listings, photos, relations, aliases };
+  }
+
+  // Listing titles and reference-photo titles as evidence documents (shared by the code index and the identity safeguard).
+  private extraEvidenceDocs(): EvidenceDoc[] {
+    const docs: EvidenceDoc[] = [];
+    for (const l of this.db.prepare("SELECT title, seller_name FROM listings").all() as Array<{ title: string; seller_name: string | null }>) {
+      docs.push({ text: l.title, origin: l.seller_name ? `seller:${l.seller_name.toLowerCase()}` : `title:${l.title.toLowerCase()}`, kind: "listing" });
+    }
+    for (const i of this.db.prepare("SELECT source_title FROM product_images WHERE source_title IS NOT NULL").all() as Array<{ source_title: string }>) {
+      docs.push({ text: sourceTitleText(i.source_title), origin: `title:${i.source_title.toLowerCase()}`, kind: "photo" });
+    }
+    return docs;
+  }
   private codeIndexCache: { at: number; products: number; index: CodeIndex } | null = null;
   private codeIndex(): CodeIndex {
     const now = Date.now();
@@ -933,12 +988,7 @@ export class Store {
     if (this.codeIndexCache && now - this.codeIndexCache.at < 600_000 && this.codeIndexCache.products === products) return this.codeIndexCache.index;
     const docs: EvidenceDoc[] = [];
     for (const p of this.db.prepare("SELECT id, name FROM products").all() as Array<{ id: string; name: string }>) docs.push({ text: p.name, origin: `product:${p.id}`, kind: "product" });
-    for (const l of this.db.prepare("SELECT title, seller_name FROM listings").all() as Array<{ title: string; seller_name: string | null }>) {
-      docs.push({ text: l.title, origin: l.seller_name ? `seller:${l.seller_name.toLowerCase()}` : `title:${l.title.toLowerCase()}`, kind: "listing" });
-    }
-    for (const i of this.db.prepare("SELECT source_title FROM product_images WHERE source_title IS NOT NULL").all() as Array<{ source_title: string }>) {
-      docs.push({ text: i.source_title, origin: `title:${i.source_title.toLowerCase()}`, kind: "photo" });
-    }
+    docs.push(...this.extraEvidenceDocs());
     const index = new CodeIndex(docs);
     this.codeIndexCache = { at: now, products, index };
     return index;
@@ -981,7 +1031,12 @@ export class Store {
     if (matchedItem) {
       const lower = matchedItem.toLowerCase();
       const hit = rows.find((r) => r.name.toLowerCase() === lower) ?? rows.find((r) => isSimilarProductName(matchedItem, r.name));
-      if (hit) return toSignals(this.moreSpecificProductForTitle(rows, hit.name, title) ?? hit);
+      if (hit) {
+        const chosen = this.moreSpecificProductForTitle(rows, hit.name, title) ?? hit;
+        // Veto-only identity safeguard: signals (value, sample, codes) from an entry that is a different product are not offered; the caller sees "no matched product".
+        if (this.safeguard.vetoes({ title, matchedName: matchedItem, entry: { id: chosen.id, name: chosen.name }, site: "signals" })) return null;
+        return toSignals(chosen);
+      }
     }
     const haystack = ` ${title.toLowerCase().replace(/[^a-z0-9]+/g, " ")} `;
     let best: { row: (typeof rows)[number]; words: number } | null = null;
@@ -990,6 +1045,7 @@ export class Store {
       if (words.length < 2 || !words.every((w) => haystack.includes(w)) || !compMatchesSpecs(r.name, title)) continue;
       if (!best || words.length > best.words) best = { row: r, words: words.length };
     }
+    if (best && this.safeguard.vetoes({ title, matchedName: null, entry: { id: best.row.id, name: best.row.name }, site: "signals-by-title" })) return null;
     return best ? toSignals(best.row) : null;
   }
 
@@ -1008,6 +1064,7 @@ export class Store {
       if (!compMatchesSpecs(r.name, title)) continue;
       if (!best || words.length > best.words) best = { name: r.name, value: r.value, words: words.length };
     }
+    if (best && this.safeguard.vetoes({ title, matchedName: null, entry: rows.find((r) => r.name === best!.name) ?? null, site: "valuation-by-title" })) return null;
     return best ? { name: best.name, value: best.value } : null;
   }
 
@@ -1077,6 +1134,7 @@ export class Store {
     this.db
       .prepare("INSERT INTO products (id, name, loading, created_at, updated_at) VALUES (?, ?, 1, ?, ?)")
       .run(id, name, now, now);
+    this.safeguard.invalidate();
     return id;
   }
 
@@ -1173,6 +1231,7 @@ export class Store {
     this.db
       .prepare("INSERT INTO products (id, name, category, image_url, keep_thumbnail, loading, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)")
       .run(id, name, category, imageUrl, imageUrl ? 1 : 0, now, now);
+    this.safeguard.invalidate();
   }
 
   updateProductProfile(
@@ -1437,6 +1496,7 @@ export class Store {
     const now = Date.now();
     if (patch.name !== undefined && patch.name.trim()) {
       this.db.prepare("UPDATE products SET name = ?, updated_at = ? WHERE id = ?").run(patch.name.trim(), now, id);
+      this.safeguard.invalidate();
     }
     if (patch.aiSummary !== undefined) {
       this.db.prepare("UPDATE products SET ai_summary = ?, updated_at = ? WHERE id = ?").run(patch.aiSummary, now, id);
@@ -1613,6 +1673,7 @@ export class Store {
 
   deleteProduct(id: string): void {
     this.db.prepare("DELETE FROM products WHERE id = ?").run(id);
+    this.safeguard.invalidate();
     this.db.prepare("DELETE FROM product_images WHERE product_id = ?").run(id);
     this.identity?.forgetProduct(id);
     // Batch 2 Fix B — see deleteWatch's own comment above; same reasoning,
@@ -1627,6 +1688,7 @@ export class Store {
   // Feed's clear-all never touches the Blacklist either.
   clearAllProducts(): void {
     this.db.exec("DELETE FROM product_images; DELETE FROM products;");
+    this.safeguard.invalidate();
     this.identity?.forgetAllProducts();
   }
 

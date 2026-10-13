@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { DiscoveryEntry } from "../main/discovery.js";
+import type { AuditEvent, DecideResult, ReviewSnapshot } from "../main/identityReview.js";
 import type { OnboardingState } from "../main/types.js";
 import type { Account, ActiveProductResearch, BlacklistedImage, BlacklistTerm, CloudStatus, Config, FeedbackVerdict, ListingRecord, LogLine, ProductImage, ProductProfile, ScrapeStatus, Watch, WatchMatch, WatchPlatform } from "../main/types.js";
 import type { ChatMessage, ChatContext, ChatAttachment } from "../main/chat.js";
@@ -373,6 +374,11 @@ const api = {
   },
   // The Database's Discovery tab: the live feed of products Clynx is looking into, with its thoughts on each.
   getDiscoveryFeed: (): Promise<DiscoveryEntry[]> => ipcRenderer.invoke("discovery:list"),
+  // The Database > Review screen (review-only: these read; deciding is refused unless switched on in config.json, and never changes the Database).
+  getIdentityReview: (): Promise<ReviewSnapshot | null> => ipcRenderer.invoke("review:get"),
+  runIdentityReview: (): Promise<ReviewSnapshot> => ipcRenderer.invoke("review:run"),
+  getIdentityReviewHistory: (): Promise<AuditEvent[]> => ipcRenderer.invoke("review:history"),
+  decideIdentityReview: (proposalId: string, decision: "approved" | "rejected" | "clear", note?: string | null): Promise<DecideResult> => ipcRenderer.invoke("review:decide", { proposalId, decision, note: note ?? null }),
   onDiscoveryEntry: (cb: (entry: DiscoveryEntry) => void) => {
     const listener = (_e: unknown, entry: DiscoveryEntry) => cb(entry);
     ipcRenderer.on("discovery:entry", listener);

@@ -43,6 +43,8 @@ import {
 import { lookupTopCitiesInState } from "./locationDiscovery.js";
 import { analyzeEbayComps, deriveWatchCountQuery, type CompAnalysis } from "./watchcount.js";
 import { specificResearchName } from "./identity/credibility.js";
+import { createSafeguardLogger } from "./identity/safeguardLog.js";
+import { IdentityReview } from "./identityReview.js";
 import { fetchActiveAsks } from "./ebayActive.js";
 import { resolveIdentityTarget } from "./productIdentity.js";
 import { buyerTotalUsd, estimateMarketValue } from "./marketValue.js";
@@ -2010,6 +2012,24 @@ async function runPhotoBackfill(): Promise<number> {
 // thrown, since nothing awaits this.
 // The Database identity foundation's background fill (identity/foundationStore.ts): only when switched on in the config, a minute after startup, in steps of
 // about 20 milliseconds with a longer pause between them, and it stops as soon as the Database it was started for is closed. It only writes the identity tables.
+// Veto-only identity safeguard (config.identitySafeguard.mode, off unless config.json says otherwise). Applied once when the Database is opened.
+// The Database review screen's backend (review-only; see identityReview.ts). Created lazily, on the first request.
+let identityReview: IdentityReview | null = null;
+function reviewService(): IdentityReview {
+  identityReview ??= new IdentityReview(
+    { readReviewInput: () => store.readReviewInput() },
+    path.join(app.getPath("userData"), "identity-review"),
+    () => config.databaseReview?.decisions === true,
+  );
+  return identityReview;
+}
+
+function applyIdentitySafeguard(): void {
+  const mode = config.identitySafeguard?.mode === "shadow" || config.identitySafeguard?.mode === "enforce" ? config.identitySafeguard.mode : "off";
+  store.setIdentitySafeguard(mode, mode === "off" ? null : createSafeguardLogger(path.join(app.getPath("userData"), "logs")));
+  if (mode !== "off") console.log(`[identity] safeguard mode: ${mode}`);
+}
+
 function scheduleIdentityBackfill(): void {
   if (config.identityFoundation?.schema !== true || config.identityFoundation?.backfill !== true) return;
   const target = store;
@@ -2876,6 +2896,7 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   // A damaged database is moved aside (never deleted) and a fresh one started, instead of the app failing to log in.
   const dbOpen = openWithRecovery(DB_PATH, () => new Store(DB_PATH, { identityFoundation: config.identityFoundation?.schema === true }));
   store = dbOpen.store;
+  applyIdentitySafeguard();
   if (dbOpen.recovered) {
     const kept = dbOpen.recovered.damagedCopy ? ` The old database was kept as ${path.basename(dbOpen.recovered.damagedCopy)} in your Clynx data folder.` : "";
     notices.set({
@@ -3668,6 +3689,13 @@ app.whenReady().then(() => {
   ipcMain.handle("research:status", (): ActiveProductResearch[] => Array.from(activeResearch.values()));
   // The Discovery tab's snapshot (live updates arrive as "discovery:entry", see the DiscoveryFeed above).
   ipcMain.handle("discovery:list", () => discovery.list());
+  // The Database > Review screen. Everything here reads; nothing changes a Database entry (see identityReview.ts). "review:decide" is refused unless
+  // config.databaseReview.decisions is on, takes exactly one suggestion, and even then only records the decision.
+  ipcMain.handle("review:get", () => reviewService().get());
+  ipcMain.handle("review:run", () => reviewService().run());
+  ipcMain.handle("review:history", () => reviewService().history());
+  ipcMain.handle("review:decide", (_e, args: { proposalId: string; decision: "approved" | "rejected" | "clear"; note?: string | null }) =>
+    reviewService().decide(args?.proposalId, args?.decision === "approved" || args?.decision === "rejected" ? args.decision : "clear", args?.note ?? null));
   // The Database screen's own client-side cache of folder-level thumbnails
   // (see ensureGroupThumbnail above) — fetched once up front since this
   // dataset stays small (one row per distinct sub-grouping actually seen),

@@ -127,6 +127,30 @@ run(() => {
     check("a variant word with no entry ('oled') is listed as unresolved, the match is not claimed as high", l14.product?.name === "Nintendo Switch" && l14.sureness !== "high" && l14.unresolved.some((u) => /oled/.test(u)), l14);
   }
 
+  section("regressions found while building the veto-only safeguard (each was a real wrong answer)");
+  {
+    const E = [
+      "Joy-Con Pair", "Nintendo Switch", "Nintendo Switch (Nintendo Switch 2)", "Switch 2", "Xbox Series S", "Xbox Series S 512GB", "Xbox Series S Console (includes wireless controller)", "Terraria",
+      "Fender Stratocaster", "Mixer Pro 5", "Mixer Pro 5 with 2 bowls",
+    ].map((name, i) => ({ id: `q${i}`, name }));
+    const c = buildContext(E, []);
+    const L = (t: string) => resolveListing(t, E, c, {});
+    const r1 = L("For Nintendo Switch Wireless Joy Con Pair L+R");
+    check("a title that BEGINS with 'for' is the item, not an accessory for what follows", !(r1.verdict === "related" && r1.relation === "goes-with"), r1);
+    const r2 = L("Nintendo Switch (Nintendo Switch 2) console");
+    check("a bracket that repeats the name and adds a word is the same name written out, not a host", !(r2.verdict === "related" && r2.relation === "goes-with"), r2);
+    const r3 = L("Microsoft Xbox Series S 512GB Console Gaming System White Tested");
+    check("a title that states 512GB resolves to the 512GB entry, not a bundle entry whose contents it never states", r3.verdict === "confirmed" && r3.product?.name === "Xbox Series S 512GB", r3);
+    const r4 = L("Terraria - Xbox One - Sealed");
+    check("a one-word game title is a product, not a family-level entry (no 'family' relation, no 'member of this family')", !(r4.relation === "family"), r4);
+    const r5 = L("Mixer Pro 5 with 2 bowls and a dough hook");
+    check("a bundle entry fits a title that states its contents", r5.verdict === "confirmed" && r5.product?.name === "Mixer Pro 5 with 2 bowls", r5);
+    const r6 = L("Mixer Pro 5 stand mixer red");
+    check("and the plain entry is chosen when the contents are not stated", r6.product?.name !== "Mixer Pro 5 with 2 bowls", r6);
+    const v = compareProducts(c.info("q8")!, c.info("q8")!, c);
+    check("a product is the same as itself", v.verdict === "confirmed");
+  }
+
   section("never confident-and-wrong on the adversarial set");
   {
     const wrongConfirm = [

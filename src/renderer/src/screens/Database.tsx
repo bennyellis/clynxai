@@ -6,6 +6,7 @@ import { useLightbox } from "../components/ImageLightbox.js";
 import { ThumbnailSizeSlider, useThumbnailSize } from "../components/ThumbnailSize.js";
 import { WatchFormFlow } from "../components/WatchFormFlow.js";
 import { DiscoveryTab } from "./DiscoveryTab.js";
+import { ReviewTab } from "./ReviewTab.js";
 import { keepRangeUsd } from "../../../main/resaleMath.js";
 import { imageSource } from "../lib/imageSource.js";
 
@@ -17,7 +18,7 @@ import { imageSource } from "../lib/imageSource.js";
 // to another top-level screen and back the same way every other bit of
 // this screen's own state already does (Database itself never unmounts —
 // see App.tsx).
-type DatabaseTab = "discovery" | "library" | "blacklist";
+type DatabaseTab = "discovery" | "library" | "review" | "blacklist";
 
 // Mirrors chat.ts's PRODUCT_CATEGORIES — only used here to pick a stable,
 // sensible display order for section headers (real grouping just uses
@@ -811,7 +812,7 @@ export function Database({
     );
   }
 
-  const TAB_LABELS: Record<DatabaseTab, string> = { discovery: "Discovery", library: "Library", blacklist: "Blacklist" };
+  const TAB_LABELS: Record<DatabaseTab, string> = { discovery: "Discovery", library: "Library", review: "Review", blacklist: "Blacklist" };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20, height: "100%" }}>
@@ -843,7 +844,7 @@ export function Database({
               background: tab === t ? "var(--bg-card-hover)" : "transparent",
             }}
           >
-            {t === "discovery" ? "🔭 " : t === "library" ? "📚 " : "🚫 "}
+            {t === "discovery" ? "🔭 " : t === "library" ? "📚 " : t === "review" ? "🔎 " : "🚫 "}
             {TAB_LABELS[t]}
             {t === "library" && products.length > 0 ? ` (${products.length})` : ""}
           </button>
@@ -1114,6 +1115,17 @@ export function Database({
               </div>
             </Modal>
           )}
+        </div>
+      )}
+
+      {tab === "review" && (
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <ReviewTab
+            onOpenProduct={(id) => {
+              setSelectedProductId(id);
+              setTab("library");
+            }}
+          />
         </div>
       )}
 

@@ -954,6 +954,16 @@ export class ScrapeEngine {
     );
   }
 
+  // Veto-only identity safeguard (identity/safeguardRuntime.ts): true only when it is on in "enforce" mode and the evidence says the matched entry is a materially different
+  // product. Never throws and never blocks a listing: any problem means the match stands.
+  private identityVeto(args: { title: string | null; matchedName: string | null; entry: { id: string; name: string } | null; seller?: string | null; site: string }): boolean {
+    try {
+      return this.opts.store.safeguard?.vetoes(args) === true;
+    } catch {
+      return false;
+    }
+  }
+
   // Same fire-and-forget enrichment pattern used for a confirmed deal, via
   // OpenAI's vision capability (src/main/vision.ts) — entirely optional,
   // silently does nothing useful if OPENAI_API_KEY was never set. Findings
@@ -1037,11 +1047,14 @@ export class ScrapeEngine {
     // knowledge of what "claimedItem" looks like — this is what lets it
     // reliably say an Xbox Series X and a PS5 don't look alike, or that a
     // photo showing just a controller isn't a full console.
-    const claimedProduct = linkedProductId
+    let claimedProduct = linkedProductId
       ? this.opts.store.getProductById(linkedProductId)
       : claimedItem
         ? this.opts.store.findMatchingProduct(claimedItem)
         : null;
+    // Veto-only identity safeguard: reference photos of an entry the evidence says is a different product would mislead the photo check. (A product the user
+    // explicitly linked is never second-guessed.)
+    if (claimedProduct && !linkedProductId && this.identityVeto({ title, matchedName: claimedItem, entry: claimedProduct, site: "reference-photos" })) claimedProduct = null;
     // Condition-awareness — a poor-condition/damaged reference photo would
     // be misleading "ground truth" for a matchesClaim identity comparison
     // (the whole point is confirming this IS the claimed product, not
@@ -2291,7 +2304,9 @@ export class ScrapeEngine {
     if (scored.isDeal && listing.price !== null) {
       const price = listing.price;
       for (const subject of rawSubjects) {
-        const capProduct = this.opts.store.findMatchingProduct(subject);
+        const foundCapProduct = this.opts.store.findMatchingProduct(subject);
+        // Veto-only identity safeguard: a price cap set on a DIFFERENT product must not hide this listing (it only ever removes a reason to skip).
+        const capProduct = foundCapProduct && this.identityVeto({ title: listing.title, matchedName: subject, entry: foundCapProduct, site: "hard-cap" }) ? null : foundCapProduct;
         if (capProduct?.hardCapAtDesiredPrice && capProduct.desiredPriceUsd != null && price > capProduct.desiredPriceUsd) {
           this.log(
             "info",
@@ -2373,6 +2388,12 @@ export class ScrapeEngine {
       if (isLowAiMode() && !photoResult) continue;
       const subjectImageDataUri = photoResult?.productPhotos[subject] ?? (await fallbackImage());
       const existingProduct = this.opts.store.findMatchingProduct(subject);
+      // Veto-only identity safeguard: the existing matcher chose this entry, the evidence says the listing is a materially different product. Nothing is added to the
+      // entry (no note, no photo, no price) and no other entry is created or chosen in its place; the listing itself is unaffected.
+      if (existingProduct && this.identityVeto({ title: listing.title, matchedName: subject, entry: existingProduct, site: "reinforce" })) {
+        this.log("info", `Identity safeguard: "${listing.title}" is not "${existingProduct.name}" — nothing was added to that entry.`, undefined, existingProduct.name);
+        continue;
+      }
       // Condition-awareness — most of this correction mechanism already
       // existed (this loop already reinforces/creates whatever vision
       // itself believes the photos show, via findMatchingProduct's fuzzy

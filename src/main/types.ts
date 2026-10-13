@@ -359,6 +359,13 @@ export interface Config {
   // the Database when it is opened; `backfill` (needs schema) fills them in small background steps a minute after startup. Nothing reads them to pick, merge
   // or value a product.
   identityFoundation?: { schema: boolean; backfill: boolean };
+  // Veto-only identity safeguard (Phase 4). OFF by default and changed only by editing config.json (then restart). "shadow" evaluates every match the existing matcher
+  // makes and writes the decision to logs/identity-safeguard.jsonl without changing anything; "enforce" additionally stops a match the evidence says is a materially
+  // different product from being filed, valued or added to. It never chooses another product. Uncertainty is never a veto.
+  identitySafeguard?: { mode: "off" | "shadow" | "enforce" };
+  // Database review screen (Database > Review). It always works in REVIEW-ONLY mode: it shows suspected problems and the suggestion for each and changes nothing. `decisions`
+  // (off by default, config.json only) would let a person record approve / reject for ONE suggestion at a time; even then nothing is applied to the Database by the app.
+  databaseReview?: { decisions: boolean };
   // First-run checklist ("Get started" on the Dashboard). Which steps are done is worked out from the real state where it can be (a Facebook
   // login, a search location, a product, a phone topic); these flags only remember what cannot be seen from the state.
   onboarding?: OnboardingState;

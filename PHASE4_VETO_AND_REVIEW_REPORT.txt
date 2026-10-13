@@ -1,0 +1,218 @@
+CLYNX - PHASE 4: VETO-ONLY IDENTITY SAFEGUARD AND DATABASE REVIEW SCREEN
+Completion report. Implemented and validated in shadow mode on isolated copies. NOTHING IS ACTIVE: the new matching behaviour is off by default and was not switched on for
+your real app; the review screen is review-only; none of the 56 proposed corrections (now 55, see section 3) was applied; your live Database, your Config and your
+real profiles were not touched.
+
+What I did in one paragraph: when the existing matcher picks a Database entry for a listing, an optional safeguard now asks the foundation resolver whether the listing and
+that entry are materially different products. If it has reliable evidence that they are, the match is "vetoed": the listing is not filed under that entry, the entry's
+price is not used for it, nothing is added to that entry, and nothing else is chosen in its place. If it only has doubt, the match stands, exactly as today. It is switched
+by one line in config.json (off / shadow / enforce) and is off. Separately, Database > Review is a new screen that lists suspected problems with the evidence, side-by-side
+existing/suggested, the exact data that would change, and an audit history, with Approve/Reject present but switched off.
+
+
+======================================================================
+1. EXACT FILES CHANGED AND COMMITS
+======================================================================
+Rollback checkpoint (before this stage): tag checkpoint-before-phase4-veto (= commit 671521e, the Stage 3b/6a report).
+This stage: @@COMMIT@@
+
+New, in src/main:
+  identity/safeguard.ts          the decision: allow / veto / unsure for one (listing, matched entry). Pure.
+  identity/safeguardRuntime.ts   mode switch (off/shadow/enforce), cached view of the Database, decision cache, counters, log hook. Fails open.
+  identity/safeguardLog.ts       the decision log writer (logs/identity-safeguard.jsonl, capped at 2 MB)
+  identity/reviewFindings.ts     the review analysis (findings, evidence labelled confirmed/heuristic, side-by-side rows, exact-change previews, proposals). Pure. One
+                                 implementation behind both the screen and the audit tool.
+  identityReview.ts              the screen's backend: reads, runs the analysis, append-only audit history, decisions (refused unless switched on). No write code.
+  __tests__/safeguard.test.ts (37 checks), safeguardDiscovery.test.ts (8), identityReview.test.ts (35)
+New, in src/renderer: screens/ReviewTab.tsx (the Review tab).
+New, audit tools (offline, copies only): audit/phase4_shadow/safeguard_shadow.ts, bench_safeguard.ts.
+Changed:
+  store.ts           holds the safeguard; asks it in 6 places (filing, Feed display, valuation by name, valuation by title, signals by name, signals by title); readReviewInput();
+                     invalidates the safeguard's view when entries are added / renamed / removed; sourceTitleText() strips the "eBay listing:" label of photo titles
+  scrapeEngine.ts    asks it in 3 places (the entry's reference photos for the photo check, the hard price cap, adding a note/photo to an entry)
+  index.ts           applies the mode from config once at startup; 4 review IPC handlers (get / run / history / decide)
+  types.ts, config.ts   config.identitySafeguard.mode = "off", config.databaseReview.decisions = false
+  preload/index.ts, renderer lib/api.ts, screens/Database.tsx   the Review tab and its API
+  identity/foundationResolver.ts   fixes found by the validation (listed in section 3)
+  audit/phase4_shadow/stage6a_audit.ts   now a thin wrapper over reviewFindings.ts (same code as the screen)
+  __tests__/shadowSafety.test.ts, foundationResolver.test.ts   extended
+Not changed: the Deal Quality Gate and every threshold, scanning coverage and what is searched, notifications, the existing matcher (isSimilarProductName and
+findMatchingProduct are untouched and still choose the entry first), the correction journal (audit/phase4_shadow/correction_journal.ts, untouched, still tested).
+
+
+======================================================================
+2. HOW THE VETO INTEGRATES WITH MATCHING, VALUATION AND FILING
+======================================================================
+Matching: unchanged. The existing matcher still picks an entry from the name the AI extracted. The safeguard looks at that pick afterwards. It never picks anything.
+
+The decision (identity/safeguard.ts), made category-agnostically from the listing title (and the extracted name, which can only add a veto and never confirm, because it is
+the very string that picked the entry):
+  allow    the title states what the entry states, or the resolver says it is the same product under another entry.
+  unsure   everything else that is not provable: a more specific variant of the same family, a bundle, an edition, rare or unfamiliar words, a mangled title, a capacity,
+           a model number, a code nobody else uses, two products named together. Treated EXACTLY like allow by every caller. Uncertainty is never proof of a difference.
+  veto     only when there is reliable evidence of a materially different product:
+             (1) the title is confidently ANOTHER entry and the resolver says the two are different products (a code, number, size or each-side extra differs);
+             (2) the title is something that goes WITH the entry (an accessory or a game for it) or the entry is only named as what the item is for;
+             (3) the title is another, more specific entry that differs by a single-letter model marker or a word the data itself uses to tell entries apart in several
+                 places ("3S" vs "3", "Plus" vs the plain model), never by a capacity;
+             (4) one entry clearly leads the title and the matched entry is plainly a different product, or the matched entry is what the leading item goes with.
+  Not judged: an entry that stands for a condition (the "(For Parts / Broken)" variants). The reference-photo check never second-guesses a product the user explicitly linked.
+  I tried and REMOVED two more rules because they were wrong too often when measured: calling the title a "variant" of its own entry because of a code or word seen in
+  other titles (that rule produced 68 of the first 85 photo-title vetoes, and in the 30 I read by hand most were wrong: specs, colours, regions, a model number of the same product), and calling a trailing extra word ("Mark II") a variant (3 false vetoes on
+  true duplicates). The limit this leaves is in section 7.
+
+Filing (store.saveScored): a vetoed match is filed under no entry (product_id stays empty). The listing is still saved, still in the Feed, still goes through the Gate.
+Valuation (store.getEbayValueForProductName / getEbayValueForTitle, used by the scorer): a vetoed match gives no value (null), exactly what an unknown product gives.
+  The Gate then treats the listing like any product the Database has not seen: Worth a look at worst; a deal when the market check prices what it really is (tested).
+Evidence for the Gate (store.getProductSignals): a vetoed match offers no signals, so none of that entry's value, sample, age or codes reach the verdict.
+Feed display (the "matched product price" on a card): withdrawn for a vetoed match.
+Adding to an entry (scrapeEngine): nothing (no note, no price, no photo) is added to the vetoed entry, and NO other entry is created or chosen in its place.
+Hard price cap on the entry: a vetoed match cannot trigger it (it can only remove a reason to skip a listing).
+Reference photos for the photo check: a vetoed entry's photos are not used for that listing.
+Stage 1.1 rule: untouched. A seller's code that nobody else uses is still note-only; it never causes research, never suppresses a deal, and is never a reason to veto
+(tested). Gate thresholds: untouched (the real Gate is used in the discovery tests).
+Fails open: any error, an entry the resolver does not know yet, an empty title - the match stands. Off means nothing is built, computed or logged (tested: zero cost).
+Not covered (stated plainly): the valuation of the "(For Parts / Broken)" variant looks the entry up by name only (no title available there); a watch-for note on an entry is
+still passed to the photo check as a hint; the user-initiated product flows in index.ts (adding, merging, chat) do not use listing titles and are untouched.
+
+
+======================================================================
+3. SHADOW-MODE RESULTS (isolated copy of your Database copy, 230 listings, 579 entries, 507 photo titles)
+======================================================================
+Method. The safeguard ran through the same code path the app uses, in shadow mode, against hand labels (mine; one reviewer): the listing chain exactly as the app does it
+(extracted name -> existing matcher -> entry), 1,128 directional "title was matched to this entry" cases built from the 564 hand-labelled product pairs, and the 507
+reference photos with the entry each is filed under. Real Electron, same copy: shadow mode logged 34 decisions for the Feed's listings (3 would be vetoed), enforce mode
+withdrew the displayed market value on 2 of 230 listings, listed all 230, and left every stored row identical.
+
+Existing-matcher listings (41 of the 230 are matched by the existing chain; 189 are not matched to any entry):
+  35 matches are right: 33 allowed, 2 left unsure (they stand), 0 vetoed        -> FALSE VETOES: 0
+   6 matches are wrong: 3 vetoed (a controller listing "for Xbox Series X|S" matched to Xbox One S; "iPhone 15+" matched to iPhone 15 - it is the Plus; a PS5 listing with
+                         DualSense controllers matched to the DualSense charging station - the filing error found in the audit), 3 left unsure (a mangled
+                         "Xbox one Series S" title twice, and "1TB" matched to the plain Series S)        -> INCORRECT MATCHES BLOCKED: 3 of 6; MISSED: 3 of 6
+Pairs the existing matcher WOULD match (75 pairs, 150 directions): of the 94 wrong ones, 76 blocked (81%), 18 unsure (missed), 0 allowed by confirmation; 0 of the right or
+  ambiguous ones vetoed.   Examples blocked: a game with the console it names, an accessory with its console, a Fanatec V2 with a V2.5.
+All labelled pair cases (1,128): 350 of 1,040 wrong ones blocked, 0 of 28 right and 0 of 60 ambiguous ones vetoed.
+Filed reference photos (507): 244 allowed, 248 unsure, 15 vetoed. By hand 14 of the 15 are right (a racing wheel under the Ps5 entry, a PS5 bundle photo under two game
+  entries, Quest 3S under Quest 3, a power bank under "iPhone", a controller listing under the DualSense entry, parts for a car under the car's entry); 1 is wrong (a
+  power cord filed under a power-cable entry).
+FALSE VETOES in total: 0 of 123 labelled right/ambiguous cases (35 listings, 28 pairs, 60 ambiguous), and 1 of 507 filed photo titles.
+MISSED INCORRECT MATCHES: 3 of 6 listings; 18 of 94 pair directions; the misses are all "unsure", never "allowed because confirmed". What stays unsure: console variants
+  separated by one plain word ("New 3DS XL" / "3DS XL", "3DS LL"), a console and its dock or charger when the name does not say so ("Nintendo Switch" / "Nintendo Switch
+  Dock"), a game whose platform follows a dash, and a mangled title that fits two entries equally.
+
+The tests the requirement named (src/main/__tests__/safeguard.test.ts; expectations written before running):
+  ambiguous identities (a title that fits two entries, mangled titles, a bare "Selling my old camera"): never vetoed.
+  rare items (a graded Charizard card, a first-edition signed book): never vetoed.   accessories (a strap or case "for" a camera, a wired pad "for" a console, a game
+  "(Nintendo 3DS)" against the console): vetoed.   bundles (a phone "with case, charger and screen protector", a console "and a blue controller"): never vetoed.   editions
+  (Halo Special Edition, an OLED model with no entry): never vetoed.   unfamiliar categories (guitars and pedals, cameras and lenses, power tools, vacuums, pressure cookers,
+  sneakers, jeans, cars, furniture, books, coffee gear): different models/sizes vetoed, same product never vetoed. 12 legitimate matches in 12 different categories: 0 vetoed.
+Potentially profitable listings stay discoverable (safeguardDiscovery.test.ts, real Deal Quality Gate): a vetoed listing gets exactly what an unknown product gets (Worth a
+  look, saved and shown), a vetoed listing the market check prices at its true value is a qualified deal, and an unsure match produces a verdict IDENTICAL to safeguard off.
+Vetoed matches cannot contribute to confident valuations: with the safeguard enforcing, the entry's value is not returned for the vetoed listing (null) while the stored value
+  is unchanged for every other listing (tested on the stored rows).
+
+Resolver fixes this validation forced (each has a regression test): a title that begins with "for" was read as an accessory for the words after it; a bracket that repeats the
+name was read as a host; a bundle entry matched a title that never states its contents; a capacity in the title did not outrank an entry with none; one-word game titles were
+treated as brand-level families; a bundle entry now outranks the plain entry when the title states its contents.
+The review's numbers moved slightly because of those fixes: 26 entries (4.5%) now carry a finding that could put a wrong product or number in front of a decision (it was 27 in
+the previous report), 55 suggestions (it was 56). The stage 3b comparison is unchanged: foundation resolver 0 false matches, 2 of 14 true duplicates confirmed.
+
+
+======================================================================
+4. DATABASE REVIEW SCREEN - EVIDENCE
+======================================================================
+Real Electron, sandboxed, on an isolated copy of your Database copy (556 MB). Screenshots (private, they show your product names):
+  C:\Users\biggt\ClynxShadowOutput_review\screenshots\
+    1_review_tab_before_run.png                              the tab and its banner: "Review only - this screen changes nothing"
+    2_review_findings.png                                    144 findings by category; "Incorrect filing (54, 8 confirmed)", "Suspected duplicate (5, 2 confirmed)", ...
+    3_review_finding_side_by_side.png                        one finding open: evidence lines each labelled Confirmed evidence / Heuristic suggestion, the side-by-side table
+    3b_review_exact_change_preview_and_disabled_approve.png  "Exactly what would change": row, field, now, after; Approve/Reject greyed out with the reason
+    4_review_valuation_finding.png                           a suspicious-valuation finding
+    5_review_audit_history.png                               the history: the run, the refused approval, the refused bulk attempt
+What the screen does against your list: shows flagged products with the evidence; distinguishes incorrect filing, suspected duplicate, generic entry, ambiguous identity,
+suspicious valuation (plus disputed alias); shows existing and suggested side by side; labels every evidence line and every suggestion Confirmed or Heuristic; has Approve and
+Reject per suggestion (disabled - review-only); previews exactly which stored values would change (a move names the photo/listing, the field, where it is now and where it
+would go; clearing a value lists each stored number); keeps an append-only audit history (every run, every decision, every refused attempt); has NO bulk control (the backend
+refuses several ids, the screen has none); and contains no code that applies a suggestion (the backend has no write SQL; the existing correction journal remains the only apply/undo
+mechanism, in the audit tools, tested on scratch copies, and is not connected to the app).
+Switches: config.databaseReview.decisions (off). Even when on, a decision is only a note about ONE suggestion ("appliedToDatabase: false" in the history); the app never
+changes your Database from this screen. Verified in the real app: a run changed nothing (content digest of products, listings and photos identical before and after).
+The round trip of the undo mechanism was re-run on the final plan: apply 38 changes, undo, byte-identical; undo in halves; hand edit protected; stale plan applies nothing.
+
+
+======================================================================
+5. PERFORMANCE AND API COST
+======================================================================
+Off (the default): nothing is built or computed; no measurable difference (tested: zero evaluations, zero context builds).
+Enforcing, synthetic library (made-up names; per lookup that includes the safeguard):
+  1,000 entries:   valuation lookup 0.89 ms -> 1.32 ms (+0.43 ms); signals lookup 2.03 -> 1.95 ms; first use builds the view once: 45 ms; memory held +4 MB
+  10,000 entries:  valuation lookup 9.2 -> 10.2 ms (+1.0 ms); signals lookup 18.5 -> 18.3 ms; first use 457 ms once (then at most once every 30 s after an entry changes, or
+                   every 5 minutes); memory held +31 MB
+  Your copy (579 entries): 1,655 decisions took 264 ms in total (0.16 ms each), view built in 35 ms.
+Candidate retrieval keeps the cost flat: the resolver reads only entries that share a distinguishing word with the title, not the whole Database.
+Review screen: the analysis takes 280 ms for 579 entries; click-to-findings on screen in the real app 385-410 ms (556 MB library). It runs only when you press Run.
+App startup / GPU / memory (Phase 3): large-library startup benchmark (396 MB library, three launches, run twice): time to Dashboard 162-303 ms (earlier runs of
+this benchmark: 165-329 ms; before Phase 3: 1,012 ms); JS heap 10 MB; main process 127-130 MB, renderer 111-116 MB, GPU 188-196 MB: all the same as before this stage.
+Cost: 0 AI calls, 0 web calls, 0 eBay/comparable-sale lookups, 0 network attempts (counted in every tool; the safeguard is local code). The review makes none either.
+
+
+======================================================================
+6. UNIT AND ELECTRON TEST RESULTS
+======================================================================
+Type check (main + renderer): clean.
+Unit tests: all 33 test files pass (30 before this stage). New: safeguard.test.ts (37 checks), safeguardDiscovery.test.ts (8), identityReview.test.ts (35); extended:
+foundationResolver.test.ts (46, with regression checks for each resolver fix), shadowSafety.test.ts (the new modules are pure, the safeguard and review defaults are off, nothing
+in the renderer or preload can change the mode, nothing in the app applies a suggestion).
+Real-Electron regression, 16 suites run one after another in sandboxes with a fake cloud server and no real accounts: all 16 exit 0, 294 checks passed, 0 failed (the
+onboarding suite now exits by itself). After the last small resolver change I rebuilt and re-ran the startup suite (18 passed), the review and safeguard suite (22 passed) and
+the identity-foundation suite. That last one failed 2 timing checks once (Dashboard 7.2 s and a 1.8 s stall) in a run started right after heavy benchmark tools; it passed in
+the full regression and in two further reruns (16 passed each time), so I treat it as machine noise, but I am telling you.
+New real-Electron suite t13 (22 checks): default config has the safeguard off; Review tab review-only; run changes nothing; refused decision and refused bulk attempt appear in
+the history; shadow mode logs and changes nothing; enforce mode keeps all 230 listings, withdraws only vetoed values, changes nothing stored; no errors in the app's output.
+
+THE ONBOARDING TEST THAT DID NOT EXIT (your item 9). Root cause found and fixed: nothing was wrong with the app or with the checks. That suite ends with the Config screen
+open and an unsaved edit in a field (it just tested "Replace with a new private topic"). Clynx correctly asks "Unsaved Config changes - Save, Cancel, Discard & close" before
+closing a window with unsaved edits, and the test harness's close call waited for an answer nobody gave. The harness now answers "Discard & close" like a user who wants out,
+and the suite prints its summary and exits (41 passed, 0 failed; exit 0). The app's behaviour is unchanged (it is the intended protection against losing a Config edit).
+
+
+======================================================================
+7. REMAINING LIMITATIONS
+======================================================================
+ 1. Small samples, one reviewer. 6 wrong listing matches, 94 wrong pair directions, 507 photo titles; labels are mine. The false-veto count (0 of 123 labelled cases, 1 of
+    507 photos) is an estimate, not a guarantee; a tool-built set mostly from video games and phones.
+ 2. Recall is modest by design. It blocks about 81% of the wrong matches the existing matcher would make on this data and 3 of 6 on the live-chain listings; the rest are
+    left unsure and stand. In a Database with few entries kept in pairs, words like "Plus" or "S" carry no evidence, so more stays unsure.
+ 3. A "Mark II", an "XL", a dock, a charger: a trailing word alone is not enough, so a console matched to its dock stays unsure.
+ 4. The 3 of 6 missed listings include mangled titles and a capacity; none is misfiled worse than today.
+ 5. Leading words (maker, "New", "Handmade") are ambiguous; "New Nintendo 3DS XL" against "Nintendo 3DS XL" is left unsure.
+ 6. Titles that name several products are sometimes vetoed against the product that is NOT leading; that is intended (a lot is not a single product) but it removes that
+    entry's value for the lot.
+ 7. One photo-title veto in 507 was wrong (a power cord against a power-cable entry). The photo population has no listing-style hand labels beyond my reading.
+ 8. The review's confirmed/heuristic labels are as good as the resolver; valuation findings can only see the stored average and sample size, not the individual sold comparables;
+    400 of 579 entries have nothing filed under them and cannot be audited.
+ 9. The mode is read at startup (restart after editing config.json); the safeguard never re-files, never creates, never merges; "unsure" listings are valued exactly as before.
+10. Not covered: see the end of section 2.
+
+
+======================================================================
+8. RECOMMENDATION: IS A LIMITED LIVE TRIAL SAFE?
+======================================================================
+Yes for a SHADOW trial; a short ENFORCE trial is reasonable only after that, and only on your explicit say-so.
+  Step 1 (zero risk, recommended first): set identitySafeguard.mode to "shadow" in config.json and restart. Nothing changes in the app; it writes every decision to
+          logs/identity-safeguard.jsonl (title, matched entry, decision, reason). After a few days I read the log with you: count the vetoes and look at every one.
+  Step 2 (if the log shows essentially no wrong vetoes - I would want at least 30 vetoes reviewed and 95% or better judged right): mode "enforce" for a limited time, with
+          the review screen open as a check. The worst case is bounded: a wrongly vetoed listing loses the Database value (it is then valued like an unknown product, saved,
+          shown, and still priced by the market check); nothing is deleted, merged, renamed, repriced or created; setting the mode back to "off" restores today's behaviour
+          immediately (restart).
+  Not recommended yet: turning on Approve/Reject (databaseReview.decisions), any automatic correction, or using the safeguard to choose a different entry.
+I have NOT switched anything on and stop here, as instructed. If you want the shadow trial, tell me and I will explain exactly what to edit (or do it with your approval).
+
+
+======================================================================
+PRIVATE DATA YOU MAY DELETE WHEN DONE (they contain your product names and titles)
+======================================================================
+  C:\Users\biggt\ClynxShadowOutput_safeguard   findings of the shadow run, benchmark
+  C:\Users\biggt\ClynxShadowOutput_review      the screenshots
+  C:\Users\biggt\ClynxShadowOutput_stage3b, _stage6a, ClynxDbCopy, and the earlier ClynxShadowOutput* folders
+summary.json in each output folder holds counts only and is safe to share.

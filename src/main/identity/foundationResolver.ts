@@ -30,6 +30,12 @@ export interface ProductVerdict {
   reasons: string[];
   // What is not known: uncertainty is listed, never hidden.
   unresolved: string[];
+  // For a "variant": what separates the two. A capacity alone is a weak reason to call them different products; a number, a model marker or a word the data uses to
+  // tell entries apart is a strong one.
+  variantBasis?: "capacity" | "number" | "marker" | "evidence-word";
+  // For "narrower than" results with plain extra words: do the extras come AFTER the shared name, and are they only a descriptive bracket ("(custom desktop)")?
+  extrasTrail?: boolean;
+  extrasInBracket?: boolean;
 }
 
 export interface NameInfo {
@@ -228,8 +234,8 @@ function binaryHas(sorted: number[], x: number): boolean {
   return false;
 }
 
-function mk(verdict: Verdict, relation: Relation | null, sureness: Sureness, reasons: string[], opts: { unresolved?: string[]; moreSpecific?: "a" | "b" | null; lean?: "same" | "different" | null } = {}): ProductVerdict {
-  return { verdict, relation, moreSpecific: opts.moreSpecific ?? null, lean: opts.lean ?? null, sureness, reasons, unresolved: opts.unresolved ?? [] };
+function mk(verdict: Verdict, relation: Relation | null, sureness: Sureness, reasons: string[], opts: { unresolved?: string[]; moreSpecific?: "a" | "b" | null; lean?: "same" | "different" | null; variantBasis?: ProductVerdict["variantBasis"]; extrasTrail?: boolean; extrasInBracket?: boolean } = {}): ProductVerdict {
+  return { verdict, relation, moreSpecific: opts.moreSpecific ?? null, lean: opts.lean ?? null, sureness, reasons, unresolved: opts.unresolved ?? [], ...(opts.variantBasis ? { variantBasis: opts.variantBasis } : {}), ...(opts.extrasTrail !== undefined ? { extrasTrail: opts.extrasTrail } : {}), ...(opts.extrasInBracket !== undefined ? { extrasInBracket: opts.extrasInBracket } : {}) };
 }
 
 /** Short forms ("ps" for "playstation") that account for part of the difference, given at least one other word both names share to anchor them. */
@@ -309,7 +315,7 @@ export function compareProducts(a: NameInfo, b: NameInfo, ctx: ResolverContext):
   }
 
   if (onlyA.length === 0 && onlyB.length === 0) {
-    if (capOne) return mk("related", "variant", "high", [`one states a capacity (${capOne === "a" ? capA[0] : capB[0]}) the other does not`], { moreSpecific: capOne, unresolved: ["whether the other is that capacity"] });
+    if (capOne) return mk("related", "variant", "high", [`one states a capacity (${capOne === "a" ? capA[0] : capB[0]}) the other does not`], { moreSpecific: capOne, unresolved: ["whether the other is that capacity"], variantBasis: "capacity" });
     if (aliasNote) return aliasWeak ? mk("uncertain", "alias", "low", [aliasNote], { lean: "same", unresolved: ["no independent document uses both forms for the same product"] }) : mk("confirmed", "alias", "medium", [aliasNote]);
     return mk("confirmed", null, "high", ["every stated word, code and capacity agrees"]);
   }
@@ -327,7 +333,7 @@ export function compareProducts(a: NameInfo, b: NameInfo, ctx: ResolverContext):
   if (broad.generic) return mk("related", "family", "high", [`"${broad.name}" is a family-level entry (${broad.words.size <= 1 ? "one word" : "contained in " + broad.fanOut + " other entries"}); "${narrow.name}" is a member, not the same product`], { moreSpecific: side });
   if (narrow.bracket === "edition-theme") return mk("related", "edition", "medium", [`"${narrow.name}" is an edition themed after something in brackets`], { moreSpecific: side });
   if (extras.some((w) => /\d/.test(w)) || capOne === side) {
-    return mk("related", "variant", "high", [`"${narrow.name}" also states ${[...extras.filter((w) => /\d/.test(w)), ...(capOne === side ? [side === "a" ? capA[0] : capB[0]] : [])].join(", ")}`], { moreSpecific: side, unresolved: ["whether that is a different product or a different way of writing it"] });
+    return mk("related", "variant", "high", [`"${narrow.name}" also states ${[...extras.filter((w) => /\d/.test(w)), ...(capOne === side ? [side === "a" ? capA[0] : capB[0]] : [])].join(", ")}`], { moreSpecific: side, unresolved: ["whether that is a different product or a different way of writing it"], variantBasis: extras.some((w) => /\d/.test(w)) ? "number" : "capacity" });
   }
   // a single letter after a model ("S", "X", "e") or a word that already separates entries in several other places (the data keeps "X" and "X + word" apart)
   // Only words that come AFTER the shared name count ("13 Pro", "3DS XL"): a word in front ("Apple", "New", "Handmade") is as often a maker or a descriptor of the
@@ -339,7 +345,7 @@ export function compareProducts(a: NameInfo, b: NameInfo, ctx: ResolverContext):
     const why = extras.map((w) => (w.length === 1 ? `"${w}" is a single-letter model marker` : `"${w}" separates entries in ${ctx.variantEvidence(w)} other places in the data`));
     const strong = extras.every((w) => w.length === 1 || ctx.variantEvidence(w) >= VARIANT_STRONG);
     const reasonText = `"${narrow.name}" also states ${extras.join(" ")}: ${why.join("; ")}${aliasNote ? "; " + aliasNote : ""}`;
-    if (strong) return mk("related", "variant", "medium", [reasonText], { moreSpecific: side, unresolved: ["whether the data's own split holds for this pair"] });
+    if (strong) return mk("related", "variant", "medium", [reasonText], { moreSpecific: side, unresolved: ["whether the data's own split holds for this pair"], variantBasis: extras.every((w) => w.length === 1) ? "marker" : "evidence-word" });
     return mk("uncertain", null, "low", [reasonText], { moreSpecific: side, lean: "different", unresolved: [`"${extras.join(" ")}" separates entries in only ${Math.min(...extras.map((w) => ctx.variantEvidence(w)))} places in the data`] });
   }
   // plain extra words only: never confirmed on how common they are; the evidence only says which way it leans
@@ -353,6 +359,7 @@ export function compareProducts(a: NameInfo, b: NameInfo, ctx: ResolverContext):
   if (habitual && leading) reasons.push(`"${extras[0]}" accompanies "${broad.name}" in ${Math.round(comp[0].rate * 100)}% of ${comp[0].support >= 3 ? "its" : ""} documents, which is what a maker or descriptor does, but a variant word does the same`);
   return mk("uncertain", null, habitual && leading ? "medium" : "low", reasons, {
     moreSpecific: side, lean: habitual && leading ? "same" : null,
+    extrasTrail: trailing, extrasInBracket: narrow.bracket === "qualifier" && !!narrow.bracketWords && extras.every((w) => narrow.bracketWords!.has(w)),
     unresolved: [`nothing shows whether "${extras.join(" ")}" changes the product (an accessory, part, edition, variant or just wording)`],
   });
 }
@@ -371,6 +378,13 @@ export interface ListingResolution {
   alsoMentions: Array<{ id: string; name: string; as: "bundle" | "mention" }>;
   alternatives: Array<{ id: string; name: string }>;
   codes: CodeAssessment | null;
+  // When no single entry is claimed but one entry clearly leads the title (it explains the item's own words), that entry and how firmly it leads. Information for callers
+  // that must tell "the item is something else" from "cannot tell"; it is never a match.
+  leading?: { id: string; name: string; confident: boolean };
+  // For a "variant": what shows it is a different product. "sibling-entry": the Database holds another entry for it; "evidence-word": a word that separates entries in several
+  // places in the data; "pattern": a model code of the same shape as the family's but another value; "credible-code": a code seen in other documents, but nothing says it
+  // separates products (it may be a spec or a description) - a reason to be careful, not to say the entry is wrong.
+  variantBasis?: "sibling-entry" | "evidence-word" | "pattern" | "credible-code";
 }
 
 export function resolveListing(title: string, candidates: Array<{ id: string; name: string }>, ctx: ResolverContext, opts: { independentTexts?: string[]; seller?: string | null } = {}): ListingResolution {
@@ -381,10 +395,21 @@ export function resolveListing(title: string, candidates: Array<{ id: string; na
   const br = /[(\[]([^)\]]+)[)\]]/.exec(title);
   let main = br ? (title.slice(0, br.index) + " " + title.slice(br.index + br[0].length)).trim() : title;
   let hostText: string | null = br ? br[1] : null;
+  if (br) {
+    // a bracket that repeats every word of the text before it and adds some ("Nintendo Switch (Nintendo Switch 2)") is the same name written out in full
+    const before = info(identityTokens(main).words);
+    const inside = info(identityTokens(br[1]).words);
+    if (before.size > 0 && [...before].every((w) => inside.has(w)) && inside.size > before.size) {
+      main = br[1];
+      hostText = null;
+    }
+  }
   const conn = CONNECTOR.exec(main);
-  if (conn) {
+  // "for X" names what the item is FOR only when something comes before it; a title that BEGINS with "For ..." ("For Nintendo Switch Wireless Joy Con Pair") is the item itself
+  const connHead = conn ? main.slice(0, conn.index).trim() : "";
+  if (conn && connHead && info(identityTokens(connHead).words).size > 0) {
     hostText = hostText ?? conn[2];
-    main = main.slice(0, conn.index).trim() || main;
+    main = connHead;
   }
   let includeText: string | null = null;
   // "plus" is also part of a name ("... 16 Plus"): when an entry has the word and the title states all of that entry's words, it is a name word, not "and also"
@@ -419,7 +444,7 @@ export function resolveListing(title: string, candidates: Array<{ id: string; na
     for (const c of candidates) {
       const e = ctx.info(c.id);
       if (!e) continue;
-      const missing = [...e.words].filter((w) => !words.has(w));
+      const missing = [...e.words].filter((w) => !words.has(w) && !(e.bracket === "qualifier" && e.bracketWords?.has(w) && hostWords.has(w)));
       const capsOk = e.capacities.size === 0 || [...e.capacities].some((x) => caps.has(x));
       const hostOk = !e.host || [...e.host.words].every((w) => hostWords.has(w) || words.has(w));
       const sharedN = e.words.size - missing.length;
@@ -468,7 +493,7 @@ export function resolveListing(title: string, candidates: Array<{ id: string; na
   }
 
   if (fits.length === 0) {
-    const tcodes = definingCodes(title);
+    const tcodes = definingCodes(main);
     const sibling = partial
       .map((p) => {
         const entryParts = new Set(p.e.codes.flatMap(parts));
@@ -496,15 +521,17 @@ export function resolveListing(title: string, candidates: Array<{ id: string; na
     const left = [...mw].filter((w) => !f.e.words.has(w) && !(f.e.host && f.e.host.words.has(w)));
     // a capacity the title states and the entry states too is a defining match; an entry with no capacity cannot claim it
     const capMatch = f.e.capacities.size > 0 && [...f.e.capacities].some((x) => mainTok.capacities.has(x)) ? 1 : 0;
-    return { leftDefining: left.filter(defining).length, left: left.length, capMatch };
+    // a bundle entry that fits a title which states what it includes is the more specific reading of that title
+    const inclMatch = f.e.includes && f.e.includes.size > 0 ? 1 : 0;
+    return { leftDefining: left.filter(defining).length, left: left.length, capMatch, inclMatch };
   };
   const ranked = fits.map((f) => ({ f, ...rank(f) }));
-  ranked.sort((x, y) => x.leftDefining - y.leftDefining || y.capMatch - x.capMatch || y.f.covered - x.f.covered || Number(x.f.e.generic) - Number(y.f.e.generic) || x.left - y.left);
+  ranked.sort((x, y) => x.leftDefining - y.leftDefining || y.capMatch - x.capMatch || y.inclMatch - x.inclMatch || y.f.covered - x.f.covered || Number(x.f.e.generic) - Number(y.f.e.generic) || x.left - y.left);
   fits = ranked.map((r) => r.f);
   const best = fits[0];
   const bestRank = ranked[0];
   // entries that explain the title exactly as well, whatever their kind: the title could be either
-  const tie = ranked.filter((r) => r.leftDefining === bestRank.leftDefining && r.capMatch === bestRank.capMatch && r.f.covered === bestRank.f.covered && r.left === bestRank.left).map((r) => r.f);
+  const tie = ranked.filter((r) => r.leftDefining === bestRank.leftDefining && r.capMatch === bestRank.capMatch && r.inclMatch === bestRank.inclMatch && r.f.covered === bestRank.f.covered && r.left === bestRank.left).map((r) => r.f);
   if (omitted.size > 1) {
     // several entries fit only if a plain word is left out. The most specific wins unless what sets it apart is ordinary listing wording ("new" in "New condition 3DS XL").
     const ambiguous = fits.slice(1).some((f) => minus(best.e.words, f.e.words).some((w) => ctx.docFrequency(w) >= 0.04));
@@ -532,7 +559,7 @@ export function resolveListing(title: string, candidates: Array<{ id: string; na
 
   const base = { product, alsoMentions, alternatives, codes: assessment, newModel: null as ListingResolution["newModel"] };
   // a sibling entry whose marker follows the same pattern as one in the title but differs ("SL5" in the Database, "SL6" in the title): a new model of that family
-  const tcodes = definingCodes(title).filter((c) => !best.e.codes.includes(c));
+  const tcodes = definingCodes(main).filter((c) => !best.e.codes.includes(c)); // the item's own codes: a platform in brackets ("(Nintendo 3DS)") is not a model marker of the item
   const patternSibling = tcodes.length
     ? candidates
         .map((c) => ctx.info(c.id))
@@ -546,7 +573,7 @@ export function resolveListing(title: string, candidates: Array<{ id: string; na
     return { verdict: "uncertain", relation: null, sureness: "low", reasons: [`${tie.length} entries fit equally well`], unresolved: ["which of them"], ...base, product: null, alternatives: tie.map((f) => ({ id: f.e.id, name: f.e.name })) };
   }
   if (rivals.length) {
-    return { verdict: "uncertain", relation: null, sureness: "low", reasons: [`the title names "${best.e.name}" and also ${rivals.slice(0, 3).map((r) => `"${r}"`).join(", ")}, which are different products`], unresolved: ["which of the products named is the item being sold"], ...base, product: null, alternatives: [product, ...alsoMentions.filter((m) => m.as === "mention").map((m) => ({ id: m.id, name: m.name }))].slice(0, 4) };
+    return { verdict: "uncertain", relation: null, sureness: "low", reasons: [`the title names "${best.e.name}" and also ${rivals.slice(0, 3).map((r) => `"${r}"`).join(", ")}, which are different products`], unresolved: ["which of the products named is the item being sold"], ...base, product: null, leading: { ...product, confident: false }, alternatives: [product, ...alsoMentions.filter((m) => m.as === "mention").map((m) => ({ id: m.id, name: m.name }))].slice(0, 4) };
   }
   if (best.e.generic) {
     const extras = [...primary].filter((w) => !best.e.words.has(w));
@@ -563,12 +590,12 @@ export function resolveListing(title: string, candidates: Array<{ id: string; na
   }
   if (patternSibling && assessment.credible.length === 0) {
     const marker = tcodes.find((tc) => patternSibling.codes.some((c) => template(tc) === template(c)))!;
-    return { verdict: "related", relation: "variant", sureness: "medium", reasons: [`the title's marker ${marker} follows the pattern of "${patternSibling.name}" but is a different value`], unresolved: [`no entry for ${marker}`], ...base,
+    return { verdict: "related", relation: "variant", variantBasis: "pattern", sureness: "medium", reasons: [`the title's marker ${marker} follows the pattern of "${patternSibling.name}" but is a different value`], unresolved: [`no entry for ${marker}`], ...base,
       newModel: { family: patternSibling.name, codes: [marker], note: "a new model of a family that already has other models: recognised as such, not folded into the nearest entry" } };
   }
   if (assessment.credible.length > 0) {
     const sib = assessment.credible.find((c) => c.siblingName);
-    return { verdict: "related", relation: "variant", sureness: "high", reasons: [`the title states ${assessment.credible.map((c) => c.code).join(", ")} which evidence shows is a real marker "${best.e.name}" lacks`], unresolved: sib ? [] : ["no entry for this exact variant"], ...base,
+    return { verdict: "related", relation: "variant", variantBasis: sib ? "sibling-entry" : "credible-code", sureness: "high", reasons: [`the title states ${assessment.credible.map((c) => c.code).join(", ")} which evidence shows is a real marker "${best.e.name}" lacks`], unresolved: sib ? [] : ["no entry for this exact variant"], ...base,
       newModel: sib ? null : { family: best.e.name, codes: assessment.credible.map((c) => c.code), note: "a marker seen in the data but with no entry of its own: a variant to recognise, not to fold into the entry" } };
   }
   // a word AFTER the entry's own words that the data uses to tell entries apart elsewhere ("Pro", "XL", a single letter): the title names a variant this entry is not
@@ -578,16 +605,16 @@ export function resolveListing(title: string, candidates: Array<{ id: string; na
   // ordinary listing wording ("new", "used") is never a variant word, however the data happens to pair it
   const variantWords = mainOrder.filter((w, i) => i > lastEntryWord && !best.e.words.has(w) && !isNumberWord(w) && !codePieces.has(w) && (w.length === 1 || (ctx.variantEvidence(w) >= VARIANT_STRONG || (ctx.variantEvidence(w) >= VARIANT_MIN && ctx.docFrequency(w) < 0.04))));
   if (variantWords.length && !variantWords.every((w) => w.length === 1 || ctx.variantEvidence(w) >= VARIANT_STRONG)) {
-    return { verdict: "uncertain", relation: null, sureness: "low", reasons: [`the title also states ${variantWords.join(" ")}, which separates entries in a few places in the data; "${best.e.name}" lacks it`], unresolved: [`whether "${variantWords.join(" ")}" makes this a different variant`], ...base, product: null, alternatives: [product] };
+    return { verdict: "uncertain", relation: null, sureness: "low", reasons: [`the title also states ${variantWords.join(" ")}, which separates entries in a few places in the data; "${best.e.name}" lacks it`], unresolved: [`whether "${variantWords.join(" ")}" makes this a different variant`], ...base, product: null, leading: { ...product, confident: true }, alternatives: [product] };
   }
   if (variantWords.length) {
-    return { verdict: "related", relation: "variant", sureness: "medium", reasons: [`the title also states ${variantWords.join(" ")}, which the data uses to tell entries apart elsewhere; "${best.e.name}" lacks it`], unresolved: [`no entry for the ${variantWords.join(" ")} variant`], ...base,
+    return { verdict: "related", relation: "variant", variantBasis: "evidence-word", sureness: "medium", reasons: [`the title also states ${variantWords.join(" ")}, which the data uses to tell entries apart elsewhere; "${best.e.name}" lacks it`], unresolved: [`no entry for the ${variantWords.join(" ")} variant`], ...base,
       newModel: { family: best.e.name, codes: [], note: "a variant of this entry that has no entry of its own: recognised as a variant, not folded into the entry" } };
   }
   // the entry's name is a small part of a title that states much else, most of it unfamiliar: the title may only mention the entry ("Minecraft ... Keychain")
   const shareOfTitle = [...best.e.words].filter((w) => mw.has(w)).length / Math.max(1, mw.size);
   if (shareOfTitle < 0.2 && rareExtras.length >= 3 && assessment.credible.length === 0) {
-    return { verdict: "uncertain", relation: null, sureness: "low", reasons: [`"${best.e.name}" is a small part of a title that mostly states other things (${rareExtras.slice(0, 4).join(", ")})`], unresolved: ["whether the item is that product or only mentions it"], ...base, product: null, alternatives: [product] };
+    return { verdict: "uncertain", relation: null, sureness: "low", reasons: [`"${best.e.name}" is a small part of a title that mostly states other things (${rareExtras.slice(0, 4).join(", ")})`], unresolved: ["whether the item is that product or only mentions it"], ...base, product: null, leading: { ...product, confident: false }, alternatives: [product] };
   }
   const unv = assessment.unverified.map((u) => u.code);
   const unresolved: string[] = [];
@@ -596,7 +623,7 @@ export function resolveListing(title: string, candidates: Array<{ id: string; na
   const left = omitted.get(best.e.id);
   // a word missing from the title AND a rare word beyond the entry: two doubts at once, so no claim
   if (left && rareExtras.length) {
-    return { verdict: "uncertain", relation: null, sureness: "low", reasons: [`the title leaves out "${left}", which "${best.e.name}" states, and also states ${rareExtras.slice(0, 3).join(", ")}, which it does not`], unresolved: ["whether this is that product or a variant that has no entry"], ...base, product: null, alternatives: [product] };
+    return { verdict: "uncertain", relation: null, sureness: "low", reasons: [`the title leaves out "${left}", which "${best.e.name}" states, and also states ${rareExtras.slice(0, 3).join(", ")}, which it does not`], unresolved: ["whether this is that product or a variant that has no entry"], ...base, product: null, leading: { ...product, confident: false }, alternatives: [product] };
   }
   if (left) unresolved.push(`the title leaves out "${left}", which the entry states (no entry exists without it)`);
   return { verdict: "confirmed", relation: null, sureness: unresolved.length ? "medium" : "high", reasons: [left ? `the title states everything "${best.e.name}" states except the plain word "${left}"` : `the title states everything "${best.e.name}" states`], unresolved, ...base };

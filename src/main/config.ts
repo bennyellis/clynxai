@@ -189,6 +189,8 @@ export const DEFAULT_CONFIG: Config = {
   // "Worth a look" finds stay in the Feed only unless this is turned on (then they are pushed quietly).
   notifyWorthALook: false,
   identityFoundation: { schema: false, backfill: false },
+  identitySafeguard: { mode: "off" },
+  databaseReview: { decisions: false },
   // A brand-new install sees the checklist; loadConfig marks it already dismissed for a config file that predates it.
   onboarding: { dismissed: false, facebookConnected: false, locationChosen: false, phoneSkipped: false },
   recentSearches: [],
