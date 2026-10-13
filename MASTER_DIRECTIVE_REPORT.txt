@@ -1,0 +1,104 @@
+CLYNX - MASTER DIRECTIVE COMPLETION REPORT (Phases 4-9)
+Written 2026-10-13. Branch master. Rollback tags: checkpoint-phase4-complete, phase7-9-checkpoint.
+Commits in this stretch: 5e13f85 (cloud billing/entitlements/deploy/CI), 55a2d9e (desktop account + plan limits),
+4ca8d7b (hardening, backups, updates core, packaging, macOS config, support report, docs), 452b67e (security review).
+
+HOW TO READ THIS REPORT
+  IMPLEMENTED = code exists.   TESTED = automated tests run and passed here.
+  STAGED      = built but switched off or not connected to anything real.
+  PRODUCTION-VALIDATED = proven against real external systems. NOTHING in this report is production-validated.
+
+0. STARTING POINT (verified, not assumed)
+  - No ChatGPT-modified archive and no PHASE4_CHATGPT_HANDOFF.md exist. The 8 GB zip was an older snapshot of earlier Claude work.
+    Everything below continues from the real repository state.
+  - Phase 4 safeguard cache changes were reviewed and a stale-cache bug was found and fixed (decision cache checked before view staleness).
+
+1. WHAT WAS DONE, BY PHASE
+PHASE 4 - identity safeguard and Database Review (IMPLEMENTED, TESTED, STAGED OFF)
+  - Veto-only safeguard (modes off/shadow/enforce, default off, fails open, never merges/renames/splits/reprices).
+  - Review screen with confirmed vs heuristic findings, individual approve/reject, per-suggestion Apply and Undo, audit history,
+    correction journal (one-row updates, same-transaction journal, stale-edit refusal, undo refused if edited since), VACUUM-INTO backup before apply.
+  - Apply is behind config databaseReview.apply (default false). It was NOT run on any real data.
+  - Validation: 17-category held-out corpus, shadow safety tests, 41 unit files total.
+  - Needs your decision before activation: turning enforce mode / apply on for the live Database (financial effect on valuations).
+
+PHASE 5 - cloud infrastructure (IMPLEMENTED, TESTED against local Postgres+Redis, NOT DEPLOYED)
+  - Auth (Argon2id, JWT, refresh rotation with reuse detection), device registry, settings/Watch/feedback/product/listing sync,
+    BullMQ jobs with retries/backoff, server-held OpenAI key, per-user isolation tests for every resource,
+    rate limits, /health, /health/ready, /metrics, production Dockerfile + docker-compose.prod.yml + .env.prod.example + DEPLOYMENT.md.
+  - The local Docker dev stack was left untouched (not rebuilt with the new cloud code).
+  - Facebook: the cloud never scrapes or stores Facebook credentials. No Facebook API is assumed.
+
+PHASE 6 - subscriptions and billing (IMPLEMENTED, TESTED with a fake provider, STAGED)
+  - Stripe adapter (hosted checkout + customer portal, verified webhook signatures, idempotent order-safe events),
+    trial (once per account), grace on failed payment, cancel-at-period-end, plan resolution, usage metering,
+    entitlement enforcement behind ENFORCE_ENTITLEMENTS (default false), AI proxy guards (model allowlist, caps, per-minute and daily limits),
+    account deletion cancels the subscription first.
+  - Desktop: Config > Account shows plan/trial/renewal/payment-problem in plain words, upgrade and manage-billing open the server's secure page
+    in the system browser (https only), change password, delete account. Plan-limit answers (402/429) never freeze Watch sync and give AI features a clear message.
+  - NEVER exercised against Stripe's servers (no credentials available). No real charge was possible or made.
+
+PHASE 7 - hardening, packaging, data safety (IMPLEMENTED, TESTED)
+  - Window: sandbox on, webviews off, navigation/redirect blocked, window.open filtered, permissions refused, IPC accepted only from the app's own page,
+    stricter CSP (object-src/base-uri/form-action none). Verified in the real Electron app.
+  - Refresh token encrypted with the OS key store (safeStorage); old plain files migrate on next save. Verified in real Electron.
+  - Dependencies: shipped desktop vulnerabilities 2 high -> 0 (sharp 0.35.5, brace-expansion). Cloud shipped: 0. Remaining findings are build/test tools only (see SECURITY_REVIEW.md).
+  - Packaging: electron-builder previously packed the whole project folder (5 GB app.asar). Now a whitelist: 25 MB archive, 411 MB unpacked.
+    publish:null so it can never upload. The unpacked packaged app was launched in a sandbox and passed (login, dashboard, native sharp, fonts, user-data location, clean quit).
+  - Signed-update core (Ed25519 manifest, hash-checked https download, replay/downgrade protection, rollback after 3 failed starts, offline key/sign/hash tool):
+    TESTED (27 checks), NOT WIRED to any server or UI.
+  - Automatic Database backups (online-backup API, verified, newest 3 + one per recent week, never touches the live file) and one-click Restore
+    (current database is kept as scout.db.before-restore-*). TESTED incl. the real start-up restore path.
+  - Crash recovery/diagnostics (Phase 3) retained; added a support report that strips secrets.
+
+PHASE 8 - macOS (CONFIG ONLY - NEVER BUILT)
+  - Audit: app code is already platform-neutral (no PowerShell/drive letters/backslash paths; guarded by a test).
+  - Fixed: no macOS menu (Cmd+C/V/Q would not work), and window-close left a half-alive app on macOS.
+  - Added dist:mac, mac targets (dmg+zip, x64+arm64, hardened runtime), CI matrix on macOS.
+  - Cannot be validated here: no Mac, no Apple Developer account, no notarization. Icon is 256 px; macOS needs 1024 px.
+
+PHASE 9 - launch readiness (PARTIAL)
+  - Done: support report button, RELEASE_CHECKLIST.md, BETA_PLAN.md (a plan; NO beta was run, no user feedback exists), SECURITY_REVIEW.md, README index,
+    account/subscription screen, startup benchmark (no regression: dashboard in ~170 ms on a 396 MB library, same as before).
+  - Existing from earlier phases: first-run checklist, notices, scanner error explanations.
+
+2. TEST RESULTS (this machine, this session)
+  - Typecheck: desktop (node + web tsconfigs) clean; cloud clean.
+  - Desktop unit tests: 41 files, all pass (npm test).
+  - Cloud tests: 11 files / 92 tests pass (vitest, isolated test database).
+  - Electron end-to-end (isolated sandbox, fake cloud): 15 suites (startup, big database, config, session, deal quality, close/recovery, onboarding,
+    status feed, performance modes, lazy library, hidden screens, diagnostics, leaks, identity foundation, review/safeguard, account/backups/security)
+    all exit 0 in the final run, plus the packaged-build suite (9 checks).
+  - Honest notes: two suites (close-on-login-screen, GPU-crash recovery) failed once while I was running other CPU-heavy commands at the same time and passed on
+    isolated re-runs; one real bug was caught by the suites and fixed (the Account screen crashed on a server answer missing fields; the answer is now validated),
+    one real bug was caught by a unit test (an unhandled stream error in the update download), and a logic slip in the report's secret redaction was found on review and fixed before it shipped.
+  - Electron suites live in the session scratchpad (not in the repository). CI runs typecheck, unit tests and build on Windows+macOS, cloud tests on Linux.
+
+3. DEPLOYMENT AND CONFIG INSTRUCTIONS
+  cloud/DEPLOYMENT.md (servers, secrets, TLS, backups, Stripe test mode, staged flags), RELEASE_CHECKLIST.md (build/sign/ship), BETA_PLAN.md.
+  Building an installer on Windows: needs Windows Developer Mode (or admin shell) for the signing-tool download; without it use
+  CSC_IDENTITY_AUTO_DISCOVERY=false and win.signAndEditExecutable=false (what I used to produce the test build).
+  No installer (.exe setup) was produced for distribution; only the unpacked packaged app was built (in a temporary folder).
+
+4. SECURITY AND PERFORMANCE FINDINGS
+  See SECURITY_REVIEW.md. Highlights: packaging leak of the whole project fixed; shipped-dependency vulnerabilities cleared; refresh token encrypted;
+  .env API keys still plain text; ~110 IPC handlers lack per-argument schemas (sender check and sandbox mitigate); no password reset/2FA.
+  Performance: startup unchanged; backups use the incremental online-backup API so the window does not freeze.
+
+5. WHAT STILL NEEDS YOU (external dependencies and approvals)
+  Needs authorization/credentials:
+   a. Stripe account + TEST keys to run the DEPLOYMENT.md test-card checklist; later live keys (production billing).
+   b. A server/hosting choice to deploy Clynx Cloud (creates paid resources).
+   c. Windows code-signing certificate; Apple Developer account + Developer ID cert for macOS signing/notarization; a 1024 px app icon.
+   d. An update host and an offline-generated update signing key (then the download/install UI can be built).
+   e. An email provider for password reset / email verification.
+   f. Decision on enabling the identity safeguard (enforce) and Database Review apply on the live Database.
+   g. Decision on ENFORCE_ENTITLEMENTS and final plan numbers (free: 5 Watches/2 devices/150 AI per day; pro: unlimited/3000 are placeholders).
+   h. Legal review of Facebook Marketplace terms before any commercial launch.
+  Product gap to decide: the installer does not include a browser. Scanning uses the customer's Google Chrome (falls back to a Chromium that only exists on
+  developer machines). Either require Chrome (note it at install) or add a first-run browser download step.
+  Not touched by design: your live Database, session and browser profiles; the old 5 GB dist/win-unpacked folder (safe to delete yourself - it is regenerated build output).
+
+6. WHAT I DID NOT DO (per your limits)
+  No deployment, no paid resources, no live billing, no publishing/release, no change to the live Database, no change to Gate thresholds or scanning coverage,
+  no extra paid AI calls, no destructive migration.
