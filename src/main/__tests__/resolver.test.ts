@@ -42,6 +42,7 @@ run(() => {
       check(`${a} | ${b} -> ${want}`, ab.level === want, ab);
       check("   ...and swapped is the same relation", ba.level === ab.level && (ab.level !== "line" || ba.moreSpecific !== ab.moreSpecific));
     }
+    check("a coincidental short form does not pair words (ds in division) unless it explains the whole difference", compareIdentity("The Division", "Nintendo 2DS").level === "different" && compareIdentity("Destiny 2", "Nintendo 2DS").level === "different");
     check("an abbreviation never bridges a number or a lone letter", !looksLikeAbbreviation("s", "series") && !looksLikeAbbreviation("5", "playstation") && looksLikeAbbreviation("ps", "playstation"));
   }
 

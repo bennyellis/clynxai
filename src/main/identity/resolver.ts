@@ -97,6 +97,14 @@ export function compareIdentity(a: string, b: string, optional?: ReadonlySet<str
     }
   }
 
+  // A short form only counts when it explains the WHOLE difference between the two names ("ps 5 slim" / "playstation 5 slim"). Otherwise it is
+  // coincidence ("ds" fits inside "division") and the pairing is discarded.
+  if (aliasPairs.length > 0 && (restA.length > 0 || restB.length > 0)) {
+    aliasPairs.length = 0;
+    restA.splice(0, restA.length, ...onlyInA);
+    restB.splice(0, restB.length, ...onlyInB);
+  }
+
   if (capacity === "conflict") reasons.push(`capacity differs (${capA.join("/")} vs ${capB.join("/")})`);
   if (restA.length && restB.length) {
     reasons.push(`each states something the other does not (${restA.join(" ")} | ${restB.join(" ")})`);

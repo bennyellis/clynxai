@@ -12,6 +12,7 @@ import { DEFAULT_MIN_PROFIT_MARGIN_PERCENT, keepRangeUsd, resaleOutcome } from "
 import { cutNeededPercent, withinNegotiationReach } from "./profitGate.js";
 import type { ScoredListing } from "./types.js";
 import type { GateVerdict } from "./dealGate.js";
+import type { CodeAssessment } from "./identity/credibility.js";
 
 export interface ProductSignals {
   id: string;
@@ -28,12 +29,17 @@ export interface ProductSignals {
   basis?: "sold" | "blend" | "active" | null;
   // Whether the comps behind the value are the market of exactly this product ("approximate": mixed comps, the cheapest group stood in).
   identity?: "exact" | "approximate" | "unresolved" | null;
-  // Defining codes the listing states that the product's name lacks (see identity/codes.ts); empty/absent = nothing unconfirmed.
+  // Defining codes the listing states that the product's name lacks AND that evidence shows to be real model / version markers (see
+  // identity/credibility.ts); empty/absent = nothing to doubt. These may downgrade the verdict and start research.
   unconfirmedCodes?: string[];
+  // Codes the listing states that no evidence vouches for (a seller's own inventory code, a number belonging to something else). Note only.
+  unverifiedCodes?: string[];
+  // The full assessment, with the evidence behind each decision (for the audit trail).
+  codeAssessment?: CodeAssessment;
 }
 
 export interface SignalSource {
-  getProductSignals(matchedItem: string | null, title: string): ProductSignals | null;
+  getProductSignals(matchedItem: string | null, title: string, independentTexts?: string[]): ProductSignals | null;
   getFacebookPriceStats(productId: string): { avgPriceUsd: number; sampleSize: number } | null;
 }
 

@@ -2460,6 +2460,7 @@ export class ScrapeEngine {
         extras: gateExtras,
         visionMismatch: mismatchCorrection !== null,
         hardCapExceeded: hardCapHit,
+        identityTexts: photoResult?.identifiedProducts ?? [],
         log: (m) => this.log("info", m, listing.url),
       });
       scored = qualification.scored;

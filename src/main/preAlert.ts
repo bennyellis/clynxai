@@ -28,7 +28,7 @@ export interface MarketCheck {
 }
 
 // purpose "bundle": the product is one item of a listing that holds several, priced on its own (not an alert check).
-export type MarketChecker = (listing: { title: string; matchedItem: string | null; purpose?: "bundle" }) => Promise<MarketCheck | null>;
+export type MarketChecker = (listing: { title: string; matchedItem: string | null; purpose?: "bundle"; identityTexts?: string[] }) => Promise<MarketCheck | null>;
 
 export interface QualifyArgs {
   scored: ScoredListing;
@@ -44,6 +44,8 @@ export interface QualifyArgs {
   extras?: GateExtras | null;
   visionMismatch?: boolean;
   hardCapExceeded?: boolean;
+  // The product names the photo analysis gave this listing: independent evidence that a code in the title is a real marker.
+  identityTexts?: string[];
   log: (message: string) => void;
 }
 
@@ -65,11 +67,11 @@ function pathwayOf(scored: ScoredListing): "search" | "database" | "general" | "
  * Database's evidence applies) and otherwise the reference the user typed for the Search For item. With no reference price at all
  * (an AI-only find) it is whatever the Database knows about the product the listing is about, if anything.
  */
-export function resolveEvidence(scored: ScoredListing, source: SignalSource | null, now: number = Date.now()): ValueEvidence | null {
+export function resolveEvidence(scored: ScoredListing, source: SignalSource | null, now: number = Date.now(), identityTexts?: string[]): ValueEvidence | null {
   const { listing, extraction } = scored;
   let signals = null;
   try {
-    signals = source?.getProductSignals(extraction.brokenVariant ?? extraction.matchedItem, listing.title) ?? null;
+    signals = source?.getProductSignals(extraction.brokenVariant ?? extraction.matchedItem, listing.title, identityTexts) ?? null;
   } catch {
     signals = null;
   }
@@ -85,13 +87,17 @@ export function resolveEvidence(scored: ScoredListing, source: SignalSource | nu
 function gateOnce(args: QualifyArgs, evidence: ValueEvidence | null, scored: ScoredListing, identityUnconfirmed?: string[]): GateVerdict {
   const { listing, extraction } = scored;
   let unconfirmed: string[] = identityUnconfirmed ?? [];
+  let unverified: string[] = [];
   let market: { runTimeDays: number | null; fbAvgPriceUsd: number | null; fbSample: number | null } | undefined;
   try {
-    const signals = args.source?.getProductSignals(extraction.brokenVariant ?? extraction.matchedItem, listing.title) ?? null;
+    const signals = args.source?.getProductSignals(extraction.brokenVariant ?? extraction.matchedItem, listing.title, args.identityTexts) ?? null;
     const fb = signals && args.source && listing.source !== "ebay" ? args.source.getFacebookPriceStats(signals.id) : null;
     market = { runTimeDays: signals?.runTimeDays ?? null, fbAvgPriceUsd: fb?.avgPriceUsd ?? null, fbSample: fb?.sampleSize ?? null };
     // Only a Database value can be the wrong product's value; a reference price the user typed stands as typed.
-    if (identityUnconfirmed === undefined && evidence && evidence.basis !== "user") unconfirmed = signals?.unconfirmedCodes ?? [];
+    if (evidence && evidence.basis !== "user") {
+      if (identityUnconfirmed === undefined) unconfirmed = signals?.unconfirmedCodes ?? [];
+      unverified = signals?.unverifiedCodes ?? [];
+    }
   } catch {
     market = undefined;
   }
@@ -103,6 +109,7 @@ function gateOnce(args: QualifyArgs, evidence: ValueEvidence | null, scored: Sco
     broken: !!extraction.brokenVariant,
     evidence,
     identityUnconfirmed: unconfirmed,
+    identityUnverified: unverified,
     extras: args.extras ?? null,
     age: assessListingAge(listing.listingAge, args.maxAgeHours),
     aiFlagged: scored.isDeal && scored.referencePriceUsd === null,
@@ -116,7 +123,13 @@ function gateOnce(args: QualifyArgs, evidence: ValueEvidence | null, scored: Sco
 
 export async function qualifyScoredListing(args: QualifyArgs): Promise<Qualification> {
   let scored = args.scored;
-  let evidence = resolveEvidence(scored, args.source);
+  let evidence = resolveEvidence(scored, args.source, Date.now(), args.identityTexts);
+  let credibleBefore: string[] = [];
+  try {
+    credibleBefore = args.source?.getProductSignals(scored.extraction.brokenVariant ?? scored.extraction.matchedItem, scored.listing.title, args.identityTexts)?.unconfirmedCodes ?? [];
+  } catch {
+    credibleBefore = [];
+  }
   let verdict = gateOnce(args, evidence, scored);
 
   // Validate before trusting: refresh the numbers for anything that may be pushed.
@@ -126,7 +139,7 @@ export async function qualifyScoredListing(args: QualifyArgs): Promise<Qualifica
   if (wantsCheck && args.check && !hardStop) {
     const variant = scored.extraction.brokenVariant;
     try {
-      market = (await args.check({ title: variant ?? scored.listing.title, matchedItem: variant ?? scored.extraction.matchedItem })) ?? null;
+      market = (await args.check({ title: variant ?? scored.listing.title, matchedItem: variant ?? scored.extraction.matchedItem, identityTexts: args.identityTexts })) ?? null;
     } catch (err) {
       args.log(`Market check failed (${(err as Error).message}), using what the Database already knows.`);
     }
@@ -135,7 +148,7 @@ export async function qualifyScoredListing(args: QualifyArgs): Promise<Qualifica
       let fresh: ValueEvidence | null = null;
       try {
         const name = market.productName ?? variant ?? scored.extraction.matchedItem;
-        fresh = evidenceFromSignals(args.source?.getProductSignals(name, scored.listing.title) ?? null);
+        fresh = evidenceFromSignals(args.source?.getProductSignals(name, scored.listing.title, args.identityTexts) ?? null);
       } catch {
         fresh = null;
       }
@@ -145,7 +158,8 @@ export async function qualifyScoredListing(args: QualifyArgs): Promise<Qualifica
       const ref = evidence.valueUsd as number;
       scored = { ...scored, referencePriceUsd: ref, discountPercent: scored.listing.price !== null ? ((ref - scored.listing.price) / ref) * 100 : scored.discountPercent };
       // The check priced a product under its own name: if the listing states nothing more than that name does, the doubt is gone.
-      const checked = market.productName ? codesMissingFrom(market.productName, scored.listing.title) : undefined;
+      const checkedName = market.productName;
+      const checked = checkedName ? credibleBefore.filter((c) => codesMissingFrom(checkedName, c).length > 0) : undefined;
       verdict = gateOnce(args, evidence, scored, evidence.basis === "user" ? [] : checked);
     }
   }

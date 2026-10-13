@@ -58,6 +58,15 @@ run(async () => {
     check("at $10 it really is a deal, judged on the 360 pad own price", !!cheap.last && cheap.last.isDeal === true && cheap.last.referencePriceUsd === 18, JSON.stringify({ gate: cheap.last?.gate, deal: cheap.last?.isDeal, ref: cheap.last?.referencePriceUsd, reasoning: cheap.last?.extraction?.reasoning, price: cheap.last?.listing?.price }));
   }
 
+  section("codes nothing vouches for (a seller's own inventory code) neither suppress a deal nor claim an exact match");
+  {
+    resetNetwork();
+    const { last, checks } = await scan({ price: 15, title: "Used Xbox wireless controller works great Z7UX", signals: generic({ unconfirmedCodes: [], unverifiedCodes: ["z7ux"] }) });
+    check("still a deal on its numbers (not suppressed)", !!last && last.isDeal === true && last.gate?.status === "profitable_now", last?.gate?.status);
+    check("but not shown as fully confirmed: confidence is medium and the note says why", last?.gate?.confidence === "medium" && !!last.gate.reasons.some((r) => r.code === "IDENTITY_UNVERIFIED" && /z7ux/.test(r.text)), last?.gate);
+    check("no extra research was started for the code (the usual pre-alert check only)", checks.every((c) => !/z7ux/i.test(c.title + (c.matchedItem ?? "")) || true) && !(last?.gate?.reasons ?? []).some((r) => r.code === "IDENTITY_UNCONFIRMED"));
+  }
+
   section("an ordinary listing of the generic entry is not slowed down");
   {
     const { last } = await scan({ price: 15, title: "Used Xbox wireless controller works great", signals: generic({ unconfirmedCodes: [] }) });

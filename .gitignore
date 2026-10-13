@@ -22,3 +22,5 @@ app-settings.json
 
 audit/phase4_shadow/run.cjs
 audit/phase4_repro/*.cjs
+audit/phase4_shadow/doubt_rule_check.cjs
+audit/phase4_shadow/protection_check.cjs

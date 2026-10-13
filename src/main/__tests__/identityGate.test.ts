@@ -42,8 +42,11 @@ run(async () => {
     const store = new Store(path.join(dir, "scout.db"));
     const id = store.addProductStub("p1", "Xbox Wireless Controller");
     store.updateProductEbayComps(id, { avgSoldPriceUsd: 48, avgRunTimeDays: 5, avgShippingUsd: 0, sampleSize: 40, estimatedValueUsd: 48, estimateBasis: "sold", identity: "approximate" });
+    // evidence that "360" is a real marker in this Database (entries that carry it), none for the incidental 1403
+    store.addProductStub("p2", "Xbox 360 Slim");
+    store.addProductStub("p3", "Fallout: New Vegas (Xbox 360)");
     const s = store.getProductSignals("Xbox Wireless Controller", "Official Microsoft Xbox 360 Wireless Controller 1403 OEM");
-    check("a more specific listing lists the codes the entry lacks", s?.unconfirmedCodes?.join() === "360,1403", s?.unconfirmedCodes);
+    check("a more specific listing lists the codes that evidence supports, and keeps the incidental one apart", s?.unconfirmedCodes?.join() === "360" && s?.unverifiedCodes?.join() === "1403", { c: s?.unconfirmedCodes, u: s?.unverifiedCodes });
     const same = store.getProductSignals("Xbox Wireless Controller", "Used xbox wireless controller works great");
     check("an ordinary listing of the entry has none", (same?.unconfirmedCodes ?? []).length === 0);
     check("the comps' identity state is stored and read back", s?.identity === "approximate" && store.getProductById(id)?.ebayCompsIdentity === "approximate");
@@ -72,8 +75,9 @@ run(async () => {
 
   section("the default (no-AI) search query keeps the listing's model numbers");
   {
-    const q = await deriveWatchCountQuery("Xbox Wireless Controller", "Official Microsoft Xbox 360 & Windows Black Wireless Controller 1403 OEM gamepad", null);
-    check("generic name + the codes the listing states", q === "Xbox Wireless Controller 360 1403", q);
+    const q = await deriveWatchCountQuery("Xbox Wireless Controller", "Official Microsoft Xbox 360 & Windows Black Wireless Controller 1403 OEM gamepad", null, ["360"]);
+    check("generic name + only the codes evidence supports", q === "Xbox Wireless Controller 360", q);
+    check("an unsupported code (a seller's own) never reaches the search", (await deriveWatchCountQuery("Xbox Series S", "Xbox Series S Console Z7UX", null, [])) === "Xbox Series S");
     check("nothing added when the listing adds nothing", (await deriveWatchCountQuery("Xbox Wireless Controller", "xbox wireless controller works", null)) === "Xbox Wireless Controller");
     check("no source listing: the name as before", (await deriveWatchCountQuery("Xbox Wireless Controller", null, null)) === "Xbox Wireless Controller");
   }

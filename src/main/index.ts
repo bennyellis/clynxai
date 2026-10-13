@@ -42,7 +42,7 @@ import {
 } from "./vision.js";
 import { lookupTopCitiesInState } from "./locationDiscovery.js";
 import { analyzeEbayComps, deriveWatchCountQuery, type CompAnalysis } from "./watchcount.js";
-import { codesMissingFrom, specificNameFor } from "./identity/codes.js";
+import { specificResearchName } from "./identity/credibility.js";
 import { fetchActiveAsks } from "./ebayActive.js";
 import { resolveIdentityTarget } from "./productIdentity.js";
 import { buyerTotalUsd, estimateMarketValue } from "./marketValue.js";
@@ -1553,7 +1553,7 @@ async function researchEbayComps(
   }
   // A "(For Parts / Broken)" variant is researched on its own terms: sold comps and asking prices of BROKEN copies of the base product.
   if (isBrokenVariantName(fallbackName)) return researchBrokenVariantComps(id, fallbackName);
-  const query = await deriveWatchCountQuery(fallbackName, sourceTitle, imageDataUri);
+  const query = await deriveWatchCountQuery(fallbackName, sourceTitle, imageDataUri, sourceTitle ? store.credibleCodes(id, fallbackName, sourceTitle) : []);
   const comps = await timed("ebay_lookup", () => getPrimaryEngine().fetchEbayComps(query));
   // The product's own name backs up the search query for hard facts like capacity (see compFilter.ts).
   // Cross-check every result's photo against this product's reference photos (not the ones that came from eBay: those would
@@ -1623,17 +1623,17 @@ const MARKET_RECENT_MS = 3 * 24 * 60 * 60 * 1000;
 const MARKET_CHECK_TIMEOUT_MS = 150_000;
 const marketChecksInFlight = new Map<string, Promise<MarketCheck | null>>();
 
-function isExactProduct(productName: string, matchedItem: string | null, title: string): boolean {
-  // A listing that states a model number / generation the product's name lacks may be a more specific product (identity/codes.ts).
-  if (codesMissingFrom(productName, title).length > 0) return false;
+function isExactProduct(productName: string, matchedItem: string | null, title: string, unconfirmedCodes: string[] = []): boolean {
+  // A listing that states a model number / generation the product's name lacks, and evidence shows it is real, may be a more specific product.
+  if (unconfirmedCodes.length > 0) return false;
   const sameName = !!matchedItem && matchedItem.trim().toLowerCase() === productName.trim().toLowerCase();
   if (sameName && compMatchesSpecs(productName, title) && !modelLettersConflict(productName, title)) return true;
   return titleLooksLikeProduct(productName, title);
 }
 
-async function checkMarketBeforeAlert(listing: { title: string; matchedItem: string | null; purpose?: "bundle" }): Promise<MarketCheck | null> {
-  const signals = store.getProductSignals(listing.matchedItem, listing.title);
-  const exact = !!signals && isExactProduct(signals.name, listing.matchedItem, listing.title);
+async function checkMarketBeforeAlert(listing: { title: string; matchedItem: string | null; purpose?: "bundle"; identityTexts?: string[] }): Promise<MarketCheck | null> {
+  const signals = store.getProductSignals(listing.matchedItem, listing.title, listing.identityTexts);
+  const exact = !!signals && isExactProduct(signals.name, listing.matchedItem, listing.title, signals.unconfirmedCodes ?? []);
   const recentlyChecked = (checkedAt: number | null | undefined) => !!checkedAt && Date.now() - checkedAt < MARKET_RECENT_MS;
   if (signals && exact && recentlyChecked(signals.checkedAt)) {
     return {
@@ -1647,7 +1647,7 @@ async function checkMarketBeforeAlert(listing: { title: string; matchedItem: str
   if (!config.watchCountEnabled) return null; // turned off in Config: the Database's own numbers decide
   // A listing more specific than the entry it matched is priced under a name of its own, so the general entry's value is not overwritten
   // with the specific product's comps.
-  const moreSpecific = signals && !exact && listing.purpose !== "bundle" && codesMissingFrom(signals.name, listing.title).length > 0 ? specificNameFor(signals.name, listing.title) : null;
+  const moreSpecific = signals && !exact && listing.purpose !== "bundle" ? specificResearchName(signals.name, signals.codeAssessment, listing.title) : null;
   const name =
     signals && exact
       ? signals.name

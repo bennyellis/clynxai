@@ -9,6 +9,8 @@
 // candidate has that the reference lacks is an unconfirmed difference (the old checks only looked in the first direction, so a generic name
 // accepted every variant).
 
+import { looksLikeAbbreviation } from "./resolver.js";
+
 const CAPACITY = /^\d+(?:p\d+)?(?:tb|gb|mb)$/;
 const YEAR = /^(?:19|20)\d\d$/;
 
@@ -25,12 +27,21 @@ function rawTokens(text: string): string[] {
     .filter(Boolean);
 }
 
+// Numbers that are never a model identifier whatever the product: an ordinal ("13th", "2nd"), a time ("9pm"), a quantity ("2x"), and a very long
+// digit run (eight or more digits: a phone number or an order id; seven-digit part numbers are real identifiers).
+const NOT_AN_IDENTIFIER = /^(?:\d+(?:st|nd|rd|th)|\d{1,2}(?:am|pm)|\d+x|\d{8,})$/;
+
+// Text that states a price, a discount or a distance, stripped before looking for codes ("$100 firm", "20% off", "15 dollars").
+function withoutAmounts(text: string): string {
+  return text.replace(/\$\s*\d[\d,.]*/g, " ").replace(/\d[\d,.]*\s*(?:dollars?|usd|bucks|%|percent)/gi, " ");
+}
+
 /** The defining codes of a text, lowercased and de-duplicated, in order of appearance. */
 export function definingCodes(text: string): string[] {
   const out: string[] = [];
-  for (const t of rawTokens(text)) {
+  for (const t of rawTokens(withoutAmounts(text))) {
     if (!/\d/.test(t)) continue;
-    if (CAPACITY.test(t) || YEAR.test(t)) continue;
+    if (CAPACITY.test(t) || YEAR.test(t) || NOT_AN_IDENTIFIER.test(t)) continue;
     const mixed = /[a-z]/.test(t);
     if (!mixed && t.length < 3) continue; // "2", "10": counts and sizes, not identity
     if (!out.includes(t)) out.push(t);
@@ -87,11 +98,23 @@ export function relateCodes(reference: string, candidate: string): { relation: C
  * own spelling ("Xbox Wireless Controller" + "Official Microsoft Xbox 360 ... 1403" -> "Xbox Wireless Controller 360 1403"). Used when a
  * listing turns out to be a more specific product than the entry it matched, so it gets (and prices) an entry of its own.
  */
-export function specificNameFor(entryName: string, listingTitle: string): string {
-  const extra = codesMissingFrom(entryName, listingTitle);
+export function specificNameFor(entryName: string, listingTitle: string, onlyCodes?: string[]): string {
+  const extra = onlyCodes ?? codesMissingFrom(entryName, listingTitle);
   if (extra.length === 0) return entryName;
   const spelled = new Map<string, string>();
   for (const w of listingTitle.split(/[^A-Za-z0-9.]+/).filter(Boolean)) spelled.set(normalize(w).replace(/[^a-z0-9]/g, ""), w);
   const added = extra.map((c) => spelled.get(c) ?? c);
   return `${entryName.trim()} ${added.join(" ")}`.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * A code that is only a short form of words the name already spells out: "ps5" against "PlayStation 5". True when the letters of the code are an
+ * abbreviation of a word in the name and its number is a word of the name too. Used only to stop a difference in WRITING from being treated as a
+ * difference in product; it never makes two products the same (unsafe abbreviations like this are only ever suggestions elsewhere).
+ */
+export function aliasCovered(code: string, entryName: string): boolean {
+  const m = /^([a-z]{2,4})(\d+)$/.exec(code);
+  if (!m) return false;
+  const tokens = rawTokens(entryName);
+  return tokens.includes(m[2]) && tokens.some((t) => /^[a-z]+$/.test(t) && looksLikeAbbreviation(m[1], t));
 }

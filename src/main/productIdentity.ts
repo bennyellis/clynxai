@@ -9,7 +9,6 @@
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 import type { ProductProfile } from "./types.js";
 import { colorsIn, isColorWord } from "./colors.js";
-import { codesMissingFrom } from "./identity/codes.js";
 
 export interface IdentityCandidate {
   id: string;
@@ -65,13 +64,14 @@ function words(text: string): string[] {
  * Cheap pre-check, no AI: does the listing's title say anything the matched entry's name doesn't? "RTX 3060 Ti" for the
  * "NVIDIA GeForce RTX 3060 Ti" entry says nothing new, so no check is needed; "EVGA RTX 3060 Ti XC Gaming" does.
  */
-export function listingHasExtraDetail(title: string, entryName: string): boolean {
+export function listingHasExtraDetail(title: string, entryName: string, credibleCodes?: string[]): boolean {
   const entryColors = colorsIn(entryName);
   // An entry that names a color ("Xbox Series S (Black)") is a claim about color: any listing headed for it gets
   // checked (the photo shows what the title may not say).
   if (entryColors.size > 0) return true;
-  // A model number / generation the title states and the entry's name lacks is always worth the check, however few other words differ.
-  if (codesMissingFrom(entryName, title).length > 0) return true;
+  // A model number / generation the title states, that evidence shows is real (identity/credibility.ts), and the entry's name lacks is always worth
+  // the check, however few other words differ.
+  if ((credibleCodes ?? []).length > 0) return true;
   const known = new Set(words(entryName));
   // For an entry with no color in its name, a color in the title is no detail worth a check.
   const extra = words(title).filter((w) => !known.has(w) && !FILLER.has(w) && !isColorWord(w) && !/^\d{1,2}$/.test(w));
@@ -189,6 +189,8 @@ export interface IdentityStore {
   listProductChildren(parentId: string): ProductProfile[];
   listProductsSharingBase(name: string, excludeId?: string): ProductProfile[];
   listProductPhotoTitles(productId: string, limit: number): string[];
+  // The codes the title states beyond the entry's name that evidence shows are real markers (optional: without it only the word count decides).
+  credibleCodes?(entryId: string, entryName: string, title: string): string[];
 }
 
 /**
@@ -202,7 +204,7 @@ export async function resolveIdentityTarget(
   evidence: IdentityEvidence
 ): Promise<{ action: IdentityAction; verdict: IdentityVerdict | null }> {
   const attach: IdentityAction = { kind: "attach", productId: existing.id };
-  if (!listingHasExtraDetail(evidence.title, existing.name)) return { action: attach, verdict: null };
+  if (!listingHasExtraDetail(evidence.title, existing.name, store.credibleCodes?.(existing.id, existing.name, evidence.title))) return { action: attach, verdict: null };
 
   // The general entry and the specific models already filed under it (an entry that is itself a specific model
   // is judged against its own siblings too).

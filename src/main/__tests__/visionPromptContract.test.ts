@@ -13,7 +13,8 @@ run(() => {
   check("generation / model number must be kept in the name, for every kind of product", /keep the details that tell look-alike products apart/.test(src) && /Never shorten a product to a more generic name/.test(src));
 
   section("the identity second look is asked whenever the title states a code the entry lacks");
-  check("one unfamiliar word plus a model number is enough", listingHasExtraDetail("Xbox 360 controller", "Xbox Wireless Controller"));
+  check("one unfamiliar word plus a model number that evidence supports is enough", listingHasExtraDetail("Xbox 360 controller", "Xbox Wireless Controller", ["360"]));
+  check("...but a number nothing supports does not trigger the (paid) identity check", !listingHasExtraDetail("Xbox 360 controller", "Xbox Wireless Controller"));
   check("a bare generation word without digits still needs two words (unchanged)", !listingHasExtraDetail("Xbox One controller", "Xbox Wireless Controller"));
   check("an ordinary listing of the entry is still not checked", !listingHasExtraDetail("Used xbox wireless controller works great", "Xbox Wireless Controller"));
 });

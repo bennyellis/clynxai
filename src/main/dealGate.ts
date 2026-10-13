@@ -114,6 +114,9 @@ export interface GateInput {
   // listing may be a more specific product than the one whose value is being used. Caps the evidence at weak and rules out the
   // "big gap on thin evidence" shortcut, so it can be a Worth a look but never a confident deal until the specific product is priced.
   identityUnconfirmed?: string[];
+  // Codes the title states that nothing vouches for (maybe a seller's own code). Note only: the verdict keeps its status, but a "high"
+  // confidence is shown as "medium" because the match to the product is not fully confirmed.
+  identityUnverified?: string[];
   extras?: GateExtras | null;
   age: AgeAssessment;
   // The model (not the arithmetic) called this a deal: used to explain an unverified AI find.
@@ -137,6 +140,7 @@ export type GateReasonCode =
   | "AI_UNVERIFIED"
   | "WEAK_EVIDENCE"
   | "IDENTITY_UNCONFIRMED"
+  | "IDENTITY_UNVERIFIED"
   | "RARE_FIND"
   | "MARGIN_OK"
   | "NEEDS_DISCOUNT"
@@ -323,6 +327,11 @@ export function qualifyListing(input: GateInput): GateVerdict {
 
   // ---- it would qualify on the numbers; now evidence and age decide how far to trust that
   let confidence = confidenceFor(level);
+  const unverified = input.identityUnverified ?? [];
+  if (unverified.length > 0) {
+    reasons.push({ code: "IDENTITY_UNVERIFIED", severity: "info", text: `The title also states ${unverified.join(", ")}, which nothing confirms is a model or version marker (it may be the seller's own code), so the match to the product is not fully confirmed.` });
+    if (confidence === "high") confidence = "medium";
+  }
   if (counted > 0) reasons.push({ code: "HIDDEN_GEM", severity: "good", text: `The lot is worth about ${money(lot)} with the extras that come with it (+${money(counted)}).` });
 
   const wantsMargin = settings.minMarginPercent;

@@ -5,7 +5,6 @@ import { compMatchesSpecs, sanitizeSearchQuery, specReference, titleLooksLikePro
 import { titleLooksLikeBrokenProduct } from "./brokenVariant.js";
 import { isLowAiMode } from "./aiMode.js";
 import { trimmedMean } from "./marketValue.js";
-import { codesMissingFrom } from "./identity/codes.js";
 import { splitByPriceSeparators } from "./identity/populations.js";
 
 export interface EbayComp {
@@ -158,13 +157,15 @@ export async function searchSoldComps(page: Page, query: string): Promise<EbayCo
 // listing title yet — e.g. a product added by hand through chat, never
 // actually found on a real listing) or if the AI call itself fails; never
 // throws, since a fallback to the existing name is always a valid result.
-export async function deriveWatchCountQuery(fallbackName: string, sourceTitle: string | null, imageDataUri: string | null): Promise<string> {
+export async function deriveWatchCountQuery(fallbackName: string, sourceTitle: string | null, imageDataUri: string | null, credibleCodes: string[] = []): Promise<string> {
   // The Database entry's own name is a fine search query; asking the AI to re-derive it costs credits every research.
   if (isLowAiMode()) {
     // No AI: the entry's own name, plus the model numbers / generations the listing it came from states and the name lacks, so a generic name
     // does not turn into a search for every version of the product (the comp filter then requires those codes too).
     const base = sanitizeSearchQuery(fallbackName) || fallbackName;
-    const extra = sourceTitle ? codesMissingFrom(fallbackName, sourceTitle) : [];
+    // Only codes that evidence shows are real model / version markers (identity/credibility.ts): a seller's inventory code in the query would
+    // find no comps at all and waste one of the day's few lookups.
+    const extra = sourceTitle ? credibleCodes : [];
     return extra.length ? `${base} ${extra.join(" ")}` : base;
   }
   if (!sourceTitle && !imageDataUri) return fallbackName;

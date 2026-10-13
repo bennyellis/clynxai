@@ -10,6 +10,7 @@ import type { BlacklistedImage, BlacklistTerm, FeedbackExample, FeedbackVerdict,
 import { brokenVariantName, isBrokenVariantName } from "./brokenVariant.js";
 import { assessListingAge } from "./listingAge.js";
 import { codesMissingFrom } from "./identity/codes.js";
+import { assessCodes, CodeIndex, NO_CODES, type CodeAssessment, type EvidenceDoc } from "./identity/credibility.js";
 
 // What a product is worth on eBay, as the total the BUYER pays (the sold item price plus the shipping they paid): the estimate when
 // there is one, else the sold average with its average shipping. The user keeps ~84% of that total (eBay's cut is on all of it).
@@ -914,11 +915,45 @@ export class Store {
 
   // What the Database knows about the product a listing is (by its tracked/matched name, else by its title): its name, what
   // it sells for on eBay, how fast, and from how many sales. Feeds the star rating in ntfy alerts (dealSummary.ts).
-  getProductSignals(matchedItem: string | null, title: string): ProductSignals | null {
+  // Evidence for deciding whether a code in a listing title is a real model / version marker (identity/credibility.ts): entry names, other
+  // sellers' listing titles and reference-photo titles. Built the first time a listing states a code its entry lacks (most never do), kept for ten
+  // minutes, and rebuilt when the number of entries changes.
+  private codeIndexCache: { at: number; products: number; index: CodeIndex } | null = null;
+  private codeIndex(): CodeIndex {
+    const now = Date.now();
+    const products = (this.db.prepare("SELECT COUNT(*) AS n FROM products").get() as { n: number }).n;
+    if (this.codeIndexCache && now - this.codeIndexCache.at < 600_000 && this.codeIndexCache.products === products) return this.codeIndexCache.index;
+    const docs: EvidenceDoc[] = [];
+    for (const p of this.db.prepare("SELECT id, name FROM products").all() as Array<{ id: string; name: string }>) docs.push({ text: p.name, origin: `product:${p.id}`, kind: "product" });
+    for (const l of this.db.prepare("SELECT title, seller_name FROM listings").all() as Array<{ title: string; seller_name: string | null }>) {
+      docs.push({ text: l.title, origin: l.seller_name ? `seller:${l.seller_name.toLowerCase()}` : `title:${l.title.toLowerCase()}`, kind: "listing" });
+    }
+    for (const i of this.db.prepare("SELECT source_title FROM product_images WHERE source_title IS NOT NULL").all() as Array<{ source_title: string }>) {
+      docs.push({ text: i.source_title, origin: `title:${i.source_title.toLowerCase()}`, kind: "photo" });
+    }
+    const index = new CodeIndex(docs);
+    this.codeIndexCache = { at: now, products, index };
+    return index;
+  }
+
+  /** Which codes a listing title states beyond the entry's name are backed by evidence (credible), which are not (unverified), and which are just a short form of the name. */
+  assessListingCodes(entryId: string | null, entryName: string, title: string, independentTexts?: string[], seller?: string | null): CodeAssessment {
+    if (codesMissingFrom(entryName, title).length === 0) return NO_CODES;
+    return assessCodes({ entryId, entryName, title, index: this.codeIndex(), independentTexts, seller });
+  }
+
+  /** The credible extra codes only (what the identity second look and the market check need). */
+  credibleCodes(entryId: string, entryName: string, title: string): string[] {
+    return this.assessListingCodes(entryId, entryName, title).credible.map((c) => c.code);
+  }
+
+  getProductSignals(matchedItem: string | null, title: string, independentTexts?: string[]): ProductSignals | null {
     const rows = this.db
       .prepare(`SELECT id, name, ${EBAY_VALUE_SQL} AS value, ebay_avg_run_time_days AS run, ebay_comps_sample_size AS n, ebay_comps_checked_at AS at, my_store_ref AS store, ebay_est_basis AS basis, ebay_comps_identity AS ident FROM products`)
       .all() as Array<{ id: string; name: string; value: number | null; run: number | null; n: number | null; at: number | null; store: string | null; basis: string | null; ident: string | null }>;
-    const toSignals = (r: (typeof rows)[number]): ProductSignals => ({
+    const toSignals = (r: (typeof rows)[number]): ProductSignals => {
+      const assessment = this.assessListingCodes(r.id, r.name, title, independentTexts);
+      return {
       id: r.id,
       name: r.name,
       valueUsd: r.value !== null && r.value > 0 ? r.value : null,
@@ -928,10 +963,13 @@ export class Store {
       storeValueUsd: parseMyStore(r.store)?.medianUsd ?? null,
       basis: r.basis === "sold" || r.basis === "blend" || r.basis === "active" ? r.basis : null,
       identity: r.ident === "exact" || r.ident === "approximate" || r.ident === "unresolved" ? r.ident : null,
-      // Defining codes (model numbers, generations) the listing states that this product's name does not: the listing may be a more
-      // specific product than the entry it matched, so the entry's value is not known to apply to it.
-      unconfirmedCodes: codesMissingFrom(r.name, title),
-    });
+      // Codes the listing states that this product's name does not, split by evidence (see identity/credibility.ts): the credible ones mean
+      // the listing may be a more specific product than the entry it matched, so the entry's value is not known to apply to it.
+      unconfirmedCodes: assessment.credible.map((c) => c.code),
+      unverifiedCodes: assessment.unverified.map((u) => u.code),
+      codeAssessment: assessment,
+      };
+    };
     if (matchedItem) {
       const lower = matchedItem.toLowerCase();
       const hit = rows.find((r) => r.name.toLowerCase() === lower) ?? rows.find((r) => isSimilarProductName(matchedItem, r.name));
