@@ -36,3 +36,4 @@ audit/phase4_shadow/*.cjs
 *.restoring
 *.partial
 resources/build-info.json
+beta-release/

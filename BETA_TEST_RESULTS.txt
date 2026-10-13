@@ -1,0 +1,67 @@
+CLYNX WINDOWS BETA 0.3.0-beta.1 - BUILD AND TEST RESULTS
+Written 2026-10-13. Everything below was actually run; nothing is assumed.
+
+BUILD
+  Installer:  Clynx-Beta-Setup-0.3.0-beta.1.exe   (124,718,780 bytes = 119 MB, NSIS, Windows x64, per-user, UNSIGNED)
+  SHA-256:    959FE95CBA5BE51E5E7E3EFD076394EAD68B59798BD4C0A367F7D6E0153A572F
+  Git commit: ef6471052036 (branch master; clean tree at build time; rollback tag checkpoint-before-windows-beta)
+  Built with: npm run dist:beta  (writes resources/build-info.json with channel "beta", builds, runs electron-builder --win --x64)
+  Branding:   Clynx icon (build/icon.ico) embedded in the exe; product/company/description metadata set
+  Not published, not uploaded anywhere. publish is disabled in the build config.
+
+WHAT IS INSIDE THE INSTALLER (checked by listing and scanning app.asar)
+  Only the built app (out/main, out/preload, out/renderer), its icon, build-info, package.json and production dependencies; native sharp unpacked.
+  No source code, no .env, no databases, no config, no sessions, no browser profiles, no backups, no audits, no cloud server.
+  Scanned for API-key/secret patterns and for the developer's name/email: none found.
+
+AUTOMATED CHECKS (final state)
+  Typecheck, desktop (node + web): clean
+  Desktop unit tests: 43 files, all pass
+  Cloud server: typecheck clean; 92 tests pass (vitest, isolated test database)
+      One run showed 1 failing test while the machine was busy; the next run (and two earlier runs) passed 92/92. The failing test was not identified. Treat as unexplained flake.
+  Electron end-to-end suites on the development build (isolated sandboxes, fake cloud server): 16 suites, all exit 0 in the final run:
+      startup, big database, config, session expiry/offline, deal quality, close/recovery, onboarding, status feed, performance modes, lazy library,
+      hidden screens, diagnostics/crash recovery, leak checks, identity foundation, review/safeguard, account/backups/security, local beta mode (33 checks).
+
+THE REAL INSTALLER (installed with the actual Clynx-Beta-Setup-0.3.0-beta.1.exe, silently, per-user, into a temporary folder)
+  Install ............ exit 0. Created a desktop shortcut, a Start-menu shortcut and an uninstall entry ("Clynx (beta) 0.3.0-beta.1").
+                       Both shortcuts point at the installed Clynx.exe (start-in = install folder). Exe shows product Clynx, version 0.3.0-beta.1.
+                       Install folder holds only the program (about 411 MB); no .env/db/config/source.
+  Launch without developer tools (installed exe, PATH reduced to System32 only, no npm/node variables): 20 of 20 checks passed:
+                       welcome screen with version and BETA badge; runs from app.asar; Start Clynx -> Dashboard; fresh empty Database created in the user-data folder
+                       (not the install folder); identity enforcement and Review Apply off; NO request to any Clynx Cloud server; About shows version and git commit;
+                       browser found; a key typed by the tester is saved only in the user-data folder; "Log in to Facebook" opens a real Chrome window (Playwright + stealth
+                       stack works from inside the installed app); support report holds no key/user name/cookie; "Back up now" writes a verified backup;
+                       closing the window quits and leaves no process; reopening goes straight in with settings, key and Database intact.
+  Scanning, matching, valuation, Watches (installed exe, local imitation of Marketplace, no OpenAI key): 13 of 13 checks passed:
+                       collected all 3 listings; recognised "PlayStation 5 ..." as the Database product "PlayStation 5 Console" and priced it from its $420 sold value
+                       ("Solid deal, about $93 profit after fees", 3 stars, flagged as a deal); a Watch "PS5 under 300" matched it; listings, Watch and match survived a restart;
+                       nothing was sent to a phone-alert server (no topic set); no cloud request; no errors.
+  Update over an existing install: running the installer again over the installed version succeeded (exit 0) and the new build opened the previous build's data
+                       (settings, API key, Database, backups) without asking for anything.
+  Edge fallback ...... With Chrome made invisible to the app, the installed app found Microsoft Edge and opened it for the Facebook login window.
+  Missing browser .... (development build) With neither browser visible the welcome screen and a Dashboard notice say what to install, with a "Get Google Chrome" button.
+  Uninstall .......... Silent uninstall exit 0: Clynx.exe removed, desktop and Start-menu shortcuts removed, uninstall entry removed.
+                       Data retention: the uninstaller does NOT delete user data (deleteAppDataOnUninstall is off; the data folder %APPDATA%\Clynx was verified unchanged -
+                       same 4,855 files before and after - and test user-data folders outside the install folder were untouched). Documented in the install guide.
+
+BUGS FOUND AND FIXED DURING THIS WORK
+  1. Installed apps never re-read the .env in their own data folder (dotenv looked in the working directory), so a key saved in Config would have been forgotten at restart.
+     Fixed; also handles a variable that exists but is empty. Verified by restart tests.
+  2. A phone alert with no topic set was posted to the alert server's root address with the deal's details. Fixed (nothing is sent without a topic); unit test added.
+  3. With no OpenAI key every listing was skipped with "Clynx couldn't read its own analysis"; now says plainly that a key is needed, with a Dashboard notice and a Config section to add one.
+  4. Scanning needed Google Chrome specifically; now Chrome, then Microsoft Edge (preinstalled on Windows 10/11); the bundled developer-only Chromium is not relied on.
+  5. The packaged app could not be built reliably on Windows (tool download needs a privilege); worked around by providing the tool directory; documented.
+  6. Earlier in the project: packaging previously produced a 5 GB archive of the whole project folder; now a whitelist (25 MB archive).
+
+WHAT WAS NOT TESTED / OPEN LIMITS (also in BETA_KNOWN_ISSUES.md)
+  - No clean Windows machine or virtual machine was available (Windows Sandbox/Hyper-V need administrator rights). The strongest substitute was used: the real installer, installed
+    and run under throwaway profiles, with developer tools removed from the search path. A first-time install on a computer that never had development tools is therefore NOT proven.
+  - The Start-menu / desktop shortcuts were checked (targets, start folder, icon) but not clicked: clicking them would have started the beta against the developer's real
+    %APPDATA%\Clynx data folder, which was deliberately left alone.
+  - Nothing was run against the real Facebook, real OpenAI, real eBay or real ntfy services (no keys, and nobody's account may be used). Scanning used a local imitation of Marketplace.
+  - The installer is unsigned: Windows SmartScreen will warn (documented). Antivirus behaviour is untested.
+  - "Install for all users" mode and a non-default install folder with spaces/unicode were not exercised beyond the temporary folder used.
+  - One installed-app run once reported an uncaught-error line in the app's output; it did not reproduce in the two later full runs of that suite (one with the reduced PATH) and its text was not captured.
+  - macOS: not built.
+  - No long-duration (days) run.

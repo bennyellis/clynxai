@@ -18,6 +18,11 @@ Mark each item only when it was actually done and checked.
 - [ ] Install it on a clean Windows machine/VM (no Node, no Chrome profile of yours): it starts, the login screen shows, a test account signs in, **a scan runs** (see "Browser" below).
 - [ ] Uninstall keeps the user's data folder (it must; `deleteAppDataOnUninstall` is false).
 
+### Windows beta build (done once, 0.3.0-beta.1)
+- `npm run dist:beta` writes `resources/build-info.json` (channel "beta", version, git commit), builds, and runs electron-builder. Only beta builds offer the local no-account mode; a production build never does.
+- On a Windows PC without Developer Mode / administrator rights, electron-builder fails while unpacking its signing tools ("Cannot create symbolic link"). The workaround used: run `CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --x64` once with Developer Mode enabled, or copy a partially unpacked `winCodeSign` folder to `%LOCALAPPDATA%\electron-builder\Cache\winCodeSign\winCodeSign-2.6.0`.
+- Results, checksum and tester guides: `BETA_TEST_RESULTS.txt`, `beta-release/`.
+
 ## 3. Building (macOS) - not yet validated
 No Mac or Apple Developer account was available when this was written. The configuration (`build.mac`, `dist:mac`, the CI job) exists but has **never been run**.
 - [ ] Apple Developer Program membership; Developer ID Application certificate; `CSC_LINK`/`CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` set as repository secrets.
