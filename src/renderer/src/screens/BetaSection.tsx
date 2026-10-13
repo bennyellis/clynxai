@@ -119,6 +119,53 @@ export function KeysBlock({ info, onChanged }: { info: BetaInfo; onChanged: () =
   );
 }
 
+/** Optional: encrypt the saved keys with this computer's key store (Windows account / Keychain). Off by default; reversible; a copy of the old file is kept until the person deletes it. */
+export function KeyProtectionBlock({ info, onChanged }: { info: BetaInfo; onChanged: () => void }) {
+  const kp = info.keyProtection;
+  const [note, setNote] = useState<string | null>(null);
+  if (!kp || !(info.hasSavedKeys || info.hasOpenAIKey || kp.on || kp.copies > 0)) return null;
+  const toggle = async (enabled: boolean) => {
+    const r = await api.setKeyProtection(enabled);
+    setNote(r.ok ? (enabled ? "Your saved keys are now protected on this computer. A copy of the old file was kept; delete it below once you have checked that everything still works." : "Your saved keys are stored as plain text again.") : (r.error ?? "That did not work."));
+    onChanged();
+  };
+  return (
+    <div data-testid="key-protection" style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 14 }}>
+      <strong>Protect my saved keys</strong>
+      <div style={{ color: "var(--text-muted)" }}>
+        Your keys are stored on this computer. {kp.on ? "They are encrypted so other programs and other Windows accounts cannot read them." : "Right now they are saved as readable text in Clynx's data folder, which anyone with access to your Windows account can read. You can encrypt them with this computer's key store; this is optional and you can undo it."}
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+        {!kp.on && (
+          <button className="ghost" data-testid="protect-keys" disabled={!kp.available} onClick={() => void toggle(true)}>
+            Protect my keys
+          </button>
+        )}
+        {kp.on && (
+          <button className="ghost" data-testid="unprotect-keys" onClick={() => void toggle(false)}>
+            Turn protection off
+          </button>
+        )}
+        {!kp.available && <span style={{ color: "var(--warn)" }}>This computer's key store is not available, so protection cannot be turned on.</span>}
+        {kp.copies > 0 && (
+          <button
+            className="ghost"
+            data-testid="delete-key-copies"
+            onClick={async () => {
+              const r = await api.deleteKeyCopies();
+              setNote(`Removed ${r.removed} old ${r.removed === 1 ? "copy" : "copies"} of the keys file.`);
+              onChanged();
+            }}
+          >
+            Delete {kp.copies} old {kp.copies === 1 ? "copy" : "copies"} of the keys file
+          </button>
+        )}
+      </div>
+      {note && <div data-testid="protect-note" style={{ color: "var(--text-muted)" }}>{note}</div>}
+    </div>
+  );
+}
+
 /** Cloud mode: AI and eBay come from Clynx. Keys saved from the beta are never deleted for you; the person moves off them, or deletes them, on purpose. */
 export function CloudApisBlock({ info, onChanged }: { info: BetaInfo; onChanged: () => void }) {
   const [note, setNote] = useState<string | null>(null);

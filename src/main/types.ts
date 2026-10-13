@@ -766,6 +766,8 @@ export interface BetaInfo {
   apiSource?: "local" | "shared" | "own";
   /** Keys (OpenAI or eBay) are saved on this computer. */
   hasSavedKeys?: boolean;
+  /** Optional protection of the saved keys with the operating system's key store. `plain` = keys currently stored as readable text; `copies` = leftover .env copies. */
+  keyProtection?: { available: boolean; on: boolean; plain: number; copies: number };
   browser: { ok: boolean; using: string | null; found: string[]; instructions: string; downloadUrl: string };
 }
 export interface BackupSummary {

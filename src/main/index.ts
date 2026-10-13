@@ -3,7 +3,7 @@ import { parse as parseDotenv } from "dotenv";
 import { makePhotoCheck } from "./compPhotoCheck.js";
 import { app, BrowserWindow, ipcMain, safeStorage, session, shell, Menu, dialog, Notification } from "electron";
 import path from "node:path";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, cpSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, cpSync, statSync, readdirSync, unlinkSync } from "node:fs";
 import { Store } from "./store.js";
 import { colorsConflict, colorsIn } from "./colors.js";
 import { ScrapeEngine } from "./scrapeEngine.js";
@@ -12,7 +12,8 @@ import { EbayEngine } from "./ebayEngine.js";
 import { hasEbayCredentials, setEbayTransport } from "./ebayClient.js";
 import { hasOpenAIAccess, initOpenAIProxy, setApiSource } from "./openai.js";
 import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
-import { writeFileAtomicWithBackup } from "./safeFs.js";
+import { writeFileAtomic, writeFileAtomicWithBackup } from "./safeFs.js";
+import { SECRET_ENV_VARS, envKeyState, isProtectedValue, protectEnvText, readEnvSecrets, unprotectEnvText } from "./envKeys.js";
 import { describeStartupFailure, type StartupProblem } from "./startupErrors.js";
 import { NoticeBoard } from "./appNotices.js";
 import { describeSessionProblem } from "./facebookSession.js";
@@ -66,7 +67,7 @@ import { readBuildInfo } from "./buildInfo.js";
 import { importLocalData, localDataExists } from "./localMigration.js";
 import { checkBrowsers, CHROME_DOWNLOAD_URL } from "./browserCheck.js";
 import { safeExternalUrl } from "./safeExternalUrl.js";
-import { setSecretCodec } from "./secretStore.js";
+import { protectSecret, revealSecret, setSecretCodec } from "./secretStore.js";
 import { externalLinkTarget, isAppUrl, isTrustedIpcSender } from "./windowSecurity.js";
 import { WatchSyncService } from "./watchSync.js";
 import { ListingIngestSyncService } from "./listingIngestSync.js";
@@ -128,7 +129,8 @@ const ENV_PATH = path.join(baseDir, ".env");
 // is the install folder, so without this a key saved in Config would be forgotten at the next start. Variables that are already set are not overridden.
 try {
   // (a variable that is set but empty counts as not set)
-  for (const [k, v] of Object.entries(parseDotenv(readFileSync(ENV_PATH, "utf-8")))) if (!process.env[k] && v) process.env[k] = v;
+  // (a protected value is decrypted later, once the operating system key store is ready; see loadProtectedEnv)
+  for (const [k, v] of Object.entries(parseDotenv(readFileSync(ENV_PATH, "utf-8")))) if (!process.env[k] && v && !isProtectedValue(v)) process.env[k] = v;
 } catch {
   /* no .env yet: the tester has not saved a key */
 }
@@ -154,12 +156,14 @@ interface AppSettings {
   // Cloud accounts: where AI and eBay come from. "shared" = Clynx's company-managed service (no keys needed); "own" = keys saved on this computer. Unset: "own" when keys are
   // already saved here (nothing changes until the person chooses), otherwise "shared".
   aiSource?: "shared" | "own";
+  // The person chose "Protect my saved keys": new keys are saved encrypted with the operating system's key store (see envKeys.ts). Off unless chosen.
+  protectKeys?: boolean;
 }
 function loadAppSettings(): AppSettings {
   try {
     if (!existsSync(APP_SETTINGS_PATH)) return { cloudApiUrl: DEFAULT_CLOUD_API_URL };
     const raw = JSON.parse(readFileSync(APP_SETTINGS_PATH, "utf-8"));
-    return { cloudApiUrl: typeof raw?.cloudApiUrl === "string" && raw.cloudApiUrl.trim() ? raw.cloudApiUrl : DEFAULT_CLOUD_API_URL, localMode: raw?.localMode === true, aiSource: raw?.aiSource === "shared" || raw?.aiSource === "own" ? raw.aiSource : undefined };
+    return { cloudApiUrl: typeof raw?.cloudApiUrl === "string" && raw.cloudApiUrl.trim() ? raw.cloudApiUrl : DEFAULT_CLOUD_API_URL, localMode: raw?.localMode === true, aiSource: raw?.aiSource === "shared" || raw?.aiSource === "own" ? raw.aiSource : undefined, protectKeys: raw?.protectKeys === true };
   } catch {
     return { cloudApiUrl: DEFAULT_CLOUD_API_URL };
   }
@@ -197,13 +201,32 @@ function syncAiKeyNotice(): void {
   });
 }
 
+/** Keys saved in protected form are decrypted into the process environment here, after the key store is installed. An unreadable one (another computer or Windows account) is simply absent. */
+function loadProtectedEnv(): void {
+  try {
+    const { values, unreadable } = readEnvSecrets(readFileSync(ENV_PATH, "utf-8"), revealSecret);
+    for (const [k, v] of Object.entries(values)) if (!process.env[k]) process.env[k] = v;
+    if (unreadable.length) console.error(`[keys] could not read ${unreadable.join(", ")} here (saved on another computer or account?): enter ${unreadable.length === 1 ? "it" : "them"} again in Config.`);
+  } catch {
+    /* no .env */
+  }
+}
+const envCopies = (): string[] => {
+  try {
+    return readdirSync(baseDir).filter((f) => f === ".env.bak" || f.startsWith(".env.backup-"));
+  } catch {
+    return [];
+  }
+};
+
 function saveEnvKey(varName: string, key: string): void {
   const trimmed = key.trim();
   let lines: string[] = [];
   if (existsSync(ENV_PATH)) {
     lines = readFileSync(ENV_PATH, "utf-8").split("\n").filter((l) => !l.startsWith(`${varName}=`));
   }
-  lines.push(`${varName}=${trimmed}`);
+  const isSecretVar = (SECRET_ENV_VARS as readonly string[]).includes(varName);
+  lines.push(`${varName}=${trimmed && isSecretVar && appSettings.protectKeys === true ? protectSecret(trimmed) : trimmed}`);
   writeFileAtomicWithBackup(ENV_PATH, lines.filter(Boolean).join("\n") + "\n", () => true);
   process.env[varName] = trimmed;
 }
@@ -3245,6 +3268,7 @@ app.whenReady().then(() => {
   // Renderer permissions (camera, microphone, location, notifications, ...) are never granted; webviews can never be attached; every IPC handler below refuses calls that
   // do not come from the app's own top-level page.
   setSecretCodec({ available: () => safeStorage.isEncryptionAvailable(), encrypt: (t) => safeStorage.encryptString(t), decrypt: (b) => safeStorage.decryptString(b) });
+  loadProtectedEnv();
   session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
   app.on("web-contents-created", (_e, contents) => {
@@ -3362,6 +3386,39 @@ app.whenReady().then(() => {
     saveAppSettings(appSettings);
     syncAiKeyNotice();
     return { ok: true };
+  });
+  // Opt-in protection of the saved keys (see envKeys.ts). A full copy of .env is kept first, the keys are verified before the file is replaced, and turning it off restores plain text.
+  ipcMain.handle("env:setKeyProtection", (_e, args: { enabled?: boolean }): { ok: boolean; error?: string; changed?: number; copy?: string } => {
+    const enabled = args?.enabled === true;
+    try {
+      const text = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, "utf-8") : "";
+      const result = enabled ? protectEnvText(text, protectSecret, revealSecret) : unprotectEnvText(text, revealSecret);
+      if (!result.ok) return { ok: false, error: result.error };
+      let copy: string | undefined;
+      if (result.changed > 0) {
+        copy = `.env.backup-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+        copyFileSync(ENV_PATH, path.join(baseDir, copy));
+        writeFileAtomic(ENV_PATH, result.text.endsWith("\n") ? result.text : result.text + "\n");
+      }
+      appSettings = { ...appSettings, protectKeys: enabled };
+      saveAppSettings(appSettings);
+      return { ok: true, changed: result.changed, copy };
+    } catch (err) {
+      return { ok: false, error: `That did not work (${err instanceof Error ? err.message : "unknown error"}). Your keys were not changed.` };
+    }
+  });
+  // Removes the copies of .env that may still hold the keys in plain text. Only on request.
+  ipcMain.handle("env:deleteKeyCopies", (): { ok: boolean; removed: number } => {
+    let removed = 0;
+    for (const f of envCopies()) {
+      try {
+        unlinkSync(path.join(baseDir, f));
+        removed++;
+      } catch {
+        /* leave it */
+      }
+    }
+    return { ok: true, removed };
   });
   ipcMain.handle("env:deleteSavedKeys", (): { ok: boolean } => {
     for (const k of ["OPENAI_API_KEY", "EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET"]) {
@@ -3589,6 +3646,7 @@ app.whenReady().then(() => {
       localDataExists: buildInfo.localModeAllowed && localDataExists(USERS_ROOT),
       apiSource: effectiveApiSource(),
       hasSavedKeys: hasSavedKeys(),
+      keyProtection: { available: safeStorage.isEncryptionAvailable(), on: appSettings.protectKeys === true, plain: envKeyState(existsSync(ENV_PATH) ? readFileSync(ENV_PATH, "utf-8") : "").plain, copies: envCopies().length },
       browser: { ok: !!browsers.preferred, using: browsers.preferred?.label ?? null, found: browsers.found.map((b) => b.label), instructions: browsers.instructions, downloadUrl: CHROME_DOWNLOAD_URL },
     };
   });

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { AccountSection } from "./AccountSection.js";
 import { BackupsSection } from "./BackupsSection.js";
-import { AboutBlock, BrowserBlock, CloudApisBlock, KeysBlock, LocalLogoutSection, useBetaInfo } from "./BetaSection.js";
+import { AboutBlock, BrowserBlock, CloudApisBlock, KeyProtectionBlock, KeysBlock, LocalLogoutSection, useBetaInfo } from "./BetaSection.js";
 import { SupportReportButton } from "./SupportReportButton.js";
 import type { Account, CloudStatus, Config as ConfigType } from "../lib/api.js";
 import { NtfySetup } from "../components/NtfySetup.js";
@@ -693,11 +693,17 @@ export function ConfigScreen({
       {tab === "account" && betaInfo?.localMode && (
         <Section title="Your API keys" subtitle="Optional, and yours: Clynx ships with none.">
           <KeysBlock info={betaInfo} onChanged={reloadBeta} />
+          <div style={{ marginTop: 18 }}>
+            <KeyProtectionBlock info={betaInfo} onChanged={reloadBeta} />
+          </div>
         </Section>
       )}
       {tab === "account" && betaInfo && !betaInfo.localMode && (
         <Section title="AI and eBay" subtitle="Where Clynx's AI and eBay lookups come from.">
           <CloudApisBlock info={betaInfo} onChanged={reloadBeta} />
+          <div style={{ marginTop: 18 }}>
+            <KeyProtectionBlock info={betaInfo} onChanged={reloadBeta} />
+          </div>
         </Section>
       )}
       {tab === "account" && (
