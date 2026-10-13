@@ -25,7 +25,7 @@
 // which per-user data folder to load *before* any per-user Config exists to
 // read an apiUrl from.
 import { readJsonFileSafe, writeFileAtomicWithBackup } from "./safeFs.js";
-import type { Config, FeedbackVerdict, ListingRecord, ProductProfile, SyncStatus, Watch, WatchMatch } from "./types.js";
+import type { BillingPlanChoice, BillingStatus, Config, FeedbackVerdict, ListingRecord, ProductProfile, SyncStatus, Watch, WatchMatch } from "./types.js";
 
 // The wire shape a PUT /watches/:localId body/response uses — Watch's own
 // fields plus the extra localId/deviceId/id bookkeeping the cloud schema
@@ -581,6 +581,33 @@ export class CloudClient {
 
   getDeviceId(): string | null {
     return this.deviceId;
+  }
+
+  // --- Account and subscription (cloud/src/billing/routes.ts, cloud/src/auth/accountRoutes.ts) ---
+  private async accountCall<T>(method: string, path: string, body?: unknown): Promise<CloudResult<T>> {
+    const apiUrl = this.resolveApiUrl();
+    if (!apiUrl) return { ok: false, error: "Cloud apiUrl not configured" };
+    if (!this.accessToken) return { ok: false, error: "Not authenticated — no access token available yet" };
+    try {
+      return await this.authedFetch(`${apiUrl}${path}`, { method, headers: this.authHeaders(), ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+  getBillingStatus(): Promise<CloudResult<BillingStatus>> {
+    return this.accountCall<BillingStatus>("GET", "/billing/status");
+  }
+  createCheckout(plan: BillingPlanChoice): Promise<CloudResult<{ url: string; trialDays: number }>> {
+    return this.accountCall("POST", "/billing/checkout", { plan });
+  }
+  createPortal(): Promise<CloudResult<{ url: string }>> {
+    return this.accountCall("POST", "/billing/portal");
+  }
+  changePassword(currentPassword: string, newPassword: string): Promise<CloudResult<unknown>> {
+    return this.accountCall("POST", "/me/password", { currentPassword, newPassword });
+  }
+  deleteAccount(password: string): Promise<CloudResult<unknown>> {
+    return this.accountCall("DELETE", "/me", { password, confirm: "DELETE" });
   }
 
   // Multi-user login migration — index.ts's auth:getSession IPC handler

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { AccountSection } from "./AccountSection.js";
 import type { Account, CloudStatus, Config as ConfigType } from "../lib/api.js";
 import { NtfySetup } from "../components/NtfySetup.js";
 import { useScreenActive } from "../lib/screenActive.js";
@@ -712,6 +713,11 @@ export function ConfigScreen({
                   : "Recommended: try “Watch only” for a few days before turning it on."}
             </span>
           </label>
+        </Section>
+      )}
+      {tab === "account" && (
+        <Section title="Your plan" subtitle="Your Clynx plan, what it includes, and billing.">
+          <AccountSection onDeleted={onLoggedOut} />
         </Section>
       )}
       {tab === "account" && <CloudSyncSection onLoggedOut={onLoggedOut} />}

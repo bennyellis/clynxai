@@ -60,11 +60,12 @@ import { timed, getMetricsSnapshot, resetMetrics } from "./metrics.js";
 import { DiscoveryFeed, type DiscoverySource } from "./discovery.js";
 import { breakDownListing, valueBundle, type BundleValuation, type PricedBundleItem } from "./bundleBreakdown.js";
 import { CloudClient } from "./cloudClient.js";
+import { safeExternalUrl } from "./safeExternalUrl.js";
 import { WatchSyncService } from "./watchSync.js";
 import { ListingIngestSyncService } from "./listingIngestSync.js";
 import { FeedbackSyncService } from "./feedbackSync.js";
 import { ProductSyncService } from "./productSync.js";
-import type { Account, ActiveProductResearch, CloudStatus, Config, EngineConfig, FeedbackVerdict, LogLine, OnboardingState, ProductProfile, ScrapeStatus, SearchItem, Watch, WatchPlatform, WatchTerm } from "./types.js";
+import type { Account, ActiveProductResearch, BillingActionResult, BillingStatus, CloudStatus, Config, EngineConfig, FeedbackVerdict, LogLine, OnboardingState, ProductProfile, ScrapeStatus, SearchItem, Watch, WatchPlatform, WatchTerm } from "./types.js";
 import { rmSync } from "node:fs";
 import { createDiagnosticsLog, createRecoveryLimiter } from "./diagnostics.js";
 
@@ -3343,6 +3344,44 @@ app.whenReady().then(() => {
   // any logged-in user now (see bootstrapUserSession) — this is only ever
   // called once the renderer is past the LoginScreen, so store/the sync
   // services below are always already constructed by the time it runs.
+  // Account and subscription (Config > Account). The renderer never talks to the server itself and never sees a token; checkout / portal pages open in the user's own browser,
+  // and only an https URL (or http on a local development server) that the server returned is ever opened.
+  const openBillingPage = (url: unknown): BillingActionResult => {
+    const safe = safeExternalUrl(url);
+    if (!safe.ok) return safe;
+    void shell.openExternal(safe.url);
+    return { ok: true };
+  };
+  const cloudMessage = (r: { error?: string; status?: number; data?: unknown }): string => {
+    const d = (r.data ?? {}) as { error?: string; message?: string };
+    if (d.error === "billing_not_configured") return "Billing is not set up on this server yet.";
+    if (d.error === "already_subscribed") return d.message ?? "You already have a subscription.";
+    if (r.status === 429) return "Too many attempts. Try again in a little while.";
+    return d.message ?? r.error ?? "That did not work. Try again.";
+  };
+  ipcMain.handle("billing:status", async (): Promise<BillingStatus | null> => {
+    const r = await cloudClient.getBillingStatus();
+    return r.ok && r.data ? r.data : null;
+  });
+  ipcMain.handle("billing:checkout", async (_e, args: { plan?: string }): Promise<BillingActionResult> => {
+    if (args?.plan !== "pro_monthly" && args?.plan !== "pro_yearly") return { ok: false, error: "Choose a plan." };
+    const r = await cloudClient.createCheckout(args.plan);
+    return r.ok && r.data ? openBillingPage(r.data.url) : { ok: false, error: cloudMessage(r) };
+  });
+  ipcMain.handle("billing:portal", async (): Promise<BillingActionResult> => {
+    const r = await cloudClient.createPortal();
+    return r.ok && r.data ? openBillingPage(r.data.url) : { ok: false, error: cloudMessage(r) };
+  });
+  ipcMain.handle("account:changePassword", async (_e, args: { currentPassword?: string; newPassword?: string }): Promise<BillingActionResult> => {
+    if (typeof args?.currentPassword !== "string" || typeof args?.newPassword !== "string" || args.newPassword.length < 8 || args.newPassword.length > 200) return { ok: false, error: "The new password must be 8 to 200 characters." };
+    const r = await cloudClient.changePassword(args.currentPassword, args.newPassword);
+    return r.ok ? { ok: true } : { ok: false, error: r.status === 401 ? "The current password is not right." : cloudMessage(r) };
+  });
+  ipcMain.handle("account:delete", async (_e, args: { password?: string }): Promise<BillingActionResult> => {
+    if (typeof args?.password !== "string" || !args.password) return { ok: false, error: "Enter your password." };
+    const r = await cloudClient.deleteAccount(args.password);
+    return r.ok ? { ok: true } : { ok: false, error: r.status === 401 ? "That password is not right." : cloudMessage(r) };
+  });
   ipcMain.handle("cloud:getStatus", (): CloudStatus => {
     const cloud = cloudClient.getStatus();
     return {

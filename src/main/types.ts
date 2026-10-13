@@ -738,6 +738,20 @@ export type DealTier = "search" | "general" | null;
 // "Qualified" (a real Deal) means profitable_now or negotiation.
 export type DealStatus = "profitable_now" | "negotiation" | "worth_a_look" | "pass";
 
+// What Clynx Cloud says about the signed-in account's plan (cloud /billing/status). Shown on Config > Account.
+export interface BillingStatus {
+  configured: boolean; // false: this server has no billing set up (everyone stays on their base plan)
+  plan: "free" | "pro";
+  basePlan: "free" | "pro";
+  entitlements: { maxWatches: number | null; maxDevices: number | null; maxSearchItems: number | null; aiResearchEnabled: boolean; aiRequestsPerDay: number | null; aiImagesPerDay: number | null };
+  subscription: null | { status: string; phase: string; currentPeriodEnd: string | null; trialEnd: string | null; cancelAtPeriodEnd: boolean; graceEndsAt: string | null };
+  canManage: boolean;
+  usage: { aiRequestsToday: number; aiImagesToday: number };
+  trialDays: number;
+}
+export type BillingPlanChoice = "pro_monthly" | "pro_yearly";
+export type BillingActionResult = { ok: true } | { ok: false; error: string };
+
 export interface OnboardingState {
   // The user closed the checklist. It stays reachable from Config > "Setup checklist".
   dismissed: boolean;

@@ -30,6 +30,7 @@ import { CloudClient, watchToCloud, watchMatchToCloud, type CloudWatch } from ".
 
 const SYNC_INTERVAL_MS = 2 * 60_000;
 const STARTUP_DELAY_MS = 15_000;
+const PLAN_RETRY_MS = 30 * 60_000;
 
 // Batch 2 Fix D — the cloud no longer sends back the 8 desktop-local-only
 // operational/scheduler fields (see cloudClient.ts's CloudWatch and
@@ -80,6 +81,7 @@ export class WatchSyncService {
   // just gets its matches pushed on the NEXT tick, once an upsert response
   // has populated it.
   private cloudIdByLocalId = new Map<string, string>();
+  private planBlocked = new Map<string, number>(); // Watch id -> when the server last refused it for plan limits (HTTP 402)
   // First UI status readout (see index.ts's cloud:getStatus). lastSyncAt
   // marks the end of the most recently COMPLETED tick (see runSyncSafely's
   // .then below), regardless of whether an individual step inside it
@@ -229,9 +231,11 @@ export class WatchSyncService {
   // and re-rejected every single tick forever.
   private async push(): Promise<void> {
     try {
+      const now = Date.now();
+      // A Watch the plan did not allow to sync (HTTP 402) is not a failure and must not hold the cursor back; it is offered again at most every 30 minutes (the plan may have changed).
       const candidates = this.store
         .listWatches()
-        .filter((w) => w.updatedAt > this.lastPushedAt)
+        .filter((w) => w.updatedAt > this.lastPushedAt || (this.planBlocked.has(w.id) && now - (this.planBlocked.get(w.id) as number) > PLAN_RETRY_MS))
         .sort((a, b) => a.updatedAt - b.updatedAt);
       if (candidates.length === 0) return;
 
@@ -240,6 +244,13 @@ export class WatchSyncService {
 
       for (const watch of candidates) {
         const result = await this.cloudClient.upsertWatch(watchToCloud(watch));
+        if (result.status === 402) {
+          this.planBlocked.set(watch.id, Date.now());
+          if (!sawFailure) newCursor = Math.max(newCursor, watch.updatedAt);
+          this.lastSyncError = "Your plan syncs a limited number of Watches. This one still works on this computer; upgrade to sync it.";
+          continue;
+        }
+        this.planBlocked.delete(watch.id);
         if (!result.ok || !result.data) {
           if (result.error) {
             console.warn(`[watchSync] push failed for watch ${watch.id}:`, result.error);

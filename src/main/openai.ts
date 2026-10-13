@@ -64,8 +64,14 @@ export function hasOpenAIAccess(): boolean {
 const CREDITS_RETRY_MS = 10 * 60_000;
 let creditsExhaustedUntil = 0;
 export function openAICreditsExhausted(): boolean {
-  return Date.now() < creditsExhaustedUntil;
+  return Date.now() < creditsExhaustedUntil || Date.now() < planLimitUntil;
 }
+
+// Clynx Cloud answers 429 "ai_daily_limit" (or 402 "plan_limit") when the account's plan has used up today's AI allowance. Same fail-fast shape as above, with its own
+// message: the fix is upgrading or waiting for tomorrow, not adding OpenAI credits.
+const PLAN_LIMIT_RETRY_MS = 15 * 60_000;
+let planLimitUntil = 0;
+export const PLAN_LIMIT_MESSAGE = "Today's AI allowance for your Clynx plan is used up. It resets tomorrow, or upgrade in Config > Account.";
 
 // Same early fail-fast shape getOpenAIApiKey() used to provide (call sites
 // still do `try { ensureOpenAIAccess(); } catch (err) { return
@@ -74,6 +80,7 @@ export function openAICreditsExhausted(): boolean {
 // below resolves whichever one is current itself, at the moment it's
 // actually needed.
 export function ensureOpenAIAccess(): void {
+  if (Date.now() < planLimitUntil) throw new Error(PLAN_LIMIT_MESSAGE);
   if (openAICreditsExhausted()) {
     throw new Error("OpenAI credits are used up — add credits at platform.openai.com/settings/organization/billing (Clynx checks again every few minutes).");
   }
@@ -96,7 +103,8 @@ export function ensureOpenAIAccess(): void {
 // unmodified at every call site), or throws with a clear message when
 // neither path is available.
 export async function callOpenAI(kind: "chat" | "images", body: unknown, signal?: AbortSignal): Promise<Response> {
-  if (openAICreditsExhausted()) {
+  if (!localApiKey() && Date.now() < planLimitUntil) throw new Error(PLAN_LIMIT_MESSAGE);
+  if (Date.now() < creditsExhaustedUntil) {
     throw new Error("OpenAI credits are used up — add credits at platform.openai.com/settings/organization/billing.");
   }
   const localKey = localApiKey();
@@ -125,5 +133,16 @@ export async function callOpenAI(kind: "chat" | "images", body: unknown, signal?
   }
   const result = await cloudClientRef.openAIRequest(kind, body, signal);
   if (!result.ok) throw new Error(result.error);
+  if (result.response.status === 429 || result.response.status === 402) {
+    const text = await result.response
+      .clone()
+      .text()
+      .catch(() => "");
+    if (/ai_daily_limit|plan_limit/i.test(text)) {
+      planLimitUntil = Date.now() + PLAN_LIMIT_RETRY_MS;
+      console.error("[openai] the Clynx plan's AI allowance is used up: AI features pause for a few minutes.");
+      throw new Error(PLAN_LIMIT_MESSAGE);
+    }
+  }
   return result.response;
 }
