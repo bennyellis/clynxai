@@ -51,6 +51,8 @@ async function postNtfyMessage(
   config: NotifyConfig,
   opts: { title: string; message: string; click: string; priority: string; tags: string; photoUrl: string | null; photoFilenamePrefix: string }
 ): Promise<void> {
+  // No phone-alert topic set up (a new install): nothing is sent anywhere. Without this guard the request would go to the ntfy server's root address with the deal's details in it.
+  if (!config.ntfy?.topic?.trim() || !config.ntfy.server?.trim()) return;
   const photo = opts.photoUrl ? await downloadImageBuffer(opts.photoUrl) : null;
 
   const url = `${config.ntfy.server.replace(/\/$/, "")}/${config.ntfy.topic}`;
