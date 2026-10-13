@@ -38,7 +38,7 @@ run(() => {
   section("the veto-only safeguard and the review screen are OFF by default and cannot be switched on by anything but config.json");
   {
     const cfg = strip(raw("src/main/config.ts"));
-    check("the default config has the safeguard off and review decisions off", /identitySafeguard:\s*\{\s*mode:\s*"off"\s*\}/.test(cfg) && /databaseReview:\s*\{\s*decisions:\s*false\s*\}/.test(cfg));
+    check("the default config has the safeguard off and review decisions off", /identitySafeguard:\s*\{\s*mode:\s*"off"\s*\}/.test(cfg) && /databaseReview:\s*\{\s*decisions:\s*false,\s*apply:\s*false\s*\}/.test(cfg));
     const idx = strip(raw("src/main/index.ts"));
     const calls = idx.match(/setIdentitySafeguard\(/g) ?? [];
     check("the app sets the safeguard mode in exactly one place, from config.identitySafeguard.mode", calls.length === 1 && /config\.identitySafeguard\?\.mode/.test(idx));
