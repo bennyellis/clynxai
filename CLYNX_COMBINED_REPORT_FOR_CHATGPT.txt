@@ -1,0 +1,433 @@
+CLYNX - COMBINED REPORT FOR CHATGPT
+Created 2026-10-13. Project: Clynx (Electron + React + TypeScript Facebook Marketplace / eBay resale scanner, with a Fastify/Postgres/Redis cloud server).
+Contents: (1) the Phase 4-9 completion report, (2) the Windows beta build and test results, (3) the beta release information,
+and, as appendices, the three tester documents (install guide, checklist, known issues).
+Reading tip: everything is plain text/Markdown. 'Implemented' = code exists, 'tested' = automated tests passed here, 'staged' = built but switched off,
+'production-validated' = proven against real external systems (nothing is).
+
+====================================================================================================
+PART 1 - MASTER DIRECTIVE COMPLETION REPORT (Phases 4-9)
+Source file: MASTER_DIRECTIVE_REPORT.txt
+====================================================================================================
+
+CLYNX - MASTER DIRECTIVE COMPLETION REPORT (Phases 4-9)
+Written 2026-10-13. Branch master. Rollback tags: checkpoint-phase4-complete, phase7-9-checkpoint.
+Commits in this stretch: 5e13f85 (cloud billing/entitlements/deploy/CI), 55a2d9e (desktop account + plan limits),
+4ca8d7b (hardening, backups, updates core, packaging, macOS config, support report, docs), 452b67e (security review).
+
+HOW TO READ THIS REPORT
+  IMPLEMENTED = code exists.   TESTED = automated tests run and passed here.
+  STAGED      = built but switched off or not connected to anything real.
+  PRODUCTION-VALIDATED = proven against real external systems. NOTHING in this report is production-validated.
+
+0. STARTING POINT (verified, not assumed)
+  - No ChatGPT-modified archive and no PHASE4_CHATGPT_HANDOFF.md exist. The 8 GB zip was an older snapshot of earlier Claude work.
+    Everything below continues from the real repository state.
+  - Phase 4 safeguard cache changes were reviewed and a stale-cache bug was found and fixed (decision cache checked before view staleness).
+
+1. WHAT WAS DONE, BY PHASE
+PHASE 4 - identity safeguard and Database Review (IMPLEMENTED, TESTED, STAGED OFF)
+  - Veto-only safeguard (modes off/shadow/enforce, default off, fails open, never merges/renames/splits/reprices).
+  - Review screen with confirmed vs heuristic findings, individual approve/reject, per-suggestion Apply and Undo, audit history,
+    correction journal (one-row updates, same-transaction journal, stale-edit refusal, undo refused if edited since), VACUUM-INTO backup before apply.
+  - Apply is behind config databaseReview.apply (default false). It was NOT run on any real data.
+  - Validation: 17-category held-out corpus, shadow safety tests, 41 unit files total.
+  - Needs your decision before activation: turning enforce mode / apply on for the live Database (financial effect on valuations).
+
+PHASE 5 - cloud infrastructure (IMPLEMENTED, TESTED against local Postgres+Redis, NOT DEPLOYED)
+  - Auth (Argon2id, JWT, refresh rotation with reuse detection), device registry, settings/Watch/feedback/product/listing sync,
+    BullMQ jobs with retries/backoff, server-held OpenAI key, per-user isolation tests for every resource,
+    rate limits, /health, /health/ready, /metrics, production Dockerfile + docker-compose.prod.yml + .env.prod.example + DEPLOYMENT.md.
+  - The local Docker dev stack was left untouched (not rebuilt with the new cloud code).
+  - Facebook: the cloud never scrapes or stores Facebook credentials. No Facebook API is assumed.
+
+PHASE 6 - subscriptions and billing (IMPLEMENTED, TESTED with a fake provider, STAGED)
+  - Stripe adapter (hosted checkout + customer portal, verified webhook signatures, idempotent order-safe events),
+    trial (once per account), grace on failed payment, cancel-at-period-end, plan resolution, usage metering,
+    entitlement enforcement behind ENFORCE_ENTITLEMENTS (default false), AI proxy guards (model allowlist, caps, per-minute and daily limits),
+    account deletion cancels the subscription first.
+  - Desktop: Config > Account shows plan/trial/renewal/payment-problem in plain words, upgrade and manage-billing open the server's secure page
+    in the system browser (https only), change password, delete account. Plan-limit answers (402/429) never freeze Watch sync and give AI features a clear message.
+  - NEVER exercised against Stripe's servers (no credentials available). No real charge was possible or made.
+
+PHASE 7 - hardening, packaging, data safety (IMPLEMENTED, TESTED)
+  - Window: sandbox on, webviews off, navigation/redirect blocked, window.open filtered, permissions refused, IPC accepted only from the app's own page,
+    stricter CSP (object-src/base-uri/form-action none). Verified in the real Electron app.
+  - Refresh token encrypted with the OS key store (safeStorage); old plain files migrate on next save. Verified in real Electron.
+  - Dependencies: shipped desktop vulnerabilities 2 high -> 0 (sharp 0.35.5, brace-expansion). Cloud shipped: 0. Remaining findings are build/test tools only (see SECURITY_REVIEW.md).
+  - Packaging: electron-builder previously packed the whole project folder (5 GB app.asar). Now a whitelist: 25 MB archive, 411 MB unpacked.
+    publish:null so it can never upload. The unpacked packaged app was launched in a sandbox and passed (login, dashboard, native sharp, fonts, user-data location, clean quit).
+  - Signed-update core (Ed25519 manifest, hash-checked https download, replay/downgrade protection, rollback after 3 failed starts, offline key/sign/hash tool):
+    TESTED (27 checks), NOT WIRED to any server or UI.
+  - Automatic Database backups (online-backup API, verified, newest 3 + one per recent week, never touches the live file) and one-click Restore
+    (current database is kept as scout.db.before-restore-*). TESTED incl. the real start-up restore path.
+  - Crash recovery/diagnostics (Phase 3) retained; added a support report that strips secrets.
+
+PHASE 8 - macOS (CONFIG ONLY - NEVER BUILT)
+  - Audit: app code is already platform-neutral (no PowerShell/drive letters/backslash paths; guarded by a test).
+  - Fixed: no macOS menu (Cmd+C/V/Q would not work), and window-close left a half-alive app on macOS.
+  - Added dist:mac, mac targets (dmg+zip, x64+arm64, hardened runtime), CI matrix on macOS.
+  - Cannot be validated here: no Mac, no Apple Developer account, no notarization. Icon is 256 px; macOS needs 1024 px.
+
+PHASE 9 - launch readiness (PARTIAL)
+  - Done: support report button, RELEASE_CHECKLIST.md, BETA_PLAN.md (a plan; NO beta was run, no user feedback exists), SECURITY_REVIEW.md, README index,
+    account/subscription screen, startup benchmark (no regression: dashboard in ~170 ms on a 396 MB library, same as before).
+  - Existing from earlier phases: first-run checklist, notices, scanner error explanations.
+
+2. TEST RESULTS (this machine, this session)
+  - Typecheck: desktop (node + web tsconfigs) clean; cloud clean.
+  - Desktop unit tests: 41 files, all pass (npm test).
+  - Cloud tests: 11 files / 92 tests pass (vitest, isolated test database).
+  - Electron end-to-end (isolated sandbox, fake cloud): 15 suites (startup, big database, config, session, deal quality, close/recovery, onboarding,
+    status feed, performance modes, lazy library, hidden screens, diagnostics, leaks, identity foundation, review/safeguard, account/backups/security)
+    all exit 0 in the final run, plus the packaged-build suite (9 checks).
+  - Honest notes: two suites (close-on-login-screen, GPU-crash recovery) failed once while I was running other CPU-heavy commands at the same time and passed on
+    isolated re-runs; one real bug was caught by the suites and fixed (the Account screen crashed on a server answer missing fields; the answer is now validated),
+    one real bug was caught by a unit test (an unhandled stream error in the update download), and a logic slip in the report's secret redaction was found on review and fixed before it shipped.
+  - Electron suites live in the session scratchpad (not in the repository). CI runs typecheck, unit tests and build on Windows+macOS, cloud tests on Linux.
+
+3. DEPLOYMENT AND CONFIG INSTRUCTIONS
+  cloud/DEPLOYMENT.md (servers, secrets, TLS, backups, Stripe test mode, staged flags), RELEASE_CHECKLIST.md (build/sign/ship), BETA_PLAN.md.
+  Building an installer on Windows: needs Windows Developer Mode (or admin shell) for the signing-tool download; without it use
+  CSC_IDENTITY_AUTO_DISCOVERY=false and win.signAndEditExecutable=false (what I used to produce the test build).
+  No installer (.exe setup) was produced for distribution; only the unpacked packaged app was built (in a temporary folder).
+
+4. SECURITY AND PERFORMANCE FINDINGS
+  See SECURITY_REVIEW.md. Highlights: packaging leak of the whole project fixed; shipped-dependency vulnerabilities cleared; refresh token encrypted;
+  .env API keys still plain text; ~110 IPC handlers lack per-argument schemas (sender check and sandbox mitigate); no password reset/2FA.
+  Performance: startup unchanged; backups use the incremental online-backup API so the window does not freeze.
+
+5. WHAT STILL NEEDS YOU (external dependencies and approvals)
+  Needs authorization/credentials:
+   a. Stripe account + TEST keys to run the DEPLOYMENT.md test-card checklist; later live keys (production billing).
+   b. A server/hosting choice to deploy Clynx Cloud (creates paid resources).
+   c. Windows code-signing certificate; Apple Developer account + Developer ID cert for macOS signing/notarization; a 1024 px app icon.
+   d. An update host and an offline-generated update signing key (then the download/install UI can be built).
+   e. An email provider for password reset / email verification.
+   f. Decision on enabling the identity safeguard (enforce) and Database Review apply on the live Database.
+   g. Decision on ENFORCE_ENTITLEMENTS and final plan numbers (free: 5 Watches/2 devices/150 AI per day; pro: unlimited/3000 are placeholders).
+   h. Legal review of Facebook Marketplace terms before any commercial launch.
+  Product gap to decide: the installer does not include a browser. Scanning uses the customer's Google Chrome (falls back to a Chromium that only exists on
+  developer machines). Either require Chrome (note it at install) or add a first-run browser download step.
+  Not touched by design: your live Database, session and browser profiles; the old 5 GB dist/win-unpacked folder (safe to delete yourself - it is regenerated build output).
+
+6. WHAT I DID NOT DO (per your limits)
+  No deployment, no paid resources, no live billing, no publishing/release, no change to the live Database, no change to Gate thresholds or scanning coverage,
+  no extra paid AI calls, no destructive migration.
+
+
+====================================================================================================
+PART 2 - WINDOWS BETA 0.3.0-beta.1: BUILD AND TEST RESULTS
+Source file: BETA_TEST_RESULTS.txt
+====================================================================================================
+
+CLYNX WINDOWS BETA 0.3.0-beta.1 - BUILD AND TEST RESULTS
+Written 2026-10-13. Everything below was actually run; nothing is assumed.
+
+BUILD
+  Installer:  Clynx-Beta-Setup-0.3.0-beta.1.exe   (124,718,780 bytes = 119 MB, NSIS, Windows x64, per-user, UNSIGNED)
+  SHA-256:    959FE95CBA5BE51E5E7E3EFD076394EAD68B59798BD4C0A367F7D6E0153A572F
+  Git commit: ef6471052036 (branch master; clean tree at build time; rollback tag checkpoint-before-windows-beta)
+  Built with: npm run dist:beta  (writes resources/build-info.json with channel "beta", builds, runs electron-builder --win --x64)
+  Branding:   Clynx icon (build/icon.ico) embedded in the exe; product/company/description metadata set
+  Not published, not uploaded anywhere. publish is disabled in the build config.
+
+WHAT IS INSIDE THE INSTALLER (checked by listing and scanning app.asar)
+  Only the built app (out/main, out/preload, out/renderer), its icon, build-info, package.json and production dependencies; native sharp unpacked.
+  No source code, no .env, no databases, no config, no sessions, no browser profiles, no backups, no audits, no cloud server.
+  Scanned for API-key/secret patterns and for the developer's name/email: none found.
+
+AUTOMATED CHECKS (final state)
+  Typecheck, desktop (node + web): clean
+  Desktop unit tests: 43 files, all pass
+  Cloud server: typecheck clean; 92 tests pass (vitest, isolated test database)
+      One run showed 1 failing test while the machine was busy; the next run (and two earlier runs) passed 92/92. The failing test was not identified. Treat as unexplained flake.
+  Electron end-to-end suites on the development build (isolated sandboxes, fake cloud server): 16 suites, all exit 0 in the final run:
+      startup, big database, config, session expiry/offline, deal quality, close/recovery, onboarding, status feed, performance modes, lazy library,
+      hidden screens, diagnostics/crash recovery, leak checks, identity foundation, review/safeguard, account/backups/security, local beta mode (33 checks).
+
+THE REAL INSTALLER (installed with the actual Clynx-Beta-Setup-0.3.0-beta.1.exe, silently, per-user, into a temporary folder)
+  Install ............ exit 0. Created a desktop shortcut, a Start-menu shortcut and an uninstall entry ("Clynx (beta) 0.3.0-beta.1").
+                       Both shortcuts point at the installed Clynx.exe (start-in = install folder). Exe shows product Clynx, version 0.3.0-beta.1.
+                       Install folder holds only the program (about 411 MB); no .env/db/config/source.
+  Launch without developer tools (installed exe, PATH reduced to System32 only, no npm/node variables): 20 of 20 checks passed:
+                       welcome screen with version and BETA badge; runs from app.asar; Start Clynx -> Dashboard; fresh empty Database created in the user-data folder
+                       (not the install folder); identity enforcement and Review Apply off; NO request to any Clynx Cloud server; About shows version and git commit;
+                       browser found; a key typed by the tester is saved only in the user-data folder; "Log in to Facebook" opens a real Chrome window (Playwright + stealth
+                       stack works from inside the installed app); support report holds no key/user name/cookie; "Back up now" writes a verified backup;
+                       closing the window quits and leaves no process; reopening goes straight in with settings, key and Database intact.
+  Scanning, matching, valuation, Watches (installed exe, local imitation of Marketplace, no OpenAI key): 13 of 13 checks passed:
+                       collected all 3 listings; recognised "PlayStation 5 ..." as the Database product "PlayStation 5 Console" and priced it from its $420 sold value
+                       ("Solid deal, about $93 profit after fees", 3 stars, flagged as a deal); a Watch "PS5 under 300" matched it; listings, Watch and match survived a restart;
+                       nothing was sent to a phone-alert server (no topic set); no cloud request; no errors.
+  Update over an existing install: running the installer again over the installed version succeeded (exit 0) and the new build opened the previous build's data
+                       (settings, API key, Database, backups) without asking for anything.
+  Edge fallback ...... With Chrome made invisible to the app, the installed app found Microsoft Edge and opened it for the Facebook login window.
+  Missing browser .... (development build) With neither browser visible the welcome screen and a Dashboard notice say what to install, with a "Get Google Chrome" button.
+  Uninstall .......... Silent uninstall exit 0: Clynx.exe removed, desktop and Start-menu shortcuts removed, uninstall entry removed.
+                       Data retention: the uninstaller does NOT delete user data (deleteAppDataOnUninstall is off; the data folder %APPDATA%\Clynx was verified unchanged -
+                       same 4,855 files before and after - and test user-data folders outside the install folder were untouched). Documented in the install guide.
+
+BUGS FOUND AND FIXED DURING THIS WORK
+  1. Installed apps never re-read the .env in their own data folder (dotenv looked in the working directory), so a key saved in Config would have been forgotten at restart.
+     Fixed; also handles a variable that exists but is empty. Verified by restart tests.
+  2. A phone alert with no topic set was posted to the alert server's root address with the deal's details. Fixed (nothing is sent without a topic); unit test added.
+  3. With no OpenAI key every listing was skipped with "Clynx couldn't read its own analysis"; now says plainly that a key is needed, with a Dashboard notice and a Config section to add one.
+  4. Scanning needed Google Chrome specifically; now Chrome, then Microsoft Edge (preinstalled on Windows 10/11); the bundled developer-only Chromium is not relied on.
+  5. The packaged app could not be built reliably on Windows (tool download needs a privilege); worked around by providing the tool directory; documented.
+  6. Earlier in the project: packaging previously produced a 5 GB archive of the whole project folder; now a whitelist (25 MB archive).
+
+WHAT WAS NOT TESTED / OPEN LIMITS (also in BETA_KNOWN_ISSUES.md)
+  - No clean Windows machine or virtual machine was available (Windows Sandbox/Hyper-V need administrator rights). The strongest substitute was used: the real installer, installed
+    and run under throwaway profiles, with developer tools removed from the search path. A first-time install on a computer that never had development tools is therefore NOT proven.
+  - The Start-menu / desktop shortcuts were checked (targets, start folder, icon) but not clicked: clicking them would have started the beta against the developer's real
+    %APPDATA%\Clynx data folder, which was deliberately left alone.
+  - Nothing was run against the real Facebook, real OpenAI, real eBay or real ntfy services (no keys, and nobody's account may be used). Scanning used a local imitation of Marketplace.
+  - The installer is unsigned: Windows SmartScreen will warn (documented). Antivirus behaviour is untested.
+  - "Install for all users" mode and a non-default install folder with spaces/unicode were not exercised beyond the temporary folder used.
+  - One installed-app run once reported an uncaught-error line in the app's output; it did not reproduce in the two later full runs of that suite (one with the reduced PATH) and its text was not captured.
+  - macOS: not built.
+  - No long-duration (days) run.
+
+
+====================================================================================================
+PART 3 - WINDOWS BETA RELEASE INFORMATION
+Source file: beta-release/BETA_RELEASE_INFO.txt
+====================================================================================================
+
+CLYNX BETA - RELEASE INFORMATION
+Product ..... Clynx (Windows beta, local mode)
+Version ..... 0.3.0-beta.1
+Git commit .. ef6471052036 (branch master)
+Built ....... 2026-10-13
+Installer ... Clynx-Beta-Setup-0.3.0-beta.1.exe  (119 MB, Windows 10/11 x64, per-user install)
+SHA-256 ..... 959FE95CBA5BE51E5E7E3EFD076394EAD68B59798BD4C0A367F7D6E0153A572F
+Signed ...... NO. Windows SmartScreen will warn ("Unknown publisher"). See BETA_INSTALL_GUIDE.md.
+
+Verify before running (PowerShell):
+  Get-FileHash .\Clynx-Beta-Setup-0.3.0-beta.1.exe -Algorithm SHA256
+
+Contents of this folder:
+  Clynx-Beta-Setup-0.3.0-beta.1.exe            the installer
+  Clynx-Beta-Setup-0.3.0-beta.1.exe.sha256.txt checksum file
+  BETA_INSTALL_GUIDE.md                        read first
+  BETA_TESTER_CHECKLIST.md                     what to try and report
+  BETA_KNOWN_ISSUES.md                         limits and things not to report
+  BETA_TEST_RESULTS.txt                        what was tested before release, and what was not
+
+Not published or uploaded anywhere. Distribute privately, by hand, to chosen testers.
+
+
+====================================================================================================
+APPENDIX A - BETA INSTALL GUIDE (tester document)
+Source file: BETA_INSTALL_GUIDE.md
+====================================================================================================
+
+# Clynx beta - install guide (Windows)
+
+Thank you for testing Clynx. This guide takes about 10 minutes. Everything Clynx does happens on **your** computer; there is no account to create.
+
+Version: **0.3.0-beta.1** (Windows 10 or 11, 64-bit). Check the build you were given against the checksum in `BETA_RELEASE_INFO.txt`.
+
+## What you need
+- Windows 10 or 11 (64-bit), about 600 MB free disk space.
+- **Google Chrome or Microsoft Edge.** Clynx scans Facebook Marketplace through one of them. Edge is already part of Windows 10/11, so you almost certainly have it. Clynx does not ship its own browser.
+- A Facebook account you are happy to use for this (see "About Facebook" below).
+- Optional but needed to get *deals judged*: your own OpenAI API key (see "API keys").
+- Nothing else. You do **not** need Node.js, npm, VS Code, Git or any developer tools.
+
+## 1. Check the file (optional, 1 minute)
+Open PowerShell in the folder with the installer and run:
+
+```powershell
+Get-FileHash .\Clynx-Beta-Setup-0.3.0-beta.1.exe -Algorithm SHA256
+```
+
+The long value must equal the SHA-256 in `BETA_RELEASE_INFO.txt`. If it does not, do not run the file; ask whoever sent it.
+
+## 2. Install
+1. Double-click `Clynx-Beta-Setup-0.3.0-beta.1.exe`.
+2. **Windows will probably warn you** ("Windows protected your PC", publisher "Unknown"). This beta is **not code-signed** (a signing certificate costs money and is not set up yet), so SmartScreen warns about every unsigned download. If you trust the person who sent it and the checksum matched: click **More info**, then **Run anyway**.
+   - Some antivirus programs may also flag a brand-new unsigned program. If yours does, tell us which one and what it said; do not disable your antivirus.
+3. Choose "Install for me only" (the default), keep or change the folder, click **Install**, then **Finish**.
+4. You now have a **Clynx** shortcut on the desktop and in the Start menu.
+
+## 3. First launch
+1. Open Clynx. You see a welcome screen marked **BETA**. Click **Start Clynx**. (If it warns that Chrome or Edge is missing, install Google Chrome from google.com/chrome and restart Clynx.)
+2. The Dashboard shows a **Get started** checklist:
+   - **Open Facebook and log in** - a Chrome/Edge window opens on Facebook. Log in with your own account in that window (Clynx never sees or stores your password; the browser keeps the login in a folder on your computer). The tick appears by itself when you are in. Also set your Marketplace location in that window if Facebook asks.
+   - **Choose where to look** - pick your city or state.
+   - **Add a first product** - a thing you want to find deals on.
+   - **Set up phone alerts** (optional) - Clynx can push deals to your phone with the free ntfy app. Press **Generate private topic**, subscribe to that topic in the ntfy app, then **Send test notification**.
+3. Press **Start Scanner** on the Dashboard.
+
+## API keys (so Clynx can judge listings)
+Clynx ships with **no keys**. Without an OpenAI key it still finds listings and prices the ones that match a product already in your Database, but it cannot decide whether *other* listings are deals, and says so in a notice on the Dashboard.
+- Get a key at platform.openai.com (OpenAI bills you directly; Clynx is set to save credits by default).
+- In Clynx: **Config > Account > Your API keys** > paste the key > **Save key**. It is stored only on your computer and is never shown again or included in reports.
+- eBay keys (optional, for eBay sold prices and eBay searching) go in the same place.
+- You can remove a key at any time with **Remove saved key**.
+
+## What leaves your computer
+- Facebook pages, through your own Chrome/Edge window (the same as browsing yourself, but automated).
+- If you add an OpenAI key: listing titles, descriptions and photos are sent to OpenAI to be judged.
+- If you add eBay keys: product searches go to eBay. Clynx also looks up sold prices on public web pages.
+- If you set a phone-alert topic: the deal text goes to ntfy.sh under that topic. With no topic, nothing is sent.
+- Nothing is sent to Clynx's developers automatically. There is no tracking. A support report is a file **you** choose to save and send.
+
+## About Facebook
+Clynx reads Marketplace the way you would, but automatically, using your own login. Facebook's terms restrict automated access, and Facebook can ask you to verify your identity or limit an account that behaves unusually. Clynx keeps a slow, human-like pace, but **you use it at your own risk**. Prefer an account you can afford to have restricted, and stop and tell us if Facebook shows any warning.
+
+## Where your data lives
+Everything is in `%APPDATA%\Clynx` (paste that into the File Explorer address bar). Your Database is in `data\users\local-beta`. Each tester has their own, starting empty.
+
+## Backups and restore
+Clynx saves a safety copy of your Database about once a day (and when you press **Back up now**) in `data\users\local-beta\backups`. To go back: **Config > Account > Database backups > Restore...** (Clynx restarts; the Database you had before is kept next to it).
+
+## Updating
+There is no automatic update. When you receive a new installer, just run it: it installs over the old version and **keeps all your data and settings**.
+
+## Uninstalling
+Settings > Apps > **Clynx (beta)** > Uninstall (or the Start menu entry). This removes the program, the shortcuts and the uninstall entry. **Your data is kept** in `%APPDATA%\Clynx` so that reinstalling picks up where you left off. To remove it completely, delete that folder yourself after uninstalling (this also removes your Facebook login for Clynx and any saved API keys).
+
+## Something not working?
+1. **Config > Account > Report a bug > Save a support report...** and save the file.
+2. Send it, with two sentences about what you were doing, to whoever gave you the beta.
+   The report lists the version, your settings (secrets removed), the browser Clynx found, recent scanner warnings and technical events. It never contains passwords, API keys, cookies, session files, listings or photos.
+3. **Config > Account > About** shows the exact version and build to quote.
+4. The Dashboard shows "needs attention" notices (browser missing, Facebook logged out, scanner failing, no API key) with a button for each.
+
+
+====================================================================================================
+APPENDIX B - BETA TESTER CHECKLIST (tester document)
+Source file: BETA_TESTER_CHECKLIST.md
+====================================================================================================
+
+# Clynx beta - tester checklist
+
+Tick each box when you have done it. For anything that does not work as written, note **what you did, what you expected, what happened** (a screenshot helps) and send it with a support report (Config > Account > Report a bug).
+
+Name: ____________   Windows version: ________   Chrome/Edge: ________   Clynx build (Config > Account > About): ________
+
+## 1. Installation
+- [ ] The installer file's SHA-256 matched the one I was given.
+- [ ] Windows showed a SmartScreen warning ("Unknown publisher"); I chose More info > Run anyway. (Expected for this unsigned beta.)
+- [ ] Installation finished without errors.
+- [ ] A Clynx shortcut exists on the desktop and in the Start menu, and both open the app.
+- [ ] Clynx is listed in Settings > Apps as "Clynx (beta)".
+
+## 2. First launch and setup
+- [ ] The welcome screen says BETA and shows the version; **Start Clynx** opened the Dashboard.
+- [ ] If I had no Chrome/Edge, Clynx told me clearly what to install. (Skip if you have one.)
+- [ ] "Open Facebook and log in" opened a browser window; I logged in with my own account; the step ticked by itself.
+- [ ] I chose where to look (city or state).
+- [ ] I added a first product to the Get started checklist.
+- [ ] (Optional) I set up phone alerts, and "Send test notification" reached my phone.
+- [ ] (Optional) I saved my own OpenAI key in Config > Account > Your API keys, and the "Add your OpenAI key" notice went away.
+
+## 3. Scanning
+- [ ] **Start Scanner** started scanning; the Activity screen shows what it is doing.
+- [ ] Listings appeared in the **Feed** within about 10 minutes.
+- [ ] Prices, titles and photos in the Feed match what Marketplace shows.
+- [ ] Pressing **Stop** stopped it and closed the scanning browser window.
+- [ ] If Facebook logged me out or showed a check, Clynx told me in plain words (a notice with a button).
+
+## 4. Product matching (Database)
+- [ ] I added a product to the **Database** (for example "PlayStation 5"). Clynx created its entry (with a photo and notes if I have an OpenAI key).
+- [ ] A listing for that product in the Feed was recognised as that product (the card names it).
+- [ ] A listing for something else was **not** wrongly filed under it. Note any wrong match: listing title, and the product Clynx chose.
+- [ ] Variants (for example "Xbox Series S" vs "Xbox Series X", or a game vs its console) were not mixed up.
+
+## 5. Valuation and deals
+- [ ] A matched listing shows what the product usually sells for and the profit after fees.
+- [ ] The numbers look believable to me (note any that look wrong, with the listing).
+- [ ] A clearly good price was flagged as a deal; an ordinary price was not.
+- [ ] Deals show a star rating and a short reason I could understand.
+
+## 6. Watches and alerts
+- [ ] I created a **Watch** (for example "PS5 under $300") on the Watch screen.
+- [ ] The Watch found matching listings, and they appear under that Watch.
+- [ ] I got a Windows notification for a deal or Watch match (if notifications are on).
+- [ ] (If phone alerts are on) I got a push on my phone, and tapping it opened the listing.
+- [ ] I could pause and delete the Watch.
+
+## 7. Settings
+- [ ] Config opens, I changed a setting (for example the minimum profit), saved, and it was still set after restarting.
+- [ ] The performance modes (Config > Appearance) change how the app feels without breaking anything.
+- [ ] Closing the window with unsaved Config changes asked me what to do.
+
+## 8. Database persistence and recovery
+- [ ] I closed Clynx completely and reopened it from the shortcut: it went straight in (no welcome screen) and my Database, Feed, Watches and settings were all still there.
+- [ ] Config > Account > Database backups: **Back up now** created a backup that is listed.
+- [ ] (Optional) **Restore...** worked and Clynx restarted with my data.
+- [ ] I restarted the computer, opened Clynx, and everything was still there.
+- [ ] I ran a newer installer (when given one) over the old one and kept all my data.
+
+## 9. Errors and recovery
+- [ ] I turned off my internet for a minute while scanning; Clynx said so plainly and carried on by itself when it came back.
+- [ ] I closed the scanning browser window by hand; Clynx offered "Try again" and recovered.
+
+## 10. Reporting bugs
+- [ ] **Config > Account > About** shows the version and build.
+- [ ] **Config > Account > Report a bug > Save a support report...** saved a text file.
+- [ ] I opened that file and checked it has no password, API key or other private information (tell us if it does!).
+- [ ] I sent the report with a description of the problem.
+
+## 11. Uninstalling
+- [ ] Uninstalling removed Clynx and its shortcuts.
+- [ ] My data was still in `%APPDATA%\Clynx`, as the guide says, and reinstalling brought it all back.
+
+## Overall
+What worked well: ______________________________________________
+
+What confused or annoyed me: ______________________________________________
+
+Would I use this regularly? ______  What is missing? ______________________________________________
+
+
+====================================================================================================
+APPENDIX C - BETA KNOWN ISSUES (tester document)
+Source file: BETA_KNOWN_ISSUES.md
+====================================================================================================
+
+# Clynx beta 0.3.0-beta.1 - known issues and limits
+
+Read this before reporting something that is listed here.
+
+## About this build
+- **Unsigned installer.** Windows SmartScreen shows "Windows protected your PC / Unknown publisher" until a code-signing certificate is bought and set up. Antivirus programs may also be suspicious of a new unsigned program. Verify the SHA-256 and only run the file from the person who gave it to you.
+- **Windows 10/11, 64-bit only.** There is no Mac or Linux build. (macOS support exists as configuration but has never been built or tested.)
+- **No automatic updates.** Install new versions by running the new installer over the old one. Your data is kept.
+- **Not tested on a clean Windows machine or virtual machine** by the developer (none was available). It was tested by installing the real installer on a development PC under a throwaway profile, with developer tools removed from the search path.
+
+## Needs things Clynx does not include
+- **Google Chrome or Microsoft Edge is required** for scanning. Clynx does not carry its own browser.
+- **No API keys are included.** Without your own OpenAI key, Clynx collects listings and prices those that match a product already in your Database, but cannot judge other listings, research new products, or use the assistant. Most "skipped / not judged" messages mean this. You pay OpenAI directly for your own usage.
+- **eBay sold prices and eBay searches need your own eBay developer keys.** Without them Clynx falls back to what is already in your Database.
+
+## Behaviour you may notice
+- **A new Database is empty**, so at first almost nothing can be priced from the Database. It fills as you add products, and (with an OpenAI key) as Clynx researches what it sees.
+- **First location setup can be slow.** Choosing "whole country" makes Clynx look up 48 cities on Facebook one at a time at a deliberately slow pace (about 12-15 minutes). A single city or state is much faster.
+- **Facebook can change its pages at any time**, which can make scanning find nothing until Clynx is updated. Clynx says "found 0 listings" and shows a notice rather than failing silently.
+- **Facebook may log you out or ask for a security check** if it dislikes automated browsing. Clynx reports this and stops; it never tries to get around a Facebook check. Using this beta is at your own risk (see the install guide).
+- **The scanning browser window** may appear and disappear while scanning; do not close it by hand (Clynx recovers if you do).
+- **Deal quality is judged by AI and by sold-price data** and can be wrong. Treat alerts as "worth a look", not as advice.
+- **Alerts to your phone need the free ntfy app** and a topic you set up. With no topic set, nothing is sent.
+- **The identity safeguard and Database Review "Apply"** (advanced matching correction tools) are **off** in this beta on purpose.
+
+## Not in the beta
+- No Clynx Cloud account, plan or billing (local mode only). The Account section says so.
+- No password reset, because there is no account.
+- No sync between computers.
+
+## Data and privacy notes
+- Uninstalling **keeps** `%APPDATA%\Clynx` (your Database, settings, Facebook login for Clynx, saved API keys). Delete the folder yourself for a full removal.
+- API keys are stored in a plain text file (`%APPDATA%\Clynx\.env`) on your computer, readable by anyone who can read your user folder. Use a key with a spending limit set at OpenAI.
+- The support report removes secrets, but read it before sending.
+
+## Testing that was NOT done
+- No test against the real Facebook (scanning was tested against a local imitation of Marketplace so that nobody's account was involved).
+- No test against real OpenAI, eBay or ntfy services with real keys.
+- No long-running (days) test, no low-memory or slow-disk test.
+- Windows Defender / third-party antivirus behaviour was not tested.
+

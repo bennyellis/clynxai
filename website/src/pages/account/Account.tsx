@@ -52,6 +52,7 @@ function VerifyBanner() {
 }
 
 interface Billing {
+  owner?: boolean;
   configured: boolean;
   plan: "free" | "pro";
   interval: "month" | "year" | null;
@@ -73,7 +74,7 @@ export function Overview() {
     get<{ requests: typeof support }>("/support/requests/mine").then((r) => setSupport(r.requests)).catch(() => undefined);
   }, []);
   if (!user) return null;
-  const d = b ? describeSubscription(b.plan, b.subscription, b.interval) : null;
+  const d = b ? (b.owner ? { headline: "Owner — Full Access", detail: "Every feature and plan is included. No subscription or payment details are needed.", tone: "ok" as const } : describeSubscription(b.plan, b.subscription, b.interval)) : null;
   return (
     <>
       <h1 style={{ fontSize: "1.9rem" }}>Hello{user.displayName ? `, ${user.displayName}` : ""}</h1>
@@ -87,7 +88,7 @@ export function Overview() {
             <p className="dim" style={{ fontSize: ".9rem" }}>
               AI requests today: {b.usage.aiRequestsToday} of {limitText(b.entitlements.aiRequestsPerDay)}
             </p>
-            <Link to="/account/billing" className="btn small">Manage subscription</Link>
+            {!b.owner && <Link to="/account/billing" className="btn small">Manage subscription</Link>}
           </>
         ) : (
           <Loading />
@@ -169,6 +170,17 @@ export function BillingPage() {
   const go = (url: string) => window.location.assign(url);
 
   if (!b) return error ? <div className="error" role="alert">{error}</div> : <Loading what="Loading your subscription" />;
+  if (b.owner)
+    return (
+      <>
+        <h1 style={{ fontSize: "1.9rem" }}>Subscription</h1>
+        <section className="card" data-testid="owner-card">
+          <p style={{ fontWeight: 800, fontSize: "1.3rem", margin: "0 0 4px" }} data-testid="plan-headline">Owner — Full Access</p>
+          <p className="muted">This account has every feature and every plan without a subscription. There is nothing to pay and no payment details to enter. The same applies in the Clynx app.</p>
+          <p className="dim" style={{ fontSize: ".9rem" }}>Safety limits on spending and request rates still apply to every account, including this one (see Console &rarr; Spending and safety).</p>
+        </section>
+      </>
+    );
   const d = describeSubscription(b.plan, b.subscription, b.interval);
   const live = !!b.subscription && ["trialing", "active", "canceling", "past_due_grace"].includes(b.subscription.phase);
   const onYearly = b.interval === "year";

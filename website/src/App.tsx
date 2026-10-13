@@ -1,6 +1,6 @@
 import { lazy, Suspense } from "react";
 import { Link, Route, Routes } from "react-router-dom";
-import { RequireAdmin, RequireAuth, SiteLayout } from "./components/Layout";
+import { RequireAdmin, RequireAuth, RequireOwner, SiteLayout } from "./components/Layout";
 import { Loading, usePageMeta } from "./components/ui";
 import Download from "./pages/Download";
 import Features from "./pages/Features";
@@ -20,6 +20,8 @@ const ConsoleUserDetail = lazy(() => import("./pages/console/Console").then((m) 
 const ConsoleReleases = lazy(() => import("./pages/console/Console").then((m) => ({ default: m.ConsoleReleases })));
 const ConsoleSupport = lazy(() => import("./pages/console/Console").then((m) => ({ default: m.ConsoleSupport })));
 const ConsoleHealth = lazy(() => import("./pages/console/Console").then((m) => ({ default: m.ConsoleHealth })));
+const ConsoleIntegrations = lazy(() => import("./pages/console/Integrations").then((m) => ({ default: m.ConsoleIntegrations })));
+const ConsoleSpending = lazy(() => import("./pages/console/Integrations").then((m) => ({ default: m.ConsoleSpending })));
 const ConsoleAudit = lazy(() => import("./pages/console/Console").then((m) => ({ default: m.ConsoleAudit })));
 
 function NotFound() {
@@ -63,6 +65,8 @@ export default function App() {
             <Route path="releases" element={<ConsoleReleases />} />
             <Route path="support" element={<ConsoleSupport />} />
             <Route path="health" element={<ConsoleHealth />} />
+            <Route path="integrations" element={<RequireOwner><ConsoleIntegrations /></RequireOwner>} />
+            <Route path="spending" element={<ConsoleSpending />} />
             <Route path="audit" element={<ConsoleAudit />} />
           </Route>
           <Route path="*" element={<NotFound />} />

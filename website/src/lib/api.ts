@@ -59,6 +59,7 @@ export async function api<T = unknown>(method: string, url: string, body?: unkno
 export const get = <T>(url: string) => api<T>("GET", url);
 export const post = <T>(url: string, body?: unknown) => api<T>("POST", url, body ?? {});
 export const patch = <T>(url: string, body: unknown) => api<T>("PATCH", url, body);
+export const put = <T>(url: string, body: unknown) => api<T>("PUT", url, body);
 export const del = <T>(url: string, body?: unknown) => api<T>("DELETE", url, body);
 
 export const errorText = (e: unknown): string => (e instanceof ApiError ? e.message : "Something went wrong. Please try again.");

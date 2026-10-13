@@ -6,7 +6,9 @@ export interface User {
   email: string;
   displayName: string | null;
   emailVerified: boolean;
-  role: "user" | "admin";
+  role: "user" | "admin" | "owner";
+  /** The permanent Owner: full access with no subscription (decided by the server). */
+  owner: boolean;
   isBetaTester: boolean;
   createdAt: string;
   plan: "free" | "pro";

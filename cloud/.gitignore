@@ -4,3 +4,5 @@ dist/
 .env.test
 *.log
 .env.prod
+.env.preview
+data/

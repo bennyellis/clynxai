@@ -25,7 +25,7 @@ export function Header() {
           <NavLink to="/support">Support</NavLink>
           {user === undefined ? null : user ? (
             <>
-              {user.role === "admin" && <NavLink to="/console">Console</NavLink>}
+              {(user.role === "admin" || user.role === "owner") && <NavLink to="/console">Console</NavLink>}
               <NavLink to="/account">Account</NavLink>
               <button className="link" onClick={() => void logout()}>
                 Sign out
@@ -117,6 +117,14 @@ export function RequireAdmin({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   if (user === undefined) return <div className="wrap section"><Loading what="Checking your session" /></div>;
   if (!user) return <Navigate to="/login" state={{ from: "/console" }} replace />;
-  if (user.role !== "admin") return <Navigate to="/account" replace />;
+  if (user.role !== "admin" && user.role !== "owner") return <Navigate to="/account" replace />;
+  return <>{children}</>;
+}
+
+/** Owner-only pages. The server refuses everyone else anyway. */
+export function RequireOwner({ children }: { children: ReactNode }) {
+  const { user } = useAuth();
+  if (user === undefined) return <div className="wrap section"><Loading what="Checking your session" /></div>;
+  if (!user || user.role !== "owner") return <Navigate to="/console" replace />;
   return <>{children}</>;
 }

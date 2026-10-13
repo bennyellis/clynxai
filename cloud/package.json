@@ -2,7 +2,7 @@
   "name": "clynx-cloud",
   "version": "0.1.0",
   "private": true,
-  "description": "Clynx Cloud backend \u2014 auth, devices, Watch sync, listing ingestion/dedup, and the async job queue (Phases 1-4). Standalone project, isolated from the Electron app.",
+  "description": "Clynx Cloud backend — auth, devices, Watch sync, listing ingestion/dedup, and the async job queue (Phases 1-4). Standalone project, isolated from the Electron app.",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -20,7 +20,11 @@
     "admin": "tsx src/scripts/admin.ts",
     "admin:prod": "node dist/scripts/admin.js",
     "owner": "tsx src/scripts/owner.ts",
-    "owner:prod": "node dist/scripts/owner.js"
+    "owner:prod": "node dist/scripts/owner.js",
+    "createdb": "tsx src/scripts/createdb.ts",
+    "preview:db": "tsx src/scripts/createdb.ts clynx_web_preview",
+    "preview:web": "tsx --env-file=.env.preview src/db/migrate.ts && tsx --env-file=.env.preview src/index.ts",
+    "preview:seed": "tsx --env-file=.env.preview src/scripts/preview-seed.ts"
   },
   "dependencies": {
     "argon2": "^0.41.1",

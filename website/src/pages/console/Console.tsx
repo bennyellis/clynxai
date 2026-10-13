@@ -2,12 +2,14 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Link, NavLink, Outlet, useNavigate, useParams } from "react-router-dom";
 import { Field, Loading, Notice, usePageMeta } from "../../components/ui";
 import { api, del, errorText, get, patch, post } from "../../lib/api";
+import { useAuth } from "../../lib/auth";
 import { formatBytes, formatDate, formatDateTime } from "../../lib/format";
 
 // The administration console. The server re-checks the administrator role on every call; hiding a page here is only a courtesy.
 
 export function ConsoleLayout() {
   usePageMeta("Console");
+  const { user } = useAuth();
   return (
     <div className="wrap portal">
       <nav className="side" aria-label="Console">
@@ -18,6 +20,8 @@ export function ConsoleLayout() {
         <NavLink to="/console/releases">Releases</NavLink>
         <NavLink to="/console/support">Support</NavLink>
         <NavLink to="/console/health">Service health</NavLink>
+        <NavLink to="/console/spending">Spending and safety</NavLink>
+        {user?.role === "owner" && <NavLink to="/console/integrations">API integrations</NavLink>}
         <NavLink to="/console/audit">Audit log</NavLink>
       </nav>
       <div className="stack">
@@ -110,7 +114,7 @@ export function ConsoleUsers({ betaOnly = false }: { betaOnly?: boolean }) {
                   <td>{u.subscriptionStatus ? `${u.subscriptionStatus}${u.interval ? ` / ${u.interval}` : ""}` : "-"}</td>
                   <td>{u.devices}</td>
                   <td>
-                    {u.role === "admin" && <span className="pill">admin</span>} {u.isBetaTester && <span className="pill ok">beta</span>} {!u.emailVerified && <span className="pill warn">unconfirmed</span>} {u.disabled && <span className="pill bad">disabled</span>}
+                    {u.role === "admin" && <span className="pill">admin</span>} {u.role === "owner" && <span className="pill ok">owner</span>} {u.isBetaTester && <span className="pill ok">beta</span>} {!u.emailVerified && <span className="pill warn">unconfirmed</span>} {u.disabled && <span className="pill bad">disabled</span>}
                   </td>
                 </tr>
               ))}

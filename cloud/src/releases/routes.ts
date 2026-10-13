@@ -42,7 +42,7 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
     const q = z.object({ channel: channelSchema.default("beta") }).safeParse(request.query);
     if (!q.success) return reply.code(400).send({ error: "Unknown channel" });
     const r = await query<ReleaseRow>(`SELECT ${COLUMNS} FROM releases WHERE status = 'published' AND channel = $1 AND file_name IS NOT NULL ORDER BY published_at DESC LIMIT 1`, [q.data.channel]);
-    reply.header("Cache-Control", "public, max-age=60");
+    reply.header("Cache-Control", "no-cache"); // always re-check: a release published a moment ago must show at once
     return reply.code(200).send({ release: r.rows[0] ? publicRelease(r.rows[0]) : null });
   });
 
@@ -53,7 +53,7 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
       `SELECT ${COLUMNS} FROM releases WHERE status = 'published' AND file_name IS NOT NULL AND ($1::text IS NULL OR channel = $1) ORDER BY published_at DESC LIMIT 50`,
       [q.data.channel ?? null]
     );
-    reply.header("Cache-Control", "public, max-age=60");
+    reply.header("Cache-Control", "no-cache"); // always re-check: a release published a moment ago must show at once
     return reply.code(200).send({ releases: r.rows.map(publicRelease) });
   });
 
