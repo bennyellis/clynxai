@@ -8,7 +8,7 @@ const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:]
 
 run(() => {
   section("the analysis modules are pure");
-  for (const f of ["resolver.ts", "shadow.ts", "words.ts", "codes.ts", "populations.ts"]) {
+  for (const f of ["resolver.ts", "shadow.ts", "words.ts", "codes.ts", "populations.ts", "credibility.ts", "foundationResolver.ts"]) {
     const src = strip(raw(`src/main/identity/${f}`));
     const imports = [...src.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]);
     check(`${f} imports only other identity modules`, imports.every((i) => i.startsWith("./") && !/notify|openai|scrapeEngine|index|browser|vision|store|watchcount|ebay/i.test(i)), imports);
@@ -18,8 +18,8 @@ run(() => {
   section("nothing in the app imports the shadow tools");
   {
     const mainDir = path.join(process.cwd(), "src", "main");
-    const offenders = fs.readdirSync(mainDir).filter((f) => f.endsWith(".ts") && /identity\/(shadow|resolver)/.test(fs.readFileSync(path.join(mainDir, f), "utf8")));
-    check("no live module uses the shadow resolver", offenders.length === 0, offenders);
+    const offenders = fs.readdirSync(mainDir).filter((f) => f.endsWith(".ts") && /identity\/(shadow|resolver|foundationResolver)/.test(fs.readFileSync(path.join(mainDir, f), "utf8")));
+    check("no live module uses the shadow resolvers", offenders.length === 0, offenders);
   }
 
   section("the command-line runner is read-only and offline");
@@ -33,5 +33,26 @@ run(() => {
     check("it does not import the app's notification, AI, scraper or database-writing code", !/notify|openai|scrapeEngine|electron|playwright|\/index/i.test(imports), imports);
     check("it contains no SQL that writes", !/\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s+TABLE|ALTER\s+TABLE|CREATE\s+TABLE|VACUUM)\b/i.test(code));
     check("the database copy is hashed before and after", (code.match(/sha256/g) ?? []).length >= 2);
+  }
+
+  section("the stage 3b / 6a tools work on scratch copies only, offline, and prove the source did not change");
+  for (const f of ["stage3b_run.ts", "stage6a_audit.ts", "stage6a_roundtrip.ts"]) {
+    const text = raw(`audit/phase4_shadow/${f}`);
+    const code = strip(text);
+    check(`${f} refuses the app's live data folder`, /Refusing to run/.test(text) && /fb-marketplace-scout/.test(text) && /process\.exit\(2\)/.test(text));
+    check(`${f} copies the database to a scratch folder and removes it afterwards`, /copyFileSync/.test(code) && /rmSync\(scratch/.test(code));
+    check(`${f} hashes the source before and after`, (code.match(/sha256|sha\(source\)/g) ?? []).length >= 2);
+    const imports = [...code.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]).join(" ");
+    check(`${f} does not import notification, AI, scraper or browser code`, !/notify|openai|scrapeEngine|electron|playwright|vision|watchcount|\/index/i.test(imports), imports);
+  }
+  check("stage 3b and 6a audit block the network", ["stage3b_run.ts", "stage6a_audit.ts"].every((f) => /globalThis\.fetch\s*=/.test(strip(raw(`audit/phase4_shadow/${f}`)))));
+  check("the audit itself contains no SQL that writes (the round-trip test is the only writer, on its own scratch copy)", !/(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s+TABLE|ALTER\s+TABLE)/i.test(strip(raw("audit/phase4_shadow/stage6a_audit.ts"))));
+  {
+    const journal = strip(raw("audit/phase4_shadow/correction_journal.ts"));
+    check("the correction journal only allows one-row updates of named columns (no insert into data tables, no delete)", !/DELETE\s+FROM/i.test(journal) && !/INSERT\s+INTO\s+(?!correction_journal)/i.test(journal));
+    const mainDir = path.join(process.cwd(), "src");
+    const walk = (d: string): string[] => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : e.name.endsWith(".ts") || e.name.endsWith(".tsx") ? [path.join(d, e.name)] : []));
+    const offenders = walk(mainDir).filter((f) => !f.includes("__tests__") && /from\s+"[^"]*(correction_journal|phase4_shadow)[^"]*"/.test(fs.readFileSync(f, "utf8")));
+    check("nothing in the app imports the audit tools or the correction journal", offenders.length === 0, offenders);
   }
 });

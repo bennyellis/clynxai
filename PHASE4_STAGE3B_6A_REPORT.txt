@@ -1,0 +1,306 @@
+CLYNX - PHASE 4, STAGE 3b (SHADOW MODE) AND STAGE 6a (READ-ONLY DATABASE AUDIT)
+Report for review. Nothing described here changes how Clynx behaves.
+
+Scope that was authorised: run a Database-aware identity resolver in SHADOW MODE only, compare it with the two existing matchers, and audit the Database for
+contamination without changing it. NOT done, and not done without your next authorisation: live matching changes, product creation from the resolver, valuation
+changes, notifications, automatic merging / splitting / renaming / repricing, alias promotion, any change to the live Database, any change to the Gate thresholds
+or to scanning coverage.
+
+Everything below was run on your copy of the Database (C:\Users\biggt\ClynxDbCopy\scout.db), which the tools copied again into a scratch folder first. Its SHA-256 was
+identical before and after every run. No AI call, no web call, no eBay lookup was made (counted: 0, and a test blocks the network in the tools).
+
+
+======================================================================
+SUMMARY IN PLAIN WORDS
+======================================================================
+* The new resolver (the "foundation resolver") made ZERO false matches in everything I checked, on your data and on a separate set of other-category tests. The old
+  matcher made 47 false matches among the 75 pairs of products it called "the same" (63% wrong), and 18 wrong picks among the 230 listings. It does this by being
+  honest: where the evidence is thin it says "uncertain" instead of guessing, and it says why.
+* The price of that honesty: of the 14 pairs of products that really are the same thing, it confirmed only 2, called 2 "related" and left 10 as "uncertain" (it leans
+  "same" on 3 pairs: 2 right, 1 wrong). For listings it picked the right Database entry for 140 of 156
+  listings that have an entry (the old matcher: 127), with no wrong picks.
+* The Database audit flags 27 of 579 entries (4.7%) as potentially contaminated in a way that could put a wrong product or a wrong number in front of a decision,
+  and 97 more as informational only. 10 entries have material filed under them that is confidently a DIFFERENT product (for example a PS5 console bundle photo
+  filed under a game, a console listing photo filed under a controller, a Quest 3S photo under the Quest Touch Controllers). The audit can only look at 179 of the 579 entries, because the
+  other 400 have no listing or photo title filed under them.
+* A 56-item correction plan is proposed (nothing applied). Every item carries the exact prior value, and the apply/undo mechanism was tested on throwaway copies:
+  apply all 39 data changes, undo all, and the database is byte-identical; undo in two halves; a row you edited by hand after an apply is never overwritten by an undo;
+  a stale plan applies nothing; changes outside the allowed tables/columns are refused.
+* Recommendation: no live matching behaviour is ready yet. The one use that looks safe enough to authorise first is "veto only" (details in section 10).
+
+
+======================================================================
+1. COMPARISON OF THE THREE APPROACHES
+======================================================================
+A. "Existing"  : the matcher the app uses today (isSimilarProductName for product names; the title pick used when a listing is filed).
+B. "Earlier shadow": the resolver built in Stage 0b / 1.1 (compareIdentity, newTitlePick).
+C. "Foundation": the new resolver (src/main/identity/foundationResolver.ts), which reads the Stage 3a identity attributes (indexed candidates), decides
+   confirmed / different / related / uncertain, names the relation (goes-with, bundle, edition, variant, family, alias) and lists what is unresolved.
+
+Product against product - every one of the 167,331 pairs of your 579 products was compared by all three. 551 pairs were reviewed by hand (every pair that ANY
+method called "same" or "uncertain", plus every pair the foundation called "related"). Hand labels: 14 truly the same, 507 truly different, 30 ambiguous.
+
+                                   Existing        Earlier shadow     Foundation
+  Said "same" (of 167,331 pairs)     75               3                  2
+  ... of which wrong (false match)   47 (63%)         1 (33%)            0
+  ... of which right                  9               2                  2
+  True same pairs missed or not      5 called not    12 called not      2 called "related", 10 "uncertain"
+    confirmed (of 14)                  the same        the same           (3 leaning "same": 2 right, 1 wrong)
+  True different pairs wrongly       47 (they were    1                  0
+    called "same"                    called "same")
+  Called "uncertain" on a truly       - (never says)   - (never says)    39 of 507 (never claimed "same")
+    different pair
+
+Listing against Database entry - all 230 listings in the copy. Hand labels: 156 listings belong to an existing entry, 74 have no entry (junk, lots, wanted ads,
+products the Database does not have, accessories).
+
+                                   Existing        Earlier shadow     Foundation
+  Right entry picked (of 156)        127             142                140
+  Wrong entry picked (has an entry)  10              6                  0
+  Picked an entry for something      8               9                  0
+    that has no entry
+  Not picked although an entry       19              8                  16 (3 of them pointed at the right entry but as
+    exists                                                              "related / family", not a confirmed match)
+  Correctly left alone (of 74)       66              65                 74
+
+Index check: the foundation resolver also ran through the Stage 3a indexed candidate lookup (what a live version would use). It found the same answer as an
+exhaustive search for 225 of 230 listings, and 124 of the 125 product pairs that were "same" or "uncertain" were among the indexed candidates.
+
+
+======================================================================
+2. FALSE MATCHES AND MISSED MATCHES (measured separately, as you asked)
+======================================================================
+FALSE MATCHES (calling different things the same)
+  Existing:  47 product pairs (63% of its "same" calls), 18 listings (it also called 19 of the 30 ambiguous pairs "the same").
+             Pattern (all 47 are in the video-game group): a game = the console it names ("Pokemon Y (Nintendo 3DS)" = "Nintendo 3DS"; about 30 pairs), an
+             accessory or add-on = the console (a Seagate expansion card = Xbox Series S, a controller-bundle entry = the controller), a console = its "New" / "LL"
+             version. It did NOT merge the iPhone Pro / Max / Plus variants.
+  Earlier shadow: 1 pair ("Nintendogs" = "Nintendo"), 15 listings (for example a controller listing filed as the console, "PS5 Pro & Portal" as plain Ps5).
+  Foundation: 0 pairs, 0 listings, in everything hand-checked. Caveat in section 7: I tuned the resolver on this same copy, so 0 is a measured result on tuned data,
+              not a guarantee. The separate other-category tests (section 3) were written before the resolver ran on them and also show 0.
+
+MISSED MATCHES (failing to say two things are the same)
+  Existing:  5 of 14 true-same pairs, 19 of 156 listings.
+  Earlier shadow: 12 of 14 pairs, 8 listings.
+  Foundation: 12 of 14 pairs not confirmed (2 called "related", 10 "uncertain"); 16 of 156 listings not confirmed. It does NOT reject everything: it confirms 140
+              listings and the plain pairs, and it leans correctly on 2 of the 3 pairs it leans on. But on product-to-product identity it is, today, a veto and a
+              flagger, not a confirmer - which is the safe direction for this data.
+  The true-same pairs it did not confirm are mostly duplicates written with a different maker word or extra words:
+    "Apple iPhone 11" / "iPhone 11", "iPhone 12 Pro" / "Apple iPhone 12 Pro", "DualSense (PS5) Controller" / "DualSense Wireless Controller",
+    "Fordite keychain" / "Handmade fordite keychain", "Gaming PC" / "Gaming PC (custom desktop)", "PS5 Pro" / "PlayStation 5 Pro".
+  I deliberately do not confirm these from "that word is common", because "Pro" is as common as "Apple" and one of them changes the product.
+
+
+======================================================================
+3. ACCURACY BY CATEGORY (only where there is evidence)
+======================================================================
+Your Database is mostly video games (55%) and phones; every other category has a handful of entries, so those numbers are NOT evidence.
+
+Reviewed product pairs by category (hand labels; "false" = called the same when different; "missed" = true-same pair called not-the-same):
+  Video Games & Consoles   317 pairs  (8 same, 282 different, 27 ambiguous)   Existing: 47 false, 3 missed.   Foundation: 0 false, 2 missed.
+  Phones & Tablets         169 pairs  (3 same, 164 different, 2 ambiguous)    Existing: 0 false, 1 missed.    Foundation: 0 false, 0 missed (but it leaves
+                                                                              "Apple iPhone 11" / "iPhone 11" as uncertain, leaning same).
+  Audio, Computers, Sporting Goods, Musical Instruments, Tools, Pet, Other: 17 pairs in total - no false matches by anyone, too few to say more.
+  Pairs crossing categories: 48 - none wrongly matched by any method.
+
+Held-out categories (src/main/__tests__/foundationHeldOut.test.ts, 21 checks; expectations written before the resolver was run on them): guitars and pedals,
+cameras and lenses, sneakers, jeans, power tools, kitchen appliances, vacuums, pressure cookers, watches, books, cars, furniture, brand-level entries, plus
+merchandise that merely names a game. Result: no pair of different products confirmed as the same, Mark II / Plus / Pro / Carbon / size variants never folded
+into the base product, brand-level entries never absorbing a member, unknown products reported as unknown, a new model beside A7 III / A7 IV reported as new,
+and plain listings still confirmed (5 of 5). This is a small adversarial set, not a measurement of accuracy in those categories.
+
+
+======================================================================
+4. DIFFICULT DECISIONS (all three methods side by side)
+======================================================================
+  "Nintendo Switch (Nintendo Switch 2)" vs "Switch 2"   (truth: same product)
+      Existing: same (right).  Earlier: different (a miss).  Foundation: uncertain, leaning "same" (right lean; it first called this "goes with", which was wrong -
+      fixed: a bracket that repeats the name and adds a word is the same product written out in full).
+  "Pokemon Y (Nintendo 3DS)" vs "Nintendo 3DS"            (truth: different - a game and its console)
+      Existing: SAME (one of about 30 such merges).  Earlier: different.  Foundation: related / goes-with.
+  "iPhone 13" vs "iPhone 13 Pro"                          (truth: different)
+      Existing: different.  Earlier: same line.  Foundation: related / variant ("pro" separates entries in 10 other places in this Database).
+  "New Nintendo 3DS XL" vs "Nintendo 3DS XL"             (truth: different consoles)
+      Existing: SAME (wrong).  Earlier: different.  Foundation: uncertain, leaning "same" - a WRONG lean (1 of its 3 leans). "New" is both a product word and a
+      condition word.
+  "Apple iPhone 11" vs "iPhone 11"                      (truth: same)
+      Existing: same (right).  Earlier: different (a miss).  Foundation: uncertain, leaning "same" (right). A word in front ("Apple") is as often a maker as a
+      variant; the data keeping both spellings as entries is what duplicates look like, so it is not used as evidence they differ.
+  Listing "iPhone 15+ unlocked"                          (truth: iPhone 15 Plus)
+      Existing (and your live filing): iPhone 15.  Earlier: iPhone 15 Plus.  Foundation: iPhone 15 Plus.
+  Listing "Xbox one Series S"                            (mangled title; truth: cannot be told)
+      Existing: Xbox One X.  Earlier: Xbox One S.  Foundation: uncertain, naming both candidates.
+  Listing "PS5 Pro & Portal"                             (truth: PS5 Pro)
+      Existing: nothing.  Earlier: Ps5.  Foundation: related / variant of Ps5 ("pro"), not confirmed as plain Ps5.
+  Listing "Sony PlayStation 5 Digital Edition with 2 DualSense Controllers"
+      Existing (and your live filing): DualSense Charging Station.  Earlier: same.  Foundation: not confirmed as the controller dock; leans to PlayStation 5.
+  Listing "Nintendo Switch with Dock and charger"
+      Existing and earlier: Nintendo Switch Dock.  Foundation: Nintendo Switch (the dock is a bundle item).
+  Listing "Pokemon Black 2 ... Nintendo DS"
+      Earlier: Nintendo 2DS (digits and letters of "Black 2 ... DS" assembled into "2DS").  Foundation: uncertain (a model code must appear as that code).
+  Listing "Minecraft Totem of Undying Metal Keychain ..."
+      Foundation: uncertain - a title that only mentions a game among much else is not that game.
+  Listing "3ds XL (jailbroken and loaded with games)"    (truth: Nintendo 3DS XL)
+      Existing and earlier: nothing.  Foundation: Nintendo 3DS XL (a title may leave out ONE plain, widely shared word such as the maker, when everything that
+      identifies the model is there; it says so in the result).
+  Listing "Xbox series s and blue transparent controller"
+      All: Xbox Series S. Foundation notes that the controller is a second item and that no variant is stated.
+
+Defects of the resolver that this hand review found and that were fixed (each has a regression test): a "Plus" in a name read as "and also"; "w/" and a spaced "+"
+not read as "with"; one-word product titles treated as brand-level families; a bundle entry matched by a title that did not state its contents; a capacity in the
+title not outranking an entry with no capacity; a short-form coincidence ("se" inside "sierra", "pro" inside "product"); a bracket that repeats the name read as an
+accessory host; and several overconfident confirmations listed above.
+
+
+======================================================================
+5. POTENTIALLY CONTAMINATED ENTRIES (Stage 6a, read-only)
+======================================================================
+Evidence base: 579 entries; 41 of 230 listings are filed under an entry; 507 reference photos carry their source title; 179 entries have something filed that
+can be checked. 400 entries have nothing filed under them and cannot be audited this way.
+
+Filed items (listing titles and photo source titles) read against ALL entries: 259 support the entry they are filed under, 25 are confidently a different
+product, 72 name something more specific than the entry, 191 cannot be decided.
+
+  Kind                                                       Entries   (high / medium / low confidence)
+  Different-product material filed under the entry           10        contaminated 6 (2/4/0) + merged 4 (0/4/0)
+  Family-level entry holding specific variants                 4        (1/3/0)
+  Duplicate entries (same product twice)                       2 sure (2/0/0), 3 possible (0/0/3)
+  Disputed alias candidates written by Stage 3a                3        (3/0/0): "ps5" is proposed as an alias of PlayStation 5 Slim and of two
+                                                                        bundle entries, but it names the plain Ps5 (the known false-alias problem)
+  Suspicious valuations                                       36        (0/17/19)
+  CORE TOTAL (could put a wrong product or number in front of a decision)  27 entries = 4.7% of the Database
+  Informational: item filed under a broader entry than it states  44    (4/40/0)   e.g. a 512GB console photo under the plain console entry
+  Informational: entries where nothing filed under them shows what they are  47  (all low)
+  Candidate relations written by Stage 3a that the new read contradicts  0 of 412
+
+Examples of the 10 (private details are in the findings file, not in this report):
+  - A reference photo titled "Sony PlayStation 5 Slim Bundle with 2 Controllers and 2 Games" filed under two game entries (Astro Bot, Need for Speed Unbound).
+  - A controller entry whose only photo is titled "Xbox one S + controller" (a console listing); another with a two-pack controller photo.
+  - "Meta Quest Touch Controllers" holding a Quest 3S Xbox Edition (headset) photo.
+  - A racing-wheel photo under the plain Ps5 entry; a PS5 console listing ("1 remote") under the DualSense controller.
+  - Fanatec Formula V2 holding a V2.5 photo.
+Valuations: 36 entries carry a value that rests on 0 or 1 comparable sales, or sits on a family-level entry (one family-level entry holds $2,130), or whose filed
+material includes other products. The audit sees only the stored average and sample size, not the individual sold comparables, so it cannot show that a particular
+comparable was the wrong product; it shows where a value could mix products.
+
+Confidence in the audit itself: I read all 10 different-product findings and the 4 family-level findings by hand. 9 of the 10 are genuine mismatches in what is
+filed. One is an artifact of the resolver: the entry "iPhone (For Parts / Broken)" is a condition variant, and the resolver reads "for parts" in a photo title as
+"made for something", so the photo resolves to the plain iPhone entry and looks different. Of the 4 family-level findings, 2 are solid (the plain Xbox Series S entry
+holding a 1TB listing; the "Apple iPhone original box" placeholder holding phone photos) and 2 are weaker (a "Nintendo Switch" entry and an "xbox" entry holding game
+and service photos: the resolver says the title only mentions the family, which is itself the finding).
+
+
+======================================================================
+6. PROPOSED CORRECTION PLAN (nothing applied)
+======================================================================
+File: correction_plan.json (private output folder). 56 proposals, each needing a person's decision:
+  move a listing   2     move a photo   17     review a duplicate pair   2     clear a stored valuation (needs revaluation)   17
+  reject a candidate alias   3     gather evidence (no data change)   15
+  Confidence: 7 high, 36 medium, 15 low. Not proposed: any delete, any merge, any rename, any split - those need a person (the plan names the pair and the reason).
+Every item with a data change carries: the table, the key, the exact new value, and the exact prior value.
+
+Undo mechanism (audit/phase4_shadow/correction_journal.ts, NOT wired into the app):
+  - only one-row updates of named columns (listing / photo product, a valuation, a candidate's status); it never inserts into data tables or deletes anything;
+  - each change and its journal line (full prior value) are written in ONE transaction;
+  - an item whose row no longer holds what the plan expected is skipped, not forced; an undo whose row was edited since is refused, not forced;
+  - undo works for a whole batch, for any subset, and newest-first.
+Round trip on throwaway copies (stage6a_roundtrip.ts):
+  apply 39 changes -> database changed -> undo -> byte-identical in every affected table (products, listings, photos incl. image bytes, relations, aliases): PASS
+  undo in two halves -> intermediate state differs, final state identical: PASS
+  applying the same plan twice: second time applies nothing: PASS
+  a row edited by hand after the apply: undo refuses that row, keeps your edit, undoes the other 38: PASS
+  stale plan (prior values wrong): applies nothing: PASS
+  a change to a table or column that is not allowed: refused: PASS
+
+
+======================================================================
+7. REMAINING LIMITATIONS OF UNIVERSAL PRODUCT IDENTIFICATION
+======================================================================
+ 1. The ground truth is mine: one reviewer (the assistant), 14 truly-same product pairs, 156+74 listings, mostly video games and phones. 398 of the 551 reviewed pairs were
+    labelled "different" by rule (the foundation called them related and neither older matcher called them the same) and checked by a random sample of 40 (39 clearly
+    right, 1 ambiguous). Please treat every number as an estimate; a person should look at the 14 true pairs and the difficult examples in section 4.
+ 2. I tuned the resolver while reading this copy's results. "0 false matches" is therefore measured on data it was fitted to. The held-out tests were written before
+    running, but they are 21 checks, not a study.
+ 3. Recall on duplicates is low by design (2 of 14 confirmed). A leading word (maker, "new", "handmade") is ambiguous: "Apple iPhone 11" and "New 3DS XL" look alike
+    to a program and are opposite cases. It leans on 3 pairs and is wrong on 1.
+ 4. It depends on the Database's own names being decent. Where the names are contaminated (a placeholder "iPhone (standard model smartphone)", an entry named "xr",
+    an entry named "Gaming PC -") the answers are only as good as the entry.
+ 5. Evidence for "this word separates products" comes from the Database itself (entries kept in pairs: X and X+word, at least 4 places = firm, 2-3 = a lean). In a
+    Database with few such pairs it says "uncertain". It uses word position (after the shared name counts, in front does not) to avoid treating makers as variants.
+ 6. A title that omits a widely shared word is accepted only when exactly one plain word is missing and the model markers are present; titles that omit more, typos
+    ("Swich"), plurals ("dresses"), other languages ("Vendo. Xbox serie nuevo") and abbreviations nobody else uses resolve to "uncertain".
+ 7. Several products in one title, bundles and lots: it names the main item and lists the others, or says uncertain; it does not price a lot.
+ 8. The relation label is sometimes imprecise (a sequel typed "variant"; "Dying Light 2" against "Dying Light") although the verdict "not the same" is right.
+ 9. The audit cannot see individual sold comparables, only the stored average and size; and it cannot audit the 400 entries with no filed material.
+10. Condition, authenticity, region and seller trust are outside identification and untouched.
+
+
+======================================================================
+8. PERFORMANCE AND COST
+======================================================================
+Phase 3 performance is untouched: the resolver is not imported by the app (a test fails if any app file imports it), and both Stage 3a flags remain off by default.
+  App startup, GPU and memory: no new code runs. Large-library startup benchmark (396 MB library, 555 products, 3,885 photos), three launches, run twice:
+    time to Dashboard 177-329 ms (earlier run with the Stage 3a flags off: 165-192 ms; before Phase 3: 1,012 ms); JS heap 10 MB; main 128 MB, renderer 111-115 MB,
+    GPU 186-193 MB - all the same as before this work. The spread between runs is machine noise (there is no code of this stage in the app).
+    The real-Electron suites (section 9) include the startup, hidden-screen, mode and leak suites and pass.
+Resolver cost (shadow runs, your copy of 579 entries):
+  build the resolver's view of all entries: 29 ms         all 167,331 pairs: 3.2 s (19 microseconds per pair)
+  resolve one listing through the indexed candidates: median 0.74 ms, 95th percentile 1.25 ms, worst 1.8 ms
+  Stage 3a backfill of 579 entries on a scratch copy: 1.7 s in 35 small steps
+Synthetic scaling (audit/phase4_shadow/bench_resolver.ts, made-up names, temp folder):
+  1,000 entries:   build 31 ms, heap +3 MB;   pair compare 3.4 microseconds;  listing via index median 0.97 ms (p95 1.33 ms, worst 3.8 ms);  brute force over all entries 0.36 ms
+  10,000 entries:  build 361 ms, heap +21 MB;  pair compare 10 microseconds;   listing via index median 1.56 ms (p95 2.14 ms, worst 9.5 ms);  brute force over all entries 5.3 ms
+  (the Stage 3a index and backfill at 1,000 / 10,000 entries were measured in the previous report and are unchanged.)
+Cost: 0 AI calls, 0 web calls, 0 eBay/comparable-sale lookups, 0 network attempts (counted). Gate thresholds: unchanged. Scanning coverage: unchanged. Data: nothing was
+written to any Database that belongs to you.
+
+
+======================================================================
+9. COMMITS AND TEST RESULTS
+======================================================================
+Rollback checkpoint (before this work): tag checkpoint-before-phase4-stage3b (= commit e804dbb).
+This work: @@COMMIT@@
+Files added: src/main/identity/foundationResolver.ts (pure, no I/O); tests foundationResolver.test.ts (39 checks), foundationHeldOut.test.ts (21 checks);
+shadowSafety.test.ts extended (the new resolver is pure, nothing in the app imports it or the audit tools, the tools refuse the live folders, block the network,
+hash the source before/after, and the audit contains no write SQL); audit tools stage3b_run.ts, stage6a_audit.ts, stage6a_roundtrip.ts, correction_journal.ts,
+bench_resolver.ts. The generated .cjs bundles are git-ignored.
+Results:
+  Type check (main + renderer): clean.
+  Unit tests: all 30 test files pass.
+  Real-Electron regression (15 suites run one after another, in a sandbox with a fake cloud server and no real accounts): 14 pass with exit 0; the onboarding
+    suite (t7b) shows all 41 of its checks passing and no failure, but its process did not exit within the 7-minute cap I give each suite (exit 124); its output is
+    identical to its previous run's. 272 checks passed, 0 failed in total. I did not investigate why that one process lingers; it is unrelated to this work.
+  Shadow tools on your copy: source hash unchanged in all runs; 0 AI / web calls.
+
+
+======================================================================
+10. RECOMMENDATION: IS ANY LIVE MATCHING BEHAVIOUR READY?
+======================================================================
+NOT READY (needs your explicit authorisation and more evidence first):
+  - using the resolver to confirm that two products are the same (alias promotion, merging, deduplication): it confirms too few to be useful and its "lean" is wrong 1 time in 3;
+  - creating or renaming products from its output; letting it decide a listing's product for valuation or alerts as the only authority;
+  - any automatic correction of the Database (the plan and journal are tested, but only on copies).
+CLOSEST TO READY - a "veto only" use, if you choose to authorise it as the next stage:
+  Keep today's matcher as it is, but never let its "same product" answer stand when the resolver says DIFFERENT, RELATED (goes-with / variant / bundle / family) or
+  UNCERTAIN-leaning-different. Measured on your copy, of the old matcher's 75 "same" calls: that veto would have stopped 41 of the 47 false product merges, would
+  also have stopped 16 of the 19 ambiguous ones and 2 of the 9 right ones (those stay as two entries - the safe error, nothing is lost). The 6 false merges it would
+  NOT stop are all "uncertain" cases (for example "Nintendo 3DS LL" = "Nintendo 3DS"); letting a call stand only when the resolver confirms it or leans "same" would
+  stop 46 of 47 but also 7 of the 9 right ones. For listings the better use is the resolver's own pick: of the old matcher's 18 wrong filings it picks the right entry for 9 and abstains on
+  the other 9 (none still wrong), and of the 127 right ones it keeps 119 and leaves 8 unconfirmed. I would roll any of this out in shadow-to-live steps: log the
+  decisions for one scan cycle, you review them, then switch it on behind a flag, for comparable-sale filtering and listing filing only, with the Phase 4 stage 1 rule
+  that an unverified identifier never starts research or suppresses a deal unchanged.
+Before that, I recommend: (1) you look at the section 4 examples and the 14 true pairs and tell me where my labels are wrong; (2) the 10 different-product findings are
+reviewed by you in the private findings file - they are real filing errors today and the plan's 17 photo moves and 2 listing moves are the lowest-risk fixes (still
+only on your approval); (3) the Database is fed more non-game, non-phone products before the resolver's category-independence is claimed from data rather than tests.
+
+
+======================================================================
+WHAT I NEED FROM YOU / WHAT I AM WAITING FOR
+======================================================================
+ - Your authorisation for the next stage (or a decision not to continue). I stop here as instructed.
+ - Private files containing your data (names and titles) that you may delete when you no longer need them:
+     C:\Users\biggt\ClynxShadowOutput_stage3b   (pair and listing comparisons, my hand labels, benchmark)
+     C:\Users\biggt\ClynxShadowOutput_stage6a   (findings.jsonl, correction_plan.json, summary.json, roundtrip.json)
+     C:\Users\biggt\ClynxDbCopy                 (your Database copy)
+     C:\Users\biggt\ClynxShadowOutput, _run1, _stage11, _stage3a, _stdout*   (earlier stages)
+   summary.json in each output folder contains counts only and is safe to share.

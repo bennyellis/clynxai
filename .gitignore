@@ -27,3 +27,7 @@ audit/phase4_shadow/protection_check.cjs
 audit/phase4_shadow/bench_10k.cjs
 audit/phase4_shadow/migration_test.cjs
 audit/phase4_shadow/open_timing.cjs
+
+# Generated bundles of the read-only audit tools (built by audit/phase4_shadow/build.cjs; not kept in git)
+audit/phase4_shadow/*.cjs
+!audit/phase4_shadow/build.cjs
