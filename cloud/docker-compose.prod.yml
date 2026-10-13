@@ -1,0 +1,72 @@
+# PRODUCTION-shaped stack (nothing here is deployed by the repo; you run it on a server you choose). Differences from docker-compose.yml (the local dev stack):
+#   * Postgres and Redis are NOT published on the host: only the API is reachable, and only through your TLS reverse proxy.
+#   * Passwords and keys come from the environment / an env file, never from this file.
+#   * Health checks, restart policies and memory limits.
+# Usage:  cp .env.prod.example .env.prod   (fill in real secrets)   then   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-clynx_cloud}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 1g
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD} ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 512m
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    env_file: .env.prod
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-clynx_cloud}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      PORT: 8787
+      TRUST_PROXY: "true"
+    # bound to localhost: your reverse proxy (Caddy / nginx, see DEPLOYMENT.md) terminates TLS and forwards here
+    ports:
+      - "127.0.0.1:8787:8787"
+    # migrations are idempotent (schema_migrations), so running them on every start is safe
+    command: sh -c "node dist/db/migrate.js && node dist/index.js"
+    mem_limit: 512m
+
+  worker:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    env_file: .env.prod
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-clynx_cloud}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    command: node dist/worker.js
+    healthcheck:
+      disable: true
+    mem_limit: 512m
+
+volumes:
+  pg_data:
+  redis_data:

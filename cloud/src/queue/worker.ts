@@ -47,7 +47,8 @@ export function createListingProcessingWorker(): Worker<ListingProcessingJobPayl
 
   worker.on("failed", (job, err) => {
     console.error(`[worker] job ${job?.id} failed:`, err);
-    if (job) {
+    // only the FINAL failure marks the listing's job failed; earlier attempts are retried by the queue with backoff
+    if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
       markJobStatus(job.data.listingId, "failed", { error: err instanceof Error ? err.message : String(err) }).catch(
         (updateErr) => console.error(`[worker] failed to record failure for job ${job.id}:`, updateErr)
       );

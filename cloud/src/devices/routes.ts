@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { query } from "../db/client.js";
 import { requireAuth } from "../auth/middleware.js";
+import { planLimitReply, withinCountLimit } from "../entitlements/enforce.js";
 
 const registerSchema = z.object({
   platform: z.string().min(1),
@@ -31,6 +32,11 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
     }
     const { platform, clientVersion } = parsed.data;
 
+    // Plan limit (enforced only when ENFORCE_ENTITLEMENTS is on). A person can free a slot with DELETE /devices/:id.
+    const count = (await query<{ n: number }>("SELECT count(*)::int AS n FROM devices WHERE user_id = $1", [request.userId])).rows[0].n;
+    const room = await withinCountLimit(request.userId as string, "maxDevices", count);
+    if (!room.ok) return planLimitReply(reply, room.plan, "maxDevices", { max: room.limit });
+
     const result = await query<{ id: string }>(
       `INSERT INTO devices (user_id, platform, client_version, last_seen_at)
        VALUES ($1, $2, $3, now())
@@ -59,6 +65,15 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
     }
 
     await query("UPDATE devices SET last_seen_at = now() WHERE id = $1", [id]);
+    return reply.code(200).send({ ok: true });
+  });
+
+  // Removes one of the signed-in user's own devices (its refresh tokens go with it), freeing a slot under the plan limit.
+  app.delete("/devices/:id", async (request, reply) => {
+    const paramsParsed = deviceIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) return reply.code(400).send({ error: "Invalid device id" });
+    const removed = await query("DELETE FROM devices WHERE id = $1 AND user_id = $2", [paramsParsed.data.id, request.userId]);
+    if (!removed.rowCount) return reply.code(404).send({ error: "Device not found" });
     return reply.code(200).send({ ok: true });
   });
 

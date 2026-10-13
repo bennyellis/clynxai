@@ -17,8 +17,17 @@ export interface ListingProcessingJobPayload {
   sourceListingId: string;
 }
 
+// Reliability defaults for every job: retried with exponential backoff (a transient failure - the database restarting, a provider hiccup - heals itself), and finished jobs are
+// removed after a while so Redis does not grow without bound. A job that exhausts its attempts is kept (for a week) so it can be inspected.
+export const JOB_ATTEMPTS = 5;
 export const listingProcessingQueue = new Queue<ListingProcessingJobPayload>(LISTING_PROCESSING_QUEUE_NAME, {
   connection: redisConnection,
+  defaultJobOptions: {
+    attempts: JOB_ATTEMPTS,
+    backoff: { type: "exponential", delay: 2_000 },
+    removeOnComplete: { age: 24 * 3600, count: 1000 },
+    removeOnFail: { age: 7 * 24 * 3600 },
+  },
 });
 
 // Enqueues a processing job for a newly-inserted listing and records a

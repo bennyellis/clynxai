@@ -46,7 +46,9 @@ describe("entitlements", () => {
       maxWatches: 5,
       maxDevices: 2,
       maxSearchItems: 10,
-      aiResearchEnabled: false,
+      aiResearchEnabled: true,
+      aiRequestsPerDay: 150,
+      aiImagesPerDay: 10,
     });
   });
 
@@ -74,6 +76,8 @@ describe("entitlements", () => {
       maxDevices: null,
       maxSearchItems: null,
       aiResearchEnabled: true,
+      aiRequestsPerDay: 3000,
+      aiImagesPerDay: 100,
     });
   });
 });

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { query } from "../db/client.js";
 import { requireAuth } from "../auth/middleware.js";
 import { requireOwnedRow, isStaleUpdate } from "../shared/syncedResource.js";
+import { planLimitReply, withinCountLimit } from "../entitlements/enforce.js";
 
 // Clynx Cloud Phase 2 — Watch cloud persistence/synchronization. Mirrors
 // devices/routes.ts's ownership-check pattern (403/404 on cross-user
@@ -218,6 +219,11 @@ export async function watchRoutes(app: FastifyInstance): Promise<void> {
       );
       return reply.code(200).send({ applied: true, watch: watchRowToJson(updated.rows[0]) });
     }
+
+    // Plan limit on how many Watches a user may have synced (enforced only when ENFORCE_ENTITLEMENTS is on). The Watch still works on the device; it just is not mirrored.
+    const watchCount = (await query<{ n: number }>("SELECT count(*)::int AS n FROM watches WHERE user_id = $1", [request.userId])).rows[0].n;
+    const room = await withinCountLimit(request.userId as string, "maxWatches", watchCount);
+    if (!room.ok) return planLimitReply(reply, room.plan, "maxWatches", { max: room.limit });
 
     const inserted = await query<WatchRow>(
       `INSERT INTO watches (
