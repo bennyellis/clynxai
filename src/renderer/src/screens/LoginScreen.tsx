@@ -61,7 +61,14 @@ export function LoginScreen({
   const [showCloud, setShowCloud] = useState(false);
   const [importLocal, setImportLocal] = useState(false);
   useEffect(() => {
-    void api.beta.info().then(setBeta).catch(() => setBeta(null));
+    void api.beta
+      .info()
+      .then((b) => {
+        setBeta(b);
+        // the sign-in form starts from the address this installation already uses (people who left local mode, or chose a server before)
+        if (b.cloudApiUrl) setApiUrl((cur) => (cur === defaultApiUrl ? (b.cloudApiUrl as string) : cur));
+      })
+      .catch(() => setBeta(null));
   }, []);
 
   async function startLocal() {

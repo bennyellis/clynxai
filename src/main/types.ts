@@ -762,6 +762,8 @@ export interface BetaInfo {
   hasOpenAIKey: boolean;
   /** There is local beta data on this computer that could be copied into an account (only when the person asks). */
   localDataExists?: boolean;
+  /** The Clynx Cloud address saved for this installation (the sign-in form starts from it). */
+  cloudApiUrl?: string;
   /** Where AI and eBay come from for this session. */
   apiSource?: "local" | "shared" | "own";
   /** Keys (OpenAI or eBay) are saved on this computer. */

@@ -1093,7 +1093,8 @@ export class CloudClient {
     const result = await safeFetch(`${apiUrl}/auth/refresh`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refreshToken }),
+      // (the device id, when this installation has one, lets the server tie the sign-in to it and end the sign-in if the device is removed from the website)
+      body: JSON.stringify({ refreshToken, ...(this.deviceId ? { deviceId: this.deviceId } : {}) }),
     });
     if (!result.ok || !result.data?.accessToken || !result.data?.refreshToken) {
       // Bug found live: "logging in each time is tedious" — root cause was

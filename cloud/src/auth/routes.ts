@@ -12,6 +12,7 @@ const credentialsSchema = z.object({
 
 const refreshSchema = z.object({
   refreshToken: z.string().min(1).max(200),
+  deviceId: z.string().uuid().optional(),
 });
 
 export function sendAccountError(reply: FastifyReply, err: unknown): FastifyReply {
@@ -62,7 +63,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
 
     try {
-      const rotated = await rotateRefreshToken(parsed.data.refreshToken);
+      const rotated = await rotateRefreshToken(parsed.data.refreshToken, parsed.data.deviceId);
       return reply.code(200).send({ accessToken: rotated.accessToken, refreshToken: rotated.refreshToken, userId: rotated.userId });
     } catch (err) {
       if (err instanceof RefreshTokenError) {

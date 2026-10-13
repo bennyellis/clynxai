@@ -1355,7 +1355,7 @@ async function executeChatTool(
 // replied to your message." Best-effort: swallow failures so an OpenAI
 // hiccup never interrupts scraping.
 async function narrate(ctx: NarrationContext): Promise<void> {
-  if (!process.env.OPENAI_API_KEY || !mainWindow) return;
+  if (!hasOpenAIAccess() || !mainWindow) return; // (a signed-in account using Clynx's shared AI has no key of its own)
   const requestId = randomUUID();
   try {
     sendToRenderer("ai:narrationStart", { requestId, kind: ctx.kind });
@@ -3645,6 +3645,7 @@ app.whenReady().then(() => {
       hasOpenAIKey: !!process.env.OPENAI_API_KEY,
       localDataExists: buildInfo.localModeAllowed && localDataExists(USERS_ROOT),
       apiSource: effectiveApiSource(),
+      cloudApiUrl: appSettings.cloudApiUrl,
       hasSavedKeys: hasSavedKeys(),
       keyProtection: { available: safeStorage.isEncryptionAvailable(), on: appSettings.protectKeys === true, plain: envKeyState(existsSync(ENV_PATH) ? readFileSync(ENV_PATH, "utf-8") : "").plain, copies: envCopies().length },
       browser: { ok: !!browsers.preferred, using: browsers.preferred?.label ?? null, found: browsers.found.map((b) => b.label), instructions: browsers.instructions, downloadUrl: CHROME_DOWNLOAD_URL },

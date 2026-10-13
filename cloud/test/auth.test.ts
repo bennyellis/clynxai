@@ -145,6 +145,50 @@ describe("auth", () => {
     expect(followUp.statusCode).toBe(401);
   });
 
+  describe("removing a device ends its sign-in", () => {
+    async function signInWithDevice() {
+      const email = uniqueEmail();
+      const reg = (await app.inject({ method: "POST", url: "/auth/register", payload: { email, password: "correct-horse-battery" } })).json();
+      const dev = await app.inject({ method: "POST", url: "/devices/register", headers: { authorization: `Bearer ${reg.accessToken}` }, payload: { platform: "win32", clientVersion: "1.0.0" } });
+      return { reg, deviceId: dev.json().id as string };
+    }
+    const refresh = (refreshToken: string, deviceId?: string) => app.inject({ method: "POST", url: "/auth/refresh", payload: { refreshToken, ...(deviceId ? { deviceId } : {}) } });
+
+    it("a refresh that names its device ties the sign-in to it, and removing the device then ends the sign-in", async () => {
+      const { reg, deviceId } = await signInWithDevice();
+      const first = await refresh(reg.refreshToken, deviceId);
+      expect(first.statusCode).toBe(200);
+      const bound = await pool.query("SELECT device_id FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL", [reg.userId]);
+      expect(bound.rows).toHaveLength(1);
+      expect(bound.rows[0].device_id).toBe(deviceId);
+      const del = await app.inject({ method: "DELETE", url: `/devices/${deviceId}`, headers: { authorization: `Bearer ${first.json().accessToken}` } });
+      expect(del.statusCode).toBe(200);
+      expect((await refresh(first.json().refreshToken, deviceId)).statusCode).toBe(401);
+    });
+
+    it("a device removed BEFORE its first refresh also ends the sign-in at that refresh, and nothing new is issued", async () => {
+      const { reg, deviceId } = await signInWithDevice();
+      await app.inject({ method: "DELETE", url: `/devices/${deviceId}`, headers: { authorization: `Bearer ${reg.accessToken}` } });
+      const r = await refresh(reg.refreshToken, deviceId);
+      expect(r.statusCode).toBe(401);
+      expect(r.json().refreshToken).toBeUndefined();
+      const live = await pool.query("SELECT count(*)::int AS n FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL", [reg.userId]);
+      expect(live.rows[0].n).toBe(0);
+    });
+
+    it("another person's device id cannot be used to tie a sign-in to it", async () => {
+      const a = await signInWithDevice();
+      const b = await signInWithDevice();
+      const r = await refresh(a.reg.refreshToken, b.deviceId);
+      expect(r.statusCode).toBe(401);
+    });
+
+    it("an older client that sends no device id keeps working as before", async () => {
+      const { reg } = await signInWithDevice();
+      expect((await refresh(reg.refreshToken)).statusCode).toBe(200);
+    });
+  });
+
   it("logs out and revokes the refresh token", async () => {
     const email = uniqueEmail();
     const registerRes = await app.inject({

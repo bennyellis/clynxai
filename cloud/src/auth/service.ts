@@ -119,7 +119,7 @@ export async function revokeRefreshToken(rawToken: string): Promise<void> {
 // WHERE clause against the now-revoked row and affects zero rows) — so
 // exactly one caller ever proceeds to mint new tokens for a given token
 // presentation, and the other deterministically lands in the reuse path.
-export async function rotateRefreshToken(rawToken: string): Promise<{ userId: string; accessToken: string; refreshToken: string }> {
+export async function rotateRefreshToken(rawToken: string, claimedDeviceId?: string): Promise<{ userId: string; accessToken: string; refreshToken: string }> {
   const tokenHash = hashRawToken(rawToken);
   const lookup = await query<RefreshTokenRow & { disabled_at: Date | null }>(
     `SELECT t.id, t.user_id, t.device_id, t.expires_at, t.revoked_at, u.disabled_at FROM refresh_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = $1`,
@@ -143,6 +143,7 @@ export async function rotateRefreshToken(rawToken: string): Promise<{ userId: st
   const client = await getClient();
   let newRawToken = "";
   let reused = false;
+  let deviceRemoved = false;
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [row.user_id]);
@@ -152,10 +153,20 @@ export async function rotateRefreshToken(rawToken: string): Promise<{ userId: st
       await client.query(`UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, [row.user_id]);
       reused = true;
     } else {
-      newRawToken = generateRawToken();
-      await client.query(`INSERT INTO refresh_tokens (user_id, device_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)`, [
-        row.user_id, row.device_id, hashRawToken(newRawToken), new Date(Date.now() + config.refreshTokenTtlSeconds * 1000),
-      ]);
+      // A sign-in is created before its device is registered, so its token starts without a device. The desktop says which device it is on every refresh: if that device still
+      // exists the token is tied to it from now on (removing the device then ends the sign-in); if it was removed (revoked from the website) the sign-in ends here.
+      let deviceId = row.device_id;
+      if (!deviceId && claimedDeviceId) {
+        const dev = await client.query(`SELECT 1 FROM devices WHERE id = $1 AND user_id = $2`, [claimedDeviceId, row.user_id]);
+        if ((dev.rowCount ?? 0) === 0) deviceRemoved = true;
+        else deviceId = claimedDeviceId;
+      }
+      if (!deviceRemoved) {
+        newRawToken = generateRawToken();
+        await client.query(`INSERT INTO refresh_tokens (user_id, device_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)`, [
+          row.user_id, deviceId, hashRawToken(newRawToken), new Date(Date.now() + config.refreshTokenTtlSeconds * 1000),
+        ]);
+      }
     }
     await client.query("COMMIT");
   } catch (err) {
@@ -165,6 +176,7 @@ export async function rotateRefreshToken(rawToken: string): Promise<{ userId: st
     client.release();
   }
   if (reused) throw new RefreshTokenError("Refresh token reuse detected; all sessions revoked", "reused");
+  if (deviceRemoved) throw new RefreshTokenError("This device was removed from the account", "invalid");
 
   const accessToken = await issueAccessToken(row.user_id);
   return { userId: row.user_id, accessToken, refreshToken: newRawToken };
