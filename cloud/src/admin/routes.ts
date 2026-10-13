@@ -195,7 +195,10 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
         await audit(request, "release.upload", p.data.id, { sha256: saved.sha256, size: saved.size });
         return reply.code(200).send({ ok: true, sha256: saved.sha256, sizeBytes: saved.size });
       } catch (err) {
-        if (err instanceof TooLargeError) return reply.code(413).send({ error: "File too large" });
+        if (err instanceof TooLargeError) {
+          reply.header("Connection", "close"); // the rest of the upload is not read
+          return reply.code(413).send({ error: "File too large" });
+        }
         throw err;
       }
     });

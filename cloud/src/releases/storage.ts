@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
-import { Transform, type Readable } from "node:stream";
+import type { Readable } from "node:stream";
 import { config } from "../config.js";
 
 // Installer storage. Today a local folder (RELEASES_DIR); the functions below are the whole boundary, so an object store (S3, R2...) can replace them without touching the routes.
@@ -31,20 +31,30 @@ export async function saveStream(releaseId: string, fileName: string, input: Rea
   const tmp = `${dest}.partial`;
   const hash = createHash("sha256");
   let size = 0;
-  const meter = new Transform({
-    transform(chunk: Buffer, _enc, cb) {
-      size += chunk.length;
-      if (size > maxBytes) return cb(new TooLargeError("file too large"));
-      hash.update(chunk);
-      cb(null, chunk);
-    },
-  });
+  const out = createWriteStream(tmp);
+  const failed = new Promise<never>((_, reject) => out.once("error", reject));
+  failed.catch(() => undefined);
+  // Read the request by hand rather than with pipeline(): on a refusal the request stream must NOT be destroyed, or the HTTP answer (413) could never be sent on that connection.
+  const it = (input as AsyncIterable<Buffer>)[Symbol.asyncIterator]();
   try {
-    await pipeline(input, meter, createWriteStream(tmp));
+    for (;;) {
+      const next = await Promise.race([it.next(), failed]);
+      if (next.done) break;
+      const chunk = next.value as Buffer;
+      size += chunk.length;
+      if (size > maxBytes) throw new TooLargeError("file too large");
+      hash.update(chunk);
+      if (!out.write(chunk)) await Promise.race([new Promise<void>((r) => out.once("drain", () => r())), failed]);
+    }
     if (size === 0) throw new Error("empty file");
+    await Promise.race([new Promise<void>((r) => out.end(() => r())), failed]);
     renameSync(tmp, dest);
     return { key, sha256: hash.digest("hex"), size };
   } catch (err) {
+    await new Promise<void>((r) => {
+      out.once("close", () => r());
+      out.destroy();
+    });
     rmSync(tmp, { force: true });
     throw err;
   }
