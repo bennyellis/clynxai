@@ -17,6 +17,8 @@ const YEAR = /^(?:19|20)\d\d$/;
 function normalize(text: string): string {
   return text
     .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "") // accents fold to plain letters ("pokémon" stays one word)
     .replace(/(\d)\.(\d)/g, "$1p$2")
     .replace(/(\d)\s*[-]?\s*(tb|gb|mb|hz|mah|mm|ah|v)\b/g, "$1$2");
 }

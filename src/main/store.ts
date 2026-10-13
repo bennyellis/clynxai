@@ -11,6 +11,7 @@ import { brokenVariantName, isBrokenVariantName } from "./brokenVariant.js";
 import { assessListingAge } from "./listingAge.js";
 import { codesMissingFrom } from "./identity/codes.js";
 import { assessCodes, CodeIndex, NO_CODES, type CodeAssessment, type EvidenceDoc } from "./identity/credibility.js";
+import { IdentityFoundation } from "./identity/foundationStore.js";
 
 // What a product is worth on eBay, as the total the BUYER pays (the sold item price plus the shipping they paid): the estimate when
 // there is one, else the sold average with its average shipping. The user keeps ~84% of that total (eBay's cut is on all of it).
@@ -46,6 +47,9 @@ export type CloudSyncedWatch = Omit<
 
 export class Store {
   private db: DatabaseSync;
+  // The Database identity foundation (identity/foundationStore.ts): extra tables of candidate relations and evidence, created only when switched on in the
+  // config. Null when off: no table exists and nothing reads or writes any.
+  identity: IdentityFoundation | null = null;
   // Per explicit instruction — an in-memory accelerator in front of the
   // hasSeen() SQLite lookup below, benchmarked (not assumed) against the
   // plain DB-only path via metrics.ts's db_dedup_lookup/dedup_cache_check
@@ -64,11 +68,15 @@ export class Store {
   private seenCache = new Set<string>();
   private static readonly SEEN_CACHE_MAX = 20_000;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, options: { identityFoundation?: boolean } = {}) {
     mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     try {
       this.initialize();
+      if (options.identityFoundation === true) {
+        this.identity = new IdentityFoundation(this.db);
+        this.identity.init();
+      }
     } catch (err) {
       // A database the app cannot set up must not stay open: on Windows an open file cannot be moved aside, and recovering from a
       // damaged database (dbIntegrity.ts) needs to move it.
@@ -1606,6 +1614,7 @@ export class Store {
   deleteProduct(id: string): void {
     this.db.prepare("DELETE FROM products WHERE id = ?").run(id);
     this.db.prepare("DELETE FROM product_images WHERE product_id = ?").run(id);
+    this.identity?.forgetProduct(id);
     // Batch 2 Fix B — see deleteWatch's own comment above; same reasoning,
     // productSync.ts's own pushPendingDeletes drains this resource type.
     this.addPendingCloudDelete("product", id);
@@ -1618,6 +1627,7 @@ export class Store {
   // Feed's clear-all never touches the Blacklist either.
   clearAllProducts(): void {
     this.db.exec("DELETE FROM product_images; DELETE FROM products;");
+    this.identity?.forgetAllProducts();
   }
 
   // --- Product reference-photo library ------------------------------------

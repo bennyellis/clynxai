@@ -2008,6 +2008,25 @@ async function runPhotoBackfill(): Promise<number> {
 // loading stub immediately so the UI doesn't block, then this pushes a
 // live update once the web research resolves. Errors are logged, not
 // thrown, since nothing awaits this.
+// The Database identity foundation's background fill (identity/foundationStore.ts): only when switched on in the config, a minute after startup, in steps of
+// about 20 milliseconds with a longer pause between them, and it stops as soon as the Database it was started for is closed. It only writes the identity tables.
+function scheduleIdentityBackfill(): void {
+  if (config.identityFoundation?.schema !== true || config.identityFoundation?.backfill !== true) return;
+  const target = store;
+  if (!target.identity) return;
+  const step = () => {
+    if (store !== target || !target.identity) return;
+    try {
+      const r = target.identity.backfillStep(20);
+      if (!r.done) setTimeout(step, 100);
+    } catch (err) {
+      console.error(`[identity] backfill stopped: ${(err as Error).message}`);
+    }
+  };
+  // (CLYNX_IDENTITY_BACKFILL_DELAY_MS only exists so the integration tests need not wait a minute.)
+  setTimeout(step, Number(process.env.CLYNX_IDENTITY_BACKFILL_DELAY_MS) || 60_000);
+}
+
 async function runProductLookup(
   id: string,
   name: string,
@@ -2855,7 +2874,7 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   saveConfig(CONFIG_PATH, config);
 
   // A damaged database is moved aside (never deleted) and a fresh one started, instead of the app failing to log in.
-  const dbOpen = openWithRecovery(DB_PATH, () => new Store(DB_PATH));
+  const dbOpen = openWithRecovery(DB_PATH, () => new Store(DB_PATH, { identityFoundation: config.identityFoundation?.schema === true }));
   store = dbOpen.store;
   if (dbOpen.recovered) {
     const kept = dbOpen.recovered.damagedCopy ? ` The old database was kept as ${path.basename(dbOpen.recovered.damagedCopy)} in your Clynx data folder.` : "";
@@ -2887,6 +2906,7 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
     });
   }, 90_000);
   mergeDuplicateProductEntries();
+  scheduleIdentityBackfill();
   // A little after startup, so the app is up and the first scan isn't competing with it.
   setTimeout(() => void sweepBlankProducts(), 8000);
   watchSyncService = new WatchSyncService(store, cloudClient, () => config);

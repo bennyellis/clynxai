@@ -355,6 +355,10 @@ export interface Config {
   lowAiMode: boolean;
   // Also push "Worth a look" finds (quietly, low priority). Off by default: they stay in the Feed only.
   notifyWorthALook?: boolean;
+  // Database identity foundation (Phase 4 stage 3a), both OFF by default and changed only by editing config.json: `schema` creates the extra identity tables in
+  // the Database when it is opened; `backfill` (needs schema) fills them in small background steps a minute after startup. Nothing reads them to pick, merge
+  // or value a product.
+  identityFoundation?: { schema: boolean; backfill: boolean };
   // First-run checklist ("Get started" on the Dashboard). Which steps are done is worked out from the real state where it can be (a Facebook
   // login, a search location, a product, a phone topic); these flags only remember what cannot be seen from the state.
   onboarding?: OnboardingState;

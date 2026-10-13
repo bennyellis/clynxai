@@ -34,7 +34,8 @@ export interface IdentityTokens {
 
 export function identityTokens(text: string, optional?: ReadonlySet<string>): IdentityTokens {
   // A possessive ("Cord's") is not a word "s": a stray one made "Xbox Series X ... Cord's" look like a Series S.
-  let s = text.toLowerCase().replace(/['’]s\b/g, "");
+  // accents fold to plain letters ("pokémon" stays one word)
+  let s = text.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/['’]s\b/g, "");
   const capacities = new Set<string>();
   s = s.replace(CAPACITY, (_m, n: string, unit: string) => {
     capacities.add(`${n.replace(".", "p")}${unit}`);
