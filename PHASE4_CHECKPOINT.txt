@@ -1,0 +1,136 @@
+CLYNX - PHASE 4 CHECKPOINT (after the first implementation slice)
+=================================================================
+Date: 2026-10-12.  No code was changed to write this. Waiting for your authorization before anything further.
+
+1. WHAT IS COMPLETE (against the Phase 4 audit's stage plan)
+-------------------------------------------------------------
+  Stage 0  Measure first           PARTIAL. Done: the read-only audit scripts (audit/phase4_repro), a unit "corpus" inside identity.test.ts,
+                                   a micro-benchmark. NOT done: the shadow-mode hook that logs old-vs-new disagreements during real scans, and
+                                   AI-call counters. The "golden corpus" is a set of hand-written cases in test files, not yet a standalone data file.
+  Stage 1  Two-way comparison      DONE for model-number-like codes (letters+digits, 3+ digit numbers) and for mixed comp sets (price-based split).
+           for comps               NOT done: exact vs approximate comps persisted per comp with reason codes; photo cross-check against exact-only photos.
+  Stage 2  Capture attributes      PARTIAL. Done: the three naming prompts no longer say "generic"/"fall back to the plain base name" and say to keep
+           at the source           generation/model numbers. NOT done: asking the model for a structured attribute list with the source of each, and OCR-style
+                                   "printed on the item/box" evidence. The change is verified by a wording test only, not against the live model.
+  Stage 3  Database identity,      NOT STARTED.
+           aliases, best-fit
+  Stage 4  Gate seam               DONE in a "lite" form: unconfirmed codes cap evidence at weak and rule out the big-gap shortcut; approximate comps are
+                                   never better than weak. NOT done: alert/Feed naming from the identity instead of the Database name.
+  Stage 5  Learned attribute       NOT STARTED.
+           schemas / weights
+  Stage 6  Migration, review UI    NOT STARTED.
+  Stage 7  Structured identifiers  NOT STARTED.
+  Requirements met from your list: the reported Xbox 360 case is handled end to end; the Deal Quality Gate thresholds are unchanged; no new AI call;
+  low-AI mode (the default) improved; Search For, Watches, eBay scanner, bundles, broken variants, hidden gems, notifications and the Phase 3 modes
+  are untouched and their suites pass. Requirements NOT yet met: aliases, universal Database matching/merging, explainable per-comp rejection,
+  migration of already-misclassified entries, and the full "evidence + confidence + provenance" identity representation.
+
+2. FILES, COMMITS, TESTS
+------------------------
+  Commits: 220a2cc (the read-only audit + repro scripts), d26a79b (the implementation slice). Rollback tag: checkpoint-before-phase4 (= 220a2cc).
+  Slice files (18): NEW src/main/identity/codes.ts, src/main/identity/populations.ts; CHANGED watchcount.ts, store.ts, types.ts, productSync.ts,
+  dealSummary.ts, dealGate.ts, preAlert.ts, index.ts, productIdentity.ts, vision.ts; NEW tests identity.test.ts, identityGate.test.ts,
+  identityRoutes.test.ts, visionPromptContract.test.ts; audit/phase4_repro/bench.ts; PHASE4_IMPLEMENTATION_REPORT.txt.
+  Tests: 24 unit-test files pass (20 existing + 4 new = 59 new checks). Typecheck and build clean.
+  Integration: identityRoutes.test.ts drives the reported listing through the REAL ScrapeEngine route (scoring, market check, Gate, save, push) with a
+  faked Database. Real-Electron sandbox suites on the final build, all 0 failures: t1 18, t3 20, t4 22, t5 21 (mock Facebook inside the real scan
+  browser), t6 13 (deal quality), t7a 13, t7b 41, t7c 25, t8a 22, t8b 10, t9 21, t10 13, t11 10.
+  NOT tested: any live OpenAI answer, live WatchCount/eBay results, a real Facebook listing, or your real Database. Two honest process notes: an early
+  version of the "no category words" test used a wrong path and passed without checking anything (found and fixed before the commit); and a couple of
+  unit runs failed only because of my own shell timeouts/concurrent builds, not code (final full runs are clean).
+
+3. HOW THE XBOX 360 CONTROLLER IS HANDLED NOW
+---------------------------------------------
+  Identification: the photo-analysis prompt now asks to keep "360"/"1403" in the name (unverified live). Whatever name comes back, the code
+    comparison finds the codes 360 and 1403 in the title and not in the matched entry "Xbox Wireless Controller" -> "unconfirmed".
+  Confidence: an unconfirmed listing gets confidence LOW; its evidence is capped at "weak" whatever the entry's sales count is. The Gate says why.
+  Resale comparisons: the generic entry's $48 value is NOT trusted for it. Before an alert, Clynx prices a new entry named from the listing
+    ("Xbox Wireless Controller 360 1403"); its search requires 360 and 1403, so Series/One/Elite comps are excluded; if the comps still mix versions
+    they are split by price-separating words. The generic entry itself is not overwritten with the 360 numbers.
+  Qualification: with the generic value it is "Worth a look" (visible, not pushed). Once the specific entry is priced it is judged on that price:
+    at $15 not a deal (a 360 pad is ~$18), at $10 a deal. The thresholds and margin math are exactly the old ones.
+  Also: a generic entry whose comps mix versions is flagged "approximate" and valued at the cheapest group (a floor), and the Discovery tab says so.
+
+4. IS IT UNIVERSAL?
+-------------------
+  The NEW logic is category-independent by construction: codes are found by pattern (letters+digits, 3+ digit numbers), the price-split learns its
+  separator words from the comps, and a test fails the build if brand/category words appear in src/main/identity/. It was exercised on Xbox, vehicles,
+  tool batteries, appliances and collectibles (synthetic data I wrote).
+  It is NOT yet fully universal, because:
+   a. Old category-flavoured rules still run underneath and were left in place on purpose: the color list (colors.ts), the tier-word list (ti/xt/ultra/pro/
+      oled..., compFilter.ts), the single-letter model rule (Series S/X), the accessory word list (controller/battery/charger/cable..., compFilter.ts),
+      "console"-centric accessory-only phrases (scorer.ts), and the examples in the vision prompts (Elite Series 2, DualSense Edge). They cause no
+      harm to other categories but also do not help them; Stage 5 is meant to replace them with learned data.
+   b. The code check needs digits. A variant that differs only by WORDS (Ultra, Elite, One, Type R, Chase variant) is caught only where there are enough
+      comps (6+) for the price-based split, not by the listing-vs-entry check.
+   c. populations.ts has a small list of English filler words (a, the, used, new, shipping...). That is language-specific, not category-specific.
+   d. The price split needs a price gap of 30% or more; products whose variants differ by less are not separated.
+   e. Digits in the title that are not identity (an item number, "HEG-001") also trigger doubt (see weaknesses).
+
+5. REMAINING WEAKNESSES (all confirmed by the audit's tests, none fixed by this slice)
+-------------------------------------------------------------------------------------
+  Identification: the AI still returns one name string; no structured attributes with sources; photo-printed model numbers are not specially read;
+    first-listing-defines-the-entry (an entry researched from a 360 listing is still named whatever the model returned).
+  Database matching: isSimilarProductName (subset containment) is UNCHANGED: 18 of 41 different-product pairs in my test still resolve to the same
+    entry (S21 vs S21 Ultra, 3060 vs 3060 Ti, Civic vs Civic Si...). findMatchingProduct and the value lookups still take the newest matching
+    entry (creation order, not best fit). The new safeguard only stops the VALUE from being trusted for such a listing; the filing (photo + notes) can
+    still go into the wrong entry.
+  Product merging: mergeDuplicateProducts only merges identical word sets (safe) but never fixes mixed entries; nothing detects an entry that already
+    holds two products.
+  Aliases: none. "PS5 Digital Edition" vs "Sony PlayStation 5 Digital Edition" still make two entries or miss each other (3 of 6 same-product pairs missed).
+  Valuation: existing mixed entries keep their old numbers until re-researched; the generic floor undervalues premium versions; the photo cross-check
+    compares against the entry's own (possibly mixed) gallery; listings.product_id is re-resolved by fuzzy name on every save; Search For items and
+    alerts still name products by text; alerts still show the Database entry's name rather than the listing's product.
+  New over-caution: any model-number-like extra in a title (item numbers, "5G", "HEG-001") makes a deal Worth a look until the specific version is
+    priced (bounded by WatchCount's ~20 lookups/day, and listings stay visible). This could reduce pushes for some products.
+
+6. WHAT STAGE 3 WILL CHANGE IN THE DATABASE
+-------------------------------------------
+  Schema (additive only, same idempotent ALTER/CREATE-IF-NOT-EXISTS pattern the app already uses on every start; nothing rewritten at migration time):
+    products:  identity_json TEXT, identity_key TEXT, identity_level TEXT  (all nullable)
+    listings:  identity_json TEXT, product_match_level TEXT                (nullable; the existing product_id/matched_item stay as saved)
+    NEW table product_aliases(alias_norm TEXT, product_id TEXT, source TEXT, confidence REAL, created_at INTEGER, PRIMARY KEY(alias_norm, product_id))
+    NEW indexes on products(identity_key) and product_aliases(alias_norm).
+  Behavior (all behind flags, off by default, switched on one lookup site at a time):
+    - A resolver returns {product, level (exact/line/unknown), candidates, why} using best attribute agreement, not "newest first".
+    - isSimilarProductName stays only as a cheap candidate generator; merges happen only when identity keys are equal or an alias/user merge says so.
+    - Aliases are learned only from confident matches, are reversible, and never join entries whose codes conflict.
+    - A listing's product link is written once with its confidence and no longer silently re-resolved on every save.
+  Effect on existing products: NONE at migration. A background backfill (rate-limited, never at startup, so Phase 3 startup gains stay) fills
+    identity_json/key from each entry's name, notes and the source titles of its photos. It only writes the new columns. Existing names, photos,
+    notes, prices, Search For items, Watches and listing history are untouched. Splitting mixed entries is NOT part of Stage 3 (that is Stage 6).
+
+7. RISKS
+--------
+  Data loss: Stage 3 is additive, so low; the real exposure is Stage 6 (splitting/moving photos and notes). Mitigation: nothing automatic at first,
+    a "needs review" list, user approval, a backup table so any split is undoable, original rows kept.
+  Incorrect merging: alias learning or key equality could join two products. Mitigation: never merge on name containment; never join entries whose
+    defining codes conflict; every alias carries source and confidence and can be undone; start in shadow mode and compare against current behavior.
+  Duplicate creation: stricter matching creates more entries (e.g. "Galaxy S21" vs "Galaxy S21 5G"), and the doubt rule can create specific entries
+    per model code. Mitigation: aliases, the existing exact-word-set duplicate guard in addProductStub (kept), a cap on specific entries created per
+    day tied to the WatchCount allowance, and a review list.
+  Performance: lookups must stay as fast as the Phase 1 name index (an inverted index on identity values is planned, plus a 10k-entry benchmark);
+    startup must not regress (backfill is background only; the Phase 3 startup benchmark is re-run). The slice-1 checks cost ~16 microseconds per product.
+  Cloud sync: new fields stay local-only at first so older clients keep working; a versioned sync is a separate decision.
+  Alert volume: more caution means fewer confident pushes in ambiguous cases; measure on a copy of your data before turning anything on.
+
+8. RECOMMENDED SEQUENCE (safest first)
+--------------------------------------
+  A. Stage 0b: shadow mode. Compute the new resolver's answer beside the current one during real scans and log every disagreement and every
+     AI/lookup count. No behavior change. Run it on a COPY of your Database (read-only) so we know how many entries are already mixed before touching
+     anything. This also turns the audit's numbers into real ones.
+  B. Stage 3a: the additive schema + backfill, writing only new columns. Verify migration on a copy of a large database, old-client compatibility.
+  C. Stage 6a: a read-only "possibly mixed entries" report (no splitting, no moving). You see the scale and the proposed splits.
+  D. Stage 3b: switch lookups to best-fit resolution, one site at a time behind flags: value lookups first (they decide money), then filing, then
+     creation. Keep the old path one release.
+  E. Stage 6b: splitting with per-entry approval and undo, plus the throttled re-research queue.
+  F. Stage 5: learned attribute schemas / empirical weights to replace the remaining hand-kept lists (colors, tier words, accessory words, examples),
+     proven on held-out categories before retiring any rule.
+  G. Stage 2b/7: structured attributes with sources from the photo call; eBay structured identifiers after a short API spike.
+  Reasoning: measure before changing; additive before behavioral; money-deciding lookups before cosmetic ones; automatic data changes last and always undoable.
+
+DECISIONS I NEED FROM YOU
+-------------------------
+  1. May I run Stage 0b against a COPY of your database (you close Clynx and copy scout.db to a folder; I never open the live file)? Strongly recommended.
+  2. Authorize which step to start with (recommended: A, then B).
+  3. Alert volume: are you willing to see somewhat fewer confident pushes for ambiguous listings while this settles? (It already applies to model-number cases.)

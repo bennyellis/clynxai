@@ -5,6 +5,7 @@
 // actually says is the exact market; when the target says nothing about any separator, the plain part (no separator words) is used and the
 // result is marked approximate.
 import { definingCodes } from "./codes.js";
+import { NOISE_WORDS } from "./words.js";
 
 export interface PricedComp {
   title: string;
@@ -29,14 +30,8 @@ export interface PopulationResult<T extends PricedComp> {
   note: string;
 }
 
-// Words that carry no product information whatever the product is (English function words and marketplace filler). Not a category list.
-const NOISE = new Set(
-  (
-    "a an the and or with for of in on to at by from is it its this that these those new used like works working work great good excellent condition " +
-    "open box boxed original genuine authentic official oem free shipping ship fast tested clean mint barely very nice lightly gently only no not " +
-    "as are was be you your our sale sold lot bundle set pack authentic usa us fully functional functioning perfect"
-  ).split(" ")
-);
+// Filler for titles: the shared language list, plus "new" (a condition word in a listing title).
+const NOISE = new Set([...NOISE_WORDS, "new"]);
 
 const MIN_RATIO = 1.3; // medians must differ by 30% or more
 const MIN_GROUP = 2;

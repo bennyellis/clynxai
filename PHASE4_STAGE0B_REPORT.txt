@@ -1,0 +1,146 @@
+CLYNX - PHASE 4, STAGE 0b REPORT: SHADOW-MODE PRODUCT IDENTITY VALIDATION
+=========================================================================
+Date: 2026-10-12.  Checkpoint tag before the work: checkpoint-before-phase4-stage0b (commit d26a79b).
+Stage 3a has NOT been started. No live matching, valuation, alert or deal-qualification behavior was changed in this stage.
+
+HOW IT WAS DONE (and why it could not have changed anything)
+------------------------------------------------------------
+  - Data: only your isolated copy, C:\Users\biggt\ClynxDbCopy\scout.db (556,683,264 bytes). I never opened or copied the live Database.
+    The copy's SHA-256 was identical before and after BOTH runs (fec13e6888d97cc48a6d65d76faa1db5c4394d2b421d30573728dd59edb28e6d), and its size
+    and modified time were unchanged.
+  - The runner (audit/phase4_shadow/run.ts) opens the copy with SQLite's read-only flag, reads only names, categories, values and listing titles
+    (never photos), refuses any path inside the app's own data folders, blocks every network call and counts attempts, and imports no notification,
+    AI, scraper, browser or Database-writing code. It is not imported by the app. src/main/__tests__/shadowSafety.test.ts enforces all of that.
+  - The proposed resolver (src/main/identity/resolver.ts) and the analysis (shadow.ts) are pure functions with no I/O. Nothing in the app calls them.
+  - Outputs (your product names and titles, so kept OUT of git): C:\Users\biggt\ClynxShadowOutput\ (summary.json, disagreements_pairs*.jsonl,
+    generics_with_specific.jsonl, listing_resolutions.jsonl, manual_review_sample.jsonl, mixed_assessments.jsonl).
+
+RESULTS
+-------
+1. Volume evaluated
+   579 products, 230 listings (all from Facebook; 145 resolved to a plausible entry, 41 carry a stored product link), 507 reference photos with the
+   original listing title, 548 titles filed under 179 products, 167,331 product-name pairs (every pair compared).
+   The copy is 55% video games (318 of 579 products) and 11% phones; the other 14 categories together are 26% (about 150 products). That skew matters
+   for everything below.
+
+2. Disagreements between the existing matcher and the proposed resolver
+   Product-name pairs: 167,331 compared. The existing matcher calls 75 pairs "the same product". For ALL 75 (100%) the proposed resolver says
+   "not the same": 60 "one is narrower", 15 "different". It calls only 1 further pair "same" that the old one rejected (iPhone (boxed) = iPhone) and
+   flags 2 as a "possible alias" (PlayStation 5 / Ps5, plus a false one, below). In total 78 disagreements (0.047% of all pairs, but 100% of the
+   pairs that matter: the ones the old matcher would merge).
+   Listings (title -> entry): 144 resolved by both: 134 agree (93%), 10 differ; 13 resolved only by the proposed picker, 1 only by the old rule.
+   The stored link on the listing differs from the old rule in 6 cases and from the proposed one in 6.
+
+3. Which side is right? Manual evaluation (my judgement; not proof). I read all 75 pairs and all 11 differing listing picks.
+   The 75 pairs the OLD matcher merges:
+     - 47 are different products (63%): almost all a game or accessory merged into its console because the platform name sits inside the title,
+       e.g. "Pokémon Y (Nintendo 3DS)" = "Nintendo 3DS" (26 such pairs just for the 3DS), "Super Smash Bros. Ultimate (Nintendo Switch)" = "Nintendo switch",
+       "Power cable for Xbox Series S" = "Xbox Series S", "Seagate 1TB Storage Expansion Card for Xbox Series X|S" = "Xbox Series S 1TB",
+       "Microsoft Xbox One S Console (...)" = "Xbox Wireless Controller", "Nintendo Switch Dock" = "Nintendo switch"; also New Nintendo 3DS XL = Nintendo
+       3DS XL, Nintendo 3DS LL = Nintendo 3DS, Nintendo 3DS = New Nintendo 3DS.
+     - 16 are the same product (21%): descriptor differences ("Apple iPhone 11" / "iPhone 11", "Handmade fordite keychain" / "Fordite keychain").
+     - 12 are genuinely unclear (16%): the Fortnite bundle, a V2 revision, a Limited Edition, (PRODUCT)RED, PS5 Slim digital-edition bundles.
+     So the old matcher's wrong-merge rate on these pairs is 63% (47/75), up to 79% if every unclear pair is counted wrong.
+   The proposed resolver on the same 75: it correctly refused all 47 wrong merges, but it also refused all 16 correct ones. It is far too strict to be
+   allowed to merge (exact recall 0 of 16-28); its value is as a doubt signal and a candidate ranker.
+   Listing picks (11 differing, my judgement): proposed better in 6 (iPhone 15+ -> Plus, iPhone 16e, the 512GB entry, Xbox One X, a game lot no longer
+   filed as a game), worse in 1 (see bugs), both wrong in 3 (garbled titles such as "Xbox one Series S"), neutral in 1. Of the 13 listings only the proposed
+   picker resolved, about 11 are right (mostly "PlayStation 5" / "Ps5", which the old rule skips because its single-digit "5" is dropped) and 2 wrong.
+   Uncertainty: no ground truth exists. These are my readings of names; two reviewers could differ on the 12 unclear pairs and on near-synonyms.
+
+4. Examples
+   Incorrect matches by the OLD matcher: Pokémon Y (Nintendo 3DS) merged with Nintendo 3DS and New Nintendo 3DS; Xbox Series S merged with "Power cable
+   for Xbox Series S"; iPhone 15+ stored under iPhone 15 (Plus is a different phone); Nintendo Switch with Dock stored on the Switch while both rules pick
+   the Dock accessory; "Nintendo DS & 3DS Game Lot" picked "Pokémon Y".
+   Missed matches by the OLD matcher: "PlayStation 5" / "Ps5" listings and entries (13 listings), "iPhone (boxed)" = "iPhone", "Prom dress" vs plural
+   (the proposed picker also misses the plural).
+   Errors of the PROPOSED resolver (found and, in the shadow code only, fixed): a possessive ("Cord's") produced a stray "s" and picked Xbox Series S 1TB for a
+   Series X listing; abbreviation inference called "Nintendogs" = "Nintendo" and (in one variant) "Destiny" = "DS". Now such cases are only "possible alias"
+   suggestions, never matches. Still wrong after the fix: it picks accessory entries whose whole name is in the title (Nintendo Switch Dock for "Nintendo Switch
+   with Dock and charger"), and "Pokémon Black 2 ... Nintendo DS" -> Nintendo 2DS.
+   REJECTED experiment: learning "optional" leading words (brand-like) from the data. It learned xbox, iphone, halo, nintendo... and produced 16 false
+   "same" pairs (xbox = iPhone). Not usable; the final resolver does not use it.
+
+5. Estimated prevalence of mixed Database entries (three imperfect proxies; real comps titles are not stored, so this cannot be measured directly)
+   a. From the titles filed under each entry: only 13 of 579 entries (2.2%) have 4+ distinct titles, because most have one photo. 1 was flagged and that
+      flag is a false positive (split on "sony" vs "nfs"). So this method cannot estimate prevalence on this copy.
+   b. Generic entries that have a more specific sibling in the Database: 83 of 579 (14%) at risk (43 video-game, 25 phone). For 14 pairs, titles filed
+      under the generic entry state the sibling's distinguishing words; by my reading about 8 are real misfilings (a Meta Quest 3S under Meta Quest 3,
+      Metroid Dread filed under the brand entry "Nintendo", iPhone 15+ under iPhone 15, Black/White Series S listings and 1TB Series X listings under the
+      colorless/capacity-less entries, a PS5 disc drive under PS5), the rest ambiguous or benign. That is a confirmed floor of roughly 1% of entries, with 14%
+      "at risk". Value divergence: of 168 generic/specific pairs where both have a price, 136 differ by 30% or more and 124 by 50% or more; many of those are
+      game-vs-console pairs that were never the same product, so it is a measure of exposure, not of mispricing.
+   c. Entries the old matcher cannot tell apart from another (lookup collisions): 77 of 579 (13%). Worst: Nintendo 3DS (17 twins), New Nintendo 3DS (17),
+      Nintendo switch (10).
+   d. Entry names that list several products or are brand-level: 26 names with "/" or "|" (some harmless) and 12 one-word names ("xbox", "iPhone", "Nintendo",
+      "Ps5"). Real example of a polluted value: the single-word game entry "Destiny" is priced at $2,130.
+   The app's own comps flag (ebay_comps_identity) is empty on the whole copy, because no research has run since Stage 1.
+   My estimate: at least 1-2% of entries are already mixed or misfiled, plausibly several percent, and up to about 14% carry the structural risk.
+
+6. Results by category (strict resolver, final run)
+     Category                    products  old-"same" pairs the new resolver rejects  new-"same" the old rejects  generic entries with a specific sibling
+     Video Games & Consoles       318       70                                          2                          43 (13 pairs with misfiled titles)
+     Phones & Tablets              65        3                                          1                          25 (1)
+     Computers & Laptops           31        1                                          0                           3
+     All 13 other categories      165        0                                          0                          ~12
+   Outside games and phones there is essentially no signal in this copy: the old matcher rarely collides because those names are distinct, so this copy
+   cannot show whether the proposed resolver generalizes. What I do have for other categories is the labelled cross-category set from the audit (47 pairs:
+   vehicles, tool batteries, appliances, furniture, collectibles, clothing, PC parts): old matcher 18 wrong merges, proposed resolver 0 wrong "exact" and 5
+   same-product pairs it would not call exact. I looked at that set while designing, so it is NOT held out. Conclusion: the design is category-free in code,
+   but its benefit outside games and phones is unproven on real data.
+
+7. Performance overhead (prototype, unindexed)
+   All 167,331 pairs: 3.0 s total (about 18 microseconds per pair; one-off batch). 230 listings against 579 entries: 0.8 s (3.5 ms per listing; it
+   re-reads every entry name each time, an index would cut that to well under 1 ms, not yet measured). Process memory 46 MB after load, 57 MB peak (photos
+   never loaded). Whole run 13 s including hashing the 556 MB file twice.
+   Phase 3 preserved: the app does not load the shadow code. Startup benchmark on the large-library fixture after this stage: Dashboard ready in 209-253 ms,
+   main-process stalls 422-486 ms, main working set 127-130 MB (Phase 3 values: 151-173 ms and 510-842 ms, 213 MB); GPU/modes suites t8a, t9, t11 pass.
+
+8. AI / API cost implications
+   The shadow run made 0 AI calls, 0 paid API calls, 0 network attempts and 0 comparable-sale lookups (verified by the counters in summary.json).
+   The proposed resolver needs no AI. The cost that DOES appear comes from the Stage 1 rule already in your app (see the finding below).
+
+9. IMPORTANT FINDING ABOUT STAGE 1 (my earlier work), found only because of this shadow run
+   The slice-1 "unconfirmed model number" rule would fire on 9 of the 145 listings that match an entry (6.2%), and only 1 of the 9 is justified:
+     justified: "iPhone 16e" vs entry "iPhone 16".
+     not justified (8): seller inventory codes on Xbox Series S listings (O1766, T3586, JTM7, Z7UX, D6306), the ordinal "13th" (Friday the 13th), the game
+     title "2k27" in an NBA 2K27 bundle, and "ps5" against an entry written "PlayStation 5".
+   Effect today: such a listing is downgraded from a possible deal to "Worth a look" and, when it would have been pushed, a WatchCount lookup is attempted
+   for a nonsense name ("Xbox Series S O1766"). That is roughly 8 wasted lookups per 145 matching listings against a limit of about 20 a day, and a real
+   risk of missing real Series S bargains. It is not a safety risk (it errs toward caution and keeps the listing visible), but it is a precision defect.
+   I did NOT change it (you limited this stage to validation). Recommended fix, small and contained (Stage 1.1): require a code to be corroborated
+   before it counts (seen in the titles of 2+ unrelated listings or comps, or present in a sibling entry's name), treat ordinals and known abbreviations
+   as equal ("13th" is not a code; "ps5" = "playstation 5" once an alias exists), and skip codes that appear only once in the whole data set.
+
+STAGE 3a: IS IT SAFE TO BEGIN?
+------------------------------
+  The schema work itself (additive nullable columns, an aliases table, a background backfill that writes only the new columns) is safe in principle: it
+  changes no existing row, and the shadow run showed the data is small enough (579 products) that backfill is cheap. But the results change what Stage 3a
+  should be, so my answer is: YES, conditionally, and not exactly as originally planned.
+  Conditions:
+   1. Do Stage 1.1 first (it is small): the doubt rule is currently noisy in live use.
+   2. The proposed resolver must NOT be used to merge or to pick an entry. On real data it is a good doubt signal (refused all 47 wrong merges) but it
+      rejects every correct merge, and its alias inference is unreliable. Stage 3a should store identity attributes and candidate relations only,
+      and keep merging/aliasing manual or confirmed (corroborated by multiple listings, or approved by you) with undo.
+   3. Add a structural rule the data demands: an entry that is a game, accessory or part that merely NAMES its platform ("X (Nintendo 3DS)",
+      "Power cable for X") is not the platform. This is the biggest source of wrong merges (26 of 47 are 3DS games alone) and the design must express it
+      generically (a name with extra stated content is narrower, never equal), not with a games rule.
+   4. Test the migration on a copy of your Database first (I have one now), compare before/after hashes of every pre-existing table, and keep the new
+      behavior behind flags, off by default.
+   5. Build the per-listing index before any live use (3.5 ms per listing unindexed is too slow to call per candidate).
+  Not recommended yet: any automatic splitting or re-valuation of existing entries (Stage 6); it needs the review list first.
+
+WHAT CHANGED IN THE CODE THIS STAGE (all shadow/test only; nothing the app loads, except one shared word list)
+-------------------------------------------------------------------------------------------------------
+  NEW  src/main/identity/resolver.ts, shadow.ts, words.ts; audit/phase4_shadow/run.ts, build.cjs, doubt_rule_check.ts;
+       tests resolver.test.ts (49 checks), shadowSafety.test.ts (17 checks).
+  CHANGED  src/main/identity/populations.ts now takes its filler words from words.ts (the app's comp splitting uses it): adds "edition", "gen", "generation" as filler.
+  Tests: 26 unit-test files pass; real-Electron t1 (18), t5 (21), t6 (13), t8a (22), t9 (21), t11 (10) pass.
+  Run-1 numbers (before the shadow-tool fixes) are saved in C:\Users\biggt\ClynxShadowOutput_run1\summary_run1.json for transparency; the differences
+  were: 3 old-different/new-exact pairs (now 1 plus 2 "possible alias") and one listing pick (the Cord's bug).
+
+DECISIONS I NEED FROM YOU
+-------------------------
+  1. Authorize Stage 1.1 (fix the noisy doubt rule) now? I recommend yes: it is small, contained and measurable on this same copy.
+  2. Authorize Stage 3a with the conditions above (identity attributes and candidate relations only, no automatic merging)?
+  3. Keep C:\Users\biggt\ClynxDbCopy for further read-only validation? Delete it when you are done: it contains your listings and photos.

@@ -19,3 +19,6 @@ app-settings.json
 *.unreadable-*
 *.tmp-*
 *.recover-requested
+
+audit/phase4_shadow/run.cjs
+audit/phase4_repro/*.cjs
