@@ -1,0 +1,181 @@
+CLYNX - PHASE 3 REPORT: PERFORMANCE AND RESOURCE OPTIMIZATION
+================================================================
+Date: 2026-10-12.  Branch: master.  Checkpoint before the phase: git tag checkpoint-before-phase3 (commit 1829db4).
+
+HEADLINE
+--------
+All three GPU targets are met on the audited PC (Intel UHD, 144 Hz), measured in the real Electron app, in an isolated sandbox:
+
+                        before (checkpoint)      after (final)        target
+  Performance, moving   26.7 %  (old "lite")      1.2 %               <= 6 %
+  Performance, still    11.7 %                     0.3 %               <= 3 %
+  Balanced,    moving   27.9 %                     9.5 %               <= 12 %
+  Balanced,    still    17.0 %                     7.7 %
+  Visual,      moving   34.9 %  (old "high")      15.0 %               <= 20 %
+  Visual,      still    19.6 %                    13.3 %
+
+No scanner scheduling, browser concurrency, search coverage, Facebook interaction, deal-quality or valuation code was changed.
+All unit tests (20 files) and every real-app suite pass (details in section 3).
+
+One thing that is NOT improved enough, and is reported honestly: while a scan is actively running and the Dashboard or Activity screen
+is showing, GPU use is still well above the idle numbers (section 5, bottleneck #1).
+
+1. WHAT CHANGED (files and commits)
+-----------------------------------
+Commits since the checkpoint:
+  b039bdd  Stage 1  CSS and animations
+  ca72ff6  Stage 2  Visual / Balanced / Performance modes, starfield, unfocused throttling
+  6bddc3c  Stage 3  Database and startup
+  d13c341  Stage 4  React rendering
+  3752392  Stage 5  Stability, diagnostics, lazy Playwright
+
+Stage 1 - CSS and animations (src/renderer/src/styles/global.css, components/Sidebar.tsx)
+  - Removed every "transition: all"; transitions now name only the properties that change.
+  - Cards no longer fade/animate on hover; the photo zoom on tiles happens only in Visual mode.
+  - The logo comet now plays once every 25 s (Visual mode only, not while idle/hidden) instead of looping forever.
+
+Stage 2 - Modes (lib/performance.ts, components/StarfieldBackground.tsx, lib/colorScheme.ts, screens/Config.tsx, global.css)
+  - Modes renamed Visual / Balanced / Performance (old saved values migrate: high -> Visual, lite -> Performance).
+  - Visual: animated starfield at 30 fps. Balanced: 18 fps, no glow/extras. Performance: the starfield is drawn once and stays still.
+  - Auto picks Performance on integrated GPUs / weak CPUs, Balanced on mid machines, Visual otherwise. The user can override it in
+    Config > "Performance mode".
+  - When the window is visible but not focused for 3 s, or the user is idle for 30 s, decorative animation drops to a trickle.
+  - Rainbow colour cycling steps: Visual 70 ms, Balanced 140 ms, Performance 320 ms.
+
+Stage 3 - Database and startup (src/main/store.ts, src/main/index.ts, src/preload/index.ts, screens/Database.tsx, screens/Activity.tsx, App.tsx)
+  - The whole product library (every photo) is no longer read at startup. The Database screen loads it the first time it is opened.
+  - Activity gets a names-only product list (new IPC products:listIndex) instead of the full library.
+  - Photo counts and the "products missing photos" lookup now use an index (idx_product_images_kind) and never read photos.
+  - New test: src/main/__tests__/startupQueries.test.ts.
+
+Stage 4 - React rendering (new lib/screenActive.tsx; App.tsx, screens/Dashboard.tsx, Config.tsx, DiscoveryTab.tsx)
+  - Hidden screens are frozen: they do not re-render while another screen is showing, and they redraw with current data the moment
+    they are shown again.
+  - Timers on hidden screens stop: Dashboard sleep countdown (1 s), Config cloud-status poll (5 s), Discovery "time ago" tick.
+  - Live-scan panels repaint less often in lighter modes: log list flush 250 ms (Visual) / 400 ms (Balanced) / 625 ms (Performance);
+    status flush 200 / 320 / 500 ms. Anything important (scanner started/stopped, logged in/out, an error, the pause between passes)
+    is always shown within 200 ms in every mode.
+  - NOT throttled: every raw event is still received, stored, counted and acted on immediately (the deal sound still plays at once from
+    the raw event, before any batching; listings, database saves and phone notifications are in the main process and untouched).
+
+Stage 5 - Stability and final optimizations (new src/main/diagnostics.ts; src/main/index.ts, browser.ts, stealthBrowser.ts)
+  - New persistent log: <data folder>\logs\diagnostics.log (one JSON line per event, kept under 1 MB with one .old copy). It records:
+    renderer crashes, GPU/helper process crashes, uncaught errors in the main process, an unresponsive window, app version/platform at
+    every start, and "previous session ended unexpectedly" if the last run was killed or crashed.
+  - If the window's page crashes it is reloaded automatically (at most 3 times in 10 minutes). The scanner lives in the main process
+    and keeps running throughout.
+  - Bug found and fixed while testing this: if the page had crashed and was not reloaded, the window's X button did nothing
+    (it waited for the dead page to answer "unsaved changes?"). A crashed window now simply closes.
+  - Playwright (playwright-extra + stealth plugin) is now loaded when the first scan browser is launched instead of at app start.
+    It cost about 0.36 s of main-thread work and about 43 MB of memory at startup. Sharp was evaluated and left as is: only about 80 ms,
+    used from 14 call sites, so the risk is not worth the gain.
+  - New test: src/main/__tests__/diagnostics.test.ts.
+
+2. BEFORE / AFTER MEASUREMENTS
+------------------------------
+Method: real Electron app in a throw-away data folder with a fake cloud server (never your real data); Windows GPU Engine counters for the
+app's own processes (3D engine of the Intel adapter); every figure is the mean of 3 interleaved runs (the individual runs are in the logs).
+GPU numbers on this machine are noisy by a few points, so differences smaller than about 3 points are not meaningful.
+
+2a. Dashboard, mouse moving / still (GPU % of the iGPU, app only)
+                 before moving/still      after moving/still
+  Visual          34.9 / 19.6               15.0 / 13.3
+  Balanced        27.9 / 17.0                9.5 /  7.7
+  Performance     26.7 / 11.7                1.2 /  0.3
+  Frame rate stays 115-130 fps (about 130 fps cap in the sandbox), no frames slower than 20 ms in Visual or Performance.
+
+2b. Window visible but not focused
+  Visual 1.8 %,  Balanced 1.7 %,  Performance 0.1 %  (renderer CPU about 0.5 %).
+
+2c. Window minimised while a scan stream is arriving (8 status updates/s + 5 log lines/s)
+  GPU 0 % in all modes; CPU: main 0-0.3 %, renderer 0.1-0.2 %, GPU process 0.2 %.
+
+2d. Active-scan event stream replayed through the real IPC (stress test: a NEW current listing with photos every 125 ms, 5 log lines/s,
+    one in seven of them a "deal" line, a new listing every 2 s - far busier than a real scan)
+  React commits per second (screen showing):          Stage 3 -> final
+    Visual   Dashboard 14.9 -> 12.4    Feed 14.1 -> 13.6
+    Balanced Dashboard 13.7 ->  9.6    Feed 13.9 -> 11.0
+    Performance Dashboard 13.9 -> 6.3  Feed 13.7 ->  8.3
+  Renderer CPU, Performance mode Dashboard 8.8 % -> 4.8 %; GPU 35 % -> 25.9 %.
+  Feed and Config screens while scanning: 3-15 % GPU in every mode (Performance 4.7-4.8 %).
+  Hidden screens: zero per-event DOM updates (test t9).
+
+2e. Startup, with a 396 MB library (555 products, 3,885 photos)
+                                        checkpoint   final
+  Dashboard ready after                 about 1,050 ms   about 160-270 ms
+  Main-process stalls > 30 ms (total)   about 1,500 ms   about 260-490 ms
+  Worst single stall                    510-557 ms    106-321 ms
+  Renderer JS heap                      98-111 MB     10 MB
+  Renderer memory (working set)         298-304 MB    144 MB
+  Main-process memory (working set)     381-391 MB    169-172 MB
+  Slow database calls at startup        357 ms photo count + five 54-91 ms full-library reads -> none
+  (Lazy Playwright alone: main-process memory 213 -> 170 MB, worst stall 346-424 ms -> 106-321 ms.)
+  One-time cost: the first start after updating builds the photo index (about 1 s on a 400 MB library).
+
+3. TESTS AND INTEGRATION RESULTS
+--------------------------------
+  Typecheck: clean.   Production build: clean.
+  Unit tests (npm test): 20 files, all pass (includes Phase 1, Phase 2, deal-quality / gate tests, plus new startupQueries and diagnostics).
+  Real Electron app, sandboxed, final build - all pass, 0 failures:
+    t1 startup 18 | t3 config 20 | t4 database 22 | t5 Facebook session / failing scans (mock Facebook inside the real scan browser) 21
+    t6 deal quality 13 | t7a close + recovery 13 | t7b onboarding 41 | t7c status/feed 25 | t8a modes 22 | t8b lazy library 10
+    t9 hidden screens 21 (new) | t10 diagnostics 13 (new) | t11 leaks/cleanup 10 (new)
+  What the new real-app tests prove:
+    t9  Hidden screens make no per-event changes in any mode; coming back shows the newest log line and the newest current listing at
+        once; none of 60 status updates / 60 log lines is lost; a scanner error appears within 700 ms even in Performance mode; the
+        Dashboard countdown and Config's 5 s poll stop while hidden and resume when shown.
+    t10 A renderer crash, a GPU-process crash, 4 repeated crashes (reload limited to 3), a normal quit and a hard kill are all recorded
+        correctly, and the app keeps working after a crash.
+    t11 Five start/stop scan rounds: scan browsers exist only while scanning, none is left after Stop; main-process memory does not grow
+        (limit 60 MB); a 2,000-line log flood stays capped at about 300 rows; quitting mid-scan leaves no process behind.
+  Deal accuracy: no scoring, valuation or gate file was touched; t6 (deal quality) and the unit gate tests are unchanged and pass.
+  Not claimed: nothing here talks to real Facebook. The scan browser ran against a mock inside the app with DNS blocked.
+  Your real data: the sandbox tests never opened your database, config or browser profiles. Your own Clynx was running during this
+  work (started 5:10 PM); its database/config files were last written at 5:10 PM, before any of the Stage 4-5 tests, and the only later
+  change was cloud-session.json (the running app refreshing its login).
+  Notes on two test quirks (not product bugs): t7b prints every PASS but then waits forever at its very last step (the sandbox app is
+  shown the "unsaved changes" prompt on close) - the same happened in the Phase 2 log; t5 failed once with "Target crashed" in a single
+  run and passed 21/21 on rerun and again in the final regression. That one-off renderer crash could not be reproduced; the new
+  diagnostics log is exactly what will capture it if it ever happens on your PC.
+
+4. SAFETY BOUNDARIES RESPECTED
+------------------------------
+  - Scanner scheduling, browser concurrency, search coverage, Facebook interaction: not changed.
+  - Deal quality and valuation: not changed. Scanner images/media: not blocked. Raw events: not throttled. No functional UI removed.
+  - Windows-friendly; nothing macOS-incompatible added (Windows-only measurement tools were used only in tests).
+  - What lighter modes do change visually: the starfield is still in Performance mode, sparkle/glow effects and some hover animations are
+    off in Balanced and Performance, and the live scan panels repaint a little less often there.
+
+5. REMAINING BOTTLENECKS
+------------------------
+  1. Dashboard / Activity while a scan is running. In the stress replay, GPU stays at 25-47 % on those two screens (Performance 26 %,
+     Balanced 33-41 %, Visual 42-47 %), versus 5-13 % on Feed/Config. Isolating it showed the biggest part of the replay's cost came
+     from the unrealistic stream (a "deal" line every 1.4 s triggers the deal sound and a row flash; with ordinary log lines Activity
+     in Performance mode costs 0.4 % CPU and 0.6 % GPU). What remains is mostly decoding and repainting the large live-listing photo
+     and the queue thumbnails on the Dashboard, and in Visual mode the animated row fade-in and smooth scroll in Activity. A real scan
+     changes listing every few seconds, so real-world cost will be lower than the replay, but this was not measured against a live
+     scan. Possible next step: a Dashboard "lite" live panel (smaller photo, no queue thumbnails) in Performance mode.
+  2. Visual mode while still sits at 13 % because the starfield animates at 30 fps; that is the price of that mode.
+  3. The first start after this update builds the photo index (about 1 s on very large libraries).
+  4. Sharp (about 80 ms) still loads at startup; left alone on purpose.
+
+6. HOW TO TEST ON YOUR REAL PC
+------------------------------
+  Your running Clynx uses the old build until it is restarted (it runs from out/, which has been rebuilt).
+  1. Close Clynx completely (including from the system tray if it has one), then start it normally.
+  2. Config > "Performance mode": leave on Auto first. On this PC Auto should pick Performance. Try each of the three and watch the
+     starfield: Visual moves, Balanced moves slower and plainer, Performance is a still picture.
+  3. GPU check: open Task Manager > Performance > GPU (or Details > add the "GPU" column) and watch the Clynx processes. With the window
+     in front and the mouse still, expect about 0-1 % in Performance, 5-8 % Balanced, 12-14 % Visual. Move the mouse a lot: Performance
+     should stay under a few percent.
+  4. Alt-tab to another program and leave Clynx visible but behind: after a few seconds its GPU use should fall to about 0-2 %.
+  5. Start the scanner for a real scan. Open Activity, Dashboard and Feed in turn: they should always show the newest lines/listings the
+     moment you switch to them. Deal alerts, the deal sound and phone notifications must happen exactly as before - if any is late or
+     missing in a lighter mode, tell me, that would be a bug.
+  6. Startup: with a large Database, the Dashboard should appear almost instantly; the Database screen takes a moment the first time
+     you open it after launch (it loads then), and is instant afterwards.
+  7. Crash log: if anything ever crashes or hangs, look at <your Clynx data folder>\logs\diagnostics.log (on this machine that is
+     C:\Users\biggt\AppData\Roaming\Clynx\logs\diagnostics.log) and send me the last lines. A line "previous-session-ended-unexpectedly"
+     means the app was closed by force, crashed, or the PC lost power.
+  8. If anything looks wrong, you can return to the old behaviour by choosing Visual mode; a full rollback is
+     "git checkout checkpoint-before-phase3" followed by "npm run build".
