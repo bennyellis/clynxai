@@ -1,53 +1,12 @@
 {
   "coldStartToFirstScreenMs": {
     "runs": [
-      587,
-      564,
-      591,
-      605,
-      562
+      639,
+      628,
+      667,
+      636,
+      545
     ],
-    "median": 587
-  },
-  "registerClickToAppReadyMs": 459,
-  "idleSignedIn": {
-    "processes": 5,
-    "workingSetMB": 613,
-    "privateMB": 354,
-    "cpuPercentSum": 0
-  },
-  "idleSignedInAfter25s": {
-    "processes": 5,
-    "workingSetMB": 616,
-    "privateMB": 355,
-    "cpuPercentSum": -0.1
-  },
-  "signedInStartToMainScreenMs": {
-    "runs": [
-      661,
-      695,
-      778,
-      653,
-      731
-    ],
-    "median": 695
-  },
-  "signInClickToAppReadyMs": 162,
-  "watchSyncDelayMs": 16037,
-  "apiContainerRestartToHealthyMs": 1470,
-  "offlineWatchCatchUpMs": 104777,
-  "databaseDown": {
-    "health": "000 in 36 ms",
-    "ready": "000 in 35 ms",
-    "login": "000 in 35 ms"
-  },
-  "apiRecoversAfterDatabaseReturnsMs": 5466,
-  "redisDown": {
-    "ready": "000",
-    "login": "000",
-    "loginMs": 40072
-  },
-  "devicesAfterOneLogoutAndLogin": "2",
-  "restartAfterHardKillMs": 728,
-  "fullStackStartToReadyMs": 11180
+    "median": 636
+  }
 }

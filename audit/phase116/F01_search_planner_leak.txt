@@ -1,4 +1,4 @@
-B triggered aggregation: HTTP 200
-B read demand: HTTP 200
-A's unique phrase visible to B: true
-sample watch ids visible: true
+B triggered aggregation: HTTP 403
+B read demand: HTTP 403
+A's unique phrase visible to B: false
+sample watch ids visible: false
