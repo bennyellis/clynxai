@@ -48,6 +48,28 @@ export function normalizeServerUrl(input: unknown): ServerAddressResult {
   return { ok: true, url: u.origin, kind, secure, warnings };
 }
 
+// ---- the old developer default ---------------------------------------------------------------------------------------------------------------------------------------
+// Every build before Beta 2 (and the first Beta 2 build) started the sign-in form at http://localhost:8787, the address of a developer's own Docker server, and wrote it into
+// app-settings.json as soon as the person pressed "Start Clynx". An installed copy that is updated or reinstalled keeps that file, so on any other computer the sign-in kept trying
+// "localhost" (this computer) and failed. In an installed build that exact value is never a deliberate choice, so it is treated as "no server chosen".
+export function isLegacyDevDefault(url: unknown): boolean {
+  if (typeof url !== "string") return false;
+  try {
+    const u = new URL(url.trim());
+    return u.protocol === "http:" && u.port === "8787" && (u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]" || u.hostname === "::1") && (u.pathname === "/" || u.pathname === "");
+  } catch {
+    return false;
+  }
+}
+
+/** The server address to start from, given what app-settings.json held. Installed builds drop the old developer default; everything else the person typed is kept as it was. */
+export function resolveSavedServerUrl(saved: unknown, opts: { packaged: boolean; buildDefault: string | null; devDefault: string }): string {
+  const fallback = opts.buildDefault ?? (opts.packaged ? "" : opts.devDefault);
+  if (typeof saved !== "string" || !saved.trim()) return fallback;
+  if (opts.packaged && isLegacyDevDefault(saved)) return fallback;
+  return saved;
+}
+
 // ---- turning a network failure into a sentence a person can act on ----------------------------------------------------------------------------------------------
 export function describeFetchFailure(err: unknown, url: string): string {
   const e = err as { name?: string; message?: string; cause?: { code?: string; message?: string } };
@@ -59,6 +81,9 @@ export function describeFetchFailure(err: unknown, url: string): string {
       return url;
     }
   })();
+  if (classifyHost(host.replace(/:\d+$/, "")) === "loopback" && (code === "ECONNREFUSED" || code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT" || e?.name === "AbortError" || code === "EHOSTUNREACH")) {
+    return `Nothing is running at ${host}. "localhost" means THIS computer, not your Clynx server. Clear the Server address and enter the address of your server instead (for example https://your-server.example).`;
+  }
   if (e?.name === "AbortError" || code === "UND_ERR_CONNECT_TIMEOUT" || code === "ETIMEDOUT") {
     return `${host} did not answer in time. Check that the server computer is on and Clynx Cloud is running, that both computers are on the same network (not a guest network), and that the address is right.`;
   }

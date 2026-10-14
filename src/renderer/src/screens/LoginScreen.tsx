@@ -66,7 +66,6 @@ export function LoginScreen({
   const [email, setEmail] = useState(readLastEmail);
   // The server address is a technical detail most people never touch, so it
   // stays tucked away — and opens itself if the server can't be reached.
-  const [showServer, setShowServer] = useState(!defaultApiUrl.trim());
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,8 +81,6 @@ export function LoginScreen({
         setBeta(b);
         // the sign-in form starts from the address this installation already uses (people who left local mode, or chose a server before)
         if (b.cloudApiUrl) setApiUrl((cur) => (cur === defaultApiUrl ? (b.cloudApiUrl as string) : cur));
-        // nothing to start from (an installed build has no built-in server): the address box stays open while the person types it
-        if (!(b.cloudApiUrl ?? "").trim() && !defaultApiUrl.trim()) setShowServer(true);
       })
       .catch(() => setBeta(null));
   }, []);
@@ -110,9 +107,10 @@ export function LoginScreen({
     }
   }
 
-  // Registering on a private server needs an invitation code: find out before asking for it (the check also runs, and gates the password, on submit).
+  // Check the address as soon as there is one (and again after every edit), so a wrong or unreachable server is shown BEFORE a password is typed; registering on a private server also needs
+  // to know whether an invitation code is wanted. (The check also runs, and gates the password, on submit.)
   useEffect(() => {
-    if (mode !== "register" || !apiUrl.trim() || test.state !== "idle") return;
+    if (!apiUrl.trim() || test.state !== "idle") return;
     const t = setTimeout(() => void runTest(apiUrl), 700); // (not on every keystroke)
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -128,7 +126,6 @@ export function LoginScreen({
       const trimmedEmail = email.trim();
       // never send a password to an address that has not answered as a Clynx server
       if (testedUrl !== trimmedUrl && !(await runTest(trimmedUrl))) {
-        setShowServer(true);
         return;
       }
       const result =
@@ -142,7 +139,6 @@ export function LoginScreen({
       if (!result.ok) {
         const friendly = friendlyLoginError(result.error ?? (mode === "login" ? "Login failed." : "Registration failed."), trimmedUrl);
         setError(friendly.message);
-        if (friendly.unreachable) setShowServer(true);
         return;
       }
       try {
@@ -154,7 +150,6 @@ export function LoginScreen({
     } catch (err) {
       const friendly = friendlyLoginError((err as Error).message || "Something went wrong.", apiUrl.trim() || defaultApiUrl);
       setError(friendly.message);
-      if (friendly.unreachable) setShowServer(true);
     } finally {
       setBusy(false);
     }
@@ -279,7 +274,7 @@ export function LoginScreen({
             </span>
           </label>
         )}
-        {showServer || !apiUrl.trim() ? (
+        {(
           <Field label="Server address">
             <div style={{ display: "flex", gap: 8 }}>
               <input
@@ -316,15 +311,6 @@ export function LoginScreen({
               <span data-testid="server-fail" role="alert" style={{ fontSize: 13, color: "var(--danger)" }}>{test.result.error}</span>
             )}
           </Field>
-        ) : (
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => setShowServer(true)}
-            style={{ alignSelf: "flex-start", fontSize: 12.5, padding: "2px 6px", color: "var(--text-dim)" }}
-          >
-            Advanced: server address
-          </button>
         )}
 
         {error && (

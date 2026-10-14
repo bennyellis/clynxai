@@ -14,7 +14,7 @@ import { hasEbayCredentials, setEbayTransport } from "./ebayClient.js";
 import { hasOpenAIAccess, initOpenAIProxy, setApiSource } from "./openai.js";
 import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
 import { writeFileAtomic, writeFileAtomicWithBackup } from "./safeFs.js";
-import { normalizeServerUrl, testServer } from "./serverAddress.js";
+import { normalizeServerUrl, resolveSavedServerUrl, testServer } from "./serverAddress.js";
 import { Updater, type UpdateChannel, type UpdateMode } from "./updater.js";
 import { isSafeForCommandLine, planInstallerLaunch } from "./installerLauncher.js";
 import { SECRET_ENV_VARS, envKeyState, isProtectedValue, protectEnvText, readEnvSecrets, unprotectEnvText } from "./envKeys.js";
@@ -171,7 +171,7 @@ function loadAppSettings(): AppSettings {
   try {
     if (!existsSync(APP_SETTINGS_PATH)) return { cloudApiUrl: defaultCloudApiUrl() };
     const raw = JSON.parse(readFileSync(APP_SETTINGS_PATH, "utf-8"));
-    return { cloudApiUrl: typeof raw?.cloudApiUrl === "string" && raw.cloudApiUrl.trim() ? raw.cloudApiUrl : defaultCloudApiUrl(), localMode: raw?.localMode === true, aiSource: raw?.aiSource === "shared" || raw?.aiSource === "own" ? raw.aiSource : undefined, protectKeys: raw?.protectKeys === true, updateMode: raw?.updateMode === "off" || raw?.updateMode === "notify" || raw?.updateMode === "download" ? raw.updateMode : undefined, updateChannel: raw?.updateChannel === "beta" || raw?.updateChannel === "stable" ? raw.updateChannel : undefined };
+    return { cloudApiUrl: resolveSavedServerUrl(raw?.cloudApiUrl, { packaged: app.isPackaged, buildDefault: buildInfo.defaultServerUrl, devDefault: "http://localhost:8787" }), localMode: raw?.localMode === true, aiSource: raw?.aiSource === "shared" || raw?.aiSource === "own" ? raw.aiSource : undefined, protectKeys: raw?.protectKeys === true, updateMode: raw?.updateMode === "off" || raw?.updateMode === "notify" || raw?.updateMode === "download" ? raw.updateMode : undefined, updateChannel: raw?.updateChannel === "beta" || raw?.updateChannel === "stable" ? raw.updateChannel : undefined };
   } catch {
     return { cloudApiUrl: defaultCloudApiUrl() };
   }

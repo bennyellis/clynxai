@@ -1,5 +1,5 @@
 // The server address a person types, and "Test connection": normalisation, the rule that internet addresses must be https, and plain-language failures. No network is used.
-import { classifyHost, compareVersionsLoose, describeFetchFailure, normalizeServerUrl, testServer } from "../serverAddress.js";
+import { classifyHost, compareVersionsLoose, describeFetchFailure, isLegacyDevDefault, normalizeServerUrl, resolveSavedServerUrl, testServer } from "../serverAddress.js";
 import { check, run, section } from "./_testkit.js";
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -39,7 +39,22 @@ run(async () => {
   const e = normalizeServerUrl("https://[fd00::1]:8443");
   check("an IPv6 unique-local address is a local network", e.ok && e.kind === "local-network", e);
 
+  section("the old developer default (the 'localhost:8787' sign-in failure on other computers)");
+  const FUNNEL = "https://ben.tail0e333d.ts.net";
+  check("http://localhost:8787 and 127.0.0.1:8787 (with or without a slash) are the legacy default", isLegacyDevDefault("http://localhost:8787") && isLegacyDevDefault("http://127.0.0.1:8787/") && isLegacyDevDefault(" http://localhost:8787 "));
+  check("anything else is NOT: other ports, https, paths, other hosts, junk", !isLegacyDevDefault("http://localhost:8788") && !isLegacyDevDefault("https://localhost:8787") && !isLegacyDevDefault("http://localhost:8787/api") && !isLegacyDevDefault("http://10.0.0.81:8787") && !isLegacyDevDefault(FUNNEL) && !isLegacyDevDefault(undefined) && !isLegacyDevDefault("not a url"));
+  const pk = (saved: unknown, buildDefault: string | null) => resolveSavedServerUrl(saved, { packaged: true, buildDefault, devDefault: "http://localhost:8787" });
+  check("INSTALLED build + a Beta 1 settings file holding localhost:8787 -> starts at the build's server", pk("http://localhost:8787", FUNNEL) === FUNNEL);
+  check("INSTALLED build with no built-in server -> starts empty (the person enters one), never localhost", pk("http://localhost:8787", null) === "" && pk(undefined, null) === "" && pk("", null) === "");
+  check("INSTALLED build, nothing saved -> the build's server", pk(undefined, FUNNEL) === FUNNEL && pk("   ", FUNNEL) === FUNNEL);
+  check("a server the person chose is kept exactly as typed (LAN address, another port, https)", pk("http://10.0.0.81:8788", FUNNEL) === "http://10.0.0.81:8788" && pk("http://localhost:8788", FUNNEL) === "http://localhost:8788" && pk("https://other.example", null) === "https://other.example");
+  const dev = (saved: unknown) => resolveSavedServerUrl(saved, { packaged: false, buildDefault: null, devDefault: "http://localhost:8787" });
+  check("a DEVELOPMENT run still starts at its own localhost:8787 (that is what it is for)", dev(undefined) === "http://localhost:8787" && dev("http://localhost:8787") === "http://localhost:8787");
+
   section("failures in plain words");
+  const loop = Object.assign(new Error("fetch failed"), { name: "TypeError", cause: { code: "ECONNREFUSED" } });
+  check("a refused connection to localhost says 'localhost means THIS computer' and tells the person to enter their server", /THIS computer/.test(describeFetchFailure(loop, "http://localhost:8787")) && /enter the address of your server/i.test(describeFetchFailure(loop, "http://localhost:8787")) && !/refused the connection/.test(describeFetchFailure(loop, "http://127.0.0.1:8787")));
+  check("a refused connection to a real address is unchanged", /refused the connection/.test(describeFetchFailure(loop, "http://10.0.0.81:8788")));
   const mk = (code: string, name = "TypeError") => Object.assign(new Error("fetch failed"), { name, cause: { code } });
   check("refused", /refused the connection/.test(describeFetchFailure(mk("ECONNREFUSED"), "http://10.0.0.81:8788")));
   check("name not found suggests the numeric address", /numeric address/.test(describeFetchFailure(mk("ENOTFOUND"), "http://ben:8788")));

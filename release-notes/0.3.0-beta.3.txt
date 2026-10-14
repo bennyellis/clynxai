@@ -1,0 +1,6 @@
+Clynx Beta 3 - what is new
+* Fixes sign-in on other computers: older Clynx builds started the sign-in at "localhost:8787", which is a developer address that only exists on the builder's own PC. This build starts at the real Clynx server, shows the Server address on the sign-in screen, and checks it for you before you type a password.
+* If a leftover "localhost:8787" address is found from an older install it is replaced automatically. Your data, your local-mode choice and your signed-in accounts are kept.
+* Clearer message when an address points at "localhost" and nothing is there: it now says that localhost means this computer, not your Clynx server.
+* Nothing else changes: invitation-only sign-up, signed automatic updates and Owner accounts work as before.
+Installing over Beta 1 or Beta 2 keeps all your data.
