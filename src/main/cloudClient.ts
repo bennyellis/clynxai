@@ -413,6 +413,15 @@ export function isBillingStatus(v: unknown): v is BillingStatus {
   );
 }
 
+/** What to tell the person when Clynx's shared eBay service cannot answer: the cause and who can fix it, never a raw "Route ... not found". */
+export function friendlyEbayFailure(status: number | undefined, data: unknown, error: string | undefined): string {
+  const d = data as { error?: string; message?: string } | undefined;
+  if (status === 404 && !d?.error?.startsWith("ebay_")) return "This Clynx server is too old to provide eBay searches. The Owner needs to update the server (Update-ClynxLan.ps1).";
+  if (d?.error === "ebay_not_configured" || d?.error === "provider_unavailable") return "eBay searches are not set up on this Clynx server yet. The Owner adds the eBay keys once (website console > API integrations); nothing is needed on your computer.";
+  if (d?.error === "rate_limited" || d?.error === "user_budget_exhausted" || d?.error === "api_budget_exhausted") return d.message ?? "eBay searches are paused for a while because today's limit was reached. They come back by themselves.";
+  return d?.message ?? error ?? "eBay could not be reached through Clynx.";
+}
+
 // The version of THIS build, reported to the server on registration and every heartbeat (set once at startup from the build info; a packaged app has no npm environment to read it from).
 let reportedVersion = process.env["npm_package_version"] ?? "unknown";
 export function setClientVersion(v: string): void {
@@ -636,8 +645,7 @@ export class CloudClient {
     }
     const r = await this.accountCall<T>("GET", url);
     if (!r.ok || r.data === undefined) {
-      const msg = (r.data as { message?: string } | undefined)?.message;
-      throw new Error(msg ?? r.error ?? "eBay could not be reached through Clynx Cloud.");
+      throw new Error(friendlyEbayFailure(r.status, r.data, r.error));
     }
     return r.data;
   }

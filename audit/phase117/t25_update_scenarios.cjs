@@ -45,7 +45,7 @@ function startProxy() {
         log.cuts++;
         res.writeHead(200, ur.headers);
         let sent = 0;
-        ur.on("data", (d) => { if (sent >= 10_000) return; const part = d.subarray(0, 10_000 - sent); sent += part.length; res.write(part); if (sent >= 10_000) { res.socket.destroy(); ur.destroy(); } });
+        ur.on("data", (d) => { if (sent >= 10_000) return; const part = d.subarray(0, 10_000 - sent); sent += part.length; res.write(part, () => { if (sent >= 10_000) setTimeout(() => { res.socket.destroy(); ur.destroy(); }, 300); }); });
         return;
       }
       if (req.headers.range) log.ranges.push(req.headers.range);

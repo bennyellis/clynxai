@@ -494,8 +494,7 @@ export function ConfigScreen({
             />
             {!hasEbayCredentials && (
               <p style={{ fontSize: 13.5, color: "var(--warn)", margin: "4px 0 0" }}>
-                No eBay API credentials found. Add EBAY_CLIENT_ID and EBAY_CLIENT_SECRET to .env (see .env.example) and
-                restart Clynx.
+                eBay is not available yet. {betaInfo?.localMode ? "Add EBAY_CLIENT_ID and EBAY_CLIENT_SECRET to .env (see .env.example) and restart Clynx." : "Clynx's own eBay access is provided through your account: nothing to add on this computer. If this stays, the Clynx server's Owner has not saved the eBay keys yet."}
               </p>
             )}
           </Section>
@@ -756,7 +755,7 @@ export function ConfigScreen({
         </Section>
       )}
       {tab === "account" && betaInfo && (
-        <Section title="Updates" subtitle="New versions of Clynx. Checked before they can install; nothing installs without your click.">
+        <Section title="Updates" subtitle="New versions of Clynx. Every one is checked (signature and checksums) before it can install, and installs by itself when Clynx is idle.">
           <UpdatesSection localMode={betaInfo.localMode} />
         </Section>
       )}

@@ -2,6 +2,7 @@
 // the company's refusals turn into plain messages. All simulated: a fake cloud client and a stubbed fetch, nothing leaves this process and no key is real.
 import { cloudRefusal, callOpenAI, hasOpenAIAccess, initOpenAIProxy, setApiSource, ensureOpenAIAccess, openAICreditsExhausted, PLAN_LIMIT_MESSAGE } from "../openai.js";
 import { hasEbayCredentials, searchEbayItems, setEbayTransport } from "../ebayClient.js";
+import { friendlyEbayFailure } from "../cloudClient.js";
 import { check, run, section } from "./_testkit.js";
 
 const realFetch = globalThis.fetch;
@@ -92,6 +93,12 @@ run(async () => {
   check("results are mapped as usual", items.length === 1 && items[0].title === "Test item");
   enabled = false;
   check("transport off and no keys: not available again", !hasEbayCredentials());
+
+  section("when the company's eBay service cannot answer, the person is told the cause and who fixes it");
+  check("an older server without eBay: says the server is too old, not 'Route ... not found'", /too old.*Owner/.test(friendlyEbayFailure(404, { message: "Route GET:/ebay/search not found", error: "Not Found" }, "Route GET:/ebay/search not found")));
+  check("keys not saved on the server yet: says the Owner adds them once, nothing needed on this computer", /not set up.*Owner.*nothing is needed on your computer/.test(friendlyEbayFailure(503, { error: "ebay_not_configured", message: "eBay features are not set up on this server yet." }, undefined)));
+  check("a daily limit keeps the server's own words", friendlyEbayFailure(429, { error: "user_budget_exhausted", message: "You have used today's allowance." }, undefined) === "You have used today's allowance.");
+  check("anything else falls back to the server's message or a plain sentence", friendlyEbayFailure(500, undefined, undefined) === "eBay could not be reached through Clynx.");
 
   globalThis.fetch = realFetch;
 });

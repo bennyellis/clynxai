@@ -187,7 +187,9 @@ function effectiveApiSource(): "local" | "shared" | "own" {
   if (isLocalMode()) return "local";
   if (appSettings.aiSource === "shared") return "shared";
   if (appSettings.aiSource === "own") return "own";
-  return hasSavedKeys() ? "own" : "shared";
+  // A signed-in account uses Clynx's shared AI and eBay by default: nobody should have to bring a key of their own, and keys that happen to be saved on this computer no longer switch it away
+  // from the service (they are used only when the person deliberately chooses "my own keys").
+  return "shared";
 }
 const offlineNotice = () => ({
   id: "cloud-offline",
