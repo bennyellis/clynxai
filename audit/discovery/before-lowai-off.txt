@@ -1,0 +1,46 @@
+lowAiMode: false
+recall of profitable listings: 7/16 = 44%  (opened 14, photo-researched or surfaced 14)
+identified correctly (Database filing / match): 19/21
+false deals (bad / mislabelled listing surfaced): 0
+wrong-product filings: 0, badly named filings: 4
+    BADNAME Power Adapter <- Phone charger lot
+    BADNAME Tempered glass screen protector <- Phone charger lot
+    BADNAME iPhone 13 128GB (front view) <- iPhone 13 128GB blue unlocked
+    BADNAME Sony PlayStation 5 Slim Digital Edition (bundle includes two DualSense controllers and two games) <- PS5 bundle with games
+listings with no verdict about why (not surfaced, not junk): 25
+research jobs: 29  (183.7/hour)  seen->researched avg 122.3s  p95 186.3s  queue wait avg 103.1s max 172.5s
+time between finished research jobs: avg 19.6s  max 44.0s
+run: scan 5.9 min, queue drain +3.6 min = 9.5 min (virtual)
+AI calls: judge 21, vision 29, identity 2, market checks 5  est. $0.325  max in flight 2
+  g1  good      opened  vision×1 SURFACED profitable_now                                                  Xbox Series S 512GB works great $120 -> [Xbox Series S]
+  g2  good      skipped vision×0          -                                                               Xbox Series S 512GB Console with Control $71 -> []
+  g3  good      skipped vision×0          -                                                               Microsoft Xbox Series X Console Black $107 -> []
+  g4  good      opened  vision×1          -                                                               Gaming console works great $100 -> [Xbox Series S]
+  g5  good      opened  vision×1          -                                                               Selling my stuff, moving $150 -> [Nintendo Switch OLED]
+  g6  good      opened  vision×1 SURFACED profitable_now                                                  PS5 slim digital $250 -> [PlayStation 5 Slim Digital Edition]
+  g7  good      opened  vision×1 SURFACED profitable_now                                                  Apple iPhone 14 Pro $300 -> [iPhone 14 Pro]
+  g8  good      opened  vision×1          -                                                               Headphones $60 -> [Sony WH-1000XM4]
+  g9  good      opened  vision×1          -                                                               Handheld game $120 -> [Steam Deck 256GB]
+  g10 good      opened  vision×1 SURFACED profitable_now                                                  Dyson V8 cordless vacuum $80 -> [Dyson V8]
+  g11 good      opened  vision×1          -                                                               Canon camera with lens and bag $135 -> [Canon EOS Rebel T7]
+  g12 good      opened  vision×2 SURFACED profitable_now                                                  Xbox Series S $120 -> [Xbox Series S]
+  f1  good      opened  vision×1          -                                                               Dyson V8 vacuum, cordless, with attachme $90 -> [Dyson V8]
+  f2  good      opened  vision×1          -                                                               Sony WH-1000XM4 headphones $85 -> [Sony WH-1000XM4]
+  b1  bad       opened  vision×1          -                                                               iPhone 13 $480 -> [iphone 13; iPhone 13]
+  b2  bad       opened  vision×0          -                                                               Xbox Series S $350 -> [Xbox Series S]
+  b3  bad       opened  vision×1          -                                                               Nintendo Switch OLED console $300 -> [Nintendo Switch OLED]
+  b4  bad       opened  vision×1          -                                                               Meta Quest 2 128GB $190 -> [Meta Quest 2]
+  b5  bad       opened  vision×1          -                                                               Airpods pro 2 $170 -> [AirPods Pro 2]
+  j1  junk      opened  vision×1          -                                                               Zara Metallic Halter Neck Dress $25 -> []
+  j2  junk      opened  vision×1          -                                                               Marcus $15 -> []
+  j3  junk      opened  vision×1          -                                                               Misc household items $40 -> []
+  j4  junk      opened  vision×1          -                                                               Old stuff $30 -> []
+  j5  junk      skipped vision×0          -                                                               Baby clothes bundle $47 -> []
+  m1  mislabel  opened  vision×1          pass                                                            PS5 console with controller $200 -> [DualSense Controller]
+  m2  mislabel  opened  vision×1          -                                                               Xbox Series X $250 -> [Xbox Series S]
+  m3  mislabel  opened  vision×1          -                                                               Nintendo Switch OLED $150 -> []
+  u1  uncertain opened  vision×1          -                                                               Console $90 -> []
+  u2  uncertain opened  vision×1          -                                                               Laptop for sale $200 -> []
+  n1  naming    opened  vision×1          -                                                               Phone charger lot $40 -> [Power Adapter; Tempered glass screen protector]
+  n2  naming    opened  vision×1 SURFACED profitable_now                                                  iPhone 13 128GB blue unlocked $200 -> [iphone 13; iPhone 13 128GB (front view)]
+  n3  naming    opened  vision×1 SURFACED profitable_now                                                  PS5 bundle with games $230 -> [Sony PlayStation 5 Slim Digital Edition (bundle includes two DualSense controllers and two games)]

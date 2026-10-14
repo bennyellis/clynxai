@@ -1,0 +1,121 @@
+Database discovery: reliability and accuracy
+
+Status: fixed and tested. Follow-up (Beta 7 prep): the price-shape skip was removed completely, and persistence, budgets, queue and failure recovery got their own tests (see the end). Nothing is published.
+
+What was wrong (root causes)
+
+  * 1
+      Cause: A photo look was only given to listings the text-only AI had already liked. With "Save OpenAI credits" on (the default) a vague title ("Gaming console works great") can't be valued from text, so it never got a look, was never identified, and never reached the Database.
+      Evidence: 0 of the 27 listings stored in your Database have a photo analysis. Benchmark: 7 of 16 profitable listings found.
+  * 2
+      Cause: Photo results were thrown away. (a) `Store.saveScored` was `INSERT OR REPLACE` over a subset of columns, so every later re-save of a listing (green flag, mismatch, final verdict) silently set `photo_analysis`, its timestamp and the flaws back to NULL. (b) Even with "Save OpenAI credits" off, what the photos identified was never used to value a listing the text hadn't flagged.
+      Evidence: (a) New test failed on the old code (3 failures), passes now. (b) Benchmark with the setting off: 14 of 16 profitable listings were looked at, only 7 reached you.
+  * 3
+      Cause: A listing whose price doesn't end in 0 or 5 was skipped unopened.
+      Evidence: 3 of your 5 unopened skips were Xbox Series X/S at $71, $107 and $107.
+  * 4
+      Cause: A failed text read counted as "not a deal". An unreadable AI answer was saved as a rejection, never retried.
+      Evidence: "Xbox one series x $400: Failed to parse AI response" in your Database.
+  * 5
+      Cause: No status. Skipped, unlooked-at, undecidable and genuinely unprofitable listings all read "skip: …".
+      Evidence: Code: one log line for all of them.
+  * 6
+      Cause: A title-only deal whose photos showed something lesser kept its deal flag (the mismatch check only applied to a tracked item).
+      Evidence: Code path; benchmark case "PS5 console" with only a controller pictured.
+  * 7
+      Cause: Nothing checked what the AI filed products under.
+      Evidence: 30 of your 581 products (5%) have view / bundle / accessory wording: "iPhone (front view)", "Power Adapter", "Tempered glass screen protector", whole bundle sentences.
+  * 8
+      Cause: Waits between products. One photo worker, strictly first-come: a slow job holds everything behind it. The Database's background fill waited 5 minutes after every batch of 10 (you have 574 entries without a thumbnail), and a pair waited for the slower of the two. Related-product research ran strictly one at a time. The Live panel showed nothing while a product's Marketplace search was being set up, so it looked asleep.
+      Evidence: Benchmark (setting off): average wait 103 s, longest 172 s.
+
+What I changed
+
+- research.ts (new, pure, tested): decides who earns a photo look; cleans and refuses product names; wording of every status.
+- Speculative looks. A listing the text couldn't settle (vague title, unsure or unavailable AI read) now gets a photo look, inside an allowance: 3 per location visit, 30 per pass, never under $35. Deals, near matches, Watch candidates and hidden gems are unchanged and always looked at.
+- Photo-first finds. If the photos name a specific product, it is valued from the Database's own numbers (free); if the Database has none, a market check runs (allowance: 2 per location, 12 per pass). The Deal Quality Gate validates it before anything is pushed.
+- Text read retried once when the answer is unreadable; a failure is marked "no evidence", not "not a deal".
+- Four honest states saved with every listing (new columns research_status/code/reason): *not researched*, *not enough evidence*, *rejected*, *confirmed unprofitable* (plus *researched*). Shown on the Feed card, counted in Activity ("Discovery summary for the last location: …"), and listed in the metrics.
+- Price rule removed (follow-up). A price not ending in 0/5 no longer skips anything. It only puts a speculative photo look behind the others in the queue, and only for a title that names nothing tracked or known. The photo check (matchesClaim) is what catches the controller-titled-as-a-console case the rule was added for.
+- Mismatch applied to title-only deals too.
+- Product names cleaned before filing ("(front view)" and bundle asides removed; accessories, bare brands and sentences refused). Real names such as "Mini refrigerator (top-freezer style)" and "Xbox Series S Fortnite Bundle" are kept (checked against your 581 names).
+- Saved photo analysis now survives re-saves.
+- Throughput: two photo workers instead of one, served deal → Watch → speculative; the queue wait is now measured (research_queue_wait). Database fill waits 30 s after a clean batch (5 minutes only after a problem) with workers that take the next entry as soon as they're free. Related products researched two at a time. The Live panel now says "Searching Marketplace for …".
+- Failed research job: the listing is marked "not enough evidence (RESEARCH_FAILED)" instead of waiting for ever.
+
+Measured (simulated: scripted AI, virtual clock, 32 representative listings; same corpus on the old and new code)
+
+  * Profitable listings found
+      Before (AI saving on): 7/16 (44%)
+      After (on): 16/16
+      Before (off): 7/16 (44%)
+      After (off): 16/16
+  * False deals surfaced
+      Before (AI saving on): 0
+      After (on): 0
+      Before (off): 0
+      After (off): 0
+  * Wrong-product filings
+      Before (AI saving on): 0
+      After (on): 0
+      Before (off): 0
+      After (off): 0
+  * Badly named products filed
+      Before (AI saving on): 2
+      After (on): 0
+      Before (off): 4
+      After (off): 0
+  * Listings with no stated reason
+      Before (AI saving on): 25
+      After (on): 0
+      Before (off): 25
+      After (off): 0
+  * Average wait for photo research
+      Before (AI saving on): 22.7 s
+      After (on): 7.4 s
+      Before (off): 103 s
+      After (off): 13 s
+  * Longest wait
+      Before (AI saving on): 63 s
+      After (on): 76 s*
+      Before (off): 172 s
+      After (off): 76 s
+  * Photo looks / estimated AI spend
+      Before (AI saving on): 10 / $0.13
+      After (on): 23 / $0.28
+      Before (off): 29 / $0.33
+      After (off): 31 / $0.36
+
+* More work is done (31 jobs, 23 looks vs 10); deals are served first, so the longest wait is a speculative look.
+Time between finished jobs barely changed (13.5 s to 13.0 s): the scan itself, about 7-12 s per listing, sets the pace, and I left that pacing alone because it is Facebook-facing. Database-fill time for your 574 blank entries is modelled, not measured (assuming about 40 s per entry, two at a time): about 8 h before, about 3.7 h now.
+
+Spend: worst case is 3 extra looks per location visit (about $0.03 at the benchmark's assumed $0.01 a look). The benchmark is half profitable listings, so real spend rises far less than the table suggests.
+
+Remaining limitations
+
+- The AI is scripted in the benchmark, so real model accuracy is not measured; it shows the pipeline no longer discards what the model can identify. Blurry or dark photos stay "not enough evidence".
+- 14 of your 27 stored listings were opened and then skipped as too old: the general browse has no Facebook "Date listed" filter (only the dedicated search does). I did not add one; this app avoids guessing Marketplace URL parameters and it needs a live check.
+- When the allowance runs out a vague listing is "not researched (LOOK_BUDGET)": visible and adjustable, not lost.
+- The 30 oddly named products already in your Database are untouched (needs your approval; Database > Review can propose them).
+- With the price skip gone, more detail pages are opened (about 4 in 5 listings have a price not ending in 0/5), so scans spend more time per location; the per-location cap on evaluated listings still applies.
+- The Watch active-check route and the eBay engine were not changed.
+
+Settings that can explain what you saw
+
+- Save OpenAI credits (default on): the main one (cause 1).
+- Wait between passes (default 2-5 min): the "Cycle done. Sleeping in ~N min" line; applies after a whole pass over all locations, not after each product.
+- Max listing age 24 h, General deal confidence "medium", Rotate search terms (5), listings per location 20.
+- The shared AI service's daily limit (then every look says "AI unavailable", not rejected) and WatchCount's daily lookup cap.
+- New, in config.json only: discovery.speculativeLooksPerLocation / speculativeLooksPerPass / marketLooksPerLocation / marketLooksPerPass (0 turns that part off).
+
+Re-running the measurement
+
+node scripts/discovery-bench.cjs --cases (add --lowai off; --root <older checkout> for "before"). Raw outputs: audit/discovery/. Tests: researchPolicy, discoveryRecall, discoveryStates, photoAnalysisKept.
+
+Follow-up verification (Beta 7 prep)
+
+- Price skip removed: benchmark corpus now has 33 listings including a vague title at $97; recall 17 of 17, none skipped unopened, no false deals.
+- Persistence (discoveryPersistence, real SQLite files): photo analysis and status survive 5 repeated saves, a close and reopen, the cloud-sync cycle (push, mark synced, re-save, rejected push), and an upgrade from a database with no research columns, in which every existing row is unchanged. The cloud payload never carries these local fields. A listing left "waiting for its photos" when the app closed becomes "interrupted, not enough evidence" on the next start.
+- A copy of your real Database (27 listings, 581 products) opened with the new code: row counts and content hashes identical, three columns added (audit/discovery/real-database-copy-migration.txt).
+- Budgets, queue, failures (discoveryLimits): 3 looks per location and 30 per pass are enforced and reset correctly; allowance 0 turns them off with an honest reason; the market-lookup allowance limits fresh lookups; never more than 2 research jobs run at once; deals go before Watch candidates before speculative looks; a stuck job costs one worker only; a failed photo look, an unavailable AI and a store that cannot record a failure all end as "not enough evidence", never as a rejection or an unhandled error.
+- Full desktop suite: 55 of 55 files pass; both typechecks clean.

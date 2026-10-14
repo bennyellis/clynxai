@@ -1,0 +1,895 @@
+{
+ "result": {
+  "options": {
+   "lowAiMode": false
+  },
+  "outcomes": [
+   {
+    "id": "g1",
+    "role": "good",
+    "title": "Xbox Series S 512GB works great",
+    "price": 120,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": true,
+    "isDeal": true,
+    "status": "profitable_now",
+    "identified": [
+     "Xbox Series S"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Matches your \"Xbox Series S\" search — title contains all the words you're looking for. Sells for about $260 on eBay, so you'd keep roughly $208-$224 after fees; buying it for $120 leaves about $98 profit."
+   },
+   {
+    "id": "g2",
+    "role": "good",
+    "title": "Xbox Series S 512GB Console with Controller",
+    "price": 71,
+    "opened": false,
+    "visionCalls": 0,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Skipped without opening the listing — $71 doesn't end in 0 or 5, probably scam bait or unnoteworthy."
+   },
+   {
+    "id": "g3",
+    "role": "good",
+    "title": "Microsoft Xbox Series X Console Black",
+    "price": 107,
+    "opened": false,
+    "visionCalls": 0,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Skipped without opening the listing — $107 doesn't end in 0 or 5, probably scam bait or unnoteworthy."
+   },
+   {
+    "id": "g4",
+    "role": "good",
+    "title": "Gaming console works great",
+    "price": 100,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [
+     "Xbox Series S"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Can't tell what this is from the text."
+   },
+   {
+    "id": "g5",
+    "role": "good",
+    "title": "Selling my stuff, moving",
+    "price": 150,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [
+     "Nintendo Switch OLED"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Can't tell what this is from the text."
+   },
+   {
+    "id": "g6",
+    "role": "good",
+    "title": "PS5 slim digital",
+    "price": 250,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": true,
+    "isDeal": true,
+    "status": "profitable_now",
+    "identified": [
+     "PlayStation 5 Slim Digital Edition"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Priced well under what PlayStation 5 Slim Digital Edition sells for."
+   },
+   {
+    "id": "g7",
+    "role": "good",
+    "title": "Apple iPhone 14 Pro",
+    "price": 300,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": true,
+    "isDeal": true,
+    "status": "profitable_now",
+    "identified": [
+     "iPhone 14 Pro"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Priced well under what iPhone 14 Pro sells for."
+   },
+   {
+    "id": "g8",
+    "role": "good",
+    "title": "Headphones",
+    "price": 60,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [
+     "Sony WH-1000XM4"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Not a deal at $60."
+   },
+   {
+    "id": "g9",
+    "role": "good",
+    "title": "Handheld game",
+    "price": 120,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [
+     "Steam Deck 256GB"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Can't tell what this is from the text."
+   },
+   {
+    "id": "g10",
+    "role": "good",
+    "title": "Dyson V8 cordless vacuum",
+    "price": 80,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": true,
+    "isDeal": true,
+    "status": "profitable_now",
+    "identified": [
+     "Dyson V8"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Priced well under what Dyson V8 sells for."
+   },
+   {
+    "id": "g11",
+    "role": "good",
+    "title": "Canon camera with lens and bag",
+    "price": 135,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [
+     "Canon EOS Rebel T7"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Priced well under what Canon EOS Rebel T7 sells for."
+   },
+   {
+    "id": "g12",
+    "role": "good",
+    "title": "Xbox Series S",
+    "price": 120,
+    "opened": true,
+    "visionCalls": 2,
+    "surfaced": true,
+    "isDeal": true,
+    "status": "profitable_now",
+    "identified": [
+     "Xbox Series S"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Matches your \"Xbox Series S\" search — title contains all the words you're looking for. Sells for about $260 on eBay, so you'd keep roughly $208-$224 after fees; buying it for $120 leaves about $98 profit."
+   },
+   {
+    "id": "f1",
+    "role": "good",
+    "title": "Dyson V8 vacuum, cordless, with attachments",
+    "price": 90,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [
+     "Dyson V8"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Clynx couldn't read its own analysis of this listing"
+   },
+   {
+    "id": "f2",
+    "role": "good",
+    "title": "Sony WH-1000XM4 headphones",
+    "price": 85,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [
+     "Sony WH-1000XM4"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Clynx couldn't read its own analysis of this listing"
+   },
+   {
+    "id": "b1",
+    "role": "bad",
+    "title": "iPhone 13",
+    "price": 480,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [
+     "iphone 13",
+     "iPhone 13"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Recognised from the Database as \"iphone 13\" (sells for about $340 on eBay, so you'd keep roughly $272-$292 after fees); buying it for $480 leaves a loss."
+   },
+   {
+    "id": "b2",
+    "role": "bad",
+    "title": "Xbox Series S",
+    "price": 350,
+    "opened": true,
+    "visionCalls": 0,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [
+     "Xbox Series S"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Matches your \"Xbox Series S\" search — title contains all the words you're looking for. Sells for about $260 on eBay, so you'd keep roughly $208-$224 after fees; buying it for $350 leaves a loss of about $132."
+   },
+   {
+    "id": "b3",
+    "role": "bad",
+    "title": "Nintendo Switch OLED console",
+    "price": 300,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [
+     "Nintendo Switch OLED"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Matches your \"Nintendo Switch OLED\" search — title contains all the words you're looking for. Sells for about $270 on eBay, so you'd keep roughly $216-$232 after fees; buying it for $300 leaves a loss of about $73."
+   },
+   {
+    "id": "b4",
+    "role": "bad",
+    "title": "Meta Quest 2 128GB",
+    "price": 190,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [
+     "Meta Quest 2"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Not a deal at $190."
+   },
+   {
+    "id": "b5",
+    "role": "bad",
+    "title": "Airpods pro 2",
+    "price": 170,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [
+     "AirPods Pro 2"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Not a deal at $170."
+   },
+   {
+    "id": "j1",
+    "role": "junk",
+    "title": "Zara Metallic Halter Neck Dress",
+    "price": 25,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Not a deal at $25."
+   },
+   {
+    "id": "j2",
+    "role": "junk",
+    "title": "Marcus",
+    "price": 15,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Can't tell what this is from the text."
+   },
+   {
+    "id": "j3",
+    "role": "junk",
+    "title": "Misc household items",
+    "price": 40,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Can't tell what this is from the text."
+   },
+   {
+    "id": "j4",
+    "role": "junk",
+    "title": "Old stuff",
+    "price": 30,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Can't tell what this is from the text."
+   },
+   {
+    "id": "j5",
+    "role": "junk",
+    "title": "Baby clothes bundle",
+    "price": 47,
+    "opened": false,
+    "visionCalls": 0,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Skipped without opening the listing — $47 doesn't end in 0 or 5, probably scam bait or unnoteworthy."
+   },
+   {
+    "id": "m1",
+    "role": "mislabel",
+    "title": "PS5 console with controller",
+    "price": 200,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": "pass",
+    "identified": [
+     "DualSense Controller"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Priced well under what DualSense Controller sells for."
+   },
+   {
+    "id": "m2",
+    "role": "mislabel",
+    "title": "Xbox Series X",
+    "price": 250,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [
+     "Xbox Series S"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Looked like it might be \"xbox series x\" by title alone, but the photos show it is an Xbox Series S, not a Series X — not counting it as a match."
+   },
+   {
+    "id": "m3",
+    "role": "mislabel",
+    "title": "Nintendo Switch OLED",
+    "price": 150,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Looked like it might be \"Nintendo Switch OLED\" by title alone, but the photos show only a charging dock is pictured — not counting it as a match."
+   },
+   {
+    "id": "u1",
+    "role": "uncertain",
+    "title": "Console",
+    "price": 90,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Can't tell what this is from the text."
+   },
+   {
+    "id": "u2",
+    "role": "uncertain",
+    "title": "Laptop for sale",
+    "price": 200,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Not a deal at $200."
+   },
+   {
+    "id": "n1",
+    "role": "naming",
+    "title": "Phone charger lot",
+    "price": 40,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": false,
+    "isDeal": false,
+    "status": null,
+    "identified": [
+     "Power Adapter",
+     "Tempered glass screen protector"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Can't tell what this is from the text."
+   },
+   {
+    "id": "n2",
+    "role": "naming",
+    "title": "iPhone 13 128GB blue unlocked",
+    "price": 200,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": true,
+    "isDeal": true,
+    "status": "profitable_now",
+    "identified": [
+     "iphone 13",
+     "iPhone 13 128GB (front view)"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Recognised from the Database as \"iphone 13\" (sells for about $340 on eBay, so you'd keep roughly $272-$292 after fees); buying it for $200 leaves about $86 profit."
+   },
+   {
+    "id": "n3",
+    "role": "naming",
+    "title": "PS5 bundle with games",
+    "price": 230,
+    "opened": true,
+    "visionCalls": 1,
+    "surfaced": true,
+    "isDeal": true,
+    "status": "profitable_now",
+    "identified": [
+     "Sony PlayStation 5 Slim Digital Edition (bundle includes two DualSense controllers and two games)"
+    ],
+    "researchStatus": null,
+    "researchCode": null,
+    "reasoning": "Priced well under what PlayStation 5 Slim Digital Edition sells for."
+   }
+  ],
+  "ai": {
+   "judge": 21,
+   "vision": 29,
+   "identity": 2,
+   "market": 5,
+   "other": 0,
+   "maxInFlight": 2
+  },
+  "spendUsd": 0.3245,
+  "filings": [
+   {
+    "at": 1800000020379.2773,
+    "title": "Xbox Series S 512GB works great",
+    "product": "Xbox Series S",
+    "kind": "photo"
+   },
+   {
+    "at": 1800000034379.2773,
+    "title": "Gaming console works great",
+    "product": "Xbox Series S",
+    "kind": "photo"
+   },
+   {
+    "at": 1800000051379.2773,
+    "title": "Selling my stuff, moving",
+    "product": "Nintendo Switch OLED",
+    "kind": "photo"
+   },
+   {
+    "at": 1800000065379.2773,
+    "title": "PS5 slim digital",
+    "product": "PlayStation 5 Slim Digital Edition",
+    "kind": "new"
+   },
+   {
+    "at": 1800000109379.2773,
+    "title": "Apple iPhone 14 Pro",
+    "product": "iPhone 14 Pro",
+    "kind": "new"
+   },
+   {
+    "at": 1800000153379.2773,
+    "title": "Headphones",
+    "product": "Sony WH-1000XM4",
+    "kind": "new"
+   },
+   {
+    "at": 1800000167379.2773,
+    "title": "Handheld game",
+    "product": "Steam Deck 256GB",
+    "kind": "new"
+   },
+   {
+    "at": 1800000181379.2773,
+    "title": "Dyson V8 cordless vacuum",
+    "product": "Dyson V8",
+    "kind": "new"
+   },
+   {
+    "at": 1800000225379.2773,
+    "title": "Canon camera with lens and bag",
+    "product": "Canon EOS Rebel T7",
+    "kind": "new"
+   },
+   {
+    "at": 1800000239379.2773,
+    "title": "Xbox Series S",
+    "product": "Xbox Series S",
+    "kind": "photo"
+   },
+   {
+    "at": 1800000256379.2773,
+    "title": "Dyson V8 vacuum, cordless, with attachments",
+    "product": "Dyson V8",
+    "kind": "photo"
+   },
+   {
+    "at": 1800000270379.2773,
+    "title": "Sony WH-1000XM4 headphones",
+    "product": "Sony WH-1000XM4",
+    "kind": "photo"
+   },
+   {
+    "at": 1800000284379.2773,
+    "title": "iPhone 13",
+    "product": "iPhone 13",
+    "kind": "photo"
+   },
+   {
+    "at": 1800000298379.2773,
+    "title": "Xbox Series S",
+    "product": "Xbox Series S",
+    "kind": "photo"
+   },
+   {
+    "at": 1800000312379.2773,
+    "title": "Nintendo Switch OLED console",
+    "product": "Nintendo Switch OLED",
+    "kind": "photo"
+   },
+   {
+    "at": 1800000326379.2773,
+    "title": "Meta Quest 2 128GB",
+    "product": "Meta Quest 2",
+    "kind": "new"
+   },
+   {
+    "at": 1800000340379.2773,
+    "title": "Airpods pro 2",
+    "product": "AirPods Pro 2",
+    "kind": "new"
+   },
+   {
+    "at": 1800000410379.2773,
+    "title": "PS5 console with controller",
+    "product": "DualSense Controller",
+    "kind": "new"
+   },
+   {
+    "at": 1800000454379.2773,
+    "title": "Xbox Series X",
+    "product": "Xbox Series S",
+    "kind": "photo"
+   },
+   {
+    "at": 1800000510379.2773,
+    "title": "Phone charger lot",
+    "product": "Power Adapter",
+    "kind": "new"
+   },
+   {
+    "at": 1800000510379.2773,
+    "title": "Phone charger lot",
+    "product": "Tempered glass screen protector",
+    "kind": "new"
+   },
+   {
+    "at": 1800000524379.2773,
+    "title": "iPhone 13 128GB blue unlocked",
+    "product": "iPhone 13 128GB (front view)",
+    "kind": "new"
+   },
+   {
+    "at": 1800000538379.2773,
+    "title": "PS5 bundle with games",
+    "product": "Sony PlayStation 5 Slim Digital Edition (bundle includes two DualSense controllers and two games)",
+    "kind": "new"
+   }
+  ],
+  "jobs": [
+   {
+    "id": "g1",
+    "enqueuedAt": 1800000008641.3132,
+    "start": 1800000006379.2773,
+    "end": 1800000020379.2773
+   },
+   {
+    "id": "g4",
+    "enqueuedAt": 1800000022969.486,
+    "start": 1800000020379.2773,
+    "end": 1800000034379.2773
+   },
+   {
+    "id": "g5",
+    "enqueuedAt": 1800000036575.3252,
+    "start": 1800000034379.2773,
+    "end": 1800000051379.2773
+   },
+   {
+    "id": "g6",
+    "enqueuedAt": 1800000049794.1118,
+    "start": 1800000051379.2773,
+    "end": 1800000095379.2773
+   },
+   {
+    "id": "g7",
+    "enqueuedAt": 1800000063836.0413,
+    "start": 1800000095379.2773,
+    "end": 1800000139379.2773
+   },
+   {
+    "id": "g8",
+    "enqueuedAt": 1800000076711.3503,
+    "start": 1800000139379.2773,
+    "end": 1800000153379.2773
+   },
+   {
+    "id": "g9",
+    "enqueuedAt": 1800000089320.8884,
+    "start": 1800000153379.2773,
+    "end": 1800000167379.2773
+   },
+   {
+    "id": "g10",
+    "enqueuedAt": 1800000101649.0623,
+    "start": 1800000167379.2773,
+    "end": 1800000211379.2773
+   },
+   {
+    "id": "g11",
+    "enqueuedAt": 1800000114694.1033,
+    "start": 1800000211379.2773,
+    "end": 1800000225379.2773
+   },
+   {
+    "id": "g12",
+    "enqueuedAt": 1800000126072.4236,
+    "start": 1800000225379.2773,
+    "end": 1800000239379.2773
+   },
+   {
+    "id": "f1",
+    "enqueuedAt": 1800000138148.8018,
+    "start": 1800000239379.2773,
+    "end": 1800000256379.2773
+   },
+   {
+    "id": "f2",
+    "enqueuedAt": 1800000151080.2349,
+    "start": 1800000256379.2773,
+    "end": 1800000270379.2773
+   },
+   {
+    "id": "b1",
+    "enqueuedAt": 1800000160203.6445,
+    "start": 1800000270379.2773,
+    "end": 1800000284379.2773
+   },
+   {
+    "id": "b2",
+    "enqueuedAt": 1800000171734.26,
+    "start": 1800000284379.2773,
+    "end": 1800000298379.2773
+   },
+   {
+    "id": "b3",
+    "enqueuedAt": 1800000181260.5828,
+    "start": 1800000298379.2773,
+    "end": 1800000312379.2773
+   },
+   {
+    "id": "b4",
+    "enqueuedAt": 1800000193867.8738,
+    "start": 1800000312379.2773,
+    "end": 1800000326379.2773
+   },
+   {
+    "id": "b5",
+    "enqueuedAt": 1800000205647.51,
+    "start": 1800000326379.2773,
+    "end": 1800000340379.2773
+   },
+   {
+    "id": "j1",
+    "enqueuedAt": 1800000218287.3154,
+    "start": 1800000340379.2773,
+    "end": 1800000354379.2773
+   },
+   {
+    "id": "j2",
+    "enqueuedAt": 1800000231907.5056,
+    "start": 1800000354379.2773,
+    "end": 1800000368379.2773
+   },
+   {
+    "id": "j3",
+    "enqueuedAt": 1800000244527.0715,
+    "start": 1800000368379.2773,
+    "end": 1800000382379.2773
+   },
+   {
+    "id": "j4",
+    "enqueuedAt": 1800000258195.495,
+    "start": 1800000382379.2773,
+    "end": 1800000396379.2773
+   },
+   {
+    "id": "m1",
+    "enqueuedAt": 1800000271139.2534,
+    "start": 1800000396379.2773,
+    "end": 1800000440379.2773
+   },
+   {
+    "id": "m2",
+    "enqueuedAt": 1800000281920.1184,
+    "start": 1800000440379.2773,
+    "end": 1800000454379.2773
+   },
+   {
+    "id": "m3",
+    "enqueuedAt": 1800000291158.1836,
+    "start": 1800000454379.2773,
+    "end": 1800000468379.2773
+   },
+   {
+    "id": "u1",
+    "enqueuedAt": 1800000303149.1414,
+    "start": 1800000468379.2773,
+    "end": 1800000482379.2773
+   },
+   {
+    "id": "u2",
+    "enqueuedAt": 1800000316091.815,
+    "start": 1800000482379.2773,
+    "end": 1800000496379.2773
+   },
+   {
+    "id": "n1",
+    "enqueuedAt": 1800000328686.5571,
+    "start": 1800000496379.2773,
+    "end": 1800000510379.2773
+   },
+   {
+    "id": "n2",
+    "enqueuedAt": 1800000338075.6108,
+    "start": 1800000510379.2773,
+    "end": 1800000524379.2773
+   },
+   {
+    "id": "n3",
+    "enqueuedAt": 1800000351888.6047,
+    "start": 1800000524379.2773,
+    "end": 1800000568379.2773
+   }
+  ],
+  "scanSpanMs": 352888.6047363281,
+  "drainSpanMs": 215490.67260742188,
+  "totalMs": 568379.27734375
+ },
+ "score": {
+  "profitable": 16,
+  "surfacedProfitable": 7,
+  "recall": 0.4375,
+  "openedProfitable": 14,
+  "researchedProfitable": 14,
+  "falseDeals": 0,
+  "falseDealDetail": [],
+  "wrongProductFilings": 0,
+  "badNameFilings": 4,
+  "filingDetail": [
+   "BADNAME Power Adapter <- Phone charger lot",
+   "BADNAME Tempered glass screen protector <- Phone charger lot",
+   "BADNAME iPhone 13 128GB (front view) <- iPhone 13 128GB blue unlocked",
+   "BADNAME Sony PlayStation 5 Slim Digital Edition (bundle includes two DualSense controllers and two games) <- PS5 bundle with games"
+  ],
+  "identifiedCorrectly": 19,
+  "identifiable": 21,
+  "insufficientButUnlabelled": 25,
+  "avgListingToResearchedS": 122.26777095400054,
+  "p95ListingToResearchedS": 186.30366650390624,
+  "avgQueueWaitS": 103.13150517746497,
+  "maxQueueWaitS": 172.49067260742189,
+  "avgGapBetweenJobsS": 19.571428571428573,
+  "maxGapBetweenJobsS": 44,
+  "jobsPerHour": 183.68016597631856,
+  "totalMin": 9.472987955729167,
+  "scanMin": 5.881476745605469,
+  "drainMin": 3.591511210123698,
+  "spendUsd": 0.3245
+ }
+}

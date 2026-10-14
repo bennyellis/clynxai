@@ -1,0 +1,62 @@
+{
+ "before": {
+  "listings": {
+   "n": 27,
+   "hash": "43bb379a871267b6"
+  },
+  "products": {
+   "n": 581,
+   "hash": "084f0cb2e360ac39"
+  },
+  "product_images": {
+   "n": 7,
+   "hash": "f0011c0fa9c0f122"
+  },
+  "feedback": {
+   "n": 0,
+   "hash": "4f53cda18c2baa0c"
+  },
+  "watches": {
+   "n": 1,
+   "hash": "02afc837f2ce51e1"
+  },
+  "blacklist_terms": {
+   "n": 3,
+   "hash": "77a723d27fbbb7c7"
+  }
+ },
+ "after": {
+  "listings": {
+   "n": 27,
+   "hash": "43bb379a871267b6"
+  },
+  "products": {
+   "n": 581,
+   "hash": "084f0cb2e360ac39"
+  },
+  "product_images": {
+   "n": 7,
+   "hash": "f0011c0fa9c0f122"
+  },
+  "feedback": {
+   "n": 0,
+   "hash": "4f53cda18c2baa0c"
+  },
+  "watches": {
+   "n": 1,
+   "hash": "02afc837f2ce51e1"
+  },
+  "blacklist_terms": {
+   "n": 3,
+   "hash": "77a723d27fbbb7c7"
+  }
+ },
+ "same": true,
+ "newColumns": [
+  "research_status",
+  "research_code",
+  "research_reason"
+ ],
+ "rowsWithNewStatus": 0,
+ "productsReadable": 581
+}

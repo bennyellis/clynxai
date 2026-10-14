@@ -2450,6 +2450,26 @@ async function runProductLookupInner(
 // an unbounded "add every game ever made for this console" would be both
 // expensive and a good way to flood the Database from one single listing.
 const SIBLING_DISCOVERY_COUNT = 6;
+// Related products (sibling games, variants) used to be researched strictly one after another: with a lookup taking a minute or more, the Discovery tab
+// showed one product at a time and the rest of the list waited. Two at a time is the same total work (the same AI and WatchCount calls) in about half the
+// time, and finding an existing entry and creating a missing one are a single synchronous step, so two lookups cannot create the same product.
+const RELATED_RESEARCH_CONCURRENCY = 2;
+
+/** Runs `fn` over `items` with at most `limit` running at once; each worker takes the next item as soon as it is free. A failure of one does not stop the others. */
+async function forEachLimited<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      try {
+        await fn(item);
+      } catch (err) {
+        console.error(`[related] research failed: ${(err as Error).message}`);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
 
 async function discoverAndCreateSiblingProducts(brand: string, generation: string, category: string, familyPath: string, parentId?: string): Promise<void> {
   // Fresh query at call time (not the products list from whenever the
@@ -2467,19 +2487,19 @@ async function discoverAndCreateSiblingProducts(brand: string, generation: strin
   if (!titles.length) return;
   if (parentId) discovery.note(parentId, "finding", `Other ${generation} games worth tracking: ${titles.join(", ")}. I'll look into them next.`);
 
-  for (const title of titles) {
+  await forEachLimited(titles, RELATED_RESEARCH_CONCURRENCY, async (title) => {
     // Skip anything that already matches an existing product (exactly or
     // fuzzily) ANYWHERE in the Database, not just this family — a game
     // that's somehow already tracked under a different/wrong family
     // shouldn't get a duplicate entry here; Refresh on the existing one is
     // how that'd get corrected instead.
-    if (store.findMatchingProduct(title)) continue;
+    if (store.findMatchingProduct(title)) return;
     const candidateId = randomUUID();
     const id = store.addProductStub(candidateId, title);
-    if (id !== candidateId) continue; // already in the Database under this name
+    if (id !== candidateId) return; // already in the Database under this name
     sendToRenderer("products:updated", store.getProductById(id));
     await runProductLookup(id, title, { skipSiblingDiscovery: true, forcedFamily: familyPath, source: "related" });
-  }
+  });
 }
 
 // Per explicit instruction, live: "when the ai is researching a product,
@@ -2502,19 +2522,19 @@ async function discoverAndCreateProductVariants(productName: string, category: s
   if (!variantNames.length) return;
   if (parentId) discovery.note(parentId, "finding", `It comes in other versions I should know about: ${variantNames.join(", ")}. Looking into those next.`);
 
-  for (const title of variantNames) {
+  await forEachLimited(variantNames, RELATED_RESEARCH_CONCURRENCY, async (title) => {
     // Skip anything already tracked ANYWHERE in the Database — relies on
     // isSimilarProductName's own variant-aware check (store.ts) correctly
     // keeping "iPhone 13" and "iPhone 13 Pro" as distinct, non-matching
     // names, so a genuine variant here is never mistaken for a duplicate of
     // the base product that triggered this.
-    if (store.findMatchingProduct(title)) continue;
+    if (store.findMatchingProduct(title)) return;
     const candidateId = randomUUID();
     const id = store.addProductStub(candidateId, title);
-    if (id !== candidateId) continue; // already in the Database under this name
+    if (id !== candidateId) return; // already in the Database under this name
     sendToRenderer("products:updated", store.getProductById(id));
     await runProductLookup(id, title, { skipSiblingDiscovery: true, forcedFamily: familyPath ?? undefined, source: "related" });
-  }
+  });
 }
 
 // Per explicit instruction — multiple Facebook accounts: the live status
@@ -2734,7 +2754,11 @@ const blankSweepAttempted = new Set<string>();
 // A sweep does this many entries, then the next one starts a few minutes later: a big library of blank entries is
 // worked through steadily instead of in one burst of hundreds of searches and AI checks.
 const BLANK_SWEEP_BATCH = 10;
+// The wait before the next batch. It used to be 5 minutes after EVERY batch, so a Database with hundreds of blank entries (the Discovery tab
+// looked asleep between batches) took hours to work through even when every batch finished cleanly. Now a clean batch is followed by a short
+// pause, and the long one is kept for after a problem (an image host or the AI refusing), which is what it was meant to protect against.
 const BLANK_SWEEP_GAP_MS = 5 * 60_000;
+const BLANK_SWEEP_QUICK_GAP_MS = 30_000;
 // Just enough photos to give the entry a thumbnail and a start on a gallery; the manual backfill tops them up.
 const BLANK_SWEEP_PHOTOS = 3;
 let blankSweepRunning = false;
@@ -2810,23 +2834,31 @@ async function sweepBlankProducts(): Promise<void> {
   lastBlankSweepAt = Date.now();
   const startStore = store;
   let moreToDo = false;
+  let problems = 0;
   try {
     const allBlanks = startStore.listBlankProductIndex().filter((p) => !activeResearch.has(p.id) && !blankSweepAttempted.has(p.id));
     if (allBlanks.length === 0) return;
     const blanks = allBlanks.slice(0, BLANK_SWEEP_BATCH);
     moreToDo = allBlanks.length > blanks.length;
     console.log(`[database] ${allBlanks.length} entr${allBlanks.length === 1 ? "y has" : "ies have"} no thumbnail: researching ${blanks.length} now`);
-    for (let i = 0; i < blanks.length && store === startStore; i += 2) {
-      await Promise.all(
-        blanks.slice(i, i + 2).map((p) => {
-          blankSweepAttempted.add(p.id);
-          return researchBlankProduct(p.id).catch((err) => console.error(`[database] auto-research of "${p.name}" failed: ${(err as Error).message}`));
-        })
-      );
-    }
+    // Two at a time, but each worker takes the next entry as soon as it is free (before, a pair waited for the slower of the two).
+    let next = 0;
+    const worker = async () => {
+      while (next < blanks.length && store === startStore) {
+        const p = blanks[next++];
+        blankSweepAttempted.add(p.id);
+        try {
+          await researchBlankProduct(p.id);
+        } catch (err) {
+          problems++;
+          console.error(`[database] auto-research of "${p.name}" failed: ${(err as Error).message}`);
+        }
+      }
+    };
+    await Promise.all([worker(), worker()]);
   } finally {
     blankSweepRunning = false;
-    if (moreToDo && store === startStore) setTimeout(() => void sweepBlankProducts(), BLANK_SWEEP_GAP_MS);
+    if (moreToDo && store === startStore) setTimeout(() => void sweepBlankProducts(), problems > 0 ? BLANK_SWEEP_GAP_MS : BLANK_SWEEP_QUICK_GAP_MS);
   }
 }
 

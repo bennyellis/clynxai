@@ -29,6 +29,8 @@ import { decideAgeGate } from "./listingAge.js";
 import { gateExtrasFromLump, gateExtrasFromValuation, looksLikeBundle, type BundleValuation } from "./bundleBreakdown.js";
 import { analyzeListingPhotos, classifyThumbnailImage, matchesReferenceProduct, type PhotoAnalysisResult } from "./vision.js";
 import { resolveIdentityTarget } from "./productIdentity.js";
+import { hasOpenAIAccess } from "./openai.js";
+import { cleanFilingName, describeDisposition, discoverySettings, disposition, MIN_MARKET_LOOK_PRICE_USD, planPhotoLook, type DiscoverySettings, type LookPlan } from "./research.js";
 import { downloadImageAsDataUri, shrinkImageDataUri } from "./webResearch.js";
 import { DEFAULT_COUNTRY_CITIES } from "./config.js";
 import { prefilterWatchListing } from "./watchFacebook.js";
@@ -52,6 +54,8 @@ import type {
   ListingSummary,
   LogLine,
   ProductProfile,
+  ResearchDisposition,
+  ResearchStatus,
   ScoredListing,
   ScrapeStatus,
   SearchItem,
@@ -78,6 +82,14 @@ export { isSuspiciousPrice };
 export function isNonRoundPrice(price: number): boolean {
   return price % 5 !== 0;
 }
+
+// evaluateListing returns early for a listing with no price, but TypeScript does not carry that across the closures and queued jobs it builds.
+function nonNullPriced(listing: ListingSummary): ListingSummary & { price: number } {
+  return listing as ListingSummary & { price: number };
+}
+
+// A listing's photo-look plan (research.ts) plus whether it is a hidden gem (needs the scored listing, so it is worked out with the plan).
+type EnginePlan = LookPlan & { hiddenGem: boolean };
 
 // Facebook Marketplace skews heavily toward big-ticket local-pickup-only
 // categories (vehicles, furniture, appliances) that a mail-order reseller
@@ -462,12 +474,22 @@ export class ScrapeEngine {
   // flight at a time (it was awaited inline) — so this changes ONLY
   // whether it blocks the scan loop, not how many OpenAI vision calls run
   // at once; bump VISION_WORKER_COUNT if you want real parallelism later.
-  private visionJobs: Array<() => Promise<void>> = [];
+  //
+  // Database discovery: the queue is now worked by two workers and in priority order. One worker meant that a single slow job (a market
+  // check can take up to 150 s) held up every listing behind it, deals included, while a speculative look at a vague title could be
+  // served ahead of a real deal that arrived a moment later. A worker's job is still one listing's whole tail, so Database filing
+  // for a given listing stays in order with itself; two different listings can be filed at the same time, which is safe because
+  // finding an existing entry and creating a missing one happen in one synchronous step (see the filing loop in runPostScoringPipeline).
+  private visionJobs: Array<{ run: () => Promise<void>; priority: number; seq: number; at: number }> = [];
+  private visionJobSeq = 0;
   private visionWorkersActive = 0;
-  private static readonly VISION_WORKER_COUNT = 1;
+  private static readonly VISION_WORKER_COUNT = 2;
 
-  private enqueueVisionJob(job: () => Promise<void>): void {
-    this.visionJobs.push(job);
+  // 0 = a deal / near-match / hidden gem, 1 = a Watch candidate, 2 = a speculative look, 3 = everything else.
+  private enqueueVisionJob(priority: number, job: () => Promise<void>): void {
+    this.visionJobs.push({ run: job, priority, seq: this.visionJobSeq++, at: Date.now() });
+    // most urgent first, first come first served within the same priority
+    this.visionJobs.sort((a, b) => a.priority - b.priority || a.seq - b.seq);
     setGauge("vision_queue_depth", this.visionJobs.length);
     this.pumpVisionQueue();
   }
@@ -476,12 +498,58 @@ export class ScrapeEngine {
     while (this.visionWorkersActive < ScrapeEngine.VISION_WORKER_COUNT && this.visionJobs.length > 0) {
       const next = this.visionJobs.shift()!;
       setGauge("vision_queue_depth", this.visionJobs.length);
+      // How long a listing sat in the queue before anyone started on it (Activity > metrics shows this as "research_queue_wait").
+      recordStage("research_queue_wait", Date.now() - next.at, true);
       this.visionWorkersActive++;
-      next().finally(() => {
-        this.visionWorkersActive--;
-        this.pumpVisionQueue();
-      });
+      next
+        .run()
+        .catch(() => undefined)
+        .finally(() => {
+          this.visionWorkersActive--;
+          this.pumpVisionQueue();
+        });
     }
+  }
+
+  // Database discovery: the extra photo looks and market lookups spent on listings the text could not settle (see research.ts).
+  // Per location visit and per pass; both reset by beginLocationVisit() / runOnce().
+  private speculativeLooksThisVisit = 0;
+  private speculativeLooksThisPass = 0;
+  private marketLooksThisVisit = 0;
+  private marketLooksThisPass = 0;
+  // How the listings of the current location turned out, for the one-line summary written when the next location starts.
+  private visitTally: Record<string, number> = {};
+
+  private discovery(): DiscoverySettings {
+    return discoverySettings(this.opts.getConfig().discovery);
+  }
+
+  /** Called when the scanner starts on a new location: the budgets for extra looks are per visit, and the last visit gets summed up. */
+  beginLocationVisit(): void {
+    this.logVisitSummary();
+    this.speculativeLooksThisVisit = 0;
+    this.marketLooksThisVisit = 0;
+  }
+
+  private tally(d: { status: string; code: string }): void {
+    this.visitTally[d.status] = (this.visitTally[d.status] ?? 0) + 1;
+    this.visitTally[`${d.status}/${d.code}`] = (this.visitTally[`${d.status}/${d.code}`] ?? 0) + 1;
+    recordEvent(`research_${d.status}`);
+    recordEvent(`research_code_${d.code}`);
+  }
+
+  private logVisitSummary(): void {
+    const t = this.visitTally;
+    this.visitTally = {};
+    const statuses = ["researched", "confirmed_unprofitable", "rejected", "insufficient_evidence", "unresearched"].filter((s) => t[s]);
+    if (!statuses.length) return;
+    const words: Record<string, string> = { researched: "researched", confirmed_unprofitable: "unprofitable", rejected: "rejected", insufficient_evidence: "not enough evidence", unresearched: "not researched" };
+    const detail = Object.keys(t)
+      .filter((k) => k.includes("/") && !k.startsWith("researched/"))
+      .sort((a, b) => t[b] - t[a])
+      .slice(0, 4)
+      .map((k) => `${k.split("/")[1]} ×${t[k]}`);
+    this.log("info", `Discovery summary for the last location: ${statuses.map((s) => `${t[s]} ${words[s]}`).join(", ")}${detail.length ? ` (most common reasons: ${detail.join(", ")})` : ""}.`);
   }
   private status: ScrapeStatus = {
     running: false,
@@ -954,6 +1022,26 @@ export class ScrapeEngine {
     );
   }
 
+  // Whether the title names something Clynx has a reason to care about: a Search For item (or a near miss on one), an enabled Facebook Watch, or a
+  // product the Database already has an eBay value for. Cheap and free of AI: it only decides how urgent a listing with an unremarkable price
+  // is in the research queue (see isNonRoundPrice in planLook); it never excludes one.
+  private titleNamesSomethingKnown(title: string): boolean {
+    try {
+      const cfg = this.opts.getConfig();
+      if (matchSearchItem(title, cfg.searchItems) || findGreenFlagCandidate(title, cfg.searchItems)) return true;
+      if (!cfg.watch?.globallyPaused) {
+        for (const w of this.opts.store.listWatches()) {
+          if (!w.enabled || w.platform !== "facebook") continue;
+          const asItems = watchAsSearchItems(w);
+          if (matchSearchItem(title, asItems) !== null || findGreenFlagCandidate(title, asItems) !== null) return true;
+        }
+      }
+      return !!this.opts.store.getEbayValueForTitle(title);
+    } catch {
+      return false;
+    }
+  }
+
   // Veto-only identity safeguard (identity/safeguardRuntime.ts): true only when it is on in "enforce" mode and the evidence says the matched entry is a materially different
   // product. Never throws and never blocks a listing: any problem means the match stands.
   private identityVeto(args: { title: string | null; matchedName: string | null; entry: { id: string; name: string } | null; seller?: string | null; site: string }): boolean {
@@ -1119,9 +1207,14 @@ export class ScrapeEngine {
   // thumbnail-classification skip, which is timed separately as its own
   // "thumbnail_classification" stage instead, since it's a real vision
   // call, not a cheap check).
-  private recordInstantSkip(listing: ListingSummary, reasoning: string, cheapFilterStartedAt?: number): ListingEvalResult {
+  private recordInstantSkip(listing: ListingSummary, reasoning: string, cheapFilterStartedAt?: number, research?: { status: ResearchStatus; code: string }): ListingEvalResult {
     if (cheapFilterStartedAt !== undefined) recordStage("cheap_filters", Date.now() - cheapFilterStartedAt, true);
+    // Why it was skipped, in the same words as the saved reason: rules that skip a listing before it is opened never look at it,
+    // so by default that is "not researched" (a rule decided), and a few say outright that they rejected it.
+    const dispositionOfSkip = disposition(research?.status ?? "unresearched", research?.code ?? "SKIPPED_BEFORE_OPENING", reasoning.replace(/^Skipped without opening the listing\s*[—-]\s*/, ""));
+    this.tally(dispositionOfSkip);
     this.opts.store.saveScored({
+      research: dispositionOfSkip,
       listing: {
         ...listing,
         description: "",
@@ -1162,6 +1255,95 @@ export class ScrapeEngine {
         reasoning: `${scored.extraction.reasoning} (Listed ${ageText ?? "a while ago"}, older than your freshness window, so it is kept only for the Watch whose own age window covers it, not as a deal.)`,
       },
     };
+  }
+
+  // A hidden gem: a tracked item priced too high on its own (needing more than a 25% cut) but whose listing suggests extras come with it (a console
+  // with an expansion card): worth a look at what the whole lot is worth, even in save-credits mode.
+  private isHiddenGem(listing: ListingSummary & { price: number }, detail: ListingDetail, config: EngineConfig, scored: ScoredListing): boolean {
+    return (
+      !scored.isDeal &&
+      !!scored.extraction.matchedItem &&
+      (scored.referencePriceUsd ?? 0) > 0 &&
+      isHiddenGemCandidate({
+        priceUsd: listing.price,
+        shippingUsd: detail.ebayShippingUsd ?? 0,
+        baseValueUsd: (scored.referencePriceUsd ?? 0) * (scored.extraction.brokenVariant ? 1 : CONDITION_VALUE_MULTIPLIER[detectConditionImpact(`${listing.title} ${detail.description}`)]),
+        settings: resaleSettingsFrom(config),
+        text: `${listing.title} ${detail.description}`,
+      })
+    );
+  }
+
+  // The first thing the photos named that may be filed and valued (research.ts cleanFilingName), or null.
+  private focalProduct(names: string[]): string | null {
+    for (const raw of names) {
+      const verdict = cleanFilingName(raw);
+      if (verdict.ok) return verdict.name;
+    }
+    return null;
+  }
+
+  private nameRefusalReason(raw: string): string {
+    const verdict = cleanFilingName(raw);
+    return verdict.ok ? "" : verdict.reason;
+  }
+
+  // Whether this listing earns a look at its photos (see research.ts), counting the look against the budget when it is a speculative one.
+  private planLook(
+    listing: ListingSummary & { price: number },
+    detail: ListingDetail,
+    config: EngineConfig,
+    scored: ScoredListing,
+    greenFlagCandidate: SearchItem | null,
+    priceQualifiedWatches: Watch[]
+  ): EnginePlan {
+    const hiddenGem = this.isHiddenGem(listing, detail, config, scored);
+    if (hiddenGem) this.log("info", `"${listing.title}" is pricey on its own, but may come with extras: looking at what the whole lot is worth...`, listing.url);
+    const budget = this.discovery();
+    const plan = planPhotoLook({
+      lowAiMode: isLowAiMode(),
+      photosEnabled: !!config.photoAnalysis?.enabled,
+      hasPhotos: detail.imageUrls.length > 0,
+      aiAvailable: hasOpenAIAccess(),
+      title: listing.title,
+      price: listing.price,
+      isDeal: scored.isDeal,
+      matchedItem: scored.extraction.matchedItem,
+      confidence: scored.extraction.confidence,
+      category: scored.extraction.extractedAttributes ?? "",
+      judgeUnavailable: !!scored.extraction.judgeUnavailable,
+      // an ordinary price (not a multiple of 5) on a title that names nothing tracked or known: never a reason to skip, only to look later
+      unremarkablePrice: isNonRoundPrice(listing.price) && !this.titleNamesSomethingKnown(listing.title),
+      greenFlag: !!greenFlagCandidate,
+      watchCandidate: priceQualifiedWatches.length > 0,
+      hiddenGem,
+      speculativeLeftVisit: budget.speculativeLooksPerVisit - this.speculativeLooksThisVisit,
+      speculativeLeftPass: budget.speculativeLooksPerPass - this.speculativeLooksThisPass,
+    });
+    if (plan.vision && plan.speculative) {
+      this.speculativeLooksThisVisit++;
+      this.speculativeLooksThisPass++;
+      recordEvent("speculative_look");
+      this.log("info", `Taking a closer look at "${listing.title}": ${plan.why}.`, listing.url);
+    }
+    return { ...plan, hiddenGem };
+  }
+
+  // Where a listing stands when it is NOT going to get a photo look: the reason is whatever kept it from one, else what the text read found.
+  private settleWithoutPhotos(scored: ScoredListing, plan: LookPlan): ResearchDisposition {
+    const x = scored.extraction;
+    if (plan.skip) return plan.skip;
+    if (x.judgeUnavailable) {
+      return disposition("insufficient_evidence", "TEXT_JUDGE_UNAVAILABLE", `${x.reasoning} This is missing evidence, not a verdict on the listing.`);
+    }
+    if (scored.isDeal) return disposition("researched", "TEXT_DEAL", "Flagged from the title and price.");
+    if (x.matchedItem && (scored.referencePriceUsd ?? 0) > 0) {
+      return disposition("confirmed_unprofitable", "UNPROFITABLE_AT_PRICE", x.reasoning);
+    }
+    if (x.confidence === "low") {
+      return disposition("insufficient_evidence", "IDENTITY_UNCLEAR", `The title does not say what this is, and the AI read of it was not sure. ${x.reasoning}`.trim());
+    }
+    return disposition("rejected", "AI_ESTIMATE", `Judged not worth it from the title and price alone (Clynx's own estimate, not market numbers). ${x.reasoning}`.trim());
   }
 
   // Per explicit instruction — checks each already price-qualified Watch
@@ -1328,7 +1510,8 @@ export class ScrapeEngine {
         return this.recordInstantSkip(
           listing,
           `Skipped without opening the listing — its location ("${listing.locationText}") looks like it's outside ${config.selectedState}, and you're only searching there.`,
-          cheapFilterStart
+          cheapFilterStart,
+          { status: "rejected", code: "OUT_OF_STATE" }
         );
       }
     }
@@ -1338,18 +1521,15 @@ export class ScrapeEngine {
       return this.recordInstantSkip(
         listing,
         `Skipped without opening the listing — $${listing.price} looks like a placeholder price, not a real one.`,
-        cheapFilterStart
+        cheapFilterStart,
+        { status: "rejected", code: "PLACEHOLDER_PRICE" }
       );
     }
 
-    if (isNonRoundPrice(listing.price)) {
-      this.log("info", `skip (non-round price): ${listing.title} — $${listing.price}`, listing.url);
-      return this.recordInstantSkip(
-        listing,
-        `Skipped without opening the listing — $${listing.price} doesn't end in 0 or 5, probably scam bait or unnoteworthy.`,
-        cheapFilterStart
-      );
-    }
+    // A price that does not end in 0 or 5 is NOT a reason to skip a listing. (It used to end the listing here, unopened: a rule added after a
+    // controller titled "Xbox Series X" at $59 passed for a deal, which threw away ordinary listings, among them Xbox Series X/S consoles at
+    // $71 and $107 in a real Database. The photo check now catches that case.) It only decides how urgent a speculative photo look is: see
+    // `unremarkablePrice` in planLook, which puts such a listing behind the others in the research queue.
 
     const unshippableMatch = findUnshippableMatch(listing.title);
     if (unshippableMatch) {
@@ -1384,7 +1564,8 @@ export class ScrapeEngine {
       return this.recordInstantSkip(
         listing,
         `Skipped without opening the listing — "${listing.title}" looks like a bulky/local-pickup-only category (vehicle, furniture, appliance, real estate, etc.), not something a mail-order reseller can buy.`,
-        cheapFilterStart
+        cheapFilterStart,
+        { status: "rejected", code: "UNSHIPPABLE" }
       );
     }
 
@@ -1404,7 +1585,7 @@ export class ScrapeEngine {
     // listingVerdict) recognizes the word "blacklisted" in the reasoning saved here.
     if (blacklistMatch) {
       this.log("info", `skip (blacklisted: "${blacklistMatch}"): ${listing.title}`, listing.url);
-      return this.recordInstantSkip(listing, `Skipped without opening the listing — title matches blacklisted term "${blacklistMatch}".`, cheapFilterStart);
+      return this.recordInstantSkip(listing, `Skipped without opening the listing — title matches blacklisted term "${blacklistMatch}".`, cheapFilterStart, { status: "rejected", code: "BLACKLISTED" });
     }
 
     // Per explicit instruction — a "green flag": the title doesn't cleanly
@@ -1543,7 +1724,8 @@ export class ScrapeEngine {
       return this.recordInstantSkip(
         listing,
         `Skipped without opening the listing — $${listing.price} is above the $${priceCandidate.maxPriceUsd} max price you set for "${priceCandidate.item}".`,
-        cheapFilterStart
+        cheapFilterStart,
+        { status: "rejected", code: "OVER_MAX_PRICE" }
       );
     }
     if (priceCandidate?.minPriceUsd != null && listing.price < priceCandidate.minPriceUsd && priceQualifiedWatches.length === 0) {
@@ -1555,7 +1737,8 @@ export class ScrapeEngine {
       return this.recordInstantSkip(
         listing,
         `Skipped without opening the listing — $${listing.price} is below the $${priceCandidate.minPriceUsd} min price you set for "${priceCandidate.item}".`,
-        cheapFilterStart
+        cheapFilterStart,
+        { status: "rejected", code: "UNDER_MIN_PRICE" }
       );
     }
 
@@ -1599,7 +1782,8 @@ export class ScrapeEngine {
       return this.recordInstantSkip(
         listing,
         `Skipped without opening the listing — general deal detection is off and this doesn't match anything on your Search For list.`,
-        cheapFilterStart
+        cheapFilterStart,
+        { status: "unresearched", code: "NOT_FOCUSED" }
       );
     }
 
@@ -1655,7 +1839,9 @@ export class ScrapeEngine {
             listing,
             `Skipped without opening the listing — the photo itself shows ${imageCheck.category ?? "something"} (${
               imageCheck.reason ?? "not something a mail-order reseller can ship"
-            }), even though the title didn't say so.`
+            }), even though the title didn't say so.`,
+            undefined,
+            { status: "rejected", code: "PHOTO_INELIGIBLE" }
           );
         }
       }
@@ -1716,7 +1902,10 @@ export class ScrapeEngine {
     const ageGate = decideAgeGate(detail.listingAge, config.maxListingAgeHours, priceQualifiedWatches);
     if (ageGate.skip) {
       this.log("info", `skip (too old — ${detail.listingAge}): ${listing.title}`, listing.url);
+      const tooOld = disposition("rejected", "TOO_OLD", `Listed ${detail.listingAge}, older than your ${config.maxListingAgeHours}-hour freshness window.`);
+      this.tally(tooOld);
       this.opts.store.saveScored({
+        research: tooOld,
         listing: detail,
         extraction: {
           matchedItem: null,
@@ -1756,7 +1945,10 @@ export class ScrapeEngine {
             ? "already set up with Facebook's own shipping program"
             : "mentions eBay";
       this.log("info", `skip (${reason}): ${listing.title}`, listing.url);
+      const notHidden = disposition("rejected", detail.hasOfficialShipping ? "OFFICIAL_SHIPPING" : "MENTIONS_EBAY", `${reason.charAt(0).toUpperCase()}${reason.slice(1)}: not a hidden local deal.`);
+      this.tally(notHidden);
       this.opts.store.saveScored({
+        research: notHidden,
         listing: detail,
         extraction: {
           matchedItem: null,
@@ -1783,7 +1975,10 @@ export class ScrapeEngine {
     const scamReason = detectScamBot(`${detail.title} ${detail.description}`, detail.seller);
     if (scamReason) {
       this.log("info", `skip (${scamReason}): ${listing.title}`, listing.url);
+      const scam = disposition("rejected", "SCAM_BOT", `${scamReason.charAt(0).toUpperCase()}${scamReason.slice(1)}.`);
+      this.tally(scam);
       this.opts.store.saveScored({
+        research: scam,
         listing: detail,
         extraction: {
           matchedItem: null,
@@ -1808,8 +2003,11 @@ export class ScrapeEngine {
     const sellerRisk = evaluateSellerRisk(detail.seller, config.sellerRisk);
     if (!sellerRisk.passed) {
       this.log("info", `seller risk: ${listing.title} — ${sellerRisk.reasons.join("; ")}`, listing.url);
+      const risky = disposition("rejected", "SELLER_RISK", `The seller did not pass your seller checks: ${sellerRisk.reasons.join("; ")}`);
+      this.tally(risky);
       this.opts.store.saveScored(
         {
+          research: risky,
           listing: detail,
           extraction: {
             matchedItem: null,
@@ -1866,6 +2064,11 @@ export class ScrapeEngine {
     // Past the general freshness window and kept only for a Watch with its own covering window: never an ordinary deal.
     if (ageGate.watchOnly) scored = this.demoteForAge(scored, detail.listingAge);
 
+    // Does this listing earn a look at its photos, and if not, where does it stand? Decided once, here, and recorded with the
+    // listing so a skipped listing says why (see research.ts). The text read alone used to decide this, so a title that said nothing
+    // meant no photo look, no Database filing and no record that anyone had ever wondered.
+    const plan = this.planLook(nonNullPriced(listing), detail, config, scored, greenFlagCandidate, priceQualifiedWatches);
+    scored = { ...scored, research: plan.vision ? disposition("unresearched", "PHOTOS_QUEUED", "Waiting for a look at its photos.") : this.settleWithoutPhotos(scored, plan) };
     this.opts.store.saveScored(scored, sellerRisk);
     const record = this.opts.store.getLastSavedListing();
     if (record) this.opts.onListing(record);
@@ -1920,7 +2123,7 @@ export class ScrapeEngine {
     // listing.price is already guaranteed non-null (see the early return
     // above) — the cast is only needed because TS doesn't carry that
     // narrowing through a closure captured for later/deferred invocation.
-    const nonNullPricedListing = listing as ListingSummary & { price: number };
+    const nonNullPricedListing = nonNullPriced(listing);
     const runPipeline = () =>
       this.runPostScoringPipeline(
         nonNullPricedListing,
@@ -1931,14 +2134,28 @@ export class ScrapeEngine {
         greenFlagCandidate,
         dismissedCategories,
         priceQualifiedWatches,
-        discoveryMode
+        discoveryMode,
+        plan
       );
-    if (config.photoAnalysis.enabled && detail.imageUrls.length > 0) {
+    if (plan.vision) {
       recordEvent("vision_enqueued");
-      this.enqueueVisionJob(() =>
-        runPipeline().catch((err) => this.log("error", `Background photo analysis failed for "${listing.title}": ${(err as Error).message}`, listing.url))
+      this.enqueueVisionJob(plan.priority, () =>
+        runPipeline().catch((err) => {
+          this.log("error", `Background photo analysis failed for "${listing.title}": ${(err as Error).message}`, listing.url);
+          // The listing was saved as "waiting for a look at its photos": it must not stay that way for ever.
+          try {
+            const failed = disposition("insufficient_evidence", "RESEARCH_FAILED", `The photo research stopped with an error (${(err as Error).message.slice(0, 120)}). This is missing evidence, not a verdict on the listing.`);
+            this.tally(failed);
+            this.opts.store.setResearch(listing.id, failed);
+            const record = this.opts.store.getById(listing.id);
+            if (record) this.opts.onListing(record);
+          } catch {
+            /* the listing keeps what it had */
+          }
+        })
       );
     } else {
+      // Nothing to look at (or no reason to): the rest of the tail is quick, so it does not wait in the photo queue behind listings that do.
       await runPipeline();
     }
 
@@ -2010,8 +2227,12 @@ export class ScrapeEngine {
     priceQualifiedWatches: Watch[],
     // Threaded down from evaluateListing's own param — see its doc comment
     // for why this defaults to "passive" everywhere except runWatchCheck.
-    discoveryMode: "passive" | "active"
+    discoveryMode: "passive" | "active",
+    // Whether this listing earns a look at its photos, worked out by evaluateListing (planLook) so the queue could order it. Worked out here
+    // when a caller does not pass it (the pipeline is also exercised on its own).
+    planGiven?: EnginePlan
   ): Promise<void> {
+    const plan = planGiven ?? this.planLook(listing, detail, config, scored, greenFlagCandidate, priceQualifiedWatches);
     // Photos are the real identification mechanism now, ahead of anything
     // text-based — a listing's title/category can be vague or wrong, but
     // what's actually IN the photos isn't. Runs early and for every
@@ -2019,23 +2240,11 @@ export class ScrapeEngine {
     // so both the bundle-value check below and the research step after it
     // can use ONE real look at the photos instead of trusting the text.
     let photoResult: PhotoAnalysisResult | null = null;
-    // Save-credits mode: the (expensive, multi-photo) vision look is only for listings worth it: a deal, a near-match on
-    // something tracked, or a Watch candidate.
-    // A hidden gem: a tracked item priced too high on its own (needing more than a 25% cut) but whose listing suggests extras come with
-    // it (a console with an expansion card): worth a look at what the whole lot is worth, even in save-credits mode.
-    const hiddenGem =
-      !scored.isDeal &&
-      !!scored.extraction.matchedItem &&
-      (scored.referencePriceUsd ?? 0) > 0 &&
-      isHiddenGemCandidate({
-        priceUsd: listing.price,
-        shippingUsd: detail.ebayShippingUsd ?? 0,
-        baseValueUsd: (scored.referencePriceUsd ?? 0) * (scored.extraction.brokenVariant ? 1 : CONDITION_VALUE_MULTIPLIER[detectConditionImpact(`${listing.title} ${detail.description}`)]),
-        settings: resaleSettingsFrom(config),
-        text: `${listing.title} ${detail.description}`,
-      });
-    if (hiddenGem) this.log("info", `"${listing.title}" is pricey on its own, but may come with extras: looking at what the whole lot is worth...`, listing.url);
-    if (config.photoAnalysis.enabled && detail.imageUrls.length > 0 && (!isLowAiMode() || scored.isDeal || !!greenFlagCandidate || priceQualifiedWatches.length > 0 || hiddenGem)) {
+    // Save-credits mode: the (expensive, multi-photo) vision look is for a deal, a near-match on something tracked, a Watch candidate, a
+    // hidden gem (a tracked item priced too high on its own but whose listing suggests extras come with it), or, within a small budget, a
+    // listing the text could not settle (research.ts planPhotoLook decides; plan.hiddenGem is kept for the bundle check below).
+    const hiddenGem = plan.hiddenGem;
+    if (plan.vision) {
       // A green-flag candidate (see above) takes priority over the raw
       // title as the thing to check photos against — "Xbox X" itself isn't
       // a real product to compare against, but "Xbox Series S" is, and
@@ -2171,9 +2380,29 @@ export class ScrapeEngine {
     // ever read once matchesClaim is confirmed false, so it's always the
     // real pre-mismatch value here, never the already-nulled one.
     let mismatchCorrection: { claimedAs: string; reason: string | null } | null = null;
+    // A listing flagged on its TITLE alone (no tracked item behind it: a general-tier deal) is "claimed" to be whatever its title says.
+    // The mismatch below used to be applied only to a confirmed matchedItem, so such a listing whose photos showed something lesser
+    // (a controller for a "PS5 console") kept its deal flag and was only stopped, if at all, by the price check that followed.
+    const generalClaimMismatch = !scored.extraction.matchedItem && scored.isDeal && photoResult?.matchesClaim === false;
     // NOTE: the renderer's outline colors (ListingSourceMarks.tsx's
     // listingVerdict) recognize this reasoning wording to show a yellow
     // "not sure" outline — keep the two in sync if the text below changes.
+    if (generalClaimMismatch && photoResult) {
+      mismatchCorrection = { claimedAs: listing.title, reason: photoResult.mismatchReason };
+      this.log("warn", `Photo/title mismatch for "${listing.title}": the photos show ${photoResult.mismatchReason ?? "something different"} — no longer counting this as a deal.`, listing.url);
+      scored = {
+        ...scored,
+        isDeal: false,
+        dealTier: null,
+        extraction: {
+          ...scored.extraction,
+          reasoning: `Looked like a deal by its title alone, but the photos show ${photoResult.mismatchReason ?? "something different from what this listing claims to be"} — not counting it as a match.`,
+        },
+      };
+      this.opts.store.saveScored(scored, sellerRisk);
+      const updatedGeneral = this.opts.store.getLastSavedListing();
+      if (updatedGeneral) this.opts.onListing(updatedGeneral);
+    }
     if (scored.extraction.matchedItem && photoResult?.matchesClaim === false) {
       mismatchCorrection = { claimedAs: scored.extraction.matchedItem, reason: photoResult.mismatchReason };
       this.log(
@@ -2194,6 +2423,96 @@ export class ScrapeEngine {
       this.opts.store.saveScored(scored, sellerRisk);
       const updated = this.opts.store.getLastSavedListing();
       if (updated) this.opts.onListing(updated);
+    }
+
+    // Photo-first identification. The text read could not say what this is (a vague title, an unsure or unavailable AI read), or called
+    // it nothing special, but the photos name one specific product. That product is valued the way a title-recognised Database product
+    // is: from the Database's own eBay numbers when it has them (free), else by a fresh WatchCount + eBay market check within a small
+    // budget (the deal gate below validates it either way before anything is pushed). Without this the photos were looked at and
+    // then thrown away unless the text had already liked the listing, so the look was spent on the wrong listings.
+    let photoVerdict: ResearchDisposition | null = null;
+    if (!scored.isDeal && !scored.extraction.matchedItem && mismatchCorrection === null && photoResult && !photoResult.error && photoResult.matchesClaim !== false) {
+      const focal = this.focalProduct(photoResult.identifiedProducts);
+      if (focal) {
+        const conditionImpact = detectConditionImpact(`${listing.title} ${detail.description}`);
+        const settings = resaleSettingsFrom(config);
+        const databaseValue = this.opts.store.getEbayValueForProductName(focal, listing.title);
+        if (databaseValue !== null && databaseValue > 0) {
+          const pricing = evaluateSearchItemPricing(
+            { item: focal, matchKeywords: [], typicalResaleUsd: databaseValue, minPriceUsd: null, maxPriceUsd: null, linkedProductId: null },
+            listing.price,
+            conditionImpact,
+            null,
+            { shippingUsd: detail.ebayShippingUsd ?? 0, settings }
+          );
+          if (pricing.isDeal) {
+            this.log("info", `Photo-first find: "${listing.title}" is a ${focal} by its photos (the title did not say so); the Database values it at about $${Math.round(databaseValue)}.`, listing.url);
+            recordEvent("photo_first_find");
+            scored = {
+              ...scored,
+              extraction: {
+                ...scored.extraction,
+                matchedItem: focal,
+                confidence: "high",
+                conditionImpact,
+                reasoning: `Recognised from the Database as "${focal}" by its photos (the title did not say what it was; it sells for about $${Math.round(databaseValue)} on eBay); buying it for $${listing.price} leaves ${pricing.profitUsd !== null && pricing.profitUsd >= 0 ? `about $${Math.round(pricing.profitUsd)} profit` : "a loss"}.`,
+              },
+              referencePriceUsd: pricing.referencePriceUsd,
+              discountPercent: pricing.discountPercent,
+              isDeal: true,
+              dealTier: "search",
+            };
+            this.opts.store.saveScored(scored, sellerRisk);
+            const found = this.opts.store.getLastSavedListing();
+            if (found) this.opts.onListing(found);
+          } else {
+            photoVerdict = disposition("confirmed_unprofitable", "UNPROFITABLE_AT_PRICE", `Its photos show a ${focal}, which the Database values at about $${Math.round(databaseValue)}; at $${listing.price} that does not clear your margin.`);
+          }
+        } else if (
+          listing.price >= MIN_MARKET_LOOK_PRICE_USD &&
+          this.marketLooksThisVisit < this.discovery().marketLooksPerVisit &&
+          this.marketLooksThisPass < this.discovery().marketLooksPerPass &&
+          !!this.opts.checkMarket
+        ) {
+          this.marketLooksThisVisit++;
+          this.marketLooksThisPass++;
+          this.log("info", `Photo-first find: "${listing.title}" looks like a ${focal} by its photos and the Database has no numbers for it: checking what it sells for.`, listing.url);
+          recordEvent("photo_first_find");
+          // An AI-only find until the market check (which the gate always runs for one) confirms or kills it.
+          scored = {
+            ...scored,
+            extraction: {
+              ...scored.extraction,
+              matchedItem: focal,
+              confidence: "medium",
+              reasoning: `Its photos show a "${focal}" (the title did not say what it was). Checking what it sells for before judging the price.`,
+            },
+            referencePriceUsd: null,
+            discountPercent: null,
+            isDeal: true,
+            dealTier: "general",
+          };
+          this.opts.store.saveScored(scored, sellerRisk);
+          const found = this.opts.store.getLastSavedListing();
+          if (found) this.opts.onListing(found);
+        } else {
+          photoVerdict = disposition(
+            "insufficient_evidence",
+            "NO_RESALE_NUMBERS",
+            listing.price < MIN_MARKET_LOOK_PRICE_USD
+              ? `Its photos show a ${focal}, but the Database has no sales numbers for it and $${listing.price} is too little to spend a market lookup on.`
+              : `Its photos show a ${focal}, but the Database has no sales numbers for it and the allowance of market lookups for this location was used.`
+          );
+        }
+      } else if (photoResult.identifiedProducts.length > 0) {
+        photoVerdict = disposition("insufficient_evidence", "NAME_REFUSED", `The photos named "${photoResult.identifiedProducts[0]}", which is not a product name Clynx will file or value (${this.nameRefusalReason(photoResult.identifiedProducts[0])}).`);
+      } else {
+        photoVerdict = disposition("insufficient_evidence", "PHOTOS_UNCLEAR", "The photos did not show anything Clynx could name with confidence (it leaves a product out rather than guess).");
+      }
+    } else if (photoResult?.error) {
+      photoVerdict = disposition("insufficient_evidence", "PHOTO_ANALYSIS_FAILED", `The photo look failed: ${photoResult.error.slice(0, 160)}. This is missing evidence, not a verdict on the listing.`);
+    } else if (mismatchCorrection !== null || photoResult?.matchesClaim === false) {
+      photoVerdict = disposition("rejected", "PHOTOS_MISMATCH", `The photos show ${mismatchCorrection?.reason ?? photoResult?.mismatchReason ?? "something different"}, not what the title says.`);
     }
 
     // A listing that doesn't clear the price bar on the base item alone
@@ -2288,7 +2607,23 @@ export class ScrapeEngine {
     // the old text-based subject (the canonical Search For name, or the
     // general-tier category guess) only when there were no photos, photo
     // analysis is off, or the model couldn't confidently identify anything.
-    const visionSubjects = photoResult?.identifiedProducts ?? [];
+    // What the photos named is cleaned before it can become a Database entry: the AI has filed "iPhone (front view)", "Power Adapter" and a
+    // whole bundle sentence as products. Those became duplicates and poisoned valuations, so a view/bundle/condition aside is dropped from
+    // the name and anything that is only an accessory, a brand or a kind of thing is not filed at all (research.ts cleanFilingName).
+    const visionSubjects: string[] = [];
+    const photoNameOf = new Map<string, string>(); // the name to file under -> the name the photo analysis gave it (its photos are keyed by that)
+    for (const raw of photoResult?.identifiedProducts ?? []) {
+      const verdict = cleanFilingName(raw);
+      if (!verdict.ok) {
+        recordEvent("filing_name_refused");
+        this.log("info", `Not filing "${raw}" in the Database: ${verdict.reason}`, listing.url);
+        continue;
+      }
+      if (visionSubjects.includes(verdict.name)) continue;
+      if (verdict.changed) this.log("info", `Filing "${raw}" as "${verdict.name}" (the rest was about the photo or the bundle, not the product).`, listing.url);
+      visionSubjects.push(verdict.name);
+      photoNameOf.set(verdict.name, raw);
+    }
     const fallbackSubject = scored.extraction.matchedItem || scored.extraction.extractedAttributes.trim();
     const rawSubjects = visionSubjects.length ? visionSubjects : fallbackSubject ? [fallbackSubject] : [];
 
@@ -2386,7 +2721,7 @@ export class ScrapeEngine {
       // Save-credits mode: a listing that wasn't worth a vision look (not a deal) doesn't get filed into the Database either:
       // that would cost an identity check and possibly a whole product research for something nobody is buying.
       if (isLowAiMode() && !photoResult) continue;
-      const subjectImageDataUri = photoResult?.productPhotos[subject] ?? (await fallbackImage());
+      const subjectImageDataUri = photoResult?.productPhotos[photoNameOf.get(subject) ?? subject] ?? (await fallbackImage());
       const existingProduct = this.opts.store.findMatchingProduct(subject);
       // Veto-only identity safeguard: the existing matcher chose this entry, the evidence says the listing is a materially different product. Nothing is added to the
       // entry (no note, no photo, no price) and no other entry is created or chosen in its place; the listing itself is unaffected.
@@ -2481,7 +2816,7 @@ export class ScrapeEngine {
         extras: gateExtras,
         visionMismatch: mismatchCorrection !== null,
         hardCapExceeded: hardCapHit,
-        identityTexts: photoResult?.identifiedProducts ?? [],
+        identityTexts: visionSubjects,
         log: (m) => this.log("info", m, listing.url),
       });
       scored = qualification.scored;
@@ -2498,6 +2833,17 @@ export class ScrapeEngine {
     if (watched) {
       qualification = watched;
       scored = watched.scored;
+    }
+
+    // Where did this listing end up? One status and one reason, saved with the listing and counted for the per-location summary
+    // (research.ts). Done once, on the final state: a listing is never left claiming to be waiting for a look it already had.
+    const finalResearch = this.finalDisposition(scored, qualification, photoVerdict, plan);
+    this.tally(finalResearch);
+    if (JSON.stringify(finalResearch) !== JSON.stringify(scored.research)) {
+      scored = { ...scored, research: finalResearch };
+      this.opts.store.saveScored(scored, sellerRisk);
+      const researched = this.opts.store.getLastSavedListing();
+      if (researched) this.opts.onListing(researched);
     }
 
     if (qualification?.verdict.qualified) {
@@ -2521,8 +2867,30 @@ export class ScrapeEngine {
         listing.url
       );
     } else {
-      this.log("info", `skip: ${listing.title} — ${scored.extraction.reasoning || "no match / not a deal"}`, listing.url);
+      this.log("info", `skip: ${describeDisposition(listing.title, finalResearch)}`, listing.url);
     }
+  }
+
+  // Where a listing stands once everything has been looked at (see ResearchStatus in types.ts).
+  private finalDisposition(scored: ScoredListing, qualification: Qualification | null, photoVerdict: ResearchDisposition | null, plan: LookPlan): ResearchDisposition {
+    if (qualification) {
+      const v = qualification.verdict;
+      if (v.qualified) return disposition("researched", v.status === "negotiation" ? "NEGOTIATION" : "DEAL", v.headline);
+      const codes = v.reasons.map((r) => r.code as string);
+      if (v.status === "worth_a_look") {
+        // Interesting, but what is missing is evidence: it stays in the Feed as "Worth a look" and says what would settle it.
+        const missing = ["AI_UNVERIFIED", "WEAK_EVIDENCE", "IDENTITY_UNCONFIRMED", "IDENTITY_UNVERIFIED", "HIDDEN_GEM_UNVERIFIED", "AGE_UNKNOWN"].find((c) => codes.includes(c));
+        return missing ? disposition("insufficient_evidence", missing, v.headline) : disposition("researched", "WORTH_A_LOOK", v.headline);
+      }
+      if (codes.includes("PHOTO_MISMATCH")) return disposition("rejected", "PHOTOS_MISMATCH", v.headline);
+      if (codes.includes("AGE_STALE")) return disposition("rejected", "TOO_OLD", v.headline);
+      if (codes.includes("HARD_CAP")) return disposition("rejected", "HARD_PRICE_CAP", v.headline);
+      if (codes.includes("PLACEHOLDER_PRICE")) return disposition("rejected", "PLACEHOLDER_PRICE", v.headline);
+      if (codes.includes("UNREACHABLE")) return disposition("confirmed_unprofitable", "UNPROFITABLE_AT_PRICE", v.headline);
+      return disposition("rejected", "GATE_PASS", v.headline);
+    }
+    if (photoVerdict) return photoVerdict;
+    return this.settleWithoutPhotos(scored, plan);
   }
 
   // A qualified deal (Profitable Now or Negotiation Opportunity): logged, pushed once (never again if a Watch match already told the
@@ -2662,6 +3030,9 @@ export class ScrapeEngine {
     this.visitsAttempted = 0;
     this.visitsNotOpened = 0;
     this.lastNotOpenedMessage = "";
+    // a new pass starts with a fresh allowance of extra photo looks and market lookups (see research.ts)
+    this.speculativeLooksThisPass = 0;
+    this.marketLooksThisPass = 0;
     this.setStatus({ lastCycleStartedAt: Date.now(), lastError: null, listingsThisCycle: 0, currentSearch: "browsing" });
 
     const perLocation = Math.max(1, config.listingsPerLocation);
@@ -2728,6 +3099,7 @@ export class ScrapeEngine {
       const url = config.browseUrls[this.locationIndex];
       const locationLabel = describeLocationUrl(url);
       this.imageMatchAttemptsThisLocation = 0;
+      this.beginLocationVisit();
       // Per explicit instruction — Dashboard's Live panel shows this
       // in-between moment explicitly ("Switching locations...") instead of
       // just going blank between one listing and the next.
@@ -2897,6 +3269,9 @@ export class ScrapeEngine {
         const activeItem = searchableItems[this.activeSearchItemIndex % searchableItems.length];
         const query = getSearchQuery(activeItem);
         this.log("info", `Actively searching for "${activeItem.item}" (query: "${query}")...`);
+        // Setting up a Marketplace search takes a while (typing, the price and date filters, each waiting for the page to settle): say so, so
+        // the Live panel does not look asleep between one product and the next.
+        this.setStatus({ currentListing: null, currentActionNote: `Searching Marketplace for "${activeItem.item}"...` });
         const searchConfig = this.opts.getConfig();
         let searchResults: ListingSummary[] = [];
         try {
@@ -2993,6 +3368,7 @@ export class ScrapeEngine {
           if (this.stopRequested || this.priorityRequested) break;
           const query = getSearchQuery(item);
           this.log("info", `Actively searching for "${item.item}" (query: "${query}")...`);
+          this.setStatus({ currentListing: null, currentActionNote: `Searching Marketplace for "${item.item}"...` });
           const searchConfig = this.opts.getConfig();
           let searchResults;
           try {
@@ -3167,6 +3543,7 @@ export class ScrapeEngine {
       }
     }
 
+    this.logVisitSummary();
     this.setStatus({
       currentSearch: null,
       lastCycleFinishedAt: Date.now(),

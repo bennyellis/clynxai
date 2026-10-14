@@ -353,6 +353,10 @@ export interface Config {
   stateCitiesVersion?: number;
   // "Save OpenAI credits" (on by default): everything that isn't a core function runs without AI or doesn't run. See aiMode.ts.
   lowAiMode: boolean;
+  // Database discovery allowances while "Save OpenAI credits" is on (see research.ts). All optional, changed only by editing config.json:
+  // how many extra photo looks a location visit / a whole pass may spend on listings the text could not settle, and how many fresh
+  // WatchCount + eBay lookups they may trigger for a product the photos identified. 0 turns that part off.
+  discovery?: { speculativeLooksPerLocation?: number; speculativeLooksPerPass?: number; marketLooksPerLocation?: number; marketLooksPerPass?: number };
   // Also push "Worth a look" finds (quietly, low priority). Off by default: they stay in the Feed only.
   notifyWorthALook?: boolean;
   // Database identity foundation (Phase 4 stage 3a), both OFF by default and changed only by editing config.json: `schema` creates the extra identity tables in
@@ -727,6 +731,25 @@ export interface ExtractionResult {
   // Set when this broken / for-parts listing was priced from a Database "(For Parts / Broken)" variant (its name): the alert and
   // the pre-alert market check then use that variant instead of the working product.
   brokenVariant?: string;
+  // True when the AI read of the listing's text could not be had at all (no key, a failed or unreadable answer, even after one retry).
+  // That is "no evidence", which is not the same as "looked, and it is not a deal" (see ResearchStatus).
+  judgeUnavailable?: boolean;
+}
+
+// Where a listing stands in Database discovery. The four ways a listing ends up without being a deal must never look alike:
+//   unresearched            Clynx did not look into it (a rule skipped it before it was opened, or the budget for speculative looks ran out)
+//   insufficient_evidence   Clynx looked, and what it had could not settle it (AI unavailable, identity unclear, photos unclear, no resale numbers)
+//   rejected                Clynx looked and decided against it on its own estimate (not backed by Database / eBay numbers)
+//   confirmed_unprofitable  Database / eBay numbers say that, at this price, it loses money or misses the margin
+//   researched              identified and valued: a deal, a negotiation, or worth a look
+export type ResearchStatus = "unresearched" | "insufficient_evidence" | "rejected" | "confirmed_unprofitable" | "researched";
+
+export interface ResearchDisposition {
+  status: ResearchStatus;
+  // Short stable code for counting and filtering, e.g. "LOOK_BUDGET", "TEXT_JUDGE_UNAVAILABLE", "PHOTOS_MISMATCH".
+  code: string;
+  // The reason in plain words, shown in the Feed and the Activity log.
+  reason: string;
 }
 
 // "search" = matched one of your Search For items; the discount math is
@@ -864,6 +887,8 @@ export interface ScoredListing {
   offTopicSuggestion: string | null;
   // The Deal Quality Gate's final verdict, set once every score adjustment (vision, bundles, hidden gems) has been made.
   gate?: GateSnapshot;
+  // Where this listing stands in Database discovery and why (see ResearchStatus). Absent on an intermediate save: the last one stored wins.
+  research?: ResearchDisposition;
 }
 
 // --- App-level records (persisted + sent to the renderer) ---------------
@@ -1011,6 +1036,11 @@ export interface ListingRecord {
   gateFacts: GateFactsSnapshot | null;
   // The listing's age in hours as parsed when it was scraped (null: unknown). Facebook's wording is approximate.
   listingAgeHours: number | null;
+  // Database discovery (see ResearchStatus): where the listing stands, a short code for why, and the reason in words. Null on a
+  // listing saved before this existed.
+  researchStatus: ResearchStatus | null;
+  researchCode: string | null;
+  researchReason: string | null;
 }
 
 // A user-curated product "database" entry. aiSummary is built from a real,

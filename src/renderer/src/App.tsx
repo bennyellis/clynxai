@@ -50,7 +50,7 @@ function listingSignature(l: ListingRecord): string {
       l.isDeal, l.dealTier, l.dealStatus, l.gateHeadline, l.gateStars, l.requiredDiscountPercent, l.targetPriceUsd, l.gateFacts?.lotValueUsd, l.gateFacts?.profitAtAskUsd, l.gateFacts?.sampleSize, l.gateFacts?.evidenceLevel, l.estimatedValueRange, l.notified, l.feedback, l.feedbackNote,
       l.sellerName, l.sellerJoinedYear, l.sellerRating, l.sellerRatingCount, l.sellerHasProfilePhoto, l.sellerRiskPassed,
       l.sellerRiskReasons?.length ?? 0, textStamp(l.photoAnalysis), l.photoAnalysisCheckedAt, l.photoFlaws?.length ?? 0,
-      l.matchedProductAvgSoldPriceUsd, l.matchedProductAvgRunTimeDays, l.foundByAccountId,
+      l.matchedProductAvgSoldPriceUsd, l.matchedProductAvgRunTimeDays, l.foundByAccountId, l.researchStatus, l.researchCode,
     ].join("|");
     listingSignatures.set(l, sig);
   }

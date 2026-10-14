@@ -354,6 +354,11 @@ export class Store {
       // back as []) unless Config.researchCondition was on when this
       // listing was last analyzed.
       ["photo_flaws", "TEXT"],
+      // Database discovery: where this listing stands (not researched / not enough evidence / rejected / confirmed unprofitable /
+      // researched), a short code for why, and the reason in words. See research.ts.
+      ["research_status", "TEXT"],
+      ["research_code", "TEXT"],
+      ["research_reason", "TEXT"],
       // Facebook's "Just listed" badge on the search-results card.
       ["just_listed", "INTEGER"],
     ];
@@ -583,6 +588,13 @@ export class Store {
       this.db.exec("UPDATE watches SET resolved_location_urls = NULL, resolved_location_checked_at = NULL WHERE location_mode = 'state'");
       this.db.prepare("INSERT INTO schema_flags (name) VALUES (?)").run(stateCitiesFlag);
     }
+    // Database discovery: a listing saved as "waiting for a look at its photos" belongs to a research job that died with the app (the queue
+    // lives in memory). Say so on the next start instead of leaving it waiting for ever. Only that one code is touched, nothing else.
+    this.db.exec(
+      `UPDATE listings SET research_status = 'insufficient_evidence', research_code = 'INTERRUPTED',
+         research_reason = 'Clynx was closed before it got to look at this listing''s photos. This is missing evidence, not a verdict on the listing.'
+       WHERE research_code = 'PHOTOS_QUEUED'`
+    );
     // Clynx Cloud Phase 6 — productSync.ts needs an updated_at to compare
     // for last-write-wins, same as watches.updated_at already does. Existing
     // installs only have created_at (set-once — none of the mutating product
@@ -688,12 +700,19 @@ export class Store {
            seller_joined_year, seller_rating, seller_rating_count, seller_has_profile_photo,
            seller_risk_passed, seller_risk_reasons, location_text, listing_age, seller_name, description, product_id, source, just_listed,
            ebay_seller_feedback_percent, ebay_shipping_usd,
-           deal_status, gate_confidence, gate_stars, gate_headline, gate_reasons, required_discount_percent, target_price_usd, listing_age_hours, gate_facts)
+           deal_status, gate_confidence, gate_stars, gate_headline, gate_reasons, required_discount_percent, target_price_usd, listing_age_hours, gate_facts,
+           photo_analysis, photo_analysis_checked_at, photo_flaws, research_status, research_code, research_reason)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
            COALESCE((SELECT notified FROM listings WHERE id = ?), 0),
            COALESCE((SELECT first_seen_at FROM listings WHERE id = ?), ?),
            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-           ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           ?, ?, ?, ?, ?, ?, ?, ?, ?,
+           (SELECT photo_analysis FROM listings WHERE id = ?),
+           (SELECT photo_analysis_checked_at FROM listings WHERE id = ?),
+           (SELECT photo_flaws FROM listings WHERE id = ?),
+           COALESCE(?, (SELECT research_status FROM listings WHERE id = ?)),
+           COALESCE(?, (SELECT research_code FROM listings WHERE id = ?)),
+           COALESCE(?, (SELECT research_reason FROM listings WHERE id = ?)))`
       )
       .run(
         listing.id,
@@ -743,7 +762,18 @@ export class Store {
         scored.gate?.requiredDiscountPercent ?? null,
         scored.gate?.targetPriceUsd ?? null,
         assessListingAge(listing.listingAge, null).hours,
-        scored.gate?.facts ? JSON.stringify(scored.gate.facts) : null
+        scored.gate?.facts ? JSON.stringify(scored.gate.facts) : null,
+        // What the photos already told us survives the later re-saves of the same listing (green flag, mismatch, final verdict).
+        listing.id,
+        listing.id,
+        listing.id,
+        // Why the listing was or was not looked into any further (research.ts): a re-save that does not say keeps the last word.
+        scored.research?.status ?? null,
+        listing.id,
+        scored.research?.code ?? null,
+        listing.id,
+        scored.research?.reason ?? null,
+        listing.id
       );
     // Every saveScored call means this id is now definitively in the
     // listings table — remember it so a LATER hasSeenCached() check for the
@@ -806,6 +836,11 @@ export class Store {
 
   markNotified(id: string): void {
     this.db.prepare("UPDATE listings SET notified = 1 WHERE id = ?").run(id);
+  }
+
+  // Database discovery: where a listing stands and why (see ResearchStatus). Touches nothing else about the listing.
+  setResearch(id: string, d: { status: string; code: string; reason: string }): void {
+    this.db.prepare("UPDATE listings SET research_status = ?, research_code = ?, research_reason = ? WHERE id = ?").run(d.status, d.code, d.reason, id);
   }
 
   // Whether a push has already gone out for this listing (a deal alert or a Watch match): the other kind must not repeat it.
@@ -2868,6 +2903,12 @@ function rowToRecord(row: any): ListingRecord {
     requiredDiscountPercent: row.required_discount_percent ?? null,
     targetPriceUsd: row.target_price_usd ?? null,
     listingAgeHours: row.listing_age_hours ?? null,
+    researchStatus:
+      row.research_status === "unresearched" || row.research_status === "insufficient_evidence" || row.research_status === "rejected" || row.research_status === "confirmed_unprofitable" || row.research_status === "researched"
+        ? row.research_status
+        : null,
+    researchCode: row.research_code ?? null,
+    researchReason: row.research_reason ?? null,
   };
 }
 

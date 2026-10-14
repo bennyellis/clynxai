@@ -1,0 +1,9 @@
+Clynx Beta 7 - better discovery
+* Clynx now takes a closer look at listings whose title doesn't say what they are ("Gaming console works great"). If the photos show a specific product, it is identified, filed in your Database and priced. This is limited to a few extra photo looks per location, so it stays gentle on your OpenAI credits.
+* A price that doesn't end in 0 or 5 no longer causes a listing to be skipped. Every listing is opened and judged.
+* Every listing that isn't a deal now says why: not researched, not enough evidence, rejected, or confirmed unprofitable. You see it on the Feed card and in a short summary in Activity.
+* Photo findings are no longer lost when a listing is updated later.
+* Products are filed under cleaner names (no more "(front view)", cables, chargers or whole bundle descriptions as products).
+* Research runs two photo looks at a time, deals first, and the Database fills in missing thumbnails faster.
+* Includes everything from Beta 6 (Beta 6 was never published): deletes reach your account, installs and updates need no Windows permission prompt on a normal install, and the server stays up through a Redis or database restart.
+* Your data, sign-in, Watches, Database and automatic updates are unchanged.

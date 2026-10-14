@@ -1,0 +1,43 @@
+lowAiMode: true
+recall of profitable listings: 17/17 = 100%  (opened 17, photo-researched or surfaced 17)
+identified correctly (Database filing / match): 20/22
+false deals (bad / mislabelled listing surfaced): 0
+wrong-product filings: 0, badly named filings: 0
+listings with no verdict about why (not surfaced, not junk): 0
+research jobs: 33  (280.6/hour)  seen->researched avg 22.8s  p95 95.2s  queue wait avg 7.3s max 75.7s
+time between finished research jobs: avg 12.6s  max 41.1s
+run: scan 6.6 min, queue drain +0.5 min = 7.1 min (virtual)
+AI calls: judge 23, vision 24, identity 3, market checks 7  est. $0.286  max in flight 2
+  g1  good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      Xbox Series S 512GB works great $120 -> [Xbox Series S]
+  g2  good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      Xbox Series S 512GB Console with Control $71 -> [Xbox Series S]
+  g3  good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      Microsoft Xbox Series X Console Black $107 -> [xbox series x; Xbox Series X]
+  g4  good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      Gaming console works great $100 -> [Xbox Series S]
+  g5  good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      Selling my stuff, moving $150 -> [Nintendo Switch OLED]
+  g6  good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      PS5 slim digital $250 -> [PlayStation 5 Slim Digital Edition]
+  g7  good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      Apple iPhone 14 Pro $300 -> [iPhone 14 Pro]
+  g8  good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      Headphones $60 -> [Sony WH-1000XM4]
+  g9  good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      Handheld game $120 -> [Steam Deck 256GB]
+  g10 good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      Dyson V8 cordless vacuum $80 -> [Dyson V8]
+  g11 good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      Canon camera with lens and bag $135 -> [Canon EOS Rebel T7]
+  g12 good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      Xbox Series S $120 -> [Xbox Series S]
+  f1  good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      Dyson V8 vacuum, cordless, with attachme $90 -> [Dyson V8]
+  f2  good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      Sony WH-1000XM4 headphones $85 -> [sony wh 1000xm4; Sony WH-1000XM4]
+  b1  bad       opened  vision×0          -             confirmed_unprofitable  UNPROFITABLE_AT_PRICE     iPhone 13 $480 -> [iphone 13]
+  b2  bad       opened  vision×0          -             confirmed_unprofitable  UNPROFITABLE_AT_PRICE     Xbox Series S $350 -> [Xbox Series S]
+  b3  bad       opened  vision×0          -             confirmed_unprofitable  UNPROFITABLE_AT_PRICE     Nintendo Switch OLED console $300 -> [Nintendo Switch OLED]
+  b4  bad       opened  vision×0          -             rejected                AI_ESTIMATE               Meta Quest 2 128GB $190 -> []
+  b5  bad       opened  vision×0          -             rejected                AI_ESTIMATE               Airpods pro 2 $170 -> []
+  j1  junk      opened  vision×0          -             rejected                AI_ESTIMATE               Zara Metallic Halter Neck Dress $25 -> []
+  j2  junk      opened  vision×0          -             unresearched            LOW_PRICE                 Marcus $15 -> []
+  j3  junk      opened  vision×1          -             insufficient_evidence   PHOTOS_UNCLEAR            Misc household items $40 -> []
+  j4  junk      opened  vision×0          -             unresearched            LOW_PRICE                 Old stuff $30 -> []
+  j5  junk      opened  vision×0          -             rejected                AI_ESTIMATE               Baby clothes bundle $47 -> []
+  m1  mislabel  opened  vision×1          -             rejected                PHOTOS_MISMATCH           PS5 console with controller $200 -> [DualSense Controller]
+  m2  mislabel  opened  vision×1          -             rejected                PHOTOS_MISMATCH           Xbox Series X $250 -> [Xbox Series S]
+  m3  mislabel  opened  vision×1          -             rejected                PHOTOS_MISMATCH           Nintendo Switch OLED $150 -> []
+  u1  uncertain opened  vision×1          -             insufficient_evidence   PHOTOS_UNCLEAR            Console $90 -> []
+  u2  uncertain opened  vision×1          -             insufficient_evidence   PHOTOS_UNCLEAR            Laptop for sale $200 -> []
+  n1  naming    opened  vision×1          -             insufficient_evidence   NAME_REFUSED              Phone charger lot $40 -> []
+  n2  naming    opened  vision×1 SURFACED profitable_nowresearched              DEAL                      iPhone 13 128GB blue unlocked $200 -> [iphone 13; iPhone 13 128GB]
+  n3  naming    opened  vision×1 SURFACED profitable_nowresearched              DEAL                      PS5 bundle with games $230 -> [Sony PlayStation 5 Slim Digital Edition]
+  g13 good      opened  vision×1 SURFACED profitable_nowresearched              DEAL                      Old console in box $97 -> [Xbox Series S]

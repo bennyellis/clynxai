@@ -480,6 +480,8 @@ interface GeneralDealResult {
   conditionImpact: ExtractionResult["conditionImpact"];
   reasoning: string;
   offTopicSuggestion: string | null;
+  // True when no readable answer could be had at all: "no evidence", which is not the same as "looked, and it is not a deal".
+  unavailable?: boolean;
 }
 
 // Per explicit instruction — the user's own thumbs-up/thumbs-down feedback
@@ -542,7 +544,18 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
 }`;
 
   try {
-    const parsed = extractJson(await callAI(prompt));
+    // An answer that arrives but cannot be read is usually a one-off (the model wrapped it in prose, or cut it short): one more
+    // try is cheap and used to be the difference between "never looked at again" and a normal verdict. An error from the service
+    // itself (no key, a limit, a timeout) is not retried: asking again would only fail again, or spend more.
+    let parsed: any;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        parsed = extractJson(await callAI(prompt));
+        break;
+      } catch (err) {
+        if (!(err instanceof SyntaxError) || attempt >= 1) throw err;
+      }
+    }
     return {
       isPotentialDeal: !!parsed.isPotentialDeal,
       category: parsed.category ?? "",
@@ -562,6 +575,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
       // With no OpenAI key (a new tester's normal state) every listing lands here; say why instead of blaming the listing.
       reasoning: hasOpenAIAccess() ? "Clynx couldn't read its own analysis of this listing" : "Not judged: Clynx has no OpenAI key to judge listings with. Add yours in Config > Account > Your API keys.",
       offTopicSuggestion: null,
+      unavailable: true,
     };
   }
 }
@@ -689,6 +703,7 @@ export async function scoreListing(
           conditionImpact: effectiveConditionImpact,
           confidence: general.confidence,
           reasoning: `Matches your "${candidate.item}" search — no reference price set yet, so judged on Clynx's own read of the price: ${general.reasoning}`,
+          ...(general.unavailable ? { judgeUnavailable: true } : {}),
         },
         referencePriceUsd: null,
         discountPercent: null,
@@ -818,6 +833,7 @@ export async function scoreListing(
       conditionImpact: general.conditionImpact,
       confidence: general.confidence,
       reasoning: general.reasoning,
+      ...(general.unavailable ? { judgeUnavailable: true } : {}),
     },
     referencePriceUsd: null,
     discountPercent: null,

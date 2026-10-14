@@ -341,6 +341,24 @@ function ListingCardImpl({
           ? { label: "Worth a look", color: "var(--accent-3-text)", detail: record.gateHeadline ?? "Interesting, not fully verified" }
           : null;
 
+  // Database discovery: a listing that is not a deal says where it stands, so "Clynx never looked at it" and "Clynx looked and it is not
+  // worth it" do not look alike. Only for the listings that have no verdict chip above (a deal, a negotiation or a worth-a-look says it all).
+  const researchNote =
+    !verdictChip && record.researchStatus && record.researchStatus !== "researched"
+      ? {
+          label:
+            record.researchStatus === "unresearched"
+              ? "Not researched"
+              : record.researchStatus === "insufficient_evidence"
+                ? "Not enough evidence"
+                : record.researchStatus === "confirmed_unprofitable"
+                  ? "Not profitable"
+                  : "Rejected",
+          color: record.researchStatus === "confirmed_unprofitable" || record.researchStatus === "rejected" ? "var(--text-dim)" : "var(--warn)",
+          detail: record.researchReason ?? "",
+        }
+      : null;
+
   // The money, from the numbers the gate saved with its verdict (null for listings that were never gated).
   const dealNumbers = describeDealNumbers(record);
 
@@ -667,6 +685,19 @@ function ListingCardImpl({
               {verdictChip.label}
             </span>
             <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{verdictChip.detail}</span>
+          </div>
+        )}
+
+        {researchNote && (
+          <div
+            data-testid="research-note"
+            title={researchNote.detail || undefined}
+            style={{ display: "flex", alignItems: "baseline", gap: 6, fontSize: 12.5, lineHeight: 1.35, minWidth: 0 }}
+          >
+            <span className="pill" style={{ flexShrink: 0, color: researchNote.color, borderColor: researchNote.color, fontWeight: 600, fontSize: 11, padding: "2px 8px" }}>
+              {researchNote.label}
+            </span>
+            <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{researchNote.detail}</span>
           </div>
         )}
 
