@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: clynx_dev_password
       POSTGRES_DB: clynx_cloud
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432" # loopback only: the database must never be reachable from the network
     volumes:
       - clynx_cloud_pg_data:/var/lib/postgresql/data
 
@@ -17,7 +17,7 @@ services:
     container_name: clynx-cloud-redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379" # loopback only
     volumes:
       - clynx_cloud_redis_data:/data
 
@@ -38,7 +38,7 @@ services:
       REDIS_URL: redis://redis:6379
       PORT: 8787
     ports:
-      - "8787:8787"
+      - "127.0.0.1:8787:8787" # loopback only; other computers use the LAN stack (docker-compose.lan.yml)
     # Migrations are idempotent (schema_migrations tracks what's applied),
     # so running them on every container start is safe and means a fresh
     # `docker compose up -d` always has an up-to-date schema.

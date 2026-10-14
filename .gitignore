@@ -42,3 +42,6 @@ beta-release/
 .env.backup-*
 website/e2e/shots/
 backups/docker/
+.env.lan
+.env.lan.bak-*
+backups/lan/

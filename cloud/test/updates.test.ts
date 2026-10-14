@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../src/index.js";
-import { closePool } from "../src/db/client.js";
+import { closePool, pool } from "../src/db/client.js";
 import { config } from "../src/config.js";
 import { redisConnection } from "../src/queue/connection.js";
 import { compareVersions } from "../src/updates/manifest.js";
@@ -24,6 +24,8 @@ const publicPem = publicKey.export({ type: "spki", format: "pem" }) as string;
 const signText = (text: string, key = privateKey) => sign(null, Buffer.from(text, "utf-8"), key).toString("base64");
 const rnd = () => Math.floor(Math.random() * 80000) + 1;
 const bigV = () => 90000 + Math.floor(Math.random() * 9000);
+// the test database is shared by every file and persists between runs: start a test from a channel with nothing published
+const clearPublished = (channel: string) => pool.query("UPDATE releases SET status = 'withdrawn' WHERE channel = $1 AND status = 'published'", [channel]);
 
 beforeAll(async () => {
   for (const k of await redisConnection.keys("rl:updates:*")) await redisConnection.del(k);
@@ -130,6 +132,7 @@ describe("attaching a signed manifest", () => {
 
 describe("serving updates", () => {
   it("offers nothing until a release is published AND carries a verified manifest", async () => {
+    await clearPublished("beta");
     const { id, version } = await newRelease("beta", `${bigV()}.0.0-beta.1`);
     const before = (await app.inject({ method: "GET", url: "/updates/beta/latest?platform=win32&arch=x64" })).json().update;
     const s = await signed(id);
@@ -141,26 +144,29 @@ describe("serving updates", () => {
     expect(before === null || JSON.parse(before.manifest).version !== version).toBe(true);
   });
   it("a published release without a manifest is not offered as an update", async () => {
+    await clearPublished("beta");
     const a = await newRelease("beta", `${bigV()}.0.0-beta.1`);
     await publish(a.id, a.version);
     const latest = (await app.inject({ method: "GET", url: "/updates/beta/latest" })).json().update;
     expect(latest === null || JSON.parse(latest.manifest).version !== a.version).toBe(true);
   });
   it("serves the highest version, per channel, and a withdrawn release disappears at once", async () => {
-    const lo = await newRelease("stable", "99001.1.0");
-    const hi = await newRelease("stable", "99001.2.0");
+    await clearPublished("stable");
+    const X = bigV();
+    const lo = await newRelease("stable", `${X}.1.0`);
+    const hi = await newRelease("stable", `${X}.2.0`);
     for (const r of [lo, hi]) {
       const s = await signed(r.id);
       await attach(r.id, s.text, s.signature);
       await publish(r.id, r.version);
     }
     const latest = async () => JSON.parse((await app.inject({ method: "GET", url: "/updates/stable/latest" })).json().update.manifest).version;
-    expect(await latest()).toBe("99001.2.0");
+    expect(await latest()).toBe(hi.version);
     expect((await app.inject({ method: "POST", url: `/admin/releases/${hi.id}/withdraw`, headers: asWeb(admin) })).statusCode).toBe(200);
-    expect(await latest()).toBe("99001.1.0");
-    const specific = await app.inject({ method: "GET", url: "/updates/stable/versions/99001.1.0" });
+    expect(await latest()).toBe(lo.version);
+    const specific = await app.inject({ method: "GET", url: `/updates/stable/versions/${lo.version}` });
     expect(specific.statusCode).toBe(200);
-    expect((await app.inject({ method: "GET", url: "/updates/stable/versions/99001.2.0" })).statusCode).toBe(404);
+    expect((await app.inject({ method: "GET", url: `/updates/stable/versions/${hi.version}` })).statusCode).toBe(404);
   });
   it("never serves a different platform's build or an unknown channel", async () => {
     expect((await app.inject({ method: "GET", url: "/updates/beta/latest?platform=darwin&arch=arm64" })).json().update).toBeNull();
