@@ -16,7 +16,7 @@ const TYPES: Record<string, string> = {
 /** The policy the website's pages are served with: only this origin's scripts and styles, no framing, no plugins, forms only to this site. */
 export const PAGE_CSP = "default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'";
 
-const API_PREFIXES = ["/auth/", "/web/", "/admin/", "/billing/", "/devices", "/me", "/releases", "/support/requests", "/health", "/metrics", "/ai/", "/watches", "/listings", "/feedback", "/products", "/entitlements", "/search-planner", "/plans", "/ebay", "/dev/"];
+const API_PREFIXES = ["/auth/", "/web/", "/admin/", "/billing/", "/devices", "/me", "/releases", "/support/requests", "/health", "/metrics", "/ai/", "/watches", "/listings", "/feedback", "/products", "/entitlements", "/search-planner", "/plans", "/ebay", "/dev/", "/updates", "/server/"];
 
 export function websiteRoot(): string {
   return path.resolve(config.web.websiteDir);

@@ -66,10 +66,10 @@ export function openRead(key: string): { stream: Readable; size: number } | null
   return { stream: createReadStream(full), size: statSync(full).size };
 }
 
-export async function hashStored(key: string): Promise<string | null> {
+export async function hashStored(key: string, algorithm: "sha256" | "sha512" = "sha256"): Promise<string | null> {
   const full = resolveKey(key);
   if (!existsSync(full)) return null;
-  const h = createHash("sha256");
+  const h = createHash(algorithm);
   await pipeline(createReadStream(full), h);
   return h.digest("hex");
 }

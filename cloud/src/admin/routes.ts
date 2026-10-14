@@ -6,6 +6,7 @@ import { pool, query } from "../db/client.js";
 import { listingProcessingQueue } from "../queue/listingProcessingQueue.js";
 import { redisConnection } from "../queue/connection.js";
 import { hashStored, removeStored, saveStream, TooLargeError } from "../releases/storage.js";
+import { verifySigned } from "../updates/manifest.js";
 import { counters } from "../security/hooks.js";
 import { revokeAllWebSessions } from "../web/session.js";
 
@@ -137,7 +138,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ------------------------------------------------------------------ releases
-  const releaseSelect = `SELECT r.id, r.version, r.channel, r.status, r.platform, r.notes, r.known_issues AS "knownIssues", r.file_name AS "fileName", r.sha256, r.size_bytes::float8 AS "sizeBytes",
+  const releaseSelect = `SELECT r.id, r.version, r.channel, r.status, r.platform, r.notes, r.known_issues AS "knownIssues", r.file_name AS "fileName", r.sha256, r.size_bytes::float8 AS "sizeBytes", (r.update_manifest IS NOT NULL) AS "hasUpdateManifest",
       r.created_at AS "createdAt", r.approved_at AS "approvedAt", r.published_at AS "publishedAt", cu.email AS "createdBy", au.email AS "approvedBy",
       (SELECT coalesce(sum(count), 0)::int FROM download_counts d WHERE d.release_id = r.id) AS downloads
     FROM releases r LEFT JOIN users cu ON cu.id = r.created_by LEFT JOIN users au ON au.id = r.approved_by`;
@@ -214,6 +215,78 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     if (!r.rows[0].storage_key) return reply.code(200).send({ ok: false, reason: "no file" });
     const actual = await hashStored(r.rows[0].storage_key);
     return reply.code(200).send({ ok: actual !== null && actual === r.rows[0].sha256, recorded: r.rows[0].sha256, actual });
+  });
+
+
+  // ------------------------------------------------------------------ automatic desktop updates
+  // The signed manifest is made OFFLINE by the holder of the update signing key; the server only checks it against the PUBLIC key and serves it.
+  // 1. GET .../update-manifest-template returns the unsigned manifest for this release (the SHA-512 is computed by the server from the stored file).
+  // 2. The publisher signs that exact text offline (node scripts/update-keys.cjs sign ...).
+  // 3. PUT .../update-manifest uploads { manifest, signature }. The server verifies the signature and that it describes THIS release's stored file before keeping it.
+  const manifestUrl = (id: string) => `/releases/${id}/download`;
+  async function releaseForManifest(id: string) {
+    const r = await query<{ id: string; version: string; channel: string; status: string; platform: string; notes: string; file_name: string | null; storage_key: string | null; size_bytes: string | null }>(
+      "SELECT id, version, channel, status, platform, notes, file_name, storage_key, size_bytes FROM releases WHERE id = $1",
+      [id]
+    );
+    return r.rows[0] ?? null;
+  }
+
+  app.get("/admin/releases/:id/update-manifest-template", async (request, reply) => {
+    const p = uuid.safeParse(request.params);
+    if (!p.success) return reply.code(400).send({ error: "Invalid id" });
+    const rel = await releaseForManifest(p.data.id);
+    if (!rel) return reply.code(404).send({ error: "Not found" });
+    if (!rel.storage_key || !rel.file_name) return reply.code(409).send({ error: "Upload the installer first" });
+    const sha512 = await hashStored(rel.storage_key, "sha512");
+    if (!sha512) return reply.code(409).send({ error: "The stored file is missing" });
+    const [platform, arch] = rel.platform.split("-");
+    const manifest = {
+      product: "clynx",
+      version: rel.version,
+      channel: rel.channel,
+      publishedAt: new Date().toISOString(),
+      files: [{ name: rel.file_name, url: manifestUrl(rel.id), sha512, size: Number(rel.size_bytes), platform, arch: arch ?? "x64" }],
+      notes: rel.notes.slice(0, 2000),
+    };
+    return reply.code(200).send({ manifest, configured: !!config.web.updatePublicKey });
+  });
+
+  app.put("/admin/releases/:id/update-manifest", async (request, reply) => {
+    const p = uuid.safeParse(request.params);
+    if (!p.success) return reply.code(400).send({ error: "Invalid id" });
+    if (!config.web.updatePublicKey) return reply.code(409).send({ error: "updates_not_configured", message: "This server has no update public key (UPDATE_PUBLIC_KEY / UPDATE_PUBLIC_KEY_FILE), so it cannot check or serve signed updates." });
+    const rel = await releaseForManifest(p.data.id);
+    if (!rel) return reply.code(404).send({ error: "Not found" });
+    if (rel.status === "withdrawn") return reply.code(409).send({ error: "A withdrawn release cannot carry an update" });
+    if (!rel.storage_key) return reply.code(409).send({ error: "Upload the installer first" });
+    const checked = verifySigned(request.body, config.web.updatePublicKey);
+    if (!checked.ok) return reply.code(422).send({ error: "manifest_rejected", message: checked.reason });
+    const m = checked.manifest;
+    const sha512 = await hashStored(rel.storage_key, "sha512");
+    const [platform, arch] = rel.platform.split("-");
+    const f = m.files[0];
+    const problems: string[] = [];
+    if (m.version !== rel.version) problems.push("the version does not match this release");
+    if (m.channel !== rel.channel) problems.push("the channel does not match this release");
+    if (m.files.length !== 1 || f.platform !== platform || f.arch !== (arch ?? "x64")) problems.push("the file entry is not for this release's platform");
+    if (f.sha512 !== sha512) problems.push("the installer checksum (SHA-512) does not match the file stored on this server");
+    if (f.size !== Number(rel.size_bytes)) problems.push("the installer size does not match");
+    if (f.url !== manifestUrl(rel.id)) problems.push("the download address must be " + manifestUrl(rel.id));
+    if (problems.length) return reply.code(422).send({ error: "manifest_mismatch", message: "The signed manifest does not describe this release: " + problems.join("; ") + "." });
+    const body = request.body as { manifest: string; signature: string };
+    await query("UPDATE releases SET sha512 = $1, update_manifest = $2, update_manifest_at = now(), update_manifest_by = $3 WHERE id = $4", [sha512, JSON.stringify({ manifest: body.manifest, signature: body.signature }), request.userId, rel.id]);
+    await audit(request, "release.update_manifest", rel.id, { version: rel.version, channel: rel.channel });
+    return reply.code(200).send({ ok: true, willBeOffered: rel.status === "published" });
+  });
+
+  app.delete("/admin/releases/:id/update-manifest", async (request, reply) => {
+    const p = uuid.safeParse(request.params);
+    if (!p.success) return reply.code(400).send({ error: "Invalid id" });
+    const r = await query("UPDATE releases SET update_manifest = NULL, update_manifest_at = NULL WHERE id = $1 AND update_manifest IS NOT NULL", [p.data.id]);
+    if (!r.rowCount) return reply.code(404).send({ error: "That release has no update manifest" });
+    await audit(request, "release.update_manifest_remove", p.data.id);
+    return reply.code(200).send({ ok: true });
   });
 
   app.post("/admin/releases/:id/approve", async (request, reply) => {

@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { readFileSync } from "node:fs";
 import { z } from "zod";
 
 // Fails fast and loudly on startup if a required var is missing — no
@@ -60,7 +61,28 @@ const envSchema = z.object({
   PLAN_PRICE_PRO_MONTHLY_DISPLAY: z.string().optional(),
   PLAN_PRICE_PRO_YEARLY_DISPLAY: z.string().optional(),
   NODE_ENV: z.string().optional(),
+  // ---- running on a home/office network or the internet
+  // Extra addresses the website may be opened from (comma separated, each like http://10.0.0.81:8788). PUBLIC_URL is always allowed. Used for the same-origin (CSRF) check only.
+  ALLOWED_ORIGINS: z.string().optional(),
+  // Shown to desktop apps that test the connection.
+  SERVER_NAME: z.string().default("Clynx Cloud"),
+  // The PUBLIC half of the update signing key (PEM text, or a path to the PEM file). Without it the server refuses to accept update manifests and serves none.
+  UPDATE_PUBLIC_KEY: z.string().optional(),
+  UPDATE_PUBLIC_KEY_FILE: z.string().optional(),
+  // The oldest desktop version this server still supports (shown to apps; they tell the person to update).
+  MIN_CLIENT_VERSION: z.string().optional(),
 });
+
+function loadPublicKey(text: string | undefined, file: string | undefined): string | null {
+  try {
+    // (an env file holds the PEM on one line with literal \n sequences)
+    if (text && text.includes("BEGIN PUBLIC KEY")) return text.replace(/\\n/g, "\n");
+    if (file) return readFileSync(file, "utf-8");
+  } catch {
+    /* unreadable: treated as not configured */
+  }
+  return null;
+}
 
 function loadConfig() {
   // A variable that is present but blank (as in a freshly copied .env.prod) counts as not set, so optional values can simply be left empty.
@@ -99,6 +121,10 @@ function loadConfig() {
       requireVerifiedEmailForBilling: d.REQUIRE_VERIFIED_EMAIL_FOR_BILLING,
       priceDisplay: { proMonthly: d.PLAN_PRICE_PRO_MONTHLY_DISPLAY ?? null, proYearly: d.PLAN_PRICE_PRO_YEARLY_DISPLAY ?? null },
       production: d.NODE_ENV === "production",
+      allowedOrigins: [d.PUBLIC_URL, ...(d.ALLOWED_ORIGINS ?? "").split(",")].map((o) => o.trim().replace(/\/+$/, "")).filter(Boolean),
+      serverName: d.SERVER_NAME,
+      minClientVersion: d.MIN_CLIENT_VERSION ?? null,
+      updatePublicKey: loadPublicKey(d.UPDATE_PUBLIC_KEY, d.UPDATE_PUBLIC_KEY_FILE),
     },
     billingFake: d.BILLING_FAKE && d.NODE_ENV !== "production",
     billing: {

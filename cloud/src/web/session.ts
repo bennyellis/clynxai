@@ -80,7 +80,14 @@ export function originAllowed(request: FastifyRequest): boolean {
   const origin = request.headers.origin;
   if (!origin) return true;
   try {
-    return new URL(origin).origin === new URL(config.web.publicUrl).origin;
+    const o = new URL(origin).origin;
+    return config.web.allowedOrigins.some((a) => {
+      try {
+        return new URL(a).origin === o;
+      } catch {
+        return false;
+      }
+    });
   } catch {
     return false;
   }

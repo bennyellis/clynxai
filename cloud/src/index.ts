@@ -23,6 +23,8 @@ import { adminRoutes } from "./admin/routes.js";
 import { plansRoutes } from "./web/plans.js";
 import { integrationsRoutes } from "./admin/integrationsRoutes.js";
 import { ebayRoutes } from "./ebay/routes.js";
+import { updatesRoutes } from "./updates/routes.js";
+import { serverInfoRoutes } from "./server/info.js";
 import { FakeStripe } from "./billing/fakeProvider.js";
 
 export interface BuildOptions {
@@ -64,6 +66,8 @@ export function buildApp(options: BuildOptions = {}) {
   app.register(adminRoutes);
   app.register(integrationsRoutes);
   app.register(ebayRoutes);
+  app.register(updatesRoutes);
+  app.register(serverInfoRoutes);
   app.register(plansRoutes);
   if (billing instanceof FakeStripe) app.register(billing.routes());
   registerWebsite(app);
