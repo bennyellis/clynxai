@@ -101,6 +101,8 @@ How the end-to-end runs work: the real packaged app, a throw-away copy of the se
 7. **SmartScreen / antivirus** may react to an unsigned installer started by the app; unsigned installers remain a limit until a code-signing certificate exists.
 8. **Required flag is unsigned** (trust decision in section 3). A computer that is offline or closed cannot be forced; it updates the next time it is online.
 
+**Real-world finding (friend's PC, Beta 2):** the first real update attempt failed twice with "ENOENT ... rename ...exe.part". The server log showed both 119 MB downloads completed (107 s and 154 s, about 1 MB/s through the tunnel). Cause: Beta 2 and Beta 3 delete their staging folder 2 minutes after Clynx opens, which landed in the middle of the download; closing and reopening Clynx between tries (confirmed by the friend) restarted that 2-minute clock and hit it again. Fixed in Beta 4 (the folder of the release being downloaded is never tidied away) and covered by a unit test and by the cut-off-download scenario. Beta 2/Beta 3 PCs therefore get Beta 4 by installing it by hand (download page) or by pressing "Check for updates" once and NOT restarting Clynx. My own Beta 3 scenario missed this because its stand-in installer was tiny and downloaded instantly; the friend's PC is the first test with a real 119 MB download.
+
 ---------------------------------------------------------------------------------------------------------------------------------------------
 
 ## 7. What is prepared on your real server (signed DRAFTS, not published)
