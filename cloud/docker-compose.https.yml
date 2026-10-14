@@ -1,0 +1,118 @@
+# INTERNET-FACING STACK (PREPARED, NOT STARTED). Same services as docker-compose.lan.yml, with TLS in front:
+#
+#   * Caddy is the ONLY thing published (ports 80 and 443). It gets and renews a real certificate by itself and forwards to the API over the private Docker network.
+#   * The API, PostgreSQL and Redis publish nothing. PostgreSQL and Redis have passwords and never leave the private network.
+#   * The website's sign-in cookie becomes Secure + __Host- prefixed and the API sends HSTS (they follow PUBLIC_URL being https).
+#
+# Before using it (see DEPLOYMENT.md "Putting Clynx on the internet" for the full checklist):
+#   1. A domain name whose DNS A/AAAA record points at this server, and ports 80+443 forwarded to it (this is the ONLY port forward ever needed).
+#   2. A strong Owner password, working email (SMTP_URL), and the spending limits set in the console (the company OpenAI key is billable by anyone who can sign up).
+#   3. A .env.https file (copy .env.prod.example) with PUBLIC_URL=https://your-domain and CLYNX_DOMAIN=your-domain.
+#   docker compose -f docker-compose.https.yml --env-file .env.https up -d --build
+name: clynx-https
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      CLYNX_DOMAIN: ${CLYNX_DOMAIN:?set CLYNX_DOMAIN to your domain name}
+      CLYNX_ACME_EMAIL: ${CLYNX_ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile.https:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api: { condition: service_started }
+    networks: [internal]
+    mem_limit: 256m
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-clynx_cloud}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+    mem_limit: 1g
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD} ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    networks: [internal]
+    mem_limit: 512m
+
+  api:
+    image: clynx-https-api:latest
+    build:
+      context: ..
+      dockerfile: cloud/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    env_file: ${CLYNX_ENV_FILE:-.env.https}
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-clynx_cloud}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      PORT: 8787
+      TRUST_PROXY: "true" # the real client address comes from Caddy; rate limits depend on it
+      NODE_ENV: production
+      COOKIE_SECURE: "true"
+    # no "ports": only Caddy can reach the API
+    volumes:
+      - releases_data:/data
+    command: sh -c "node dist/db/migrate.js && node dist/index.js"
+    networks: [internal]
+    mem_limit: 512m
+
+  worker:
+    image: clynx-https-api:latest
+    pull_policy: never
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      api: { condition: service_started }
+    env_file: ${CLYNX_ENV_FILE:-.env.https}
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-clynx_cloud}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      NODE_ENV: production
+    command: node dist/worker.js
+    healthcheck:
+      disable: true
+    networks: [internal]
+    mem_limit: 512m
+
+networks:
+  internal:
+
+volumes:
+  pg_data:
+  redis_data:
+  releases_data:
+  caddy_data:
+  caddy_config:

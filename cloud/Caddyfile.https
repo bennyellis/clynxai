@@ -1,0 +1,33 @@
+# Used by docker-compose.https.yml. {$CLYNX_DOMAIN} is your domain name; Caddy obtains and renews its certificate automatically (Let's Encrypt) and redirects http to https.
+{
+	email {$CLYNX_ACME_EMAIL}
+}
+
+{$CLYNX_DOMAIN} {
+	encode zstd gzip
+
+	# installers are several hundred MB: allow uploads from the console, nothing larger
+	request_body {
+		max_size 700MB
+	}
+
+	# The API sets its own security headers (CSP, frame/sniff protection, HSTS). Only the proxy-level ones below are added here.
+	header {
+		-Server
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+	}
+
+	# Metrics are for the operator on the private network only, never the internet.
+	@internal path /metrics /health/ready
+	respond @internal 404
+
+	reverse_proxy api:8787 {
+		# lets the API see the real address of the visitor for rate limits (TRUST_PROXY=true)
+		header_up X-Real-IP {remote_host}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

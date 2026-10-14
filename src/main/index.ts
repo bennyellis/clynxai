@@ -3788,11 +3788,23 @@ app.whenReady().then(() => {
       return !!r && r.ok;
     },
     launchInstaller: (installerPath, args) => {
-      // Windows: run the installer silently, then start Clynx again WHATEVER the installer's result (a failed install simply reopens the version that was there, and the next start records
-      // that the update did not finish). The same data folder is passed on explicitly, so the reopened app uses exactly the data this one did.
+      // Windows: run the installer silently, WAIT until it and everything it started has finished, then start Clynx again WHATEVER the result (a failed install simply reopens the version
+      // that was there, and the next start records that the update did not finish). The same data folder is passed on explicitly, so the reopened app uses exactly the data this one did.
+      const q = (v: string) => `'${v.replace(/'/g, "''")}'`;
       const child =
         process.platform === "win32"
-          ? spawn("cmd.exe", ["/d", "/s", "/c", `"\"${installerPath}\" ${args.join(" ")} & start \"\" \"${process.execPath}\" \"--user-data-dir=${app.getPath("userData")}\""`], { detached: true, stdio: "ignore", windowsHide: true, windowsVerbatimArguments: true })
+          ? spawn(
+              "powershell.exe",
+              [
+                "-NoProfile",
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                `Start-Process -FilePath ${q(installerPath)} -ArgumentList ${args.map(q).join(",")} -Wait; Start-Sleep -Seconds 2; Start-Process -FilePath ${q(process.execPath)} -ArgumentList ${q(`--user-data-dir=${app.getPath("userData")}`)}`,
+              ],
+              { detached: true, stdio: "ignore", windowsHide: true }
+            )
           : spawn(installerPath, args, { detached: true, stdio: "ignore" });
       child.on("error", (err) => console.error("[updates] installer failed to start:", err));
       child.unref();
