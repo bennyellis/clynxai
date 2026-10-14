@@ -1,0 +1,133 @@
+CLYNX - PHASE 10: WEBSITE AND CUSTOMER PLATFORM - FINAL DEVELOPMENT REPORT
+==========================================================================
+Branch master. Rollback point: git tag checkpoint-before-phase10-website. Phase 10 is 11 commits after that tag (about 13,400 lines added across 123 files at the time of the last count, before the final fixes). Companion file: PHASE10_SECURITY_AND_TESTING_REPORT.txt (threat review, key-storage evaluation, known gaps). Deployment guide: cloud/DEPLOYMENT.md.
+
+THE SHORT VERSION
+-----------------
+Built: the public website, the customer portal, the admin console, a secure permanent Owner role, company-managed OpenAI and eBay integrations (encrypted, Owner-only, with spending limits and an emergency switch), release management, the desktop-to-account integration (offline mode, device revocation, safe copy of local beta data, no API keys needed in cloud mode), optional encryption of saved API keys, Docker/CI/deployment files, and tests.
+Not done, on purpose (needs you): nothing was deployed, published, charged, emailed, or sent to Stripe/OpenAI/eBay. No paid API call was made. Your OpenAI key was never touched or printed. The Windows beta installer was not republished; the existing beta behaviour is unchanged and its regression tests pass.
+One thing to know first: an early run of my own desktop test registered one empty test account (desktop-1f85cd@example.com) in your running dev cloud's database, and my cleanup was blocked. Details and a one-line command to remove it are in section 8.
+
+
+1. IMPLEMENTED vs TESTED vs STAGED vs PRODUCTION-VALIDATED
+-----------------------------------------------------------
+"Tested" says what kind: REAL = real component, SIMULATED = stand-in for an outside service.
+
+A. Official website (website/)                         IMPLEMENTED  TESTED (real Chrome E2E, 3 screen sizes; 11 unit tests)   STAGED (not hosted)
+   Home, Features, Pricing, Download, Support, five draft legal pages, real screenshots of the app (sample data), no invented prices, no unsupported claims.
+   Pricing page: free vs Pro comparison, limits, trial, monthly/annual toggle, upgrade/downgrade/cancel explanations. Prices show a clearly marked placeholder until you set PLAN_PRICE_PRO_*_DISPLAY (and the matching Stripe Price).
+   Download page: shows ONLY published releases (version, SHA-256, size, notes, known issues, requirements, install steps, SmartScreen note). Currently there is no published release, so it says so.
+   Support: FAQ, troubleshooting, bug-report form (stored, rate-limited), contact address (placeholder support@clynx.invalid until you set SUPPORT_EMAIL).
+B. Customer portal                                      IMPLEMENTED  TESTED (browser E2E + 31 API tests)  email SIMULATED (captured in an outbox)
+   Sign up, sign in/out, email verification, password reset, subscription view, billing (checkout, portal, change plan, cancel, resume), download page, device list + revoke, profile and email change, session list, data export, account deletion request.
+C. Stripe (TEST MODE ONLY)                               IMPLEMENTED  TESTED SIMULATED (15 billing-flow tests + browser E2E through a local FakeStripe)  NOT contacted
+   Hosted checkout, portal, status, one-time trial eligibility, upgrade/downgrade (price change), cancel at period end, resume, failed payment grace, webhook-driven updates, signature verification, duplicate and out-of-order events, entitlement effects. The simulated provider is refused in production.
+D. Shared accounts website <-> desktop                   IMPLEMENTED  TESTED REAL (Electron app vs real local server, 35 checks)
+   Register/sign in from the desktop; entitlements; device registration; secure refresh; logout; device revocation from the website ends the desktop sign-in; offline mode (opens with local data, reconnects by itself); revoked sign-in returns to the sign-in screen; optional copy of local beta data (copy, never move; hash-verified unchanged; reversible by going back to local mode). Local beta testers are not subject to subscriptions.
+E. Release management                                    IMPLEMENTED  TESTED (21 admin/release tests)  STAGED (nothing published)
+   Version metadata, upload with SERVER-computed SHA-256, beta/stable channels, notes, approve -> publish (type the version to confirm), withdraw, promote beta -> stable draft, download counting (one number per release per day, no personal data), storage module ready for an object store.
+F. Admin console (server-side RBAC)                      IMPLEMENTED  TESTED
+   Customers, subscriptions, beta-tester flag, disable/enable accounts, releases, support requests, health (database, Redis, queue, email outbox), aggregate metrics, audit log. Admins cannot see or change credentials; only the Owner can.
+G. Owner role                                            IMPLEMENTED  TESTED (17 tests, REAL database)
+   One Owner; granted only by the server command npm run owner -- begin / complete (one-time code); database trigger + unique index; not grantable by registration/email/frontend flag; "Owner - Full Access" shown in the account dashboard; no payment needed; admins get no free plan; ordinary users and admins cannot make themselves Owner (tested). Infrastructure safety limits still apply to the Owner.
+H. Company-managed OpenAI + eBay                         IMPLEMENTED  TESTED (41 tests, REAL database/Redis, SIMULATED providers)  STAGED (no credentials saved anywhere)
+   Owner-only "API Integrations" console section: status, last verification, masked identifier, replace/rotate/revoke/verify, never shows a secret again. Encrypted vault. Customer AI goes through an authenticated proxy with entitlements, per-user/plan quotas, rate and concurrency limits, atomic spending reservations, global daily/monthly limits, abuse detection and blocks, emergency stop, per-customer cost attribution (ESTIMATED). eBay: company application credentials for public listing data; a customer's own eBay account needs its own consent flow (application credentials do NOT give access to a customer's account) - built, tested against a stub only.
+I. Desktop cloud mode without keys                       IMPLEMENTED  TESTED (unit + REAL app)
+   Cloud mode needs no OpenAI/eBay key; the key form is hidden; local mode is clearly labelled and unchanged. A beta tester's saved keys are kept untouched until they choose "Use Clynx's shared AI and eBay" or "Delete my saved keys". Shared-service refusals show plain messages.
+J. API-key storage review + opt-in protection            IMPLEMENTED  TESTED (unit + REAL app)  OFF by default
+   See the security report, section 3.
+K. Deployment preparation                                IMPLEMENTED  PARTLY TESTED
+   Dockerfile (builds website + API, non-root), production compose (volumes, health checks, memory limits), local compose, Caddy HTTPS example, .env templates, blank-value handling, migrations with advisory lock, CI (desktop, cloud, website, browser E2E, image build, audit), backup/recovery/rotation/staging instructions in cloud/DEPLOYMENT.md. TESTED: the image builds and a container served the site + API in production mode and the owner tool ran inside it. NOT tested: the multi-container prod compose, the CI workflow on GitHub, real TLS.
+L. Production-validated:  NOTHING. No part of Phase 10 has run on a live system with real providers.
+
+
+2. TEST RESULTS (final run, this session)
+-----------------------------------------
+Cloud server tests ............ 228 passed, 0 failed (17 files)
+Desktop unit tests ............ 46 files passed (npm test) - includes accountIntegration, sharedApis (20 checks), envKeys (15 checks)
+Website unit tests ............ 11 passed
+Website browser E2E ........... 31 passed (Chrome; phone/tablet/desktop; signup, verify, reset, billing, devices, admin, releases, owner console, integrations)
+Desktop vs real server ........ 35 passed (passed in repeated standalone runs; the first runs found real bugs, now fixed; one run inside the long batch hit a wait timeout in the test's own final step, which I made more tolerant and re-ran twice)
+Earlier Electron regression ... t1-t16 all exit 0 (startup, big DB, config, DB recovery, session, deal quality, close/recovery, onboarding, status feed, performance modes, lazy library, hidden screens, diagnostics, leak checks, identity foundation, review & safeguard, account/backups/security, local beta mode)
+Typechecks .................... desktop, cloud, website clean
+Docker image .................. built; container smoke test passed (health 200, site + prerendered pages, strict CSP, owner tool)
+
+
+3. HOW TO LOOK AT IT NOW (nothing to install)
+---------------------------------------------
+A preview server is running on this computer: http://localhost:8790  (left running; stop it by closing that process or restarting the PC).
+It uses its own throwaway database with sample accounts and SIMULATED payments (no email sent, no Stripe). Password for all three: preview-password-1
+   owner@preview.clynx.invalid   - sees "Owner - Full Access", the console, API Integrations (try pasting a FAKE key; it is stored encrypted and never shown again, nothing is called), Spending, Releases
+   admin@preview.clynx.invalid   - console without credentials
+   customer@preview.clynx.invalid - portal: subscription, devices, profile
+A DRAFT release "0.3.0-beta.1" (your real beta installer) is registered there but NOT approved or published, so the public Download page still shows nothing.
+To rebuild the preview later: cd cloud; npm run preview:db; npm run preview:seed; npm run preview:web  (needs cloud/.env.preview, already generated and git-ignored).
+
+
+4. WHAT YOU NEED TO PROVIDE OR APPROVE BEFORE ANY REAL USE
+----------------------------------------------------------
+Credentials / accounts (none of these exist in the repo; nothing is activated until you add them):
+  1. Hosting: a server (or container host) and a domain name with DNS you control; TLS comes from the Caddy example.
+  2. Secrets for .env.prod: JWT_ACCESS_SECRET, JWT_REFRESH_SECRET, POSTGRES/REDIS passwords, METRICS_TOKEN (generate with openssl rand -hex 32).
+  3. CREDENTIALS_ENCRYPTION_KEY (openssl rand -base64 32). Back it up separately from database backups.
+  4. Stripe: a Stripe account; in TEST mode create the Clynx Pro product with a monthly (and yearly) Price, a webhook endpoint https://your-domain/billing/webhook, and give the server STRIPE_SECRET_KEY (sk_test_...), STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_PRO_MONTHLY / _YEARLY. Run the test-card rehearsal in cloud/DEPLOYMENT.md. Live keys are a separate, later decision of yours.
+  5. An email provider (SMTP_URL, MAIL_FROM, SUPPORT_EMAIL) with SPF/DKIM for your domain.
+  6. OpenAI API key and (optionally) eBay developer credentials (App ID/Cert ID, RuName) - entered by YOU, the Owner, in the console after Owner setup; never in files. Set the spending limits in the console first.
+  7. The Owner setup on the server: register normally, then npm run owner -- begin / complete (instructions in cloud/DEPLOYMENT.md).
+Decisions / approvals:
+  8. Plan prices, trial length, refund policy (the site shows placeholders; the Stripe Price is the real charge).
+  9. Lawyer review of the five legal pages (they are drafts) and of Facebook's terms for a commercial product.
+ 10. Authorization to publish an installer (approve + publish in the console), and to build a new installer that includes the Phase 10 desktop changes. Code-signing certificate if you want to avoid the SmartScreen warning.
+ 11. Font license for the desktop app's Made Tommy Soft font (personal use only) or a replacement.
+ 12. Authorization before: deploying anywhere, enabling ENFORCE_ENTITLEMENTS, enabling REQUIRE_VERIFIED_EMAIL_FOR_BILLING, any live Stripe key, any change to your live Database.
+
+
+5. DIRECTIVE CHECKLIST (what was asked -> where it is)
+------------------------------------------------------
+ 1 Inspect, checkpoint, preserve beta ........ tag checkpoint-before-phase10-website; beta regression t16 still passes
+ 2 Official website .......................... website/ (served by cloud/, same address as the API)
+ 3 Customer portal ........................... website/src/pages/account, auth; cloud/src/web
+ 4 Stripe test mode .......................... cloud/src/billing (+ fakeProvider.ts dev stand-in)
+ 5 Website <-> desktop shared accounts ....... src/main/cloudClient.ts, localMigration.ts; cloud/src/auth, devices
+ 6 Release management ........................ cloud/src/releases, admin/routes.ts; website console
+ 7 Admin console + RBAC ...................... cloud/src/admin; website/src/pages/console
+ 8 Security and privacy review ............... PHASE10_SECURITY_AND_TESTING_REPORT.txt; SECURITY_REVIEW.md updated; key-storage evaluation + opt-in protection (src/main/envKeys.ts)
+ 9 Deployment preparation .................... cloud/Dockerfile, docker-compose(.prod).yml, Caddyfile.example, .env*.example, .github/workflows/ci.yml, cloud/DEPLOYMENT.md
+10 Real tests ................................ section 2; the two end-to-end suites are website/e2e/e2e.cjs and audit/phase10_integration/t17_cloud_account.cjs
+11 Autonomy / milestones ..................... 11 commits on master since the checkpoint
+12 Deliverables ............................... source in repo; local preview (section 3); portal; Stripe test integration (simulated); download management; admin dashboard; security + testing report; deployment docs; required credentials list (section 4); this report
+Addition A (Owner) .......................... complete; tests include "ordinary users cannot grant themselves Owner"; no billing touched; no existing subscription modified
+Addition B (company API credentials) ........ complete as in section 1H/I; no credentials exposed or committed; no paid API call made; no production integration activated
+
+
+6. THINGS I DECIDED ON MY OWN (so you can overrule them)
+--------------------------------------------------------
+ - Website and API share one address (simplest, safest cookies). A separate marketing domain is possible later.
+ - Admin (staff) and Owner are different roles; admins cannot touch credentials or get a free plan.
+ - Saved keys of existing beta testers are NEVER changed unasked; key protection is opt-in.
+ - Cloud mode: if a tester already has saved keys, the app keeps using them until they pick the shared service (so nothing silently starts costing Clynx money, and nothing silently stops working).
+ - Default spending limits (changeable in the console): $20/day and $200/month company-wide, $0.25/day per free customer, $3/day per Pro customer, $25/day for the Owner, 3 concurrent AI requests per customer. These are guesses to be safe, not business decisions.
+ - Download analytics = one counter per release per day. No cookies besides the sign-in cookie.
+ - Nunito (open license) for the website font.
+
+
+7. WHAT PHASE 10 DID NOT DO
+---------------------------
+No deployment, no domain, no TLS, no real Stripe/email/OpenAI/eBay contact, no published installer, no new installer build, no signed-update delivery, no two-factor authentication, no mobile apps (Phase 10 in the older plan), no change to scanning, the Gate, or your Database.
+
+
+8. THE ONE LOOSE END
+--------------------
+While building the real-app test I let it sign in from the Electron sandbox and the app's sign-in form defaulted to http://localhost:8787 (your running dev cloud) instead of the test server, so one empty test account was registered there:
+   email  desktop-1f85cd@example.com     id 0c9d266a-0ee5-4122-86a2-7785d39a7359
+I fixed the cause (the form now starts from the server address saved for the installation, and the test now proves it is talking to its own throwaway server). I tried to delete the row with one narrow DELETE; the safety layer blocked a direct write to that shared database, and I did not look for a way around it. It is harmless. To remove it:
+   docker exec clynx-cloud-postgres psql -U clynx -d clynx_cloud -c "DELETE FROM users WHERE id = '0c9d266a-0ee5-4122-86a2-7785d39a7359' AND email = 'desktop-1f85cd@example.com'"
+Your dev containers (clynx-cloud-api/worker/postgres/redis) were not rebuilt or restarted. They run an older build without the Phase 10 routes; if you rebuild them, migrations 011-013 will be applied to that dev database.
+
+
+9. SUGGESTED NEXT STEPS (your call)
+-----------------------------------
+ 1. Look at the preview (section 3) and tell me what to change on the pages and copy.
+ 2. Decide prices and refund policy; get the legal pages reviewed.
+ 3. Create the Stripe test account and a staging server; I can then run the test-mode rehearsal with you.
+ 4. Authorize a new beta installer build that includes the Phase 10 desktop changes (cloud mode without keys, key protection, offline mode).

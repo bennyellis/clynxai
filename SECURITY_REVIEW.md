@@ -19,7 +19,7 @@ Not done: per-handler argument schemas. About 110 handlers take typed-but-unvali
 
 ## Secrets
 - **Cloud refresh token**: now stored encrypted with the operating system's key store (Electron `safeStorage`: Windows DPAPI, macOS Keychain) as `enc:v1:...`. Older plain files still read and are rewritten encrypted. A file copied to another computer or Windows account reads as "signed out". If the key store is unavailable the token is stored as before (and that is the only case). Verified: unit tests with a stand-in cipher; the Electron start-up suite confirms the real `safeStorage` encrypts and that the app signs back in from the encrypted file.
-- **OpenAI / eBay keys in `.env`**: still plain text in the user's data folder. They are the user's own keys on the user's own machine, and migrating the file would change data the app does not own; moving them into the key store is the next step if keys ever become per-user secrets that Clynx hands out. In the hosted setup the shared OpenAI key lives only on the server.
+- **OpenAI / eBay keys in `.env`**: plain text by default (the user's own keys on the user's own machine; nothing is changed without being asked). Since Phase 10 there is an opt-in **"Protect my saved keys"** switch in Config > Account that encrypts just those three lines with the same key store as above (a full copy of `.env` is kept first, every key is read back and compared before the file is replaced, the switch is reversible, and the old copies can be deleted on request). Cloud accounts no longer need these keys at all: AI and eBay can come from Clynx's company-managed service. In the hosted setup the OpenAI/eBay credentials are stored only on the server, encrypted (see `PHASE10_SECURITY_AND_TESTING_REPORT.txt`).
 - **Facebook session**: lives in the browser profile folder on the user's machine and is never sent to the cloud.
 - **Support report**: removes keys, tokens, passwords, emails, the user's name in paths; contains no listings or photos (unit-tested).
 
@@ -46,10 +46,10 @@ Not done: per-handler argument schemas. About 110 handlers take typed-but-unvali
 Argon2id passwords, refresh-token rotation with reuse detection, per-user data scoping tested for every resource, rate limits (login per IP+email, registration, checkout), allow-listed AI models with output caps and metering, verified and idempotent billing webhooks, security headers, run as non-root.
 
 ## Known gaps (not fixed here)
-1. No password reset or email verification (needs an email provider).
+1. Password reset and email verification exist (Phase 10) but have only been tested with captured email; a real mail provider is needed.
 2. No two-factor authentication.
 3. IPC argument validation is partial (see above).
-4. `.env` keys are plain text.
+4. `.env` keys are plain text unless the person turns on the opt-in protection (Phase 10).
 5. Update delivery is not built (verification core only).
 6. Windows installer is unsigned; macOS never built.
 7. Billing never exercised against Stripe's servers (no test credentials were available).

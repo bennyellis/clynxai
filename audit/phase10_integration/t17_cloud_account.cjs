@@ -184,9 +184,10 @@ const noisy = (h) => h.mainOut.join("").split("\n").filter((l) => /uncaught|Type
     await L.closeApp(h);
     h = null;
     h = await L.launch(sb);
-    await h.win.waitForFunction(() => !!document.querySelector('input[type="password"]') || /Start Scanner/i.test(document.body.innerText), null, { timeout: 90000 });
+    // the app may show its data for a moment before the server's answer arrives; wait until the sign-in has ended and the sign-in (or beta welcome) screen is up
+    await h.win.waitForFunction(() => !!document.querySelector('input[type="password"], [data-testid="beta-welcome"]'), null, { timeout: 120000 });
     const sess = await h.win.evaluate(() => window.api.auth.getSession());
-    L.check("[E] after the device is revoked the desktop is signed out (login screen, not the app)", sess.authenticated === false && (await h.win.locator('input[type="password"]').count()) >= 0 && !/Start Scanner/i.test(await text(h)), sess);
+    L.check("[E] after the device is revoked the desktop is signed out (login screen, not the app)", sess.authenticated === false && !/Start Scanner/i.test(await text(h)), sess);
     L.check("[E] signing out did not delete the local data", fs.existsSync(L.path.join(localFolder, "scout.db")) && L.sha(L.path.join(localFolder, "scout.db")) === dbHashBefore);
     L.check("[*] no renderer errors / unhandled exceptions", h.rendererErrors.filter((e) => !/Failed to load resource/.test(e)).length === 0 && noisy(h).length === 0, { r: h.rendererErrors.slice(0, 3), m: noisy(h).slice(0, 3) });
   } catch (e) {

@@ -264,7 +264,8 @@ showing up or titles/prices look wrong:
 - [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) — everything a person does to ship a build (signing, macOS, updates, publishing)
 - [`BETA_PLAN.md`](BETA_PLAN.md) — controlled beta rollout plan (a plan only; no beta has been run)
 - [`SECURITY_REVIEW.md`](SECURITY_REVIEW.md) — Electron hardening, secret storage, dependency review, update design, known gaps
-- [`cloud/DEPLOYMENT.md`](cloud/DEPLOYMENT.md) — deploying and operating Clynx Cloud (including Stripe test-mode setup)
+- [`cloud/DEPLOYMENT.md`](cloud/DEPLOYMENT.md) — deploying and operating Clynx Cloud and the website (HTTPS proxy, Owner setup, company-managed OpenAI/eBay credentials, Stripe test-mode setup, backups)
+- [`website/`](website/) — the public website, customer portal and admin console (Vite + React; served by the cloud server)
 
 ## Clynx Cloud
 
@@ -274,3 +275,9 @@ provides auth/devices, Watch cloud sync, listing ingestion + dedup, and an
 async job queue, all opt-in behind `Config.cloud.enabled` (default `false`)
 so the desktop app works exactly as it always has when cloud is off or
 unreachable. See [`cloud/README.md`](cloud/README.md) for setup.
+
+## Website and customer platform
+
+`website/` is the public site (Home, Features, Pricing, Download, Support, draft legal pages), the customer portal (sign up, sign in, email verification and password reset, subscription and billing, devices, profile, data export and deletion) and the admin console. The cloud server serves it on the same address as the API. Run it for development with `cd website && npm ci && npm run dev` next to a running cloud server; a self-contained preview with simulated payments and sample accounts is described in `cloud/DEPLOYMENT.md`. Nothing in the repository publishes, deploys or charges anything.
+
+The desktop app has two modes: **local mode** (Windows beta; everything stays on the computer, your own keys) and **cloud mode** (a Clynx account; AI and eBay can come from Clynx's shared service so no keys are needed).

@@ -40,3 +40,4 @@ beta-release/
 
 # Backup copies of .env made when saved API keys are protected (may hold the old plain-text keys)
 .env.backup-*
+website/e2e/shots/
