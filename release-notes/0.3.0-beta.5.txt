@@ -1,0 +1,2 @@
+Clynx Beta 5 - update test build
+* Identical to Beta 4 apart from its version number. It exists only to prove that a computer running Beta 4 updates itself automatically.
