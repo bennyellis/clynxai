@@ -66,7 +66,7 @@ export function LoginScreen({
   const [email, setEmail] = useState(readLastEmail);
   // The server address is a technical detail most people never touch, so it
   // stays tucked away — and opens itself if the server can't be reached.
-  const [showServer, setShowServer] = useState(false);
+  const [showServer, setShowServer] = useState(!defaultApiUrl.trim());
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,6 +81,8 @@ export function LoginScreen({
         setBeta(b);
         // the sign-in form starts from the address this installation already uses (people who left local mode, or chose a server before)
         if (b.cloudApiUrl) setApiUrl((cur) => (cur === defaultApiUrl ? (b.cloudApiUrl as string) : cur));
+        // nothing to start from (an installed build has no built-in server): the address box stays open while the person types it
+        if (!(b.cloudApiUrl ?? "").trim() && !defaultApiUrl.trim()) setShowServer(true);
       })
       .catch(() => setBeta(null));
   }, []);

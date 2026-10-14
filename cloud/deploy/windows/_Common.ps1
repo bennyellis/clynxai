@@ -68,7 +68,14 @@ function Get-LanAddresses {
   return $result
 }
 
-function Get-ComposeArgs { $env:CLYNX_ENV_FILE = $script:EnvFile; return @("compose", "-f", $script:ComposeFile, "--env-file", $script:EnvFile) }
+# CLYNX_COMPOSE_PROJECT / CLYNX_IMAGE let a second, throw-away copy of the stack run beside the real one (used by the test procedures); normally unset.
+$script:Image = if ($env:CLYNX_IMAGE) { $env:CLYNX_IMAGE } else { "clynx-lan-api:latest" }
+function Get-ComposeArgs {
+  $env:CLYNX_ENV_FILE = $script:EnvFile
+  $a = @("compose")
+  if ($env:CLYNX_COMPOSE_PROJECT) { $a += @("-p", $env:CLYNX_COMPOSE_PROJECT) }
+  return $a + @("-f", $script:ComposeFile, "--env-file", $script:EnvFile)
+}
 
 function Invoke-Compose([string[]]$arguments, [switch]$AllowFail) {
   $all = (Get-ComposeArgs) + $arguments

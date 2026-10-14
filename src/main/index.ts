@@ -3138,7 +3138,7 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
     if (!cloudHeartbeatTimer) {
       cloudHeartbeatTimer = setInterval(() => {
         cloudClient.sendHeartbeat().catch((err) => console.error("[cloud] heartbeat threw unexpectedly:", err));
-      }, 60_000);
+      }, 30_000);
     }
     watchSyncService.start();
     listingIngestSyncService.start();
@@ -3788,7 +3788,12 @@ app.whenReady().then(() => {
       return !!r && r.ok;
     },
     launchInstaller: (installerPath, args) => {
-      const child = spawn(installerPath, args, { detached: true, stdio: "ignore", windowsHide: true });
+      // Windows: run the installer silently, then start Clynx again WHATEVER the installer's result (a failed install simply reopens the version that was there, and the next start records
+      // that the update did not finish). The same data folder is passed on explicitly, so the reopened app uses exactly the data this one did.
+      const child =
+        process.platform === "win32"
+          ? spawn("cmd.exe", ["/d", "/s", "/c", `"\"${installerPath}\" ${args.join(" ")} & start \"\" \"${process.execPath}\" \"--user-data-dir=${app.getPath("userData")}\""`], { detached: true, stdio: "ignore", windowsHide: true, windowsVerbatimArguments: true })
+          : spawn(installerPath, args, { detached: true, stdio: "ignore" });
       child.on("error", (err) => console.error("[updates] installer failed to start:", err));
       child.unref();
     },

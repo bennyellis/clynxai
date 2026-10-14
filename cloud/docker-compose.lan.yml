@@ -45,7 +45,7 @@ services:
     mem_limit: 512m
 
   api:
-    image: clynx-lan-api:latest
+    image: ${CLYNX_IMAGE:-clynx-lan-api:latest}
     build:
       context: ..
       dockerfile: cloud/Dockerfile
@@ -71,7 +71,7 @@ services:
     mem_limit: 512m
 
   worker:
-    image: clynx-lan-api:latest
+    image: ${CLYNX_IMAGE:-clynx-lan-api:latest}
     pull_policy: never # built by the api service above; never looked up in a registry
     restart: unless-stopped
     depends_on:

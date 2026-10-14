@@ -24,9 +24,10 @@ if ($Pull) {
 }
 
 Write-Step "Remembering the current image so we can go back"
-& docker image inspect clynx-lan-api:latest *> $null
+& docker image inspect $script:Image *> $null
 $hadImage = ($LASTEXITCODE -eq 0)
-if ($hadImage) { & docker tag clynx-lan-api:latest clynx-lan-api:previous; Write-Ok "tagged clynx-lan-api:previous" }
+$previousImage = ($script:Image -replace ':latest$', '') + ":previous"
+if ($hadImage) { & docker tag $script:Image $previousImage; Write-Ok "tagged $previousImage" }
 
 Write-Step "Building and restarting"
 try {
@@ -43,7 +44,7 @@ if (Wait-Healthy (Get-ServerBase) 150) {
 Write-Warn2 "The updated server is not healthy."
 if ($hadImage) {
   Write-Step "Going back to the previous image"
-  & docker tag clynx-lan-api:previous clynx-lan-api:latest
+  & docker tag $previousImage $script:Image
   Invoke-Compose @("up", "-d", "--no-build")
   if (Wait-Healthy (Get-ServerBase) 120) { Write-Host "Rolled back: the previous version is running again. Your data was not touched (backup: backups\lan)." -ForegroundColor Yellow } else { Stop-Script "Still not healthy after rolling back. Run .\Get-ClynxLanStatus.ps1 and see docs; your latest backup is in backups\lan." }
 } else { Stop-Script "There was no previous image to go back to. Check the logs: docker compose -f docker-compose.lan.yml logs api" }
