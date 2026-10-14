@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { signManifest, type UpdateManifest } from "../updateVerifier.js";
 import { Updater, type UpdateMode, type UpdaterDeps } from "../updater.js";
+import { isSafeForCommandLine, planInstallerLaunch } from "../installerLauncher.js";
 import { check, run, section } from "./_testkit.js";
 
 const keys = crypto.generateKeyPairSync("ed25519");
@@ -316,6 +317,16 @@ run(async () => {
     await r.u.check();
     const inst = await r.u.installNow();
     check("a launch failure is reported, nothing is left pending, and the app does not quit", !inst.ok && r.quits === 0 && JSON.parse(fs.readFileSync(r.stateFile, "utf-8")).pending === null, inst);
+  }
+
+  section("the installer hand-off command");
+  {
+    const win = planInstallerLaunch("win32", "C:\\Users\\me\\AppData\\Roaming\\Clynx\\updates\\staging\\0.3.0\\Setup.exe", ["/S", "--updated"], "C:\\Users\\me\\AppData\\Local\\Programs\\Clynx\\Clynx.exe", "C:\\Users\\me\\AppData\\Roaming\\Clynx");
+    check("Windows: cmd waits for the installer (start /wait), then starts Clynx on the same data folder", win.command === "cmd.exe" && /^"start \/wait "" "C:.*Setup\.exe" \/S --updated & ping -n 4 127\.0\.0\.1 >nul & start "" "C:.*Clynx\.exe" "--user-data-dir=C:.*Clynx""$/.test(win.args[3]) && win.options.detached === true, win);
+    check("...hidden, detached, and with the command line passed untouched", win.options.windowsHide === true && win.options.windowsVerbatimArguments === true && win.args.slice(0, 3).join(" ") === "/d /s /c");
+    const other = planInstallerLaunch("plain", "/tmp/x.pkg", ["-q"], "/Applications/Clynx", "/data");
+    check("any other case just starts the installer, detached", other.command === "/tmp/x.pkg" && other.args.join() === "-q" && other.options.detached === true);
+    check("a path that would break a command line is not used with cmd", !isSafeForCommandLine("C:\\Users\\a&b\\x.exe") && !isSafeForCommandLine("C:\\50%\\x.exe") && !isSafeForCommandLine('C:\\a"b') && isSafeForCommandLine("C:\\Users\\me\\My Files\\x.exe", "D:\\ok"));
   }
 
   fs.rmSync(root, { recursive: true, force: true });

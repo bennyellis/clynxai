@@ -31,6 +31,7 @@ run(() => {
     const files = [...walk(path.resolve("src/main")), ...walk(path.resolve("src/preload")), ...walk(path.resolve("src/renderer/src"))];
     const offenders: string[] = [];
     for (const f of files) {
+      if (path.basename(f) === "installerLauncher.ts") continue; // the one deliberate Windows-only file: the silent-installer hand-off (unit-tested in updater.test.ts)
       const lines = fs.readFileSync(f, "utf-8").split("\n");
       lines.forEach((line, i) => {
         const code = line.replace(/\/\/.*$/, "");

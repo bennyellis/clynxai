@@ -16,6 +16,7 @@ import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
 import { writeFileAtomic, writeFileAtomicWithBackup } from "./safeFs.js";
 import { normalizeServerUrl, testServer } from "./serverAddress.js";
 import { Updater, type UpdateChannel, type UpdateMode } from "./updater.js";
+import { isSafeForCommandLine, planInstallerLaunch } from "./installerLauncher.js";
 import { SECRET_ENV_VARS, envKeyState, isProtectedValue, protectEnvText, readEnvSecrets, unprotectEnvText } from "./envKeys.js";
 import { describeStartupFailure, type StartupProblem } from "./startupErrors.js";
 import { NoticeBoard } from "./appNotices.js";
@@ -3788,17 +3789,11 @@ app.whenReady().then(() => {
       return !!r && r.ok;
     },
     launchInstaller: (installerPath, args) => {
-      // Windows: run the installer silently and WAIT for it ("start /wait"; a plain command would not wait for a windowed program), pause a few seconds, then start Clynx again WHATEVER
-      // the installer's result (a failed install simply reopens the version that was there, and the next start records that the update did not finish). The same data folder is passed
-      // on explicitly so the reopened app uses exactly the data this one did.
-      const child =
-        process.platform === "win32"
-          ? spawn(
-              "cmd.exe",
-              ["/d", "/s", "/c", `"start /wait \"\" \"${installerPath}\" ${args.join(" ")} & ping -n 4 127.0.0.1 >nul & start \"\" \"${process.execPath}\" \"--user-data-dir=${app.getPath("userData")}\""`],
-              { detached: true, stdio: "ignore", windowsHide: true, windowsVerbatimArguments: true }
-            )
-          : spawn(installerPath, args, { detached: true, stdio: "ignore" });
+      // (see installerLauncher.ts: run the installer silently and WAIT for it, then reopen Clynx on the same data folder, whatever the installer's result.) A path with a character that
+      // would break a command line makes the hand-off start the installer plainly instead: the update still installs, Clynx just has to be opened by hand afterwards.
+      const userData = app.getPath("userData");
+      const plan = planInstallerLaunch(isSafeForCommandLine(installerPath, process.execPath, userData) ? process.platform : "plain", installerPath, args, process.execPath, userData);
+      const child = spawn(plan.command, plan.args, plan.options);
       child.on("error", (err) => console.error("[updates] installer failed to start:", err));
       child.unref();
     },

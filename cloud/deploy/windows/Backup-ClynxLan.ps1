@@ -46,7 +46,7 @@ Set-Content -Path (Join-Path $script:BackupDir "$name.sha256.txt") -Value $sums 
 Write-Ok "Checksums: $name.sha256.txt"
 
 # keep the newest $Keep sets
-$sets = Get-ChildItem $script:BackupDir -Filter "clynx-lan-*.sql.gz" | Sort-Object Name -Descending
+$sets = @(Get-ChildItem $script:BackupDir -Filter "clynx-lan-*.sql.gz" | Sort-Object Name -Descending)
 if ($sets.Count -gt $Keep) {
   foreach ($old in $sets | Select-Object -Skip $Keep) {
     $base = $old.Name -replace "\.sql\.gz$", ""

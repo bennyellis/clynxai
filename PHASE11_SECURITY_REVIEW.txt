@@ -1,0 +1,83 @@
+CLYNX - PHASE 11 SECURITY REVIEW
+(LAN server, remote desktop clients, signed automatic updates, Windows Beta 2)
+================================================================================
+Scope: what changed in Phase 11 and what it exposes. Phase 10's review (PHASE10_SECURITY_AND_TESTING_REPORT.txt) still applies to the website, accounts, Owner role, vault and billing.
+"Verified" = checked on this computer (command output or an automated test I ran). "Not verified" = designed/configured but not exercised.
+
+
+1. FINDINGS ON THE EXISTING SETUP (fixed)
+-----------------------------------------
+F1  HIGH (fixed, verified). The developer Docker stack published PostgreSQL (5432, password clynx_dev_password), Redis (6379, NO password) and the API (8787) on ALL network interfaces, and Docker Desktop's own Windows Firewall rule ("com.docker.backend.exe", Public profile, TCP, any port, any remote address) allowed them in. This computer's Wi-Fi ("Bagel 2") is classed Public. So any device on that Wi-Fi could have reached the dev database and an unauthenticated Redis. Fix: docker-compose.yml now binds all three to 127.0.0.1; the containers were recreated with the same volumes (a pg_dump backup was taken and test-restored first; account/watch counts identical). Verified with Get-NetTCPConnection: 5432, 6379, 8787 now listen on 127.0.0.1 only. I made a local backup of the dev database (kept in backups\docker, git-ignored) and only counted rows; I did not look at the contents.
+F2  MEDIUM (fixed, verified). My own Phase 10 preview server listened on 0.0.0.0:8790 with known sample passwords (preview-password-1) behind the same firewall rule. I stopped it before doing anything else in this phase.
+F3  MEDIUM (fixed, verified). The cloud test suite imported the server config before loading .env.test, so every test run silently used the DEVELOPMENT database (about 2,570 "@example.com" test accounts accumulated there) and shared the live Redis queue with the running worker. Fixed: cloud/test/env.ts loads .env.test first and REFUSES to run unless the database name ends in _test and Redis uses a non-zero database. Full suite: 243/243 passing against the disposable database. The old leftover accounts in the dev database were not touched (see section 8).
+F4  LOW (fixed). Generated server secrets were first written inside the project folder, which syncs to OneDrive. They were never used (the file was deleted and regenerated), and the secrets file now lives in C:\Users\biggt\ClynxLan\ (outside OneDrive, readable by your Windows account only). The update signing key pair was generated directly into C:\Users\biggt\ClynxKeys\update-signing\ (not in the project, not synced).
+
+
+2. NETWORK EXPOSURE OF THE NEW LAN SERVER (docker-compose.lan.yml)
+-------------------------------------------------------------------
+- Exactly ONE published port: the API/website on 10.0.0.81:8788, bound to that address only (not 0.0.0.0, so not on WSL, VPN or other adapters). Start-ClynxLan.ps1 refuses to start if this PC no longer has that address, rather than binding somewhere else.
+- PostgreSQL and Redis publish NO ports (docker ps shows "5432/tcp" / "6379/tcp" with no host mapping). Redis requires a password; Postgres has its own random password; both are 24 random bytes from the OS generator.
+- Inside the network the server needs a login for everything except: /health, /health/ready, /server/info (name, version, which shared services exist as true/false: no secrets), /plans/public, /releases/*, /updates/* (published, signed data only). Rate limits apply per address.
+- Plain HTTP on the LAN is the one real weakness: a person on the same network who can capture traffic (a compromised device on your Wi-Fi, or someone with the Wi-Fi password using ARP tricks) could read tokens and passwords. Mitigations built: the desktop app REFUSES plain http to any address that is not this computer or a private-network address, shows a warning on http, and warns "do not use on public Wi-Fi"; the website cookie is HttpOnly + SameSite=Lax with CSRF tokens and an explicit origin allow-list (ALLOWED_ORIGINS); passwords are Argon2id-hashed. Not built for the LAN: HTTPS with a locally trusted certificate (every client would have to install your certificate authority). Use it only on a network you trust (WPA2/WPA3 Wi-Fi with a strong password, no guests on it).
+- Windows Firewall: Docker's own rule already lets the port in on the Public profile (for any source address). Set-ClynxLanFirewall.ps1 (administrator, optional) adds a rule scoped to your own subnet; it cannot remove Docker's broader rule. The practical protections are therefore: no router port forward, the address binding, and authentication. Not verified from a second computer.
+- Residential routers: never forward 8788. If something on your network (UPnP) opens it automatically, that is outside what this PC can control: check the router's UPnP/port-forward list once.
+
+
+3. REMOTE DESKTOP CLIENTS
+-------------------------
+- Server address is typed once and remembered; an installed build has NO built-in server (no localhost assumption). "Test connection" runs before any password is typed: it must answer as a Clynx server (/server/info product = clynx-cloud) and the sign-in refuses to send credentials to an address that has not passed it.
+- Address rules (unit-tested, 31 checks): http only for this computer / private addresses / .local / single-word names; https required for everything else; credentials inside the address, other schemes, paths and queries are refused; certificate problems are reported in plain words and the connection is refused (there is no "ignore certificate" switch).
+- Sign-in uses the existing short-lived access token + rotating refresh token. NEW: a sign-in is tied to its device, so removing the device on the website ends that computer's sign-in at its next refresh (<= ~10 minutes), even if the device was removed before its first refresh (found and fixed in Phase 10, retested here).
+- Owner and plan come from the server for every request (the app only displays them); the app never receives the server's OpenAI/eBay credentials, encryption key or any other secret. Shared-AI requests go to the server's /ai routes with the customer's token; verified that with no company key configured the answer is "temporarily unavailable" and no key prompt appears.
+- Offline: the app keeps working on local data and reconnects by itself (15 s probe); an outage never signs a person out. Verified with a real stop/start of the Docker server under the installed app (offline shown after 63 s with the old 60 s heartbeat, now 30 s; back within 12 s).
+- Local beta mode is unchanged: no server contact (unit-tested and in the Phase 10/beta regression suites).
+
+
+4. AUTOMATIC UPDATES
+--------------------
+Trust model: the server is NOT trusted for integrity. Only the holder of the update private key can make an installer acceptable.
+- Ed25519 signature over the exact manifest text; the app holds only the public key (resources/update-public.pem, inside the installer). A build without that file cannot install updates at all. There is no setting that turns signature checking off.
+- Checks before an update is offered: signature; product/channel/platform/arch; version strictly newer (pre-releases ordered correctly: beta.10 > beta.9, beta < release - a pre-existing bug in the verifier treated "-beta.N" as equal, which would have made the beta channel useless; fixed and tested); publish time not older than one already accepted (replay); version not previously marked bad.
+- Checks on the download: https, OR http only when the host is this computer / a private address (so a home server works; the file is untrusted until the next check anyway); size cap; size == signed size; SHA-512 == signed; SHA-256 == signed; hashed AGAIN immediately before running. A mismatch deletes the partial file and installs nothing (unit-tested with a tampered byte, a wrong SHA-256, a change after verification).
+- Consent: the installer is started only by the person's click ("Restart and install"). Background download happens only in the default mode and only after verification; "notify" and "off" modes exist.
+- Server side: the server verifies each uploaded manifest against the PUBLIC key and against the stored file (version, channel, checksums, size, download address) before keeping it, serves only published releases, and withdrawal removes an update at once. The private key is never on the server.
+- Recovery: an installer that did not finish is detected on the next start; a new version that fails to start 3 times is marked bad (never offered again) and the person is offered "Go back" (kept installer, verified, or the signed earlier build fetched from the server). User data lives outside the install folder and is not touched; a Database backup is taken just before an install.
+- Residual risks: (a) The signing private key sits on this same PC (C:\Users\biggt\ClynxKeys). Malware or a thief with access to this PC could sign updates for every client. Move it to an offline USB stick / hardware token and keep a second copy; this is the single most important follow-up. (b) The installer itself is not Windows-code-signed, so SmartScreen warns on manual installs (updates are checked by our own signature, but the first install is manual). (c) A malicious server operator cannot push code, but could withhold or freeze updates; a client only learns of a replay within what it has already seen. (d) A person with write access to the user's own app data folder could alter the local update state file; they could equally replace the app. (e) "Go back" re-installs an older signed version on request; it cannot be triggered remotely.
+
+
+5. SECRETS AND RECOVERY
+-----------------------
+- .env.lan (JWT secrets, database/Redis passwords, metrics token, credential-vault key) is generated with the OS random source, stored outside OneDrive, ACL-restricted to your Windows account, never committed (.gitignore), and never printed by the scripts. It is NOT encrypted at rest: anyone who can read your Windows profile can read it. Keep an off-PC copy; without CREDENTIALS_ENCRYPTION_KEY the saved OpenAI/eBay keys cannot be recovered (re-enter them).
+- Rotation script (Jwt, Redis, Postgres, Metrics) keeps a backup of the previous file, changes the database password inside the database first, and verifies health. The vault key and the update key are rotated by documented manual procedures.
+- Backups are gzip-verified, checksummed, restore-tested (CheckOnly and the real restore, which swaps databases by renaming and keeps the old one). A backup on the same disk does not protect against disk failure: copy them elsewhere. Backups contain account data (emails, password hashes): protect them like the database.
+
+
+6. THINGS I DID THAT YOU SHOULD KNOW ABOUT (own-goals)
+-------------------------------------------------------
+- Early in the phase, while testing the repaired dev setup, a Phase 10 test run created one empty account (desktop-1f85cd@example.com) in your dev database; a direct DELETE was blocked by the permission layer, so it remains (harmless; command in PHASE10_FINAL_REPORT.txt section 8).
+- While testing the update hand-off I ran a command that stopped EVERY Notepad process on this computer (11 Notepad processes) instead of only my test one. Windows 11 Notepad normally restores its tabs/unsaved text on reopening, but if you lost something unsaved I am sorry; it was my mistake. All later process cleanup in this phase is filtered by the install folder's path.
+- I recreated the developer Docker containers (same images and volumes, new port bindings) after a verified backup, to fix F1. The backup is backups\docker\clynx_cloud-before-phase11-*.sql.gz (git-ignored).
+- Test installs of Beta 2 were made into temporary folders and removed afterwards (the per-user uninstall entry for "Clynx (beta)" is gone).
+
+
+7. WHAT IS NOT VERIFIED
+-----------------------
+- Any second physical computer (Wi-Fi isolation, its firewall, antivirus, SmartScreen, a first install without development tools). Plan: SECOND_COMPUTER_TEST_PLAN.md.
+- HTTPS (docker-compose.https.yml / Caddyfile.https): configuration validated (compose config, "caddy validate"), never started, no certificate issued.
+- Real OpenAI/eBay/Stripe/email: none called.
+- Behaviour when the Wi-Fi password is shared with untrusted devices, router UPnP, IPv6 exposure (Docker publishes IPv4 here; not examined further).
+
+
+8. REQUIREMENTS BEFORE PUBLIC-INTERNET DEPLOYMENT (not started; needs your decisions)
+--------------------------------------------------------------------------------------
+Must have:
+ 1. A domain name and a host. A residential line often blocks 80/443 or changes address; a small paid cloud server is sturdier (creating one is your decision and cost).
+ 2. HTTPS: docker-compose.https.yml with Caddy (only 80/443 published, automatic certificate). Never expose 8788.
+ 3. Email delivery (SMTP + SPF/DKIM) so verification and password-reset work; REQUIRE_VERIFIED_EMAIL_FOR_BILLING=true.
+ 4. Spending protection BEFORE registration opens: global/daily/monthly limits, per-plan limits and the emergency switch set in the console; a billing alert at OpenAI; decide whether sign-up is invite-only first (no invitation feature exists yet).
+ 5. The update signing key moved offline; a Windows code-signing certificate for the installer.
+ 6. Lawyer review of the five draft legal pages; a decision on prices, refunds and the Facebook-terms question.
+ 7. Off-machine backups, a tested restore, uptime monitoring, log retention, and a plan for abuse reports.
+ 8. Two-factor authentication for the Owner (not built), an external web-application firewall/DDoS layer (e.g. Cloudflare), and an independent penetration test.
+ 9. Stripe test-mode rehearsal, then live keys only after your explicit decision.
+10. The desktop font license (Made Tommy Soft is personal-use only) and the real second-computer validation.

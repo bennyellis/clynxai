@@ -37,7 +37,7 @@ const until = async (fn, ms, every = 1000) => { const end = Date.now() + ms; whi
 const asarHash = () => crypto.createHash("sha256").update(fs.readFileSync(path.join(installDir, "resources", "app.asar"))).digest("hex").slice(0, 16);
 const running = () => spawnSync("powershell", ["-NoProfile", "-Command", `Get-Process Clynx -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '${installDir}*' } | Select-Object -ExpandProperty Id`], { encoding: "utf8" }).stdout.split(/\s+/).filter(Boolean);
 const killInstalled = () => { for (const p of running()) { try { execSync(`taskkill /pid ${p} /T /F`, { stdio: "ignore" }); } catch { /* gone */ } } };
-function install(exe) { const r = spawnSync(exe, ["/S", `/D=${installDir}`], { timeout: 180000 }); return r.status; }
+function install(exe) { const r = spawnSync(exe, ["/S", `/D=${installDir}`], { timeout: 600000 }); return r.status; }
 
 async function launch() {
   const out = [];
