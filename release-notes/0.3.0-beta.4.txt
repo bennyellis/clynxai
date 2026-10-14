@@ -1,0 +1,5 @@
+Clynx Beta 4 - what is new
+* Clynx now updates itself. When a newer, signed version is published it is downloaded in the background, checked (signature and checksums) and installed automatically while Clynx is idle: it never restarts in the middle of a scan or a Watch check (unless one has been running for 12 hours), and never in the first minutes after you open it. Your data is kept.
+* You can still choose, in Config > Account > Updates, to be asked first or to be only told.
+* A version that fails to install is not retried by itself, and a version that will not start is rolled back as before.
+* From Beta 3 you still install this build once by hand (download page); from then on updates are automatic.

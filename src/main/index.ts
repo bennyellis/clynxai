@@ -171,7 +171,7 @@ function loadAppSettings(): AppSettings {
   try {
     if (!existsSync(APP_SETTINGS_PATH)) return { cloudApiUrl: defaultCloudApiUrl() };
     const raw = JSON.parse(readFileSync(APP_SETTINGS_PATH, "utf-8"));
-    return { cloudApiUrl: resolveSavedServerUrl(raw?.cloudApiUrl, { packaged: app.isPackaged, buildDefault: buildInfo.defaultServerUrl, devDefault: "http://localhost:8787" }), localMode: raw?.localMode === true, aiSource: raw?.aiSource === "shared" || raw?.aiSource === "own" ? raw.aiSource : undefined, protectKeys: raw?.protectKeys === true, updateMode: raw?.updateMode === "off" || raw?.updateMode === "notify" || raw?.updateMode === "download" ? raw.updateMode : undefined, updateChannel: raw?.updateChannel === "beta" || raw?.updateChannel === "stable" ? raw.updateChannel : undefined };
+    return { cloudApiUrl: resolveSavedServerUrl(raw?.cloudApiUrl, { packaged: app.isPackaged, buildDefault: buildInfo.defaultServerUrl, devDefault: "http://localhost:8787" }), localMode: raw?.localMode === true, aiSource: raw?.aiSource === "shared" || raw?.aiSource === "own" ? raw.aiSource : undefined, protectKeys: raw?.protectKeys === true, updateMode: raw?.updateMode === "off" || raw?.updateMode === "notify" || raw?.updateMode === "download" || raw?.updateMode === "automatic" ? raw.updateMode : undefined, updateChannel: raw?.updateChannel === "beta" || raw?.updateChannel === "stable" ? raw.updateChannel : undefined };
   } catch {
     return { cloudApiUrl: defaultCloudApiUrl() };
   }
@@ -3780,7 +3780,8 @@ app.whenReady().then(() => {
     publicKeyPem: updatePublicKey,
     currentVersion: buildInfo.version,
     channel: updateChannel,
-    mode: () => appSettings.updateMode ?? "download",
+    mode: () => appSettings.updateMode ?? "automatic",
+    isBusy: () => watchSearching || [...engines.values()].some((e) => e.getStatus().running),
     platform: process.platform,
     arch: process.arch,
     stateFile: path.join(baseDir, "updates", "update-state.json"),
@@ -3809,7 +3810,8 @@ app.whenReady().then(() => {
       if (s.state === "available") {
         notices.set({ id: "update", severity: "info", title: `Clynx ${s.version} is available`, message: "A new version is ready to download. Your data is not affected. It installs only when you say so.", action: "download-update", actionLabel: "Download it" });
       } else if (s.state === "ready") {
-        notices.set({ id: "update", severity: "info", title: `Clynx ${s.version} is ready to install`, message: "It was downloaded and checked (signature and checksums). Installing closes Clynx for a moment and reopens it. Your data is not affected.", action: "install-update", actionLabel: "Restart and install" });
+        const auto = info.mode === "automatic";
+        notices.set({ id: "update", severity: "info", title: auto ? `Clynx ${s.version} will install by itself` : `Clynx ${s.version} is ready to install`, message: auto ? "It was downloaded and checked (signature and checksums) and installs when Clynx is idle: Clynx closes for a moment and reopens. Your data is not affected." : "It was downloaded and checked (signature and checksums). Installing closes Clynx for a moment and reopens it. Your data is not affected.", action: "install-update", actionLabel: auto ? "Install now" : "Restart and install" });
       } else if (s.state === "downloading" || s.state === "installing") {
         /* shown in Config > Account > Updates */
       } else {
@@ -3838,7 +3840,7 @@ app.whenReady().then(() => {
   ipcMain.handle("updates:install", () => updater.installNow());
   ipcMain.handle("updates:rollback", () => updater.rollback());
   ipcMain.handle("updates:setMode", (_e, args: { mode?: string }) => {
-    if (args?.mode !== "off" && args?.mode !== "notify" && args?.mode !== "download") return { ok: false };
+    if (args?.mode !== "off" && args?.mode !== "notify" && args?.mode !== "download" && args?.mode !== "automatic") return { ok: false };
     appSettings = { ...appSettings, updateMode: args.mode };
     saveAppSettings(appSettings);
     return { ok: true };

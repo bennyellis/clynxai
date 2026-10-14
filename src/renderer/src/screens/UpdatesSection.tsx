@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api.js";
 import type { UpdateInfo } from "../lib/api.js";
 
-// Config > Account > Updates. Updates come from the Clynx server you are signed in to, are checked against the publisher's signature and checksums, and install only when you click.
+// Config > Account > Updates. Updates come from the Clynx server you are signed in to, are checked against the publisher's signature and checksums, and, by default, install by themselves when Clynx is idle (you can choose to be asked first).
 // Your data (Database, settings, Facebook login, keys) is not touched by an update. In local mode there is no server, so updating is a manual download.
 
 const fmtSize = (n: number) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(0)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
@@ -132,7 +132,8 @@ export function UpdatesSection({ localMode }: { localMode: boolean }) {
       <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={{ fontWeight: 700 }}>When a new version appears</span>
-          <select data-testid="updates-mode" value={info.mode} onChange={(e) => void act(() => api.updates.setMode(e.target.value as "off" | "notify" | "download"))}>
+          <select data-testid="updates-mode" value={info.mode} onChange={(e) => void act(() => api.updates.setMode(e.target.value as "off" | "notify" | "download" | "automatic"))}>
+            <option value="automatic">Update by itself (recommended): download, then install when Clynx is idle</option>
             <option value="download">Download it in the background, then ask me to install</option>
             <option value="notify">Only tell me</option>
             <option value="off">Do not check by itself</option>

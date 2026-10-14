@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { signManifest, type UpdateManifest } from "../updateVerifier.js";
-import { Updater, type UpdateMode, type UpdaterDeps } from "../updater.js";
+import { AUTO_INSTALL_START_GRACE_MS, MAX_BUSY_WAIT_MS, Updater, type UpdateMode, type UpdaterDeps } from "../updater.js";
 import { isSafeForCommandLine, planInstallerLaunch } from "../installerLauncher.js";
 import { check, run, section } from "./_testkit.js";
 
@@ -342,6 +342,76 @@ run(async () => {
     (r2.u as unknown as { deps: { fetchImpl: typeof fetch } }).deps.fetchImpl = r2.server.fetch;
     const s401 = await r2.u.check();
     check("a refused sign-in is explained and nothing is offered", s401.state === "error" && /sign out and in again/i.test((s401 as { message: string }).message), s401);
+  }
+
+  section("automatic installation (mode 'automatic')");
+  {
+    let clock = 1_000_000;
+    let busy = false;
+    const r = rig({ mode: "automatic", now: () => clock, isBusy: () => busy });
+    r.u.init();
+    r.server.publish("0.3.0-beta.3");
+    const s = await r.u.check();
+    check("a verified update is downloaded by itself and waits", s.state === "ready" && r.launched.length === 0);
+    check("right after the app started it does NOT restart the app", (await r.u.autoInstallTick()) === "waiting-start" && r.launched.length === 0);
+    clock += AUTO_INSTALL_START_GRACE_MS + 1000;
+    busy = true;
+    check("while a scan or Watch check is running it waits", (await r.u.autoInstallTick()) === "waiting-busy" && r.launched.length === 0);
+    clock += MAX_BUSY_WAIT_MS - AUTO_INSTALL_START_GRACE_MS - 5000;
+    check("...still waiting just before the longest it may wait", (await r.u.autoInstallTick()) === "waiting-busy" && r.launched.length === 0);
+    busy = false;
+    check("once idle it installs by itself, silently, with the verified installer", (await r.u.autoInstallTick()) === "installed" && r.launched.length === 1 && r.launched[0].args.join(" ") === "/S --updated", r.launched);
+    await sleep(800);
+    check("...and quits so the installer can replace the app", r.quits === 1);
+    check("a second look does not install twice", (await r.u.autoInstallTick()) === "none" && r.launched.length === 1);
+  }
+  {
+    let clock = 5_000_000;
+    const r = rig({ mode: "automatic", now: () => clock, isBusy: () => true });
+    r.u.init();
+    r.server.publish("0.3.0-beta.3");
+    await r.u.check();
+    clock += AUTO_INSTALL_START_GRACE_MS + 1000;
+    check("a scanner that never goes idle postpones it", (await r.u.autoInstallTick()) === "waiting-busy");
+    clock += MAX_BUSY_WAIT_MS + 1000;
+    check("...but only up to the longest wait, then it installs anyway", (await r.u.autoInstallTick()) === "installed" && r.launched.length === 1);
+  }
+  {
+    let clock = 9_000_000;
+    const r = rig({ mode: "automatic", now: () => clock, seed: { lastGoodVersion: null, newestSeenPublishedAt: null, pending: { version: "0.3.0-beta.2", from: "0.3.0-beta.1", startedAt: 1, attempts: 0 }, badVersions: [] } });
+    r.u.init();
+    r.server.publish("0.3.0-beta.3");
+    await r.u.check();
+    clock += AUTO_INSTALL_START_GRACE_MS + 1000;
+    check("a version that has not yet proven it starts never triggers another automatic update", ["waiting-unproven", "none"].includes(await r.u.autoInstallTick()) && r.launched.length === 0);
+  }
+  {
+    let clock = 12_000_000;
+    const r = rig({ mode: "automatic", now: () => clock, seed: { lastGoodVersion: null, newestSeenPublishedAt: null, pending: null, badVersions: [], lastFailure: { version: "0.3.0-beta.3", reason: "The installer did not finish.", at: 1 } } });
+    r.u.init();
+    r.server.publish("0.3.0-beta.3");
+    await r.u.check();
+    clock += AUTO_INSTALL_START_GRACE_MS + 1000;
+    check("a version whose installer failed once is not retried by itself", ["skipped", "none"].includes(await r.u.autoInstallTick()) && r.launched.length === 0);
+  }
+  for (const mode of ["download", "notify", "off"] as const) {
+    let clock = 20_000_000;
+    const r = rig({ mode, now: () => clock });
+    r.u.init();
+    r.server.publish("0.3.0-beta.3");
+    await r.u.check({ manual: true });
+    if (mode === "notify") await r.u.download();
+    clock += 10 * MAX_BUSY_WAIT_MS;
+    check(`mode '${mode}' never installs by itself, however long it waits`, (await r.u.autoInstallTick()) === "none" && r.launched.length === 0 && r.quits === 0);
+  }
+  {
+    let clock = 30_000_000;
+    const r = rig({ mode: "automatic", now: () => clock });
+    r.u.init();
+    r.server.publish("0.3.0-beta.3", {}, {}, { key: OTHER_PRIV });
+    const s = await r.u.check();
+    clock += 10 * MAX_BUSY_WAIT_MS;
+    check("an update that fails verification is never installed automatically", s.state === "error" && (await r.u.autoInstallTick()) === "none" && r.launched.length === 0);
   }
 
   section("the installer hand-off command");

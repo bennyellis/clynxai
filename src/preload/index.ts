@@ -441,7 +441,7 @@ const api = {
     download: (): Promise<UpdateInfo> => ipcRenderer.invoke("updates:download"),
     install: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("updates:install"),
     rollback: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("updates:rollback"),
-    setMode: (mode: "off" | "notify" | "download"): Promise<{ ok: boolean }> => ipcRenderer.invoke("updates:setMode", { mode }),
+    setMode: (mode: "off" | "notify" | "download" | "automatic"): Promise<{ ok: boolean }> => ipcRenderer.invoke("updates:setMode", { mode }),
     setChannel: (channel: "beta" | "stable"): Promise<{ ok: boolean }> => ipcRenderer.invoke("updates:setChannel", { channel }),
     onStatus: (cb: (info: UpdateInfo) => void): (() => void) => {
       const h = (_e: unknown, info: UpdateInfo) => cb(info);

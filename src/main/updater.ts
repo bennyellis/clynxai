@@ -1,10 +1,13 @@
-// Automatic desktop updates: check the signed-in server for a newer SIGNED build, download it in the background, and (only when the person says so) install it and restart.
+// Automatic desktop updates: check the signed-in server for a newer SIGNED build, download it in the background, and install it and restart by itself (mode "automatic", the default) or
+// when the person says so (modes "download" and "notify").
 //
 // What is trusted, and what is not:
 //   * The server is NOT trusted. It hands over a manifest signed with the update key; this app holds only the PUBLIC half (resources/update-public.pem) and refuses anything whose
 //     signature does not verify, that is for another channel/platform, that is not newer than the running version, or whose publish time is older than one already accepted.
 //   * The downloaded installer is NOT trusted either: it is used only if its size, SHA-512 and SHA-256 equal what the signed manifest states, and is hashed again right before it runs.
-//   * Nothing installs without the person's click ("Restart and install"). User data (Database, settings, Facebook profile, keys) lives outside the install folder and is never touched
+//   * In mode "automatic" a verified update installs by itself, but only when Clynx is idle (no scan or Watch check running; after at most MAX_BUSY_WAIT it installs anyway), never in the
+//     first minutes after start, never while the version now running is still unproven (a just-installed update), and never again for a version whose last install did not finish.
+//     In the other modes nothing installs without the person's click ("Restart and install"). User data (Database, settings, Facebook profile, keys) lives outside the install folder and is never touched
 //     by the installer; a Database backup is made first anyway.
 //   * Signature checks cannot be switched off. A build without the public key simply cannot install updates (manual installers keep working).
 // Failure handling: an installer that did not finish is detected on the next start; a new version that fails to start 3 times is marked bad, never offered again, and (when the installer
@@ -29,7 +32,12 @@ import {
   type UpdateState,
 } from "./updateVerifier.js";
 
-export type UpdateMode = "off" | "notify" | "download";
+export type UpdateMode = "off" | "notify" | "download" | "automatic";
+
+/** How often a ready update is reconsidered for automatic installation, how long after start Clynx waits before it may restart itself, and how long a busy scanner can postpone it. */
+export const AUTO_INSTALL_CHECK_MS = 60_000;
+export const AUTO_INSTALL_START_GRACE_MS = 90_000;
+export const MAX_BUSY_WAIT_MS = 12 * 60 * 60_000;
 export type UpdateChannel = "beta" | "stable";
 
 export type UpdateStatus =
@@ -73,6 +81,8 @@ export interface UpdaterDeps {
   fetchImpl?: typeof fetch;
   /** Copies the user's data aside before an install (best effort; its result is reported, not required). */
   backupBeforeInstall?: () => Promise<boolean>;
+  /** True while a scan or a Watch check is running: an automatic install waits for it to finish (up to MAX_BUSY_WAIT). */
+  isBusy?: () => boolean;
   /** Starts the installer and returns; the app is quit by `quit` right after. */
   launchInstaller: (installerPath: string, args: string[]) => void;
   quit: () => void;
@@ -93,10 +103,14 @@ export class Updater {
   private busy = false;
   private lastCheckedAt: number | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private autoTimer: ReturnType<typeof setInterval> | null = null;
+  private readySince: number | null = null;
+  private readonly startedAt: number;
   private readonly now: () => number;
 
   constructor(private deps: UpdaterDeps) {
     this.now = deps.now ?? Date.now;
+    this.startedAt = this.now();
     this.state = readUpdateState(deps.stateFile);
   }
 
@@ -266,13 +280,14 @@ export class Updater {
       if (fs.existsSync(existing) && fs.statSync(existing).size === offer.file.size && hashFile(existing, "sha512") === offer.file.sha512) {
         this.readyPath = existing;
         this.set({ state: "ready", version: m.version, notes: m.notes ?? "" });
+        this.armAutoInstall();
         return this.status;
       }
       this.set({ state: "available", version: m.version, notes: m.notes ?? "", size: offer.file.size, publishedAt: m.publishedAt });
     } finally {
       this.busy = false;
     }
-    if (this.deps.mode() === "download") await this.download();
+    if (this.deps.mode() === "download" || this.deps.mode() === "automatic") await this.download();
     return this.status;
   }
 
@@ -312,13 +327,49 @@ export class Updater {
       }
       this.readyPath = result.path;
       this.set({ state: "ready", version: o.manifest.version, notes: o.manifest.notes ?? "" });
+      this.armAutoInstall();
       return this.status;
     } finally {
       this.busy = false;
     }
   }
 
-  // ---------------------------------------------------------------- installing (only ever on the person's click)
+  // ---------------------------------------------------------------- automatic installation
+  /** Starts watching a ready update (mode "automatic" only). Safe to call repeatedly. */
+  private armAutoInstall(): void {
+    if (this.deps.mode() !== "automatic") return;
+    this.readySince ??= this.now();
+    if (this.autoTimer) return;
+    this.autoTimer = setInterval(() => void this.autoInstallTick(), AUTO_INSTALL_CHECK_MS);
+    this.autoTimer.unref?.();
+  }
+  private disarmAutoInstall(): void {
+    if (this.autoTimer) clearInterval(this.autoTimer);
+    this.autoTimer = null;
+    this.readySince = null;
+  }
+
+  /** One look at whether the ready update may be installed now. Public so it can be tested with a fake clock. Returns what it decided. */
+  async autoInstallTick(): Promise<"installed" | "waiting-busy" | "waiting-start" | "waiting-unproven" | "skipped" | "none"> {
+    if (this.deps.mode() !== "automatic" || this.status.state !== "ready" || !this.offered) {
+      if (this.status.state !== "ready") this.disarmAutoInstall();
+      return "none";
+    }
+    const version = this.offered.manifest.version;
+    // a version whose installer already failed to finish once is never retried by itself (the person can still click)
+    if (this.state.lastFailure && this.state.lastFailure.version === version) return "skipped";
+    // the version now running must have proven it starts, or a bad update could restart the app in a loop
+    if (this.state.pending) return "waiting-unproven";
+    if (this.now() - this.startedAt < AUTO_INSTALL_START_GRACE_MS) return "waiting-start";
+    const waited = this.now() - (this.readySince ?? this.now());
+    if (this.deps.isBusy?.() && waited < MAX_BUSY_WAIT_MS) return "waiting-busy";
+    this.log(`installing ${version} automatically${this.deps.isBusy?.() ? " (waited the longest it may for a scan to finish)" : ""}`);
+    this.disarmAutoInstall();
+    const r = await this.installNow();
+    return r.ok ? "installed" : "skipped";
+  }
+
+  // ---------------------------------------------------------------- installing (on the person's click, or by itself in mode "automatic")
   async installNow(): Promise<{ ok: boolean; error?: string }> {
     const o = this.offered;
     if (this.status.state !== "ready" || !o || !this.readyPath) return { ok: false, error: "There is no downloaded update to install." };
@@ -446,5 +497,6 @@ export class Updater {
   stopSchedule(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    this.disarmAutoInstall();
   }
 }
