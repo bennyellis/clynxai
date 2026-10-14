@@ -1,0 +1,77 @@
+CLYNX - DESKTOP SIGN-IN "localhost:8787" FIX - REPORT
+=====================================================
+Rollback point: git commit 5d14b18 (before the fix). Fix: commits 16202bd and the test-log commit after it. Corrected installer: Beta 3 (0.3.0-beta.3), a signed DRAFT, NOT published.
+
+THE SHORT VERSION
+-----------------
+* Port 8787 is NOT a callback listener. Clynx has no OAuth, no browser redirect and no local callback server anywhere. Sign-in is one direct request from the app to the server's /auth/login (or /auth/register). 8787 is only the address of the DEVELOPER's own Docker server on the builder's PC ("http://localhost:8787" is a development default). "localhost" always means "this computer", so on the tester's PC it pointed at nothing.
+* Why it reached the tester: every build up to and including Beta 1 started the sign-in at http://localhost:8787 and wrote that value into app-settings.json as soon as the person pressed "Start Clynx". An installed copy that is updated or reinstalled keeps that file, so the old address survives and the sign-in keeps trying "this computer". The Server address box was also hidden under "Advanced" whenever an address was already saved, so the tester could not see or change it.
+* Fixed in Beta 3: (1) an installed build treats the old developer value as "no server chosen" and replaces it; (2) the build carries the real address, https://ben.tail0e333d.ts.net, so a new PC starts there; (3) the Server address is always visible on the sign-in form and is tested automatically before any password is typed; (4) if an address says "localhost" and nothing answers, the message now says so in plain words. Nothing about authentication was loosened.
+* Tested with the packaged app, 24 of 24 checks pass, including a real "Test connection" to https://ben.tail0e333d.ts.net (real certificate, private mode noticed) and a proof that nothing reached the developer server on localhost:8787.
+* Beta 3 is on your server as a DRAFT (signed, hash verified). You decide when to publish.
+
+WHAT I COULD AND COULD NOT CONFIRM (please read)
+------------------------------------------------
+* I could reproduce the failing mechanism: a profile whose app-settings.json holds http://localhost:8787 (what Beta 1 wrote) keeps trying localhost after an install over it. This follows from the code (the old loader returned any saved value unchanged); S2/S3 below prove the new loader replaces it. I did not run t22 against the old build to watch it fail.
+* I could NOT reproduce it on a truly clean install of Beta 2 revision B: a clean packaged Beta 2 starts with an EMPTY Server address (no localhost anywhere), and asks for one. So the tester's PC must have had old state: most likely Beta 1 (or a development copy) installed earlier, OR the address was typed/kept from earlier tries. I have no way to look at their PC. To confirm, ask them for (a) Settings > Apps > Clynx version and (b) the one line "cloudApiUrl" in %APPDATA%\Clynx\app-settings.json. Either way the fix covers both cases (old value replaced; clean PCs start at the real server).
+* Your server log shows no desktop sign-in request from the tester ever reached ben.tail0e333d.ts.net - consistent with the app talking to localhost on their own PC. (Their website registration, codyharman51@gmail.com, did reach it.)
+
+1. COMPLETE DESKTOP LOGIN FLOW (as implemented)
+-----------------------------------------------
+ Renderer LoginScreen.tsx -> IPC auth:login / auth:register -> main/cloudClient.ts -> HTTPS POST {server}/auth/login | /auth/register (+ invitation code when the server is private)
+   -> server returns a 15-minute access token + a rotating, device-bound refresh token -> stored in cloud-session.json (encrypted when the OS allows) -> device registration -> automatic sign-in on restart.
+ {server} = the "Server address" box, saved in app-settings.json (cloudApiUrl). Address rules (serverAddress.ts): https required for internet hosts; plain http only for loopback / private network / .local / single-word hosts.
+ No redirects, no callback URL, no listener on any port, no browser involved in desktop sign-in (the website uses its own cookie sign-in; that is separate).
+ Where 8787 appeared: exactly one place in src (main/index.ts defaultCloudApiUrl: used only when the app is NOT packaged, i.e. a developer run) plus the settings value Beta 1 saved.
+
+2. ROOT CAUSE
+-------------
+ Beta 1 default = http://localhost:8787, saved to app-settings.json on first use; the box was hidden under "Advanced" once something was saved; Beta 2 removed the default for NEW installs but kept any saved value, so an upgraded or previously used profile kept localhost. On another computer "localhost" is that computer, nothing listens, the request fails.
+
+3. THE FIX (files changed)
+--------------------------
+ src/main/serverAddress.ts ........ isLegacyDevDefault(), resolveSavedServerUrl() (installed build: old developer default -> the build's own server or empty; anything else the person typed is kept, e.g. a LAN address or another port), loopback-aware failure message ("localhost means THIS computer ...").
+ src/main/index.ts ................ loadAppSettings uses resolveSavedServerUrl (so the cleaned value is also written back to disk).
+ src/renderer/src/screens/LoginScreen.tsx .. Server address always visible (no "Advanced" button), checked automatically ~0.7 s after it is shown or edited, in sign-in AND register mode, before any password is sent; sign-in is not attempted against an address that did not answer as a Clynx server.
+ scripts/build-info.cjs (existing) + CLYNX_DEFAULT_SERVER at build time ... Beta 3 built with https://ben.tail0e333d.ts.net as its starting address (the box stays editable).
+ package.json ..................... 0.3.0-beta.3.   release-notes/0.3.0-beta.3.txt
+ Tests: src/main/__tests__/serverAddress.test.ts (42), audit/phase115_integration/t22_clean_install_auth.cjs + t22_result.log.
+ Unchanged by design: server code, the private-beta gate, invitation codes, Owner permissions, accounts, update signing and its checks, Gate thresholds/scanning.
+
+4. TEST RESULTS
+---------------
+ Desktop unit tests: all 48 files pass (serverAddress: 42 checks, incl. legacy-default migration, user-chosen LAN/other-port kept, dev runs keep localhost:8787, localhost error text). Typechecks (main + renderer) clean.
+ t22 (packaged app dist\win-unpacked, same app.asar as the installer; throw-away private invitation-only Docker server; real Test connection to the Funnel address): 24 passed, 0 failed.
+   S1 clean profile: Server box visible; starts at https://ben.tail0e333d.ts.net, no "localhost"/"8787" on screen; auto "Connected" against the REAL server with its real certificate.
+   S2 Beta-1-style profile ({"cloudApiUrl":"http://localhost:8787","localMode":true}): local mode and local data kept; address no longer localhost; "leave local mode" shows the real server; the file on disk is cleaned.
+   S3 same with 127.0.0.1:8787, not in local mode: starts at the real server.
+   S4 on the private server: typing the address -> Connected; register with an invitation code; device registered; Log out; form remembers the server; wrong password refused in plain words; sign IN works; restart signs in by itself; a stranger still gets 401 and cannot register without a code.
+   S5 "localhost" with nothing listening: message says localhost means THIS computer; no sign-in attempted.
+   S6 the developer server on localhost:8787 received zero requests during the run.
+ Not run: cloud (265) and website (42) suites - no server or website code changed since their last passing run. Not tested: an actual second physical PC; the NSIS installer itself in this round (my install tests are still blocked by the leftover per-machine registration on this PC; the installer is built from the same app.asar that t22 tested); real Funnel registration/sign-in (only read-only Test connection was made, no account was created on your real server).
+ The test stack was removed afterwards; your real server and Owner account were not touched (accounts unchanged; the only server change is the new DRAFT release row).
+
+5. THE CORRECTED INSTALLER
+--------------------------
+ beta-release\Clynx-Beta-Setup-0.3.0-beta.3.exe   124,738,163 bytes
+ SHA-256  B32E3BF460FE333C3CE0114C53D2D74158A42271C58995168546B8530258F220
+ Built from clean commit 16202bd8ac0e, built-in server https://ben.tail0e333d.ts.net. The installer is not Windows-code-signed (no certificate): SmartScreen "unknown publisher" is expected. "Signed" here = the update manifest is signed with your Ed25519 key (verified by the server).
+ Server state: 0.3.0-beta.2 = published; 0.3.0-beta.3 = DRAFT (invisible, not downloadable). NOT published.
+
+6. EXACT STEPS TO DEPLOY
+------------------------
+ Right now (no new build needed) - tell the tester:
+   1. Open Clynx, on the sign-in screen click the Server address box (or on the very first screen choose "I have a Clynx Cloud account"), delete what is there, type  https://ben.tail0e333d.ts.net  and wait for "Connected". If the box is hidden (older build), close Clynx, delete %APPDATA%\Clynx\app-settings.json (keeps all data; only the saved address/mode is reset), reopen.
+ Publish the fix:
+   2. Website console (https://ben.tail0e333d.ts.net, signed in as Owner) > Releases > 0.3.0-beta.3: check the SHA-256 above, Approve, then Publish (type the version).
+   3. The tester downloads Beta 3 from the private Download page (signed in) and installs it over the old copy ("only for me"); data is kept; the sign-in starts at the real server. (A tester who CAN sign in gets it automatically via Settings > Updates, "Restart and install"; a tester who cannot sign in must use the download page, as above.)
+   4. Ask the tester to send (a) Settings > Apps version and (b) the cloudApiUrl line, if you want to confirm what their PC had.
+   5. Then: sign in with the invitation they already registered with on the website (codyharman51@gmail.com exists; if the desktop sign-in says the account exists, use "Sign in", not "Need an account").
+ Remote PCs need no Docker, no local server and no Tailscale: they only reach https://ben.tail0e333d.ts.net (Funnel certificate).
+ Still your pending item from Phase 11.5: uninstall the stale per-machine Clynx entry on this PC (Settings > Apps > Clynx (beta) > Uninstall, or Remove-StaleClynxTestInstall.ps1 as administrator); then I can re-run the installer-based cycle (cycle115.sh) for a full installer test. Note cycle115.sh still builds "Beta 2" by version text; it needs a small edit for the new version before reuse.
+
+7. THINGS TO KNOW
+-----------------
+ * Same-version caveat: Beta 3 is a new version (not a re-issue), so existing testers see it as an update after you publish.
+ * A tester who deliberately typed another address (LAN, another port) keeps it; only the exact old developer default (localhost/127.0.0.1/[::1] port 8787) is replaced in installed builds. Development runs (npm run dev) still default to localhost:8787.
+ * No security setting was weakened: https is still required for internet hosts, private mode, invitation-only sign-up, token handling and update verification are as before.
