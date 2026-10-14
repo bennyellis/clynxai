@@ -70,6 +70,28 @@ describe("a visitor who is not signed in", () => {
     const r = await app.inject({ method: "GET", url: "/releases/00000000-0000-4000-8000-000000000000/download" });
     expect(r.statusCode).toBe(401);
   });
+  it("cannot slip past the gate with an odd spelling of a protected address", async () => {
+    const odd = [
+      "//admin/overview", "/admin/overview/", "/admin//overview", "/%61dmin/overview", "/admin%2Foverview", "/ADMIN/overview", "/Releases/latest",
+      "/health/../admin/overview", "/health/ready/../../admin/overview", "/gate/../admin/overview", "/server/info/../../admin/overview", "/server/info%2f..%2fadmin/overview",
+      "/auth/login/../../admin/overview", "/robots.txt/../admin/overview", "/.%2e/admin/overview", "/health;/admin/overview", "/health?/admin/overview=1",
+    ];
+    for (const p of odd) {
+      const r = await app.inject({ method: "GET", url: p });
+      expect([200, 400, 401, 404].includes(r.statusCode), `${p} -> ${r.statusCode}`).toBe(true);
+      // whatever the answer, it must not be protected data
+      expect(r.body, p).not.toMatch(/"users"|"downloads30"|"signups7"/);
+    }
+    for (const m of ["POST", "PUT", "DELETE", "PATCH"] as const) {
+      const r = await app.inject({ method: m, url: "/admin/releases", payload: {} });
+      expect(r.statusCode, m).toBe(401);
+    }
+    // a header that asks to be treated as another method changes nothing
+    expect((await app.inject({ method: "GET", url: "/admin/overview", headers: { "x-http-method-override": "POST", "x-original-url": "/health", "x-rewrite-url": "/health" } })).statusCode).toBe(401);
+    // a made-up bearer token or cookie opens nothing
+    expect((await app.inject({ method: "GET", url: "/releases/latest", headers: { authorization: "Bearer abc.def.ghi" } })).statusCode).toBe(401);
+    expect((await app.inject({ method: "GET", url: "/releases/latest", headers: { cookie: "clynx_sid=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; __Host-clynx_sid=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } })).statusCode).toBe(401);
+  });
   it("is told, by robots.txt, to stay away", async () => {
     const r = await app.inject({ method: "GET", url: "/robots.txt" });
     expect(r.statusCode).toBe(200);

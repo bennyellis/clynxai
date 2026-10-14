@@ -21,3 +21,8 @@
 
 ## Not in this beta
 Mobile apps, a public internet server, code signing, automatic updates for local mode, macOS, two-factor sign-in.
+
+## Added in revision B (private beta)
+* A private server checks your sign-in on update checks and downloads, so updates work only while you are signed in. Signed out, Clynx simply does not check.
+* An "all users" (per-machine) install makes the silent update installer ask for administrator rights (a Windows UAC prompt) every time. Install "only for me".
+* The update hand-off waits for that prompt; if it is dismissed the update does not install and Clynx reopens on the old version.

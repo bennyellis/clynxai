@@ -57,6 +57,7 @@ try {
   Write-Host "Done: $Version ($Channel) is a DRAFT with a verified signed manifest. Nobody can see or download it yet." -ForegroundColor Green
   Write-Host "To release it: website console > Releases > $Version > Approve, then Publish (type the version)." -ForegroundColor Cyan
 } finally {
-  Invoke-Compose @("exec", "-T", "api", "sh", "-c", "rm -f /tmp/$name /tmp/notes.txt /tmp/issues.txt /tmp/signed.json") -AllowFail
+  # (files copied in with docker cp belong to root, so they are removed as root)
+  Invoke-Compose @("exec", "-T", "-u", "root", "api", "sh", "-c", "rm -f /tmp/$name /tmp/notes.txt /tmp/issues.txt /tmp/signed.json") -AllowFail
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

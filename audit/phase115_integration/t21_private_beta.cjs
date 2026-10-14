@@ -26,6 +26,13 @@ const envVals = () => Object.fromEntries(fs.readFileSync(ENVFILE, "utf8").split(
 const psql = (sql) => { const v = envVals(); return dc("exec", "-T", "postgres", "psql", "-U", v.POSTGRES_USER, "-d", v.POSTGRES_DB, "-tAc", sql).trim(); };
 const curl = (args) => spawnSync("curl", ["-sk", "--max-time", "20", ...args], { encoding: "utf8" });
 
+
+// An installer that finds a PER-MACHINE ("all users") registration of Clynx elevates itself, which shows a Windows UAC prompt on the screen and waits for a click. A test must never do that:
+// stop here instead (uninstall the stale "Clynx (beta)" entry in Settings > Apps first).
+{
+  const r = spawnSync("powershell", ["-NoProfile", "-Command", "Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { $_.DisplayName -match 'Clynx' } | ForEach-Object { $_.DisplayName }"], { encoding: "utf8" });
+  if (r.stdout.trim()) { console.error("REFUSING TO RUN: a per-machine Clynx install is registered (" + r.stdout.trim() + "). Its installer would pop up a UAC prompt. Uninstall it in Settings > Apps first."); process.exit(3); }
+}
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "clynx-t21-"));
 const installDir = path.join(root, "install"), userData = path.join(root, "userdata"), downloads = path.join(root, "downloads");
 fs.mkdirSync(userData, { recursive: true });
@@ -200,7 +207,7 @@ async function quitApp(h) {
     L.check("[E] after a reload the code is gone; only a status remains", !(await pg.textContent("body")).includes(code2));
 
     // ================================================================ F. install what was DOWNLOADED, connect, register with the invitation
-    const code = spawnSync(saved, ["/S", `/D=${installDir}`], { timeout: 600000 }).status;
+    const code = spawnSync(saved, ["/S", "/currentuser", `/D=${installDir}`], { timeout: 600000 }).status;
     L.check("[F] the downloaded installer installs silently", code === 0 && fs.existsSync(EXE), code);
     const B2_ASAR = asarHash();
     h = await launchApp();

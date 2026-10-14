@@ -1,0 +1,73 @@
+CLYNX - PHASE 11.5 SECURITY REVIEW (PRIVATE BETA OVER THE INTERNET)
+===================================================================
+Scope: the private-beta gate, invitation-only registration, authenticated downloads/updates, the planned tunnel, and Beta 2 revision B. Earlier reviews (Phase 10, Phase 11) still apply.
+"Verified" = a test or command I ran. "Not verified" = designed but not exercised. NOTHING is reachable from the internet yet: the tunnel was not started.
+
+
+1. THE DESIGN IN ONE PARAGRAPH
+------------------------------
+Transport (HTTPS, no router ports) is provided by a tunnel (recommended: Tailscale Funnel). Access control is Clynx's own: with ACCESS_MODE=private every request must carry a website session cookie or a desktop bearer token, except a short list of endpoints; strangers receive only a self-contained sign-in page. With REGISTRATION=invite an account needs a one-time invitation code from the Owner/an administrator. The gate lives inside Clynx (not in front of it) because a gate in front would also block the desktop app, which cannot answer a browser login page.
+
+
+2. WHAT A STRANGER CAN REACH (verified over https, with a local TLS front standing in for the tunnel, and by 22 unit tests)
+------------------------------------------------------------------------------------------------------------------------
+  * GET anything in a browser  -> a 401 page with a sign-in form and an invitation form. No script, no website code, no asset, no data. Headers: HSTS (when https), X-Robots-Tag noindex/nofollow/noarchive/nosnippet, CSP default-src 'none' (+ inline style only), Cache-Control no-store, Referrer-Policy same-origin.
+  * /robots.txt (Disallow: /), /health, /health/ready, /server/info (name, version, API version, access/registration mode, three yes/no flags for shared services; no secrets), /metrics (needs its own token), /billing/webhook (needs the payment provider's signature; billing is off).
+  * /auth/login, /auth/refresh, /auth/logout, /auth/register (desktop sign-in; register needs an invitation code), /gate/login, /gate/join. All rate limited (section 4).
+  * Everything else: 401 {"error":"private_beta"} with no detail - the website bundle, /releases*, /updates*, /plans, /admin, /web, /devices, /ai, /ebay, the installer download. Tested also with odd spellings (//admin, %2F, ../ tricks, case changes, method-override headers, forged bearer tokens and cookies): none opens anything; the gate fails closed because anything not exactly on its list needs a valid session.
+  * Not exposed at all: PostgreSQL, Redis, the Docker daemon, the developer stack (127.0.0.1 only), the update signing key (on this PC only, never in Docker/the repository/the website).
+
+
+3. WHO IS AN "AUTHORIZED TESTER"
+--------------------------------
+A person with an account. Accounts exist only if (a) the Owner/an administrator created an invitation code for them, or (b) they already had one (your Owner account; benboyers1@gmail.com was already on the server and keeps working). Invitation codes: 16 characters from a 32-character alphabet (80 bits), only a SHA-256 hash stored, shown once to the creator, valid for a chosen time (default 72 h, max 30 days), optionally tied to one email, single use (claimed atomically; given back if the sign-up fails), revocable. Disabling an account ends its website sessions at once and its desktop sign-in at the next refresh (10 minutes at most). There is no self-service "request access"; no password reset by email exists until SMTP is configured, so a locked-out tester asks the Owner.
+
+
+4. ABUSE CONTROLS (verified in tests)
+-------------------------------------
+  * Passwords: 8 failed attempts per (address + email) in 15 minutes locks that pair; the gate page limits any address to 40 sign-in/sign-up posts per 15 minutes; unauthenticated requests to non-open paths are limited to 300/minute per address.
+  * Invitation guessing: only WRONG guesses count, 10 per address per hour, then 429 (a legitimate registration is never counted against the person).
+  * Registration per address: 20 per hour (existing).
+  * Cookies: HttpOnly, SameSite=Lax; over https (detected per request from the tunnel's X-Forwarded-Proto) Secure with the __Host- prefix; sign-in forms refuse a request from another site.
+  * Cost controls are unchanged: Owner-only OpenAI/eBay credentials (encrypted), global/per-plan/per-user spending limits, emergency stop; billing is off (no Stripe), registration is invitation-only, so strangers cannot create accounts that spend your AI budget. The shared AI/eBay services are still switched off until you enter a key.
+
+
+5. DOWNLOADS AND UPDATES THROUGH THE GATE
+-----------------------------------------
+  * The installer download needs a signed-in session (browser) or a signed-in desktop (bearer token). An approved-but-unpublished release is not downloadable; a draft is invisible.
+  * The desktop sends its bearer token on update checks, rollbacks and downloads, ONLY to the server it is signed in to (an update file hosted at another address never receives it) - unit-tested. The Windows Beta 2 installed from the downloaded file found, downloaded, verified and installed a signed update through the gate (verified), and an unauthenticated or forged-token request to the manifest endpoint is refused (verified).
+  * Unchanged and still enforced: Ed25519 signature on the manifest, channel/platform/version checks (no downgrade), replay protection, size + SHA-512 + SHA-256 of the installer (re-hashed before it runs), install only on the person's click.
+  * The private signing key is read locally by Register-ClynxRelease.ps1 to sign; it is never copied into the container or the repository. The server holds only the public key.
+  * Why Beta 2 had to be rebuilt: the Phase 11 build did not present its sign-in on update requests, so a gated server would have blocked its updates; the only alternative was an un-gated update endpoint (a hole). The Phase 11 installer is kept, superseded, never distributed.
+
+
+6. TRANSPORT AND THE TUNNEL
+---------------------------
+  * https is required by the desktop app for every internet address (plain http is refused), and a certificate it does not trust is refused with no override (verified against a local certificate authority). Tailscale's certificates come from Let's Encrypt, which the app trusts. Not verified: the real Tailscale certificate chain.
+  * Funnel, per Tailscale's documentation: only ports 443/8443/10000, only the tailnet's ts.net name, traffic relayed through Tailscale's servers with unpublished bandwidth limits, and the hostname will appear in public certificate-transparency logs (so it is discoverable; the gate is what protects it). Tailscale (the company) is in the path; a TLS-terminating tunnel provider can in principle observe traffic. If that is unacceptable, run Caddy on a VPS/your own port forward instead (docker-compose.https.yml, prepared).
+  * Over the tunnel the server trusts X-Forwarded-For/Proto (TRUST_PROXY=true). Residual risk: a person ON YOUR HOME NETWORK who can reach 10.0.0.81:8788 directly could send a forged X-Forwarded-For to dodge the per-address throttles. They are already inside your network, and passwords/invitation limits keyed on email still apply to the account side; accepted, documented.
+  * The home-network address stays plain http (the app warns). The gate applies there too (verified).
+
+
+7. WHAT IS STILL WEAK
+---------------------
+  * Your Owner account can be attacked from the internet like any other. Use a long unique password; there is no two-factor sign-in. A stolen Owner session would expose the console (OpenAI key entry/replacement, spending limits). Consider keeping the Owner for you only and using a separate administrator account for testers' invitations, and never reuse the password.
+  * No email delivery: no verification emails, no password reset (SMTP not configured).
+  * A tester can pass the installer on to someone else (an unsigned beta; no per-tester watermark).
+  * The update signing private key lives on this same PC as the server. Move it offline (see Phase 11 review).
+  * No external monitoring/alerting: use Get-ClynxLanStatus.ps1; consider an uptime monitor.
+  * The installer is unsigned (SmartScreen warns; testers must click through).
+
+
+8. THINGS I DID WRONG OR FOUND ON THE WAY (own-goals)
+-----------------------------------------------------
+  * UAC PROMPTS ON YOUR SCREEN. My install tests, in Phase 11 and 11.5, triggered Windows administrator prompts. Cause: a PER-MACHINE ("all users") Clynx registration exists on this PC (HKLM, Uninstall key "Clynx (beta) 0.3.0-beta.3", program folder in my temporary test folder, uninstaller marked /allusers). While it exists, every Clynx installer - even a silent update - asks for administrator rights. It must have been created when an installer was run elevated and approved; I did not notice, and I wrongly blamed antivirus scanning for two earlier installer time-outs in Phase 11 (they were waiting for you to click the prompt). One such prompt may still be open from my last test (a "consent.exe" process was still running): if you see a Windows prompt asking to allow "Clynx-Beta-Setup", click No. I cannot remove the registration without administrator rights. Fix: Settings > Apps > Installed apps > Clynx (beta) > Uninstall (click Yes), or run cloud\deploy\windows\Remove-StaleClynxTestInstall.ps1 as administrator (it only touches a registration whose folder is inside your Temp folder and asks first). The install tests now refuse to run while such a registration exists and install with /currentuser.
+  * SCREEN CAPTURE. While looking for the installer's window I captured a full-screen image of your desktop, which showed your browser (a video site and a search tab). I looked at it only to find the installer, deleted the file immediately, and will not capture the whole screen again.
+  * Files left behind: 4 copies of the installer/notes/manifest inside the server container's /tmp (a safety check stopped me removing them; they vanish at the next server update, and the script now removes them as root).
+  * Real server changes this phase: updated to the new code after a backup (C:\Users\biggt\ClynxLan\backups\...pre-update...), private gate ON (no tunnel), Beta 2 registered as an unpublished draft. Accounts and data untouched (2 accounts).
+  * Referrer-Policy: my first gate page made browsers send "Origin: null" on form posts (the server rightly refused them): found by the real-browser test, fixed.
+
+
+9. NOT VERIFIED
+---------------
+  The real tunnel/internet path and certificate; behaviour on a second physical computer; Tailscale's limits with a 119 MB download; a re-run of the "go back" installer step on a clean machine (blocked by the per-machine registration above).

@@ -24,6 +24,13 @@ const dc = (...a) => execFileSync("docker", ["compose", "-p", "clynx-lan-test", 
 const envVals = Object.fromEntries(fs.readFileSync(ENVFILE, "utf8").split("\n").filter((l) => l.includes("=") && !l.startsWith("#")).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
 const psql = (sql) => dc("exec", "-T", "postgres", "psql", "-U", envVals.POSTGRES_USER, "-d", envVals.POSTGRES_DB, "-tAc", sql).trim();
 
+
+// An installer that finds a PER-MACHINE ("all users") registration of Clynx elevates itself, which shows a Windows UAC prompt on the screen and waits for a click. A test must never do that:
+// stop here instead (uninstall the stale "Clynx (beta)" entry in Settings > Apps first).
+{
+  const r = spawnSync("powershell", ["-NoProfile", "-Command", "Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { $_.DisplayName -match 'Clynx' } | ForEach-Object { $_.DisplayName }"], { encoding: "utf8" });
+  if (r.stdout.trim()) { console.error("REFUSING TO RUN: a per-machine Clynx install is registered (" + r.stdout.trim() + "). Its installer would pop up a UAC prompt. Uninstall it in Settings > Apps first."); process.exit(3); }
+}
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "clynx-t20-"));
 const installDir = path.join(root, "install");
 const userData = path.join(root, "userdata");
@@ -37,7 +44,7 @@ const until = async (fn, ms, every = 1000) => { const end = Date.now() + ms; whi
 const asarHash = () => crypto.createHash("sha256").update(fs.readFileSync(path.join(installDir, "resources", "app.asar"))).digest("hex").slice(0, 16);
 const running = () => spawnSync("powershell", ["-NoProfile", "-Command", `Get-Process Clynx -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '${installDir}*' } | Select-Object -ExpandProperty Id`], { encoding: "utf8" }).stdout.split(/\s+/).filter(Boolean);
 const killInstalled = () => { for (const p of running()) { try { execSync(`taskkill /pid ${p} /T /F`, { stdio: "ignore" }); } catch { /* gone */ } } };
-function install(exe) { const r = spawnSync(exe, ["/S", `/D=${installDir}`], { timeout: 600000 }); return r.status; }
+function install(exe) { const r = spawnSync(exe, ["/S", "/currentuser", `/D=${installDir}`], { timeout: 600000 }); return r.status; }
 
 async function launch() {
   const out = [];

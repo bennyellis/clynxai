@@ -40,3 +40,6 @@ In server mode Clynx checks the server for a newer **signed** version, downloads
 
 ## 7. Something not working?
 Config → Account → **Report a bug → Save a support report…** (no keys, passwords, listings or photos inside) and send it. For connection problems copy `Test-ClynxConnection.ps1` from the server's `cloud\deploy\windows` folder and run it on this computer.
+
+## 8. Private servers (invitation only)
+If the server you connect to is a private beta, you will see (after Test connection) that registering needs an **Invitation code**: type the one-time code you were sent. Strangers cannot even load the server's website: you open its address in a browser, sign in, and the **Download** page then offers this installer. When installing, choose **"Only for me"** (not "anyone who uses this computer"): an all-users install makes every later update ask Windows for administrator rights.
