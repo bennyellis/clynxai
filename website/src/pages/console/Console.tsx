@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Link, NavLink, Outlet, useNavigate, useParams } from "react-router-dom";
 import { Field, Loading, Notice, usePageMeta } from "../../components/ui";
-import { api, del, errorText, get, patch, post } from "../../lib/api";
+import { api, del, errorText, get, patch, post, put } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { formatBytes, formatDate, formatDateTime } from "../../lib/format";
 
@@ -184,7 +184,7 @@ export function ConsoleUserDetail() {
   );
 }
 
-interface AdminRelease { id: string; version: string; channel: string; status: string; notes: string; knownIssues: string; fileName: string | null; sha256: string | null; sizeBytes: number | null; createdAt: string; publishedAt: string | null; createdBy: string | null; downloads: number }
+interface AdminRelease { id: string; version: string; channel: string; status: string; notes: string; knownIssues: string; fileName: string | null; sha256: string | null; sizeBytes: number | null; createdAt: string; publishedAt: string | null; createdBy: string | null; downloads: number; hasUpdateManifest?: boolean }
 
 export function ConsoleReleases() {
   const [data, e, reload] = useLoad<{ releases: AdminRelease[] }>("/admin/releases");
@@ -210,6 +210,26 @@ export function ConsoleReleases() {
   const upload = (r: AdminRelease, file: File | undefined) => {
     if (!file) return;
     void run(`up-${r.id}`, () => api("PUT", `/admin/releases/${r.id}/file?name=${encodeURIComponent(file.name)}`, undefined, { raw: file, headers: { "Content-Type": "application/octet-stream" } }), `Uploaded ${file.name}. The server computed its SHA-256.`);
+  };
+  // Automatic updates: the manifest is signed OFFLINE with the update private key (which never touches this server); this page only downloads the unsigned text and uploads the signed result.
+  const downloadTemplate = (r: AdminRelease) =>
+    void run(`tpl-${r.id}`, async () => {
+      const t = await get<{ manifest: unknown; configured: boolean }>(`/admin/releases/${r.id}/update-manifest-template`);
+      const blob = new Blob([JSON.stringify(t.manifest, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `manifest-${r.version}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      setInfo(t.configured ? `Saved manifest-${r.version}.json. Sign it offline, then upload the signed file here.` : "Saved the manifest, but this server has no UPDATE_PUBLIC_KEY, so it will refuse the signed file until one is configured.");
+    });
+  const uploadSigned = async (r: AdminRelease, file: File | undefined) => {
+    if (!file) return;
+    void run(`sig-${r.id}`, async () => {
+      let body: unknown;
+      try { body = JSON.parse(await file.text()); } catch { throw new Error("That file is not a signed manifest (expected JSON with manifest and signature)."); }
+      await put(`/admin/releases/${r.id}/update-manifest`, body);
+    }, `The signed manifest for ${r.version} was verified and stored. ${r.status === "published" ? "Desktop apps on this channel will now be offered it." : "It is offered once the release is published."}`);
   };
   const verify = (r: AdminRelease) =>
     void run(`ver-${r.id}`, async () => {
@@ -266,6 +286,16 @@ export function ConsoleReleases() {
               </>
             )}
             {(r.status === "approved" || r.status === "published") && <button className="btn small ghost danger" onClick={() => void run(`wd-${r.id}`, () => post(`/admin/releases/${r.id}/withdraw`), "Withdrawn. It is no longer public.")}>Withdraw</button>}
+            {r.sha256 && r.status !== "withdrawn" && (
+              <>
+                <button className="btn small ghost" onClick={() => downloadTemplate(r)} title="Download the unsigned update manifest to sign offline">Manifest to sign</button>
+                <label className="btn small ghost" style={{ cursor: "pointer" }} title="Upload the manifest you signed offline">
+                  {busy === `sig-${r.id}` ? "Checking..." : r.hasUpdateManifest ? "Replace signed manifest" : "Upload signed manifest"}
+                  <input type="file" accept=".json" hidden onChange={(x) => void uploadSigned(r, x.target.files?.[0])} />
+                </label>
+                <span className={`pill ${r.hasUpdateManifest ? "ok" : ""}`}>{r.hasUpdateManifest ? "auto-update ready" : "no auto-update"}</span>
+              </>
+            )}
             {r.status === "published" && r.channel === "beta" && <button className="btn small" onClick={() => void run(`pr-${r.id}`, () => post(`/admin/releases/${r.id}/promote`), "A stable DRAFT was created. Approve and publish it separately.")}>Promote to stable (draft)</button>}
           </div>
         </section>

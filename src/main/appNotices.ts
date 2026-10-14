@@ -4,7 +4,7 @@
 export type NoticeSeverity = "error" | "warning" | "info";
 
 // What the notice's button does (the renderer maps this to a call); "dismiss" only hides it.
-export type NoticeAction = "open-facebook-login" | "retry-scanner" | "open-activity" | "recover-database" | "open-browser-download" | "dismiss";
+export type NoticeAction = "open-facebook-login" | "retry-scanner" | "open-activity" | "recover-database" | "open-browser-download" | "download-update" | "install-update" | "rollback-update" | "dismiss";
 
 export interface AppNotice {
   id: string;

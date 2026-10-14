@@ -27,6 +27,8 @@ const info = {
   dirty: git("status --porcelain").length > 0,
   builtAt: new Date().toISOString(),
 };
+// Optional: start this build at one server (the sign-in form is still editable). Without it a distributed build has NO default server and asks for one.
+if (process.env.CLYNX_DEFAULT_SERVER) info.defaultServerUrl = process.env.CLYNX_DEFAULT_SERVER;
 fs.mkdirSync(path.join(root, "resources"), { recursive: true });
 fs.writeFileSync(path.join(root, "resources", "build-info.json"), JSON.stringify(info, null, 2) + "\n");
 console.log("build-info:", JSON.stringify(info));

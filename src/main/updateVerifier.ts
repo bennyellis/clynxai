@@ -11,11 +11,14 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { classifyHost } from "./serverAddress.js";
 
 export interface UpdateFile {
   name: string;
   url: string;
   sha512: string; // hex
+  /** Also checked when present (the server records the installer's SHA-256 as well). */
+  sha256?: string; // hex
   size: number;
   platform: "win32" | "darwin" | "linux";
   arch: string;
@@ -63,7 +66,7 @@ export function verifyManifest(signed: unknown, publicKeyPem: string): ManifestC
     return { ok: false, reason: "The update information is incomplete." };
   }
   for (const f of m.files) {
-    if (typeof f?.name !== "string" || typeof f.url !== "string" || !/^[0-9a-f]{128}$/.test(f.sha512) || !Number.isInteger(f.size) || f.size <= 0) return { ok: false, reason: "The update information is incomplete." };
+    if (typeof f?.name !== "string" || typeof f.url !== "string" || !/^[0-9a-f]{128}$/.test(f.sha512) || (f.sha256 !== undefined && !/^[0-9a-f]{64}$/.test(f.sha256)) || !Number.isInteger(f.size) || f.size <= 0) return { ok: false, reason: "The update information is incomplete." };
   }
   return { ok: true, manifest: m };
 }
@@ -73,23 +76,62 @@ export function parseVersion(v: string): [number, number, number] | null {
   const m = /^(\d{1,6})\.(\d{1,6})\.(\d{1,6})(?:[-+].*)?$/.exec(v);
   return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
 }
+/** Semantic-version order: numbers first; then a pre-release ("-beta.2") is OLDER than the same number without one, and pre-releases compare part by part (beta.10 > beta.9). */
 export function compareVersions(a: string, b: string): number {
   const pa = parseVersion(a);
   const pb = parseVersion(b);
   if (!pa || !pb) return 0;
   for (let i = 0; i < 3; i++) if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
+  const ra = /-([0-9A-Za-z.]+)/.exec(a)?.[1];
+  const rb = /-([0-9A-Za-z.]+)/.exec(b)?.[1];
+  if (!ra && !rb) return 0;
+  if (!ra) return 1;
+  if (!rb) return -1;
+  const xa = ra.split(".");
+  const xb = rb.split(".");
+  for (let i = 0; i < Math.max(xa.length, xb.length); i++) {
+    const p = xa[i];
+    const q = xb[i];
+    if (p === undefined) return -1;
+    if (q === undefined) return 1;
+    const np = /^\d+$/.test(p);
+    const nq = /^\d+$/.test(q);
+    if (np && nq) {
+      if (Number(p) !== Number(q)) return Number(p) < Number(q) ? -1 : 1;
+    } else if (np !== nq) return np ? -1 : 1; // numeric parts are older than text parts
+    else if (p !== q) return p < q ? -1 : 1;
+  }
   return 0;
 }
 
 // ---- persistent state (rollback + replay protection) --------------------------------------------------------------------------------------------------------------
+export interface InstallerRecord {
+  version: string;
+  path: string;
+  sha512: string;
+  size: number;
+}
 export interface UpdateState {
+  /** The installer that put the RUNNING version on this computer, when the updater did (kept so a user-approved return to it is possible without downloading). */
+  currentInstaller?: InstallerRecord | null;
+  /** The installer of the version before the running one (rollback). */
+  previousInstaller?: InstallerRecord | null;
+  /** An update that was handed to its installer but the old version is still the one that started: the installer did not finish. */
+  lastFailure?: { version: string; at: string; reason: string } | null;
+  /** The version that was running before the current one was installed by an update (the target of a way back). */
+  previousVersion?: string | null;
   lastGoodVersion: string | null; // newest version that started and confirmed healthy
   newestSeenPublishedAt: string | null; // newest manifest time ever accepted (replay protection)
-  pending: { version: string; startsSinceInstall: number } | null; // installed but not yet confirmed healthy
+  pending: { version: string; startsSinceInstall: number; installer?: InstallerRecord | null; from?: string | null } | null; // installed but not yet confirmed healthy
   badVersions: string[]; // versions that failed to start; never offered again
 }
-export const EMPTY_UPDATE_STATE: UpdateState = { lastGoodVersion: null, newestSeenPublishedAt: null, pending: null, badVersions: [] };
+export const EMPTY_UPDATE_STATE: UpdateState = { lastGoodVersion: null, newestSeenPublishedAt: null, pending: null, badVersions: [], currentInstaller: null, previousInstaller: null, lastFailure: null };
 export const MAX_FAILED_STARTS = 3;
+
+function readInstaller(v: unknown): InstallerRecord | null {
+  const r = v as Partial<InstallerRecord> | null;
+  return r && typeof r.version === "string" && typeof r.path === "string" && /^[0-9a-f]{128}$/.test(String(r.sha512)) && Number.isInteger(r.size) ? { version: r.version, path: r.path, sha512: r.sha512 as string, size: r.size as number } : null;
+}
 
 export function readUpdateState(file: string): UpdateState {
   try {
@@ -97,8 +139,12 @@ export function readUpdateState(file: string): UpdateState {
     return {
       lastGoodVersion: typeof raw.lastGoodVersion === "string" ? raw.lastGoodVersion : null,
       newestSeenPublishedAt: typeof raw.newestSeenPublishedAt === "string" ? raw.newestSeenPublishedAt : null,
-      pending: raw.pending && typeof raw.pending.version === "string" ? { version: raw.pending.version, startsSinceInstall: Number(raw.pending.startsSinceInstall) || 0 } : null,
+      pending: raw.pending && typeof raw.pending.version === "string" ? { version: raw.pending.version, startsSinceInstall: Number(raw.pending.startsSinceInstall) || 0, installer: readInstaller(raw.pending.installer), from: typeof raw.pending.from === "string" ? raw.pending.from : null } : null,
       badVersions: Array.isArray(raw.badVersions) ? raw.badVersions.filter((x: unknown) => typeof x === "string") : [],
+      currentInstaller: readInstaller(raw.currentInstaller),
+      previousInstaller: readInstaller(raw.previousInstaller),
+      previousVersion: typeof raw.previousVersion === "string" ? raw.previousVersion : null,
+      lastFailure: raw.lastFailure && typeof raw.lastFailure.version === "string" ? { version: raw.lastFailure.version, at: String(raw.lastFailure.at ?? ""), reason: String(raw.lastFailure.reason ?? "") } : null,
     };
   } catch {
     return { ...EMPTY_UPDATE_STATE, badVersions: [] };
@@ -138,35 +184,62 @@ export function recordAccepted(state: UpdateState, m: UpdateManifest): UpdateSta
 export function onAppStart(state: UpdateState, runningVersion: string): { state: UpdateState; action: "none" | "rollback" } {
   const p = state.pending;
   if (!p || p.version !== runningVersion) {
-    // not running the pending version (it was rolled back, or never installed): drop the pending marker
+    // not running the pending version: either the installer never finished (the old version is still here: remember that, so the person is told), or it was rolled back
+    if (p && p.version !== runningVersion && p.from === runningVersion) {
+      return { state: { ...state, pending: null, lastFailure: { version: p.version, at: new Date().toISOString(), reason: "The installer did not finish, so Clynx is still on the version you had." } }, action: "none" };
+    }
     return { state: p && p.version !== runningVersion ? { ...state, pending: null } : state, action: "none" };
   }
   const starts = p.startsSinceInstall + 1;
   if (starts > MAX_FAILED_STARTS) {
     return { state: { ...state, pending: null, badVersions: [...new Set([...state.badVersions, runningVersion])] }, action: "rollback" };
   }
-  return { state: { ...state, pending: { version: p.version, startsSinceInstall: starts } }, action: "none" };
+  return { state: { ...state, pending: { ...p, startsSinceInstall: starts } }, action: "none" };
 }
-/** Call once the running version has shown it works (window loaded, database opened, a few minutes alive). */
+/** Call once the running version has shown it works (window loaded, database opened, a few minutes alive). The installer that brought it here becomes the one kept for it; the one before is kept as the way back. */
 export function markHealthy(state: UpdateState, runningVersion: string): UpdateState {
-  return { ...state, lastGoodVersion: runningVersion, pending: state.pending?.version === runningVersion ? null : state.pending };
+  const p = state.pending;
+  if (p && p.version === runningVersion) {
+    return { ...state, lastGoodVersion: runningVersion, pending: null, previousInstaller: state.currentInstaller ?? null, currentInstaller: p.installer ?? null, previousVersion: p.from ?? state.previousVersion ?? null };
+  }
+  return { ...state, lastGoodVersion: runningVersion };
 }
-/** Call when an update has been handed to the installer. */
-export function markInstalled(state: UpdateState, version: string): UpdateState {
-  return { ...state, pending: { version, startsSinceInstall: 0 } };
+/** Call when an update has been handed to the installer. `from` is the version being left. */
+export function markInstalled(state: UpdateState, version: string, installer?: InstallerRecord | null, from?: string | null): UpdateState {
+  return { ...state, lastFailure: null, pending: { version, startsSinceInstall: 0, installer: installer ?? null, from: from ?? null } };
 }
 
 // ---- download (untrusted) -> verified file -----------------------------------------------------------------------------------------------------------------------
 export type Download = (url: string) => Promise<AsyncIterable<Uint8Array>>;
 
-export async function downloadAndVerify(file: UpdateFile, stagingDir: string, download: Download, maxBytes = 600 * 1024 * 1024): Promise<{ ok: true; path: string } | { ok: false; reason: string }> {
+/** Plain http is acceptable for the download ONLY on a network the person controls (this computer or a private address): the file is not trusted until its signed checksums match anyway. */
+export function isLocalNetworkUrl(url: string): boolean {
+  try {
+    return classifyHost(new URL(url).hostname) !== "internet";
+  } catch {
+    return false;
+  }
+}
+
+export interface DownloadOptions {
+  maxBytes?: number;
+  /** Allow http:// for a download from this computer / a private network address (a home server). Never for an internet address. */
+  allowLocalNetworkHttp?: boolean;
+  onProgress?: (received: number, total: number) => void;
+}
+
+export async function downloadAndVerify(file: UpdateFile, stagingDir: string, download: Download, opts: DownloadOptions | number = {}): Promise<{ ok: true; path: string } | { ok: false; reason: string }> {
+  const o: DownloadOptions = typeof opts === "number" ? { maxBytes: opts } : opts;
+  const maxBytes = o.maxBytes ?? 600 * 1024 * 1024;
   if (file.size > maxBytes) return { ok: false, reason: "The update is larger than allowed." };
-  if (!/^https:\/\//i.test(file.url)) return { ok: false, reason: "Updates are only downloaded over https." };
+  const httpsOk = /^https:\/\//i.test(file.url);
+  if (!httpsOk && !(o.allowLocalNetworkHttp && /^http:\/\//i.test(file.url) && isLocalNetworkUrl(file.url))) return { ok: false, reason: "Updates are only downloaded over https." };
   const safeName = path.basename(file.name).replace(/[^A-Za-z0-9._-]/g, "_");
   fs.mkdirSync(stagingDir, { recursive: true });
   const partial = path.join(stagingDir, `${safeName}.part`);
   const final = path.join(stagingDir, safeName);
   const hash = crypto.createHash("sha512");
+  const hash256 = crypto.createHash("sha256");
   let received = 0;
   const out = fs.createWriteStream(partial);
   let streamError: Error | null = null;
@@ -178,6 +251,8 @@ export async function downloadAndVerify(file: UpdateFile, stagingDir: string, do
       received += chunk.byteLength;
       if (received > file.size || received > maxBytes) throw new Error("The download is larger than the update says it is.");
       hash.update(chunk);
+      hash256.update(chunk);
+      o.onProgress?.(received, file.size);
       if (streamError) throw streamError;
       if (!out.write(chunk)) await new Promise<void>((r) => out.once("drain", r));
     }
@@ -188,6 +263,7 @@ export async function downloadAndVerify(file: UpdateFile, stagingDir: string, do
     if (streamError) throw streamError;
     if (received !== file.size) throw new Error("The download is incomplete.");
     if (hash.digest("hex") !== file.sha512) throw new Error("The download does not match the signed update (checksum).");
+    if (file.sha256 && hash256.digest("hex") !== file.sha256) throw new Error("The download does not match the signed update (SHA-256).");
     fs.renameSync(partial, final);
     return { ok: true, path: final };
   } catch (err) {

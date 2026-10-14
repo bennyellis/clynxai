@@ -62,7 +62,7 @@ run(async () => {
 
   section("versions and offers");
   {
-    check("version ordering", compareVersions("0.2.0", "0.10.0") < 0 && compareVersions("1.0.0", "0.99.99") > 0 && compareVersions("1.2.3", "1.2.3") === 0 && compareVersions("1.2.3-beta", "1.2.3") === 0);
+    check("version ordering", compareVersions("0.2.0", "0.10.0") < 0 && compareVersions("1.0.0", "0.99.99") > 0 && compareVersions("1.2.3", "1.2.3") === 0 && compareVersions("1.2.3-beta", "1.2.3") < 0 && compareVersions("0.3.0-beta.2", "0.3.0-beta.1") > 0 && compareVersions("0.3.0-beta.10", "0.3.0-beta.9") > 0 && compareVersions("0.3.1-beta.1", "0.3.0") > 0); // a pre-release is OLDER than its release (the beta channel depends on this)
     const m = manifest();
     check("a newer version for this platform is offered", evaluateOffer(m, ctx()).offer === true);
     check("the same or an older version is not offered (no downgrade)", !evaluateOffer(manifest({ version: "0.2.0" }), ctx()).offer && !evaluateOffer(manifest({ version: "0.1.0" }), ctx()).offer);
@@ -119,7 +119,8 @@ run(async () => {
 
     const file = path.join(dir, "state", "update-state.json");
     writeUpdateState(file, t);
-    check("state survives a restart", JSON.stringify(readUpdateState(file)) === JSON.stringify(t));
+    const reread = readUpdateState(file);
+    check("state survives a restart", reread.lastGoodVersion === t.lastGoodVersion && reread.pending === t.pending && JSON.stringify(reread.badVersions) === JSON.stringify(t.badVersions) && reread.newestSeenPublishedAt === t.newestSeenPublishedAt);
     fs.writeFileSync(file, "{ not json");
     check("a damaged state file reads as empty, not as a crash", readUpdateState(file).lastGoodVersion === null);
   }

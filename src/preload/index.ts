@@ -5,6 +5,8 @@ import type { OnboardingState } from "../main/types.js";
 import type { Account, ActiveProductResearch, BackupSummary, BetaInfo, BillingActionResult, BillingPlanChoice, BillingStatus, BlacklistedImage, BlacklistTerm, CloudStatus, Config, FeedbackVerdict, ListingRecord, LogLine, ProductImage, ProductProfile, ScrapeStatus, Watch, WatchMatch, WatchPlatform } from "../main/types.js";
 import type { ChatMessage, ChatContext, ChatAttachment } from "../main/chat.js";
 import type { MetricsSnapshot } from "../main/metrics.js";
+import type { ServerTestResult } from "../main/serverAddress.js";
+import type { UpdateInfo } from "../main/updater.js";
 import type { AppNotice } from "../main/appNotices.js";
 import type { StartupProblem } from "../main/startupErrors.js";
 
@@ -430,6 +432,24 @@ const api = {
   },
   cloud: {
     getStatus: (): Promise<CloudStatus> => ipcRenderer.invoke("cloud:getStatus"),
+    testServer: (url: string): Promise<ServerTestResult> => ipcRenderer.invoke("cloud:testServer", { url }),
+    retryNow: (): Promise<{ online: boolean }> => ipcRenderer.invoke("cloud:retryNow"),
+  },
+  updates: {
+    getStatus: (): Promise<UpdateInfo> => ipcRenderer.invoke("updates:getStatus"),
+    check: (): Promise<UpdateInfo> => ipcRenderer.invoke("updates:check"),
+    download: (): Promise<UpdateInfo> => ipcRenderer.invoke("updates:download"),
+    install: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("updates:install"),
+    rollback: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("updates:rollback"),
+    setMode: (mode: "off" | "notify" | "download"): Promise<{ ok: boolean }> => ipcRenderer.invoke("updates:setMode", { mode }),
+    setChannel: (channel: "beta" | "stable"): Promise<{ ok: boolean }> => ipcRenderer.invoke("updates:setChannel", { channel }),
+    onStatus: (cb: (info: UpdateInfo) => void): (() => void) => {
+      const h = (_e: unknown, info: UpdateInfo) => cb(info);
+      ipcRenderer.on("updates:status", h);
+      return () => {
+        ipcRenderer.removeListener("updates:status", h);
+      };
+    },
   },
 
   // Multi-user login migration — the interactive login IS the cloud auth now

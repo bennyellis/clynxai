@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { AccountSection } from "./AccountSection.js";
 import { BackupsSection } from "./BackupsSection.js";
+import { UpdatesSection } from "./UpdatesSection.js";
 import { AboutBlock, BrowserBlock, CloudApisBlock, KeyProtectionBlock, KeysBlock, LocalLogoutSection, useBetaInfo } from "./BetaSection.js";
 import { SupportReportButton } from "./SupportReportButton.js";
 import type { Account, CloudStatus, Config as ConfigType } from "../lib/api.js";
@@ -752,6 +753,11 @@ export function ConfigScreen({
       {tab === "account" && betaInfo && !betaInfo.localMode && (
         <Section title="Your plan" subtitle="Your Clynx plan, what it includes, and billing.">
           <AccountSection onDeleted={onLoggedOut} />
+        </Section>
+      )}
+      {tab === "account" && betaInfo && (
+        <Section title="Updates" subtitle="New versions of Clynx. Checked before they can install; nothing installs without your click.">
+          <UpdatesSection localMode={betaInfo.localMode} />
         </Section>
       )}
       {tab === "account" && (

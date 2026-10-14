@@ -602,6 +602,9 @@ export interface CloudStatus {
   authenticated: boolean;
   deviceId: string | null;
   heartbeat: SyncStatus;
+  /** The server answered the last time we asked. */
+  online?: boolean;
+  lastContactAt?: number | null;
   sync: {
     watches: SyncStatus;
     feedback: SyncStatus;
@@ -750,6 +753,8 @@ export interface BillingStatus {
   canManage: boolean;
   usage: { aiRequestsToday: number; aiImagesToday: number };
   trialDays: number;
+  /** The Owner account: every feature, no subscription or payment, set only by the server's own setup procedure. */
+  owner?: boolean;
 }
 // What the Beta panel and login screen show: which build this is, whether local mode is on, and whether a browser for scanning was found.
 export interface BetaInfo {
@@ -764,6 +769,8 @@ export interface BetaInfo {
   localDataExists?: boolean;
   /** The Clynx Cloud address saved for this installation (the sign-in form starts from it). */
   cloudApiUrl?: string;
+  /** The server address this build was made for (null: none, the person enters one). */
+  defaultServerUrl?: string | null;
   /** Where AI and eBay come from for this session. */
   apiSource?: "local" | "shared" | "own";
   /** Keys (OpenAI or eBay) are saved on this computer. */

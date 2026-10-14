@@ -4,6 +4,7 @@ import { makePhotoCheck } from "./compPhotoCheck.js";
 import { app, BrowserWindow, ipcMain, safeStorage, session, shell, Menu, dialog, Notification } from "electron";
 import path from "node:path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, cpSync, statSync, readdirSync, unlinkSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { Store } from "./store.js";
 import { colorsConflict, colorsIn } from "./colors.js";
 import { ScrapeEngine } from "./scrapeEngine.js";
@@ -13,6 +14,8 @@ import { hasEbayCredentials, setEbayTransport } from "./ebayClient.js";
 import { hasOpenAIAccess, initOpenAIProxy, setApiSource } from "./openai.js";
 import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
 import { writeFileAtomic, writeFileAtomicWithBackup } from "./safeFs.js";
+import { normalizeServerUrl, testServer } from "./serverAddress.js";
+import { Updater, type UpdateChannel, type UpdateMode } from "./updater.js";
 import { SECRET_ENV_VARS, envKeyState, isProtectedValue, protectEnvText, readEnvSecrets, unprotectEnvText } from "./envKeys.js";
 import { describeStartupFailure, type StartupProblem } from "./startupErrors.js";
 import { NoticeBoard } from "./appNotices.js";
@@ -148,7 +151,8 @@ const CLOUD_SESSION_PATH = path.join(baseDir, "cloud-session.json");
 // load — same "cheap, local, never blocks startup" posture as config.json
 // always had.
 const APP_SETTINGS_PATH = path.join(baseDir, "app-settings.json");
-const DEFAULT_CLOUD_API_URL = "http://localhost:8787";
+// A distributed (installed) build has no localhost assumption: it starts at the server the build was made for, or empty so the person enters one. Only a development run starts at localhost.
+const defaultCloudApiUrl = (): string => buildInfo.defaultServerUrl ?? (app.isPackaged ? "" : "http://localhost:8787");
 interface AppSettings {
   cloudApiUrl: string;
   // Beta builds only: the tester chose "use Clynx on this computer only" (no Clynx Cloud account, nothing leaves the computer except the tester's own scans and API calls).
@@ -158,14 +162,17 @@ interface AppSettings {
   aiSource?: "shared" | "own";
   // The person chose "Protect my saved keys": new keys are saved encrypted with the operating system's key store (see envKeys.ts). Off unless chosen.
   protectKeys?: boolean;
+  // Automatic updates (cloud mode): "download" = fetch a verified update in the background and ask before installing; "notify" = only tell me; "off" = never check by itself.
+  updateMode?: UpdateMode;
+  updateChannel?: UpdateChannel;
 }
 function loadAppSettings(): AppSettings {
   try {
-    if (!existsSync(APP_SETTINGS_PATH)) return { cloudApiUrl: DEFAULT_CLOUD_API_URL };
+    if (!existsSync(APP_SETTINGS_PATH)) return { cloudApiUrl: defaultCloudApiUrl() };
     const raw = JSON.parse(readFileSync(APP_SETTINGS_PATH, "utf-8"));
-    return { cloudApiUrl: typeof raw?.cloudApiUrl === "string" && raw.cloudApiUrl.trim() ? raw.cloudApiUrl : DEFAULT_CLOUD_API_URL, localMode: raw?.localMode === true, aiSource: raw?.aiSource === "shared" || raw?.aiSource === "own" ? raw.aiSource : undefined, protectKeys: raw?.protectKeys === true };
+    return { cloudApiUrl: typeof raw?.cloudApiUrl === "string" && raw.cloudApiUrl.trim() ? raw.cloudApiUrl : defaultCloudApiUrl(), localMode: raw?.localMode === true, aiSource: raw?.aiSource === "shared" || raw?.aiSource === "own" ? raw.aiSource : undefined, protectKeys: raw?.protectKeys === true, updateMode: raw?.updateMode === "off" || raw?.updateMode === "notify" || raw?.updateMode === "download" ? raw.updateMode : undefined, updateChannel: raw?.updateChannel === "beta" || raw?.updateChannel === "stable" ? raw.updateChannel : undefined };
   } catch {
-    return { cloudApiUrl: DEFAULT_CLOUD_API_URL };
+    return { cloudApiUrl: defaultCloudApiUrl() };
   }
 }
 // Which build this is, and whether it may offer the local beta mode (only builds made with `npm run dist:beta` can; see buildInfo.ts).
@@ -180,6 +187,14 @@ function effectiveApiSource(): "local" | "shared" | "own" {
   if (appSettings.aiSource === "own") return "own";
   return hasSavedKeys() ? "own" : "shared";
 }
+const offlineNotice = () => ({
+  id: "cloud-offline",
+  severity: "info" as const,
+  title: "You're working offline",
+  message: "Clynx can't reach your Clynx server right now, so it is using the data on this computer. Syncing and your plan are picked up again by themselves, within about 15 seconds of the server coming back.",
+  action: "dismiss" as const,
+  actionLabel: "Got it",
+});
 function saveAppSettings(settings: AppSettings): void {
   writeFileAtomicWithBackup(APP_SETTINGS_PATH, JSON.stringify(settings, null, 2));
 }
@@ -3588,14 +3603,7 @@ app.whenReady().then(() => {
     if (restored.offline && restored.userId) {
       const opened = await bootstrapOrExplain(restored.userId, restored.email ?? "");
       if (!opened.ok) return { authenticated: false, userId: null, email: null, apiUrl: restored.apiUrl, startupProblem: opened.problem };
-      notices.set({
-        id: "cloud-offline",
-        severity: "info",
-        title: "You're working offline",
-        message: "Clynx can't reach your Clynx account right now, so it is using the data on this computer. Syncing and your plan are picked up again by themselves when the connection is back.",
-        action: "dismiss",
-        actionLabel: "Got it",
-      });
+      notices.set(offlineNotice());
       return { authenticated: true, userId: restored.userId, email: restored.email, apiUrl: restored.apiUrl };
     }
     if (restored.ok && restored.userId) {
@@ -3646,6 +3654,7 @@ app.whenReady().then(() => {
       localDataExists: buildInfo.localModeAllowed && localDataExists(USERS_ROOT),
       apiSource: effectiveApiSource(),
       cloudApiUrl: appSettings.cloudApiUrl,
+      defaultServerUrl: buildInfo.defaultServerUrl,
       hasSavedKeys: hasSavedKeys(),
       keyProtection: { available: safeStorage.isEncryptionAvailable(), on: appSettings.protectKeys === true, plain: envKeyState(existsSync(ENV_PATH) ? readFileSync(ENV_PATH, "utf-8") : "").plain, copies: envCopies().length },
       browser: { ok: !!browsers.preferred, using: browsers.preferred?.label ?? null, found: browsers.found.map((b) => b.label), instructions: browsers.instructions, downloadUrl: CHROME_DOWNLOAD_URL },
@@ -3655,7 +3664,9 @@ app.whenReady().then(() => {
   ipcMain.handle(
     "auth:login",
     async (_e, args: { apiUrl: string; email: string; password: string; importLocal?: boolean }): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem; imported?: string }> => {
-      const apiUrl = (args.apiUrl || appSettings.cloudApiUrl).trim();
+      const addr = normalizeServerUrl((args.apiUrl || appSettings.cloudApiUrl || "").trim());
+      if (!addr.ok) return { ok: false, error: addr.error };
+      const apiUrl = addr.url;
       const result = await cloudClient.login(apiUrl, args.email.trim(), args.password);
       if (!result.ok || !result.data) return { ok: false, error: result.error ?? "Login failed" };
       appSettings = { ...appSettings, cloudApiUrl: apiUrl, localMode: false };
@@ -3680,7 +3691,9 @@ app.whenReady().then(() => {
   ipcMain.handle(
     "auth:register",
     async (_e, args: { apiUrl: string; email: string; password: string; importLocal?: boolean }): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem; imported?: string }> => {
-      const apiUrl = (args.apiUrl || appSettings.cloudApiUrl).trim();
+      const addr = normalizeServerUrl((args.apiUrl || appSettings.cloudApiUrl || "").trim());
+      if (!addr.ok) return { ok: false, error: addr.error };
+      const apiUrl = addr.url;
       const result = await cloudClient.register(apiUrl, args.email.trim(), args.password);
       if (!result.ok || !result.data) return { ok: false, error: result.error ?? "Registration failed" };
       appSettings = { ...appSettings, cloudApiUrl: apiUrl, localMode: false };
@@ -3739,7 +3752,98 @@ app.whenReady().then(() => {
       })();
     },
     onOnline: () => notices.clear("cloud-offline"),
+    onOffline: () => {
+      if (hasActiveUserSession && !isLocalMode()) notices.set(offlineNotice());
+    },
   });
+  // Test connection (sign-in form, before any password is typed) and the "Retry now" button.
+  ipcMain.handle("cloud:testServer", (_e, args: { url?: string }) => testServer(String(args?.url ?? ""), { clientVersion: buildInfo.version }));
+  ipcMain.handle("cloud:retryNow", async (): Promise<{ online: boolean }> => {
+    if (isLocalMode() || !hasActiveUserSession) return { online: false };
+    return { online: await cloudClient.retryConnectionNow() };
+  });
+  // ---- Automatic updates (cloud mode) -------------------------------------------------------------------------------------------------------------------------
+  // The server hands over a manifest SIGNED with the update key; this build holds only the public half (resources/update-public.pem). Nothing is installed without the person's
+  // click, and a build without that file cannot install updates at all. Local beta mode makes no request (no server), so beta testers keep updating by installer.
+  let updatePublicKey: string | null = null;
+  try {
+    updatePublicKey = readFileSync(path.join(app.getAppPath(), "resources", "update-public.pem"), "utf-8");
+    if (!updatePublicKey.includes("BEGIN PUBLIC KEY")) updatePublicKey = null;
+  } catch {
+    updatePublicKey = null;
+  }
+  const updateChannel = (): UpdateChannel => appSettings.updateChannel ?? (buildInfo.channel === "production" ? "stable" : "beta");
+  const updater = new Updater({
+    getServerBase: () => (hasActiveUserSession && !isLocalMode() ? (cloudClient.getSessionInfo().apiUrl ?? appSettings.cloudApiUrl) || null : null),
+    publicKeyPem: updatePublicKey,
+    currentVersion: buildInfo.version,
+    channel: updateChannel,
+    mode: () => appSettings.updateMode ?? "download",
+    platform: process.platform,
+    arch: process.arch,
+    stateFile: path.join(baseDir, "updates", "update-state.json"),
+    stagingDir: path.join(baseDir, "updates", "staging"),
+    backupBeforeInstall: async () => {
+      const r = await runDatabaseBackup(true);
+      return !!r && r.ok;
+    },
+    launchInstaller: (installerPath, args) => {
+      const child = spawn(installerPath, args, { detached: true, stdio: "ignore", windowsHide: true });
+      child.on("error", (err) => console.error("[updates] installer failed to start:", err));
+      child.unref();
+    },
+    quit: () => {
+      allowClose = true;
+      app.quit();
+    },
+    onStatus: () => {
+      const info = updater.getStatus();
+      sendToRenderer("updates:status", info);
+      const s = info.status;
+      if (s.state === "available") {
+        notices.set({ id: "update", severity: "info", title: `Clynx ${s.version} is available`, message: "A new version is ready to download. Your data is not affected. It installs only when you say so.", action: "download-update", actionLabel: "Download it" });
+      } else if (s.state === "ready") {
+        notices.set({ id: "update", severity: "info", title: `Clynx ${s.version} is ready to install`, message: "It was downloaded and checked (signature and checksums). Installing closes Clynx for a moment and reopens it. Your data is not affected.", action: "install-update", actionLabel: "Restart and install" });
+      } else if (s.state === "downloading" || s.state === "installing") {
+        /* shown in Config > Account > Updates */
+      } else {
+        notices.clear("update");
+      }
+    },
+    onProblem: (p) => {
+      notices.set({
+        id: "update-problem",
+        severity: "warning",
+        title: p.kind === "rollback-offered" ? `Clynx ${p.version} had trouble starting` : `The update to ${p.version} did not finish`,
+        message: p.message,
+        action: p.canRollback ? "rollback-update" : "dismiss",
+        actionLabel: p.canRollback ? "Go back to the earlier version" : "Got it",
+      });
+    },
+    log: (m) => console.log(m),
+  });
+  updater.init();
+  updater.startSchedule();
+  // a version that has been running for two minutes, with its window up, has proved it starts: that ends the "pending" watch on a freshly installed update
+  setTimeout(() => updater.confirmHealthy(), 2 * 60_000).unref?.();
+  ipcMain.handle("updates:getStatus", () => updater.getStatus());
+  ipcMain.handle("updates:check", () => updater.check({ manual: true }).then(() => updater.getStatus()));
+  ipcMain.handle("updates:download", () => updater.download().then(() => updater.getStatus()));
+  ipcMain.handle("updates:install", () => updater.installNow());
+  ipcMain.handle("updates:rollback", () => updater.rollback());
+  ipcMain.handle("updates:setMode", (_e, args: { mode?: string }) => {
+    if (args?.mode !== "off" && args?.mode !== "notify" && args?.mode !== "download") return { ok: false };
+    appSettings = { ...appSettings, updateMode: args.mode };
+    saveAppSettings(appSettings);
+    return { ok: true };
+  });
+  ipcMain.handle("updates:setChannel", (_e, args: { channel?: string }) => {
+    if (args?.channel !== "beta" && args?.channel !== "stable") return { ok: false };
+    appSettings = { ...appSettings, updateChannel: args.channel };
+    saveAppSettings(appSettings);
+    return { ok: true };
+  });
+
   // Opens the person's account on the website in their own browser (only an address on the server they signed in to, https or local development).
   ipcMain.handle("account:openWebsite", (_e, args: { page?: string }): { ok: boolean; error?: string } => {
     const allowed: Record<string, string> = { account: "/account", billing: "/account/billing", devices: "/account/devices", download: "/download", support: "/support" };
@@ -3805,6 +3909,8 @@ app.whenReady().then(() => {
       authenticated: cloud.authenticated,
       deviceId: cloud.deviceId,
       heartbeat: cloud.heartbeat,
+      online: cloudClient.getConnection().online,
+      lastContactAt: cloudClient.getConnection().lastContactAt,
       sync: {
         watches: watchSyncService.getStatus(),
         feedback: feedbackSyncService.getStatus(),

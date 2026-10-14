@@ -547,8 +547,16 @@ export class CloudClient {
       if (result.ok) {
         this.lastHeartbeatAt = Date.now();
         this.lastHeartbeatError = null;
+        this.markConnection(true);
       } else {
         this.lastHeartbeatError = result.error ?? "Heartbeat failed";
+        if (result.status === undefined) {
+          // no answer at all: the server (or the network) is down
+          this.markConnection(false);
+          this.scheduleOfflineRetry();
+        } else if (result.status === 401 && this.refreshToken) {
+          void this.refreshAccessToken(); // the access token expired while we were away: get a new one now instead of waiting for the timer
+        }
       }
       return result;
     } catch (err) {
@@ -981,20 +989,51 @@ export class CloudClient {
   private restoreInFlight: Promise<{ ok: boolean; userId: string | null; email: string | null; apiUrl: string | null }> | null = null;
   // Told when the server answers for good that this sign-in is over (the computer was removed on the website, the password was reset, the account was disabled) and when a
   // connection that was down comes back. Used by index.ts to sign the person out cleanly / clear the "working offline" notice.
-  private sessionListener: { onRejected?: () => void; onOnline?: () => void } = {};
-  setSessionListener(l: { onRejected?: () => void; onOnline?: () => void }): void {
+  private sessionListener: { onRejected?: () => void; onOnline?: () => void; onOffline?: () => void } = {};
+  setSessionListener(l: { onRejected?: () => void; onOnline?: () => void; onOffline?: () => void }): void {
     this.sessionListener = l;
   }
+  // Whether the server answered the last time we asked. Flips are reported once each (to show/clear the "working offline" notice).
+  private connected = true;
+  private lastContactAt: number | null = null;
+  private markConnection(online: boolean): void {
+    if (online) this.lastContactAt = Date.now();
+    if (this.connected === online) return;
+    this.connected = online;
+    if (online) this.sessionListener.onOnline?.();
+    else this.sessionListener.onOffline?.();
+  }
+  getConnection(): { online: boolean; lastContactAt: number | null } {
+    return { online: this.connected, lastContactAt: this.lastContactAt };
+  }
   private offlineRetry: ReturnType<typeof setTimeout> | null = null;
+  // While the server cannot be reached, ask it (a cheap health request) every few seconds; the moment it answers, sign the token back in and report "online".
   private scheduleOfflineRetry(): void {
     if (this.offlineRetry) return;
     this.offlineRetry = setTimeout(() => {
       this.offlineRetry = null;
-      if (!this.accessToken && this.refreshToken) void this.refreshAccessToken();
+      void this.retryConnectionNow();
     }, CloudClient.OFFLINE_RETRY_MS);
     this.offlineRetry.unref?.();
   }
-  static OFFLINE_RETRY_MS = 60_000;
+  /** Tries to reach the server right now (also used by the "Retry now" button). Resolves true when it answered. */
+  async retryConnectionNow(): Promise<boolean> {
+    if (!this.sessionApiUrl) return false;
+    if (this.offlineRetry) {
+      clearTimeout(this.offlineRetry);
+      this.offlineRetry = null;
+    }
+    const health = await this.checkHealth();
+    if (!health.ok && health.status === undefined) {
+      this.markConnection(false);
+      this.scheduleOfflineRetry();
+      return false;
+    }
+    if (!this.accessToken && this.refreshToken) await this.refreshAccessToken();
+    else this.markConnection(true);
+    return this.connected;
+  }
+  static OFFLINE_RETRY_MS = 15_000;
   /** Pauses between the short retries at start-up while the server cannot be reached (changeable so tests do not wait). */
   static RESTORE_RETRY_DELAYS_MS = [2000, 4000, 8000];
 
@@ -1050,6 +1089,7 @@ export class CloudClient {
           // OFFLINE: the session itself was never rejected, so the person keeps working on this computer's data; the connection is retried in the background and syncing
           // resumes by itself. (Nothing is trusted that the server has not said: while offline there is simply no access token, so no cloud call is made.)
           this.startAuthRefreshTimer();
+          this.connected = false; // (index.ts shows the notice itself at start-up)
           this.scheduleOfflineRetry();
           return { ok: false, offline: true, userId: session.userId, email: session.email, apiUrl: session.apiUrl };
         }
@@ -1080,6 +1120,11 @@ export class CloudClient {
   // the LOCAL session would leave the user stuck unable to log out at all.
   logout(): void {
     this.stopAuthRefresh();
+    if (this.offlineRetry) {
+      clearTimeout(this.offlineRetry);
+      this.offlineRetry = null;
+    }
+    this.connected = true;
     this.accessToken = null;
     this.refreshToken = null;
     this.deviceId = null;
@@ -1171,9 +1216,11 @@ export class CloudClient {
       const result = await this.doRefresh(this.sessionApiUrl, this.refreshToken);
       if (result.ok) {
         if (!this.deviceId) await this.ensureDeviceRegistered();
-        if (wasOffline) this.sessionListener.onOnline?.();
+        void wasOffline;
+        this.markConnection(true);
       } else if (result.networkFailure) {
-        if (wasOffline) this.scheduleOfflineRetry();
+        this.markConnection(false);
+        this.scheduleOfflineRetry();
       } else if (result.status === 401 || result.status === 403) {
         // The server answered, and the answer is "this sign-in is no longer valid" (device removed, password reset, account disabled): end it here and now.
         console.warn("[cloudClient] the server ended this sign-in:", result.error);

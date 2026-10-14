@@ -3,7 +3,7 @@ import { defineConfig } from "vitest/config";
 
 // In development the site runs on its own port and forwards every API call to the Clynx Cloud server, so the browser sees ONE origin and the session cookie works exactly as it does in production.
 const API = process.env.CLYNX_API_URL ?? "http://localhost:8787";
-const apiPaths = ["/auth", "/web", "/admin", "/billing", "/devices", "/me", "/releases", "/support/requests", "/plans", "/dev", "/health"];
+const apiPaths = ["/auth", "/web", "/admin", "/billing", "/devices", "/me", "/releases", "/updates", "/server", "/support/requests", "/plans", "/dev", "/health"];
 
 export default defineConfig({
   plugins: [react()],

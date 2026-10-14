@@ -113,7 +113,7 @@ const EMPTY_STATUS: ScrapeStatus = {
   currentReaction: null,
 };
 
-const DEFAULT_CLOUD_API_URL = "http://localhost:8787";
+// (no built-in server address here: the main process knows which server this installation uses; an installed build starts empty and asks)
 
 // Each screen only re-renders when ITS props change (the screens are all
 // mounted at once, so without this every status/log update re-rendered all of
@@ -142,7 +142,7 @@ export default function App() {
   // lands.
   const [authChecked, setAuthChecked] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
-  const [defaultApiUrl, setDefaultApiUrl] = useState(DEFAULT_CLOUD_API_URL);
+  const [defaultApiUrl, setDefaultApiUrl] = useState("");
   // Opening the user's data failed (see index.ts's bootstrapOrExplain): shown on the login screen with a Try again button.
   const [startupProblem, setStartupProblem] = useState<StartupProblem | null>(null);
 

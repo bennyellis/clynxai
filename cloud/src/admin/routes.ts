@@ -225,8 +225,8 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   // 3. PUT .../update-manifest uploads { manifest, signature }. The server verifies the signature and that it describes THIS release's stored file before keeping it.
   const manifestUrl = (id: string) => `/releases/${id}/download`;
   async function releaseForManifest(id: string) {
-    const r = await query<{ id: string; version: string; channel: string; status: string; platform: string; notes: string; file_name: string | null; storage_key: string | null; size_bytes: string | null }>(
-      "SELECT id, version, channel, status, platform, notes, file_name, storage_key, size_bytes FROM releases WHERE id = $1",
+    const r = await query<{ id: string; version: string; channel: string; status: string; platform: string; notes: string; file_name: string | null; storage_key: string | null; size_bytes: string | null; sha256: string | null }>(
+      "SELECT id, version, channel, status, platform, notes, file_name, storage_key, size_bytes, sha256 FROM releases WHERE id = $1",
       [id]
     );
     return r.rows[0] ?? null;
@@ -246,7 +246,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       version: rel.version,
       channel: rel.channel,
       publishedAt: new Date().toISOString(),
-      files: [{ name: rel.file_name, url: manifestUrl(rel.id), sha512, size: Number(rel.size_bytes), platform, arch: arch ?? "x64" }],
+      files: [{ name: rel.file_name, url: manifestUrl(rel.id), sha512, sha256: rel.sha256, size: Number(rel.size_bytes), platform, arch: arch ?? "x64" }],
       notes: rel.notes.slice(0, 2000),
     };
     return reply.code(200).send({ manifest, configured: !!config.web.updatePublicKey });
@@ -272,6 +272,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     if (m.files.length !== 1 || f.platform !== platform || f.arch !== (arch ?? "x64")) problems.push("the file entry is not for this release's platform");
     if (f.sha512 !== sha512) problems.push("the installer checksum (SHA-512) does not match the file stored on this server");
     if (f.size !== Number(rel.size_bytes)) problems.push("the installer size does not match");
+    if (f.sha256 !== undefined && f.sha256 !== rel.sha256) problems.push("the installer checksum (SHA-256) does not match the file stored on this server");
     if (f.url !== manifestUrl(rel.id)) problems.push("the download address must be " + manifestUrl(rel.id));
     if (problems.length) return reply.code(422).send({ error: "manifest_mismatch", message: "The signed manifest does not describe this release: " + problems.join("; ") + "." });
     const body = request.body as { manifest: string; signature: string };

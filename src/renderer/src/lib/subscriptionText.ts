@@ -3,6 +3,7 @@ import type { BillingStatus } from "../../../main/types.js";
 export const dateText = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }) : "");
 
 export function describeSubscription(b: BillingStatus): { headline: string; detail: string; tone: "ok" | "warn" | "plain" } {
+  if (b.owner === true) return { headline: "Owner — Full Access", detail: "Every feature, with no subscription or plan limits. Safety limits that protect the shared service (rate limits and the daily spending cap) still apply.", tone: "ok" };
   const s = b.subscription;
   const planName = b.plan === "pro" ? "Clynx Pro" : "Free";
   if (!s) return { headline: planName, detail: b.plan === "pro" ? "Pro is included with your account." : "No subscription.", tone: "plain" };

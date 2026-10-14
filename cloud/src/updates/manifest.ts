@@ -7,6 +7,7 @@ export interface ManifestFile {
   name: string;
   url: string;
   sha512: string;
+  sha256?: string;
   size: number;
   platform: string;
   arch: string;
@@ -75,7 +76,7 @@ export function verifySigned(signed: unknown, publicKeyPem: string): Checked {
     return { ok: false, reason: "The manifest is incomplete." };
   }
   for (const f of m.files) {
-    if (typeof f?.name !== "string" || typeof f.url !== "string" || !/^[0-9a-f]{128}$/.test(f.sha512) || !Number.isInteger(f.size) || f.size <= 0) return { ok: false, reason: "A file entry in the manifest is incomplete." };
+    if (typeof f?.name !== "string" || typeof f.url !== "string" || !/^[0-9a-f]{128}$/.test(f.sha512) || (f.sha256 !== undefined && !/^[0-9a-f]{64}$/.test(f.sha256)) || !Number.isInteger(f.size) || f.size <= 0) return { ok: false, reason: "A file entry in the manifest is incomplete." };
   }
   return { ok: true, manifest: m };
 }

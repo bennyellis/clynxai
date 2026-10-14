@@ -9,3 +9,5 @@ export type { LocationDiscoveryResult } from "../../../main/locationDiscovery.js
 export type { MetricsSnapshot, StageStats, EventStats } from "../../../main/metrics.js";
 export type { AppNotice } from "../../../main/appNotices.js";
 export type { StartupProblem } from "../../../main/startupErrors.js";
+export type { ServerTestResult } from "../../../main/serverAddress.js";
+export type { UpdateInfo, UpdateStatus } from "../../../main/updater.js";

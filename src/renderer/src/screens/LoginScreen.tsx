@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api.js";
-import type { BetaInfo, StartupProblem } from "../lib/api.js";
+import type { BetaInfo, ServerTestResult, StartupProblem } from "../lib/api.js";
 
 // Multi-user login migration — blocks the ENTIRE app until authenticated
 // (see App.tsx, which renders this instead of everything else until
@@ -18,7 +18,7 @@ import type { BetaInfo, StartupProblem } from "../lib/api.js";
 function friendlyLoginError(raw: string, apiUrl: string): { message: string; unreachable: boolean } {
   if (/fetch failed|failed to fetch|econnrefused|enotfound|network|timed out|timeout|socket/i.test(raw)) {
     return {
-      message: `Can't reach the Clynx server at ${apiUrl}. If you run it with Docker, make sure Docker Desktop is open and its containers are running, then try again.`,
+      message: `Can't reach the Clynx server at ${apiUrl || "(no address entered)"}. Check that the server computer is on and Clynx Cloud is running (Docker Desktop open there), that this computer is on the same network, and that the address is right. Use Test connection to check.`,
       unreachable: true,
     };
   }
@@ -49,6 +49,20 @@ export function LoginScreen({
   useEffect(() => setProblem(startupProblem), [startupProblem]);
   const [mode, setMode] = useState<"login" | "register">("login");
   const [apiUrl, setApiUrl] = useState(defaultApiUrl);
+  // "Test connection": checked before any password is sent. `testedUrl` is the address the last successful test was for.
+  const [test, setTest] = useState<{ state: "idle" | "testing" | "ok" | "fail"; result?: ServerTestResult }>({ state: "idle" });
+  const [testedUrl, setTestedUrl] = useState<string | null>(null);
+  const runTest = async (url: string): Promise<boolean> => {
+    if (!url.trim()) {
+      setTest({ state: "fail", result: { ok: false, error: "Enter the address of your Clynx server first.", stage: "address" } });
+      return false;
+    }
+    setTest({ state: "testing" });
+    const r = await api.cloud.testServer(url.trim());
+    setTest({ state: r.ok ? "ok" : "fail", result: r });
+    setTestedUrl(r.ok ? url.trim() : null);
+    return r.ok;
+  };
   const [email, setEmail] = useState(readLastEmail);
   // The server address is a technical detail most people never touch, so it
   // stays tucked away — and opens itself if the server can't be reached.
@@ -101,6 +115,11 @@ export function LoginScreen({
     try {
       const trimmedUrl = apiUrl.trim() || defaultApiUrl;
       const trimmedEmail = email.trim();
+      // never send a password to an address that has not answered as a Clynx server
+      if (testedUrl !== trimmedUrl && !(await runTest(trimmedUrl))) {
+        setShowServer(true);
+        return;
+      }
       const result =
         mode === "login"
           ? await api.auth.login(trimmedUrl, trimmedEmail, password, importLocal && !!beta?.localDataExists)
@@ -240,9 +259,42 @@ export function LoginScreen({
             </span>
           </label>
         )}
-        {showServer ? (
-          <Field label="Server URL">
-            <input value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} placeholder={defaultApiUrl} autoComplete="off" spellCheck={false} />
+        {showServer || !apiUrl.trim() ? (
+          <Field label="Server address">
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                data-testid="server-url-input"
+                style={{ flex: 1 }}
+                value={apiUrl}
+                onChange={(e) => {
+                  setApiUrl(e.target.value);
+                  setTestedUrl(null);
+                  setTest({ state: "idle" });
+                }}
+                placeholder="http://192.168.1.20:8788"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <button type="button" className="ghost" data-testid="server-test" disabled={test.state === "testing"} onClick={() => void runTest(apiUrl)}>
+                {test.state === "testing" ? "Testing…" : "Test connection"}
+              </button>
+            </div>
+            {!apiUrl.trim() && test.state === "idle" && (
+              <span style={{ fontSize: 12.5, color: "var(--text-dim)" }}>Enter the address of your Clynx server (ask the person who runs it). On the same home network it looks like http://192.168.1.20:8788.</span>
+            )}
+            {test.state === "ok" && test.result?.ok && (
+              <span data-testid="server-ok" style={{ fontSize: 13, color: "var(--good, #3ecf8e)" }}>
+                ✓ Connected to {test.result.name}
+                {test.result.serverVersion ? ` (version ${test.result.serverVersion})` : ""} in {test.result.latencyMs} ms.
+                {test.result.services.sharedAi ? " Shared AI is available: no OpenAI key needed." : ""}
+                {test.result.warnings.map((w, i) => (
+                  <span key={i} style={{ display: "block", color: "var(--warn)" }}>{w}</span>
+                ))}
+              </span>
+            )}
+            {test.state === "fail" && test.result && !test.result.ok && (
+              <span data-testid="server-fail" role="alert" style={{ fontSize: 13, color: "var(--danger)" }}>{test.result.error}</span>
+            )}
           </Field>
         ) : (
           <button
