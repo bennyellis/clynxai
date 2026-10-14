@@ -27,7 +27,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   // ------------------------------------------------------------------ overview and health
   app.get("/admin/overview", async (_request, reply) => {
     const one = async <T>(sql: string) => (await query<{ v: T }>(sql)).rows[0].v;
-    const [users, verified, signups7, beta, activeSubs, trialing, pastDue, canceling, devices, openSupport, downloads30, daily, byStatus] = await Promise.all([
+    const [users, verified, signups7, beta, activeSubs, trialing, pastDue, canceling, devices, openSupport, downloads30, daily, byStatus, versions] = await Promise.all([
       one<number>("SELECT count(*)::int AS v FROM users"),
       one<number>("SELECT count(*)::int AS v FROM users WHERE email_verified_at IS NOT NULL"),
       one<number>("SELECT count(*)::int AS v FROM users WHERE created_at > now() - interval '7 days'"),
@@ -41,8 +41,9 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       one<number>("SELECT coalesce(sum(count), 0)::int AS v FROM download_counts WHERE day > CURRENT_DATE - 30"),
       query("SELECT to_char(d::date, 'YYYY-MM-DD') AS day, (SELECT count(*)::int FROM users u WHERE u.created_at::date = d::date) AS signups FROM generate_series(CURRENT_DATE - 13, CURRENT_DATE, interval '1 day') d ORDER BY d"),
       query("SELECT status, count(*)::int AS n FROM subscriptions GROUP BY status ORDER BY n DESC"),
+      query("SELECT client_version AS version, count(*)::int AS devices, max(last_seen_at) AS \"lastSeenAt\" FROM devices WHERE last_seen_at > now() - interval '14 days' GROUP BY client_version ORDER BY max(last_seen_at) DESC"),
     ]);
-    return reply.code(200).send({ users, verifiedUsers: verified, signupsLast7Days: signups7, betaTesters: beta, subscriptions: { active: activeSubs, trialing, pastDue, cancelingAtPeriodEnd: canceling, byStatus: byStatus.rows }, devices, openSupportRequests: openSupport, downloadsLast30Days: downloads30, signupsByDay: daily.rows });
+    return reply.code(200).send({ users, verifiedUsers: verified, signupsLast7Days: signups7, betaTesters: beta, subscriptions: { active: activeSubs, trialing, pastDue, cancelingAtPeriodEnd: canceling, byStatus: byStatus.rows }, devices, openSupportRequests: openSupport, downloadsLast30Days: downloads30, signupsByDay: daily.rows, deviceVersions: versions.rows });
   });
 
   app.get("/admin/health", async (_request, reply) => {

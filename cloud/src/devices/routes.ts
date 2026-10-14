@@ -64,7 +64,9 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(403).send({ error: "Forbidden" });
     }
 
-    await query("UPDATE devices SET last_seen_at = now() WHERE id = $1", [id]);
+    // an up-to-date app also says which version it is, so the Owner can watch an update roll out (an older app sends nothing)
+    const body = z.object({ clientVersion: z.string().trim().min(1).max(40).regex(/^[0-9A-Za-z.+-]+$/) }).safeParse(request.body);
+    await query("UPDATE devices SET last_seen_at = now(), client_version = coalesce($2, client_version) WHERE id = $1", [id, body.success ? body.data.clientVersion : null]);
     return reply.code(200).send({ ok: true });
   });
 

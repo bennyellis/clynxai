@@ -528,6 +528,14 @@ run(async () => {
     }
     {
       clock += 5 * HOUR;
+      const r = mk("notify", { seed: { lastGoodVersion: null, newestSeenPublishedAt: null, pending: null, badVersions: ["0.3.0-beta.3"] } });
+      r.server.publish("0.3.0-beta.3");
+      r.server.required = { version: "0.3.0-beta.3", deadline: new Date(clock - HOUR).toISOString() };
+      await r.u.check();
+      check("a required version that failed to start on this computer is not 'required' here (nothing to install, no false banner)", r.u.getStatus().required === null);
+    }
+    {
+      clock += 5 * HOUR;
       const f = { lastGoodVersion: null, newestSeenPublishedAt: null, pending: null, badVersions: [], lastFailure: { version: "0.3.0-beta.3", at: new Date(clock - HOUR).toISOString(), reason: "The installer did not finish." } };
       const r = mk("off", { seed: f });
       r.server.publish("0.3.0-beta.3");

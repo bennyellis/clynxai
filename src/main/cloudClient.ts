@@ -413,6 +413,13 @@ export function isBillingStatus(v: unknown): v is BillingStatus {
   );
 }
 
+// The version of THIS build, reported to the server on registration and every heartbeat (set once at startup from the build info; a packaged app has no npm environment to read it from).
+let reportedVersion = process.env["npm_package_version"] ?? "unknown";
+export function setClientVersion(v: string): void {
+  if (v) reportedVersion = v;
+}
+const clientVersion = (): string => reportedVersion;
+
 export class CloudClient {
   private accessToken: string | null = null;
   private deviceId: string | null = null;
@@ -515,7 +522,7 @@ export class CloudClient {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.accessToken}`,
         },
-        body: JSON.stringify({ platform: process.platform, clientVersion: process.env["npm_package_version"] ?? "unknown" }),
+        body: JSON.stringify({ platform: process.platform, clientVersion: clientVersion() }),
       });
       if (result.ok && result.data?.id) {
         this.deviceId = result.data.id;
@@ -540,9 +547,11 @@ export class CloudClient {
       return result;
     }
     try {
+      // (the version rides along so the Owner can see which computers have updated; an older server ignores the body)
       const result = await this.authedFetch(`${apiUrl}/devices/${this.deviceId}/heartbeat`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${this.accessToken}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.accessToken}` },
+        body: JSON.stringify({ clientVersion: clientVersion() }),
       });
       if (result.ok) {
         this.lastHeartbeatAt = Date.now();

@@ -48,6 +48,7 @@ interface Overview {
   users: number; verifiedUsers: number; signupsLast7Days: number; betaTesters: number; devices: number; openSupportRequests: number; downloadsLast30Days: number;
   subscriptions: { active: number; trialing: number; pastDue: number; cancelingAtPeriodEnd: number; byStatus: Array<{ status: string; n: number }> };
   signupsByDay: Array<{ day: string; signups: number }>;
+  deviceVersions?: Array<{ version: string; devices: number; lastSeenAt: string }>;
 }
 
 export function ConsoleOverview() {
@@ -83,6 +84,15 @@ export function ConsoleOverview() {
         </div>
         <p className="fine">Aggregate counts only. No usage is tracked per person beyond what is needed to run the service.</p>
       </section>
+      {o.deviceVersions && o.deviceVersions.length > 0 && (
+        <section className="card" data-testid="device-versions">
+          <h2 style={{ fontSize: "1.2rem" }}>Which version computers are running (seen in the last 14 days)</h2>
+          <table className="table"><thead><tr><th>Version</th><th>Computers</th><th>Last seen</th></tr></thead><tbody>
+            {o.deviceVersions.map((v) => <tr key={v.version}><td>{v.version}</td><td>{v.devices}</td><td>{formatDateTime(v.lastSeenAt)}</td></tr>)}
+          </tbody></table>
+          <p className="fine">After you publish a release, this is how you watch it reach the computers: they report their version about every 30 seconds while Clynx is open. A computer that is closed updates the next time it is opened.</p>
+        </section>
+      )}
     </>
   );
 }

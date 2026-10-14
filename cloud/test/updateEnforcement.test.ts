@@ -127,8 +127,9 @@ describe("required updates", () => {
 
   it("withdrawing a required release clears the requirement; the floor is the highest required version", async () => {
     await clearPublished();
-    const a = await newRelease("93000.0.1-beta.1");
-    const b = await newRelease("93000.0.2-beta.1");
+    const n = 91000 + Math.floor(Math.random() * 8000);
+    const a = await newRelease(`${n}.0.1-beta.1`);
+    const b = await newRelease(`${n}.0.2-beta.1`);
     await publish(a.id, a.version);
     await publish(b.id, b.version);
     await app.inject({ method: "POST", url: `/admin/releases/${a.id}/require`, headers: asWeb(owner), payload: { hours: 10 } });
@@ -172,5 +173,25 @@ describe("resumable installer downloads", () => {
     await app.inject({ method: "GET", url: `/releases/${id}/download`, headers: { range: "bytes=500-" } });
     await app.inject({ method: "GET", url: `/releases/${id}/download`, headers: { range: "bytes=900-" } });
     expect(await count()).toBe(1);
+  });
+});
+
+describe("watching an update roll out", () => {
+  it("a heartbeat carries the app's version into the device list; the Owner's overview counts computers per version; junk is ignored", async () => {
+    const reg = await app.inject({ method: "POST", url: "/auth/register", payload: { email: `hb-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`, password: "correct-horse-battery" } });
+    const token = reg.json().accessToken as string;
+    const dev = await app.inject({ method: "POST", url: "/devices/register", headers: { authorization: `Bearer ${token}` }, payload: { platform: "windows", clientVersion: "unknown" } });
+    const id = dev.json().id as string;
+    const hb = (payload?: unknown) => app.inject({ method: "POST", url: `/devices/${id}/heartbeat`, headers: { authorization: `Bearer ${token}` }, payload: payload as never });
+    expect((await hb()).statusCode).toBe(200); // an older app sends no body at all
+    expect((await pool.query("SELECT client_version FROM devices WHERE id = $1", [id])).rows[0].client_version).toBe("unknown");
+    expect((await hb({ clientVersion: "0.3.0-beta.4" })).statusCode).toBe(200);
+    expect((await pool.query("SELECT client_version FROM devices WHERE id = $1", [id])).rows[0].client_version).toBe("0.3.0-beta.4");
+    expect((await hb({ clientVersion: "<script>alert(1)</script>" })).statusCode).toBe(200);
+    expect((await hb({ clientVersion: "x".repeat(500) })).statusCode).toBe(200);
+    expect((await pool.query("SELECT client_version FROM devices WHERE id = $1", [id])).rows[0].client_version).toBe("0.3.0-beta.4"); // unchanged by junk
+    const ov = await app.inject({ method: "GET", url: "/admin/overview", headers: asWeb(admin) });
+    expect(ov.statusCode).toBe(200);
+    expect(ov.json().deviceVersions.some((v: { version: string; devices: number }) => v.version === "0.3.0-beta.4" && v.devices >= 1)).toBe(true);
   });
 });

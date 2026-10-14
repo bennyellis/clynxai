@@ -61,6 +61,8 @@ Before publishing, only you can see the draft. To release Beta 2 to testers: Con
 ## 5. Updates (Beta 3 later)
 Install Beta 3 as a new draft the same way (`Register-ClynxRelease.ps1 -Installer … -Version 0.3.0-beta.3 -ExpectSha256 …` — it signs the manifest here with your private key), approve and publish it in the console. Every Beta 2 installation that is signed in finds it (its own sign-in passes the gate), downloads and verifies it, and installs when the person clicks **Restart and install**. Signature, checksum and downgrade checks are unchanged.
 
+**Update (Beta 4 onwards, Phase 11.7):** installations from Beta 4 on install new releases by themselves when Clynx is idle (see `PHASE_11_7_AUTOMATIC_UPDATES.md`). In the console, Releases: only the Owner can create, approve, publish, withdraw or **Require** a release; "Require this update" sets a deadline (in hours) by which every online Clynx must have installed it. The Overview page shows how many computers run each version, so you can watch a release arrive.
+
 ## 6. Rollback
 * Internet off: `.\Set-ClynxTunnel.ps1 -Action Stop`.
 * Private mode off (back to Phase 11 behaviour): `.\Disable-ClynxPrivateAccess.ps1` (stop the tunnel first). Accounts and data are untouched.

@@ -1,5 +1,5 @@
-routes probed: 112
-answered 401/403 to an anonymous caller: 85
+routes probed: 114
+answered 401/403 to an anonymous caller: 87
 answered something else (public by design, or a validation error):
 GET /ebay/callback -> 303
 GET /gate -> 200

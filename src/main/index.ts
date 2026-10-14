@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { parse as parseDotenv } from "dotenv";
 import { makePhotoCheck } from "./compPhotoCheck.js";
-import { app, BrowserWindow, ipcMain, safeStorage, session, shell, Menu, dialog, Notification } from "electron";
+import { app, BrowserWindow, ipcMain, safeStorage, session, shell, Menu, dialog, Notification, powerMonitor } from "electron";
 import path from "node:path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, cpSync, statSync, readdirSync, unlinkSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -66,7 +66,7 @@ import { snapToFacebookRadius, snapToWatchInterval } from "./watchOptions.js";
 import { timed, getMetricsSnapshot, resetMetrics } from "./metrics.js";
 import { DiscoveryFeed, type DiscoverySource } from "./discovery.js";
 import { breakDownListing, valueBundle, type BundleValuation, type PricedBundleItem } from "./bundleBreakdown.js";
-import { CloudClient, isBillingStatus } from "./cloudClient.js";
+import { setClientVersion, CloudClient, isBillingStatus } from "./cloudClient.js";
 import { readBuildInfo } from "./buildInfo.js";
 import { importLocalData, localDataExists } from "./localMigration.js";
 import { checkBrowsers, CHROME_DOWNLOAD_URL } from "./browserCheck.js";
@@ -178,6 +178,7 @@ function loadAppSettings(): AppSettings {
 }
 // Which build this is, and whether it may offer the local beta mode (only builds made with `npm run dist:beta` can; see buildInfo.ts).
 const buildInfo = readBuildInfo(app.getAppPath(), app.getVersion());
+setClientVersion(buildInfo.version);
 const LOCAL_USER_ID = "local-beta";
 const isLocalMode = (): boolean => appSettings.localMode === true && buildInfo.localModeAllowed;
 const hasSavedKeys = (): boolean => !!process.env.OPENAI_API_KEY?.trim() || !!(process.env.EBAY_CLIENT_ID?.trim() && process.env.EBAY_CLIENT_SECRET?.trim());
@@ -2150,6 +2151,14 @@ function scheduleIdentityBackfill(): void {
 
 // Research in progress (Database lookups, eBay comps): an automatic update waits for it, the same way it waits for a scan.
 let researchActive = 0;
+// True while the person is at the keyboard with Clynx in front (any input in the last minute): an automatic update should not close the window under their hands.
+function personIsUsingClynx(): boolean {
+  try {
+    return !!mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized() && mainWindow.isFocused() && powerMonitor.getSystemIdleTime() < 60;
+  } catch {
+    return false;
+  }
+}
 async function runProductLookup(...args: Parameters<typeof runProductLookupInner>): Promise<void> {
   researchActive++;
   try {
@@ -3819,7 +3828,7 @@ app.whenReady().then(() => {
     currentVersion: buildInfo.version,
     channel: updateChannel,
     mode: () => appSettings.updateMode ?? "automatic",
-    isBusy: () => watchSearching || researchActive > 0 || [...engines.values()].some((e) => e.getStatus().running),
+    isBusy: () => watchSearching || researchActive > 0 || [...engines.values()].some((e) => e.getStatus().running) || personIsUsingClynx(),
     refreshAuth: () => cloudClient.refreshSessionNow(),
     beforeInstall: () => {
       // scanners that are running now are started again by the new version once it is up (an update must not silently end a scan the person left running)

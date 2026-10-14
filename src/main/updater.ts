@@ -256,7 +256,7 @@ export class Updater {
   /** True while the Owner's "required" mark applies to this computer (it is behind the required version). */
   private requiredActive(): boolean {
     const r = this.state.required;
-    return !!r && compareVersions(r.version, this.deps.currentVersion) > 0;
+    return !!r && compareVersions(r.version, this.deps.currentVersion) > 0 && !this.state.badVersions.includes(r.version);
   }
   /** Milliseconds past the required deadline (0 or negative while the deadline is still ahead). */
   private overdueMs(): number {

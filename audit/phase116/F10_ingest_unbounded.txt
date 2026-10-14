@@ -1,1 +1,1 @@
-one authenticated request with 1000 listings: HTTP 200, 6897 ms, 1000 stored; queue rows created so far (all runs): 7000
+one authenticated request with 1000 listings: HTTP 200, 6750 ms, 1000 stored; queue rows created so far (all runs): 8000
