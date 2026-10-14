@@ -1,4 +1,4 @@
-import { redisConnection } from "../queue/connection.js";
+import { viaRedis } from "../queue/redisGuard.js";
 
 // Fixed-window rate limiter backed by Redis (shared by every API instance), with an in-process fallback if Redis is unreachable so a Redis outage degrades to per-process limits
 // instead of removing protection (or taking login down).
@@ -27,9 +27,11 @@ function memoryHit(key: string, limit: number, windowSec: number, now: number): 
 export async function hit(key: string, limit: number, windowSec: number, now: number = Date.now()): Promise<HitResult> {
   const k = `rl:${key}`;
   try {
-    const count = await redisConnection.incr(k);
-    if (count === 1) await redisConnection.expire(k, windowSec);
-    const ttl = count === 1 ? windowSec : await redisConnection.ttl(k);
+    const { count, ttl } = await viaRedis(async (r) => {
+      const c = await r.incr(k);
+      if (c === 1) await r.expire(k, windowSec);
+      return { count: c, ttl: c === 1 ? windowSec : await r.ttl(k) };
+    });
     return { allowed: count <= limit, count, limit, retryAfterSec: ttl > 0 ? ttl : windowSec };
   } catch {
     return memoryHit(k, limit, windowSec, now);
@@ -40,10 +42,13 @@ export async function hit(key: string, limit: number, windowSec: number, now: nu
 export async function peek(key: string, limit: number): Promise<{ blocked: boolean; retryAfterSec: number }> {
   const k = `rl:${key}`;
   try {
-    const raw = await redisConnection.get(k);
-    const count = raw ? Number(raw) : 0;
+    const { count, ttl: ttl0 } = await viaRedis(async (r) => {
+      const raw = await r.get(k);
+      const c = raw ? Number(raw) : 0;
+      return { count: c, ttl: c < limit ? 0 : await r.ttl(k) };
+    });
     if (count < limit) return { blocked: false, retryAfterSec: 0 };
-    const ttl = await redisConnection.ttl(k);
+    const ttl = ttl0;
     return { blocked: true, retryAfterSec: ttl > 0 ? ttl : 60 };
   } catch {
     const cur = memory.get(k);
@@ -55,7 +60,7 @@ export async function peek(key: string, limit: number): Promise<{ blocked: boole
 export async function reset(key: string): Promise<void> {
   memory.delete(`rl:${key}`);
   try {
-    await redisConnection.del(`rl:${key}`);
+    await viaRedis((r) => r.del(`rl:${key}`));
   } catch {
     /* nothing to clear */
   }

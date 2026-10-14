@@ -374,7 +374,16 @@ export function writeSession(sessionPath: string, session: CloudSession): void {
   }
 }
 
-async function safeFetch(url: string, init?: RequestInit): Promise<CloudResult<any>> {
+/** A request without a body must not claim to carry JSON: a server answers 400 "Body cannot be empty when content-type is set to application/json" (Beta 2 to 5 sent every DELETE like that, so deletes never arrived). */
+export function withoutEmptyContentType(init?: RequestInit): RequestInit | undefined {
+  if (!init || init.body !== undefined || !init.headers || typeof init.headers !== "object" || Array.isArray(init.headers) || init.headers instanceof Headers) return init;
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(init.headers as Record<string, string>)) if (k.toLowerCase() !== "content-type") headers[k] = v;
+  return { ...init, headers };
+}
+
+async function safeFetch(url: string, rawInit?: RequestInit): Promise<CloudResult<any>> {
+  const init = withoutEmptyContentType(rawInit);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {

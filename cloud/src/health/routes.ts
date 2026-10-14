@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { config } from "../config.js";
 import { pool } from "../db/client.js";
 import { listingProcessingQueue } from "../queue/listingProcessingQueue.js";
-import { redisConnection } from "../queue/connection.js";
+import { redisFast, withTimeout } from "../queue/redisGuard.js";
 import { counters } from "../security/hooks.js";
 
 export async function healthRoutes(app: FastifyInstance): Promise<void> {
@@ -27,7 +27,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       /* stays down */
     }
     try {
-      checks.redis = (await redisConnection.ping()) === "PONG" ? "ok" : "down";
+      checks.redis = (await redisFast.ping()) === "PONG" ? "ok" : "down";
     } catch {
       /* stays down */
     }
@@ -41,7 +41,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
     if (request.headers.authorization !== `Bearer ${config.metricsToken}`) return reply.code(401).send({ error: "Unauthorized" });
     let queue: Record<string, number> | { error: string };
     try {
-      queue = await listingProcessingQueue.getJobCounts("waiting", "active", "delayed", "failed", "completed");
+      queue = await withTimeout(listingProcessingQueue.getJobCounts("waiting", "active", "delayed", "failed", "completed"), 2000, "queue counts");
     } catch {
       queue = { error: "unavailable" };
     }

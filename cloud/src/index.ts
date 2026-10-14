@@ -48,6 +48,16 @@ export function buildApp(options: BuildOptions = {}) {
   const app = Fastify({ logger: { redact: ["req.headers.authorization", "req.headers.cookie", "req.headers[\"stripe-signature\"]"] }, bodyLimit: 10 * 1024 * 1024, trustProxy: config.trustProxy });
   const billing = options.billing === undefined ? defaultBillingProvider() : options.billing;
 
+  // An empty body with a JSON content type is "no body", not an error. Older apps (Beta 2 to 5) send `Content-Type: application/json` on DELETE requests that carry no body, and the default
+  // parser answered 400 to every one of them, so deletes never reached the server. Everything else about JSON parsing (size limit, prototype-poisoning protection, a clear 400 for broken
+  // JSON) is Fastify's own parser, unchanged.
+  const secureJson = app.getDefaultJsonParser("error", "error");
+  app.removeContentTypeParser("application/json");
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
+    if (typeof body === "string" && body.trim() === "") return done(null, undefined);
+    secureJson(req, body as string, done);
+  });
+
   registerSecurity(app);
   registerAccessGate(app);
   app.register(healthRoutes);

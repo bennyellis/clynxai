@@ -1,5 +1,6 @@
 import { Queue } from "bullmq";
 import { redisConnection } from "./connection.js";
+import { withTimeout } from "./redisGuard.js";
 import { query } from "../db/client.js";
 
 // Clynx Cloud Phase 4 — job queue for (future) AI processing of newly
@@ -36,5 +37,6 @@ export const listingProcessingQueue = new Queue<ListingProcessingJobPayload>(LIS
 // fail the ingestion response itself.
 export async function enqueueListingProcessing(payload: ListingProcessingJobPayload): Promise<void> {
   await query("INSERT INTO listing_processing_jobs (listing_id, status) VALUES ($1, 'queued')", [payload.listingId]);
-  await listingProcessingQueue.add("process-listing", payload);
+  // (a queue that cannot be reached must never hold up a scanner's upload: give up after 2 s; the listing itself is already saved)
+  await withTimeout(listingProcessingQueue.add("process-listing", payload), 2000, "queueing the listing");
 }

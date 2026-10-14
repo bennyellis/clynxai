@@ -199,10 +199,11 @@ describe("two accounts: A cannot read, change or delete B's records", () => {
     expect(mine.statusCode).toBe(none.statusCode);
   });
 
-  it.fails("KNOWN ISSUE F-01: GET /search-planner/demand must not show other users' search phrases or watch ids", async () => {
+  it("F-01 (fixed in Beta 6): GET /search-planner/demand must not show other users' search phrases or watch ids", async () => {
     const phrase = `zz-private-phrase-${randomUUID()}`;
     await putWatch(A, `lw-${randomUUID()}`, "phrase carrier", { searchPhrase: phrase });
     const trig = await app.inject({ method: "POST", url: "/search-planner/aggregate", headers: bearer(B) });
+    expect(trig.statusCode).toBe(403);
     const view = await app.inject({ method: "GET", url: "/search-planner/demand", headers: bearer(B) });
     writeFileSync("../audit/phase116/F01_search_planner_leak.txt", `B triggered aggregation: HTTP ${trig.statusCode}\nB read demand: HTTP ${view.statusCode}\nA's unique phrase visible to B: ${view.body.includes(phrase)}\nsample watch ids visible: ${/sampleWatchIds":\["[0-9a-f-]{36}/.test(view.body)}\n`);
     expect(view.body).not.toContain(phrase);

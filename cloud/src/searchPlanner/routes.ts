@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { requireAuth } from "../auth/middleware.js";
+import { requireOwner } from "../auth/middleware.js";
 import { runSearchDemandAggregation, getLatestSearchDemandSnapshot } from "./service.js";
 
 // Clynx Cloud Phase 7 — Search Planner foundation. Behind requireAuth: any
@@ -31,7 +31,8 @@ function snapshotRowToJson(row: {
 }
 
 export async function searchPlannerRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook("preHandler", requireAuth);
+  // OWNER ONLY (website session). The aggregation reads every customer's Watches and shows what they are searching for; no customer may see that, and no app uses these routes.
+  app.addHook("preHandler", requireOwner);
 
   // Manual trigger — runs the aggregation synchronously and returns the
   // resulting groups. Not enqueued/scheduled yet (future wiring decision).

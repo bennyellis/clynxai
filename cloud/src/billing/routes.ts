@@ -16,6 +16,7 @@ export function billingRoutes(provider: BillingProvider | null) {
   return async function plugin(app: FastifyInstance): Promise<void> {
     // ---------------------------------------------------------------- the webhook: NOT authenticated by a user; authenticated by the provider's signature over the raw body
     app.register(async (hook) => {
+      hook.removeContentTypeParser("application/json"); // (the API's own JSON parser, see index.ts, is replaced here by the raw body the signature check needs)
       hook.addContentTypeParser("application/json", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
       hook.post("/billing/webhook", async (request, reply) => {
         if (!provider) return reply.code(503).send({ error: "billing_not_configured" });

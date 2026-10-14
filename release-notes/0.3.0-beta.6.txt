@@ -1,0 +1,5 @@
+Clynx Beta 6 - stabilization
+* Deleting a Watch, a product or feedback now reaches your Clynx account. Before, deletes were refused by the server and retried forever, so a deleted Watch could come back on another computer.
+* Updates no longer ask Windows for permission on a normal install: Clynx now installs for your own Windows account only, with no "all users" choice. A computer that already has an all-users install keeps being updated that way (that case still shows the Windows prompt; reinstall once to remove it).
+* Server-side (no action needed): the search-planner is Owner-only, a Redis outage can no longer freeze sign-in, uploads or AI, and a database restart no longer crashes the server.
+* Everything else is unchanged: your data, sign-in, Watches, Database and automatic updates.

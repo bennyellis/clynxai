@@ -4,7 +4,7 @@ import { requireAdmin, requireOwner } from "../auth/middleware.js";
 import { config } from "../config.js";
 import { pool, query } from "../db/client.js";
 import { listingProcessingQueue } from "../queue/listingProcessingQueue.js";
-import { redisConnection } from "../queue/connection.js";
+import { redisFast, withTimeout } from "../queue/redisGuard.js";
 import { hashStored, removeStored, saveStream, TooLargeError } from "../releases/storage.js";
 import { attachSignedManifest, manifestTemplate } from "../releases/manifestOps.js";
 import { counters } from "../security/hooks.js";
@@ -55,12 +55,12 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       checks.database = "down";
     }
     try {
-      checks.redis = (await redisConnection.ping()) === "PONG" ? "ok" : "down";
+      checks.redis = (await redisFast.ping()) === "PONG" ? "ok" : "down";
     } catch {
       checks.redis = "down";
     }
     try {
-      checks.queue = await listingProcessingQueue.getJobCounts("waiting", "active", "delayed", "failed");
+      checks.queue = await withTimeout(listingProcessingQueue.getJobCounts("waiting", "active", "delayed", "failed"), 2000, "queue counts");
     } catch {
       checks.queue = "unavailable";
     }

@@ -1,6 +1,6 @@
 import { query } from "../db/client.js";
 import { effectivePlanFor } from "../entitlements/enforce.js";
-import { redisConnection } from "../queue/connection.js";
+import { viaRedis } from "../queue/redisGuard.js";
 import { hit } from "../security/rateLimit.js";
 
 // Cost and safety controls for every PAID provider operation (OpenAI, eBay). They apply to everybody - customers and the Owner alike; the Owner's missing PLAN limits do not remove them:
@@ -137,9 +137,11 @@ export function estimatePromptTokens(body: Record<string, unknown>): number {
 const mem = new Map<string, number>();
 async function addNumber(key: string, delta: number, ttlSec: number): Promise<number> {
   try {
-    const v = Number(await redisConnection.incrbyfloat(key, delta));
-    await redisConnection.expire(key, ttlSec);
-    return v;
+    return await viaRedis(async (r) => {
+      const v = Number(await r.incrbyfloat(key, delta));
+      await r.expire(key, ttlSec);
+      return v;
+    });
   } catch {
     const v = (mem.get(key) ?? 0) + delta;
     mem.set(key, v);
@@ -148,7 +150,7 @@ async function addNumber(key: string, delta: number, ttlSec: number): Promise<nu
 }
 async function readNumber(key: string): Promise<number> {
   try {
-    return Number((await redisConnection.get(key)) ?? 0);
+    return Number((await viaRedis((r) => r.get(key))) ?? 0);
   } catch {
     return mem.get(key) ?? 0;
   }
@@ -264,7 +266,7 @@ export async function noteRefusal(userId: string, c?: Controls): Promise<void> {
 export async function clearAbuse(userId: string, byUser: string): Promise<void> {
   await query("DELETE FROM api_user_blocks WHERE user_id = $1", [userId]);
   await query("UPDATE api_abuse_flags SET cleared_at = now(), cleared_by = $2 WHERE user_id = $1 AND cleared_at IS NULL", [userId, byUser]);
-  for (const k of [`rl:abuse:req:${userId}`, `rl:abuse:ref:${userId}`]) await redisConnection.del(k).catch(() => undefined);
+  for (const k of [`rl:abuse:req:${userId}`, `rl:abuse:ref:${userId}`]) await viaRedis((r) => r.del(k)).catch(() => undefined);
 }
 
 // ------------------------------------------------------------------ eBay call accounting

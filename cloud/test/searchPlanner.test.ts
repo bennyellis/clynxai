@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { buildApp } from "../src/index.js";
 import { closePool } from "../src/db/client.js";
+import { asWeb, makeOwner, signup, webLogin, type WebUser } from "./helpers/web.js";
 import { computeSearchDemand } from "../src/searchPlanner/aggregate.js";
 
 // Clynx Cloud Phase 7 — Search Planner foundation tests. Two parts:
@@ -45,10 +46,15 @@ describe("computeSearchDemand (unit, no DB)", () => {
 
 describe("search planner routes (integration)", () => {
   let app: FastifyInstance;
+  let owner: WebUser;
 
   beforeEach(async () => {
     app = buildApp();
     await app.ready();
+    // the planner reads every customer's Watches: since Phase 12 only the Owner (website session) may use it
+    const o = await signup(app);
+    await makeOwner(o.id);
+    owner = await webLogin(app, o.email);
   });
 
   afterAll(async () => {
@@ -133,7 +139,7 @@ describe("search planner routes (integration)", () => {
     const aggregateRes = await app.inject({
       method: "POST",
       url: "/search-planner/aggregate",
-      headers: { authorization: `Bearer ${userA.accessToken}` },
+      headers: asWeb(owner),
     });
     expect(aggregateRes.statusCode).toBe(200);
     const aggregateBody = aggregateRes.json();
@@ -152,7 +158,7 @@ describe("search planner routes (integration)", () => {
     const demandRes = await app.inject({
       method: "GET",
       url: "/search-planner/demand",
-      headers: { authorization: `Bearer ${userA.accessToken}` },
+      headers: asWeb(owner),
     });
     expect(demandRes.statusCode).toBe(200);
     const demandBody = demandRes.json();
