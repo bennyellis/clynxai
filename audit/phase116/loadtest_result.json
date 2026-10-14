@@ -1,0 +1,730 @@
+{
+  "startedAt": "2026-10-14T05:32:48.491Z",
+  "base": "http://10.0.0.81:8796",
+  "durationSecondsPerLevel": 25,
+  "baselineOneUser": {
+    "register": {
+      "n": 1,
+      "p50": 144.8,
+      "p95": 144.8,
+      "p99": 144.8,
+      "max": 144.8,
+      "errors": 0,
+      "statuses": {
+        "201": 1
+      }
+    },
+    "device_register": {
+      "n": 1,
+      "p50": 11.4,
+      "p95": 11.4,
+      "p99": 11.4,
+      "max": 11.4,
+      "errors": 0,
+      "statuses": {
+        "201": 1
+      }
+    },
+    "login": {
+      "n": 20,
+      "p50": 68.8,
+      "p95": 90.6,
+      "p99": 90.6,
+      "max": 90.6,
+      "errors": 0,
+      "statuses": {
+        "200": 20
+      }
+    },
+    "login_then_refresh": {
+      "n": 20,
+      "p50": 9.5,
+      "p95": 14.1,
+      "p99": 14.1,
+      "max": 14.1,
+      "errors": 0,
+      "statuses": {
+        "200": 20
+      }
+    },
+    "ingest50": {
+      "n": 40,
+      "p50": 243.7,
+      "p95": 320.8,
+      "p99": 323.7,
+      "max": 323.7,
+      "errors": 0,
+      "statuses": {
+        "200": 40
+      }
+    },
+    "get_watches": {
+      "n": 40,
+      "p50": 4.9,
+      "p95": 7.9,
+      "p99": 8.3,
+      "max": 8.3,
+      "errors": 0,
+      "statuses": {
+        "200": 40
+      }
+    },
+    "get_products": {
+      "n": 40,
+      "p50": 4.6,
+      "p95": 7,
+      "p99": 7.6,
+      "max": 7.6,
+      "errors": 0,
+      "statuses": {
+        "200": 40
+      }
+    },
+    "get_feedback": {
+      "n": 40,
+      "p50": 4.8,
+      "p95": 7,
+      "p99": 7.5,
+      "max": 7.5,
+      "errors": 0,
+      "statuses": {
+        "200": 40
+      }
+    },
+    "heartbeat": {
+      "n": 40,
+      "p50": 6.4,
+      "p95": 9,
+      "p99": 9,
+      "max": 9,
+      "errors": 0,
+      "statuses": {
+        "200": 40
+      }
+    },
+    "put_watch": {
+      "n": 40,
+      "p50": 7,
+      "p95": 9.8,
+      "p99": 10.1,
+      "max": 10.1,
+      "errors": 0,
+      "statuses": {
+        "200": 39,
+        "201": 1
+      }
+    },
+    "put_product": {
+      "n": 40,
+      "p50": 7.2,
+      "p95": 9.6,
+      "p99": 10,
+      "max": 10,
+      "errors": 0,
+      "statuses": {
+        "200": 39,
+        "201": 1
+      }
+    }
+  },
+  "burst_signup_5": {
+    "wallSignupMs": 311,
+    "wallLoginMs": 214,
+    "latency": {
+      "register": {
+        "n": 5,
+        "p50": 238.7,
+        "p95": 302.1,
+        "p99": 302.1,
+        "max": 302.1,
+        "errors": 0,
+        "statuses": {
+          "201": 5
+        }
+      },
+      "device_register": {
+        "n": 5,
+        "p50": 11.5,
+        "p95": 18.7,
+        "p99": 18.7,
+        "max": 18.7,
+        "errors": 0,
+        "statuses": {
+          "201": 5
+        }
+      },
+      "login_burst": {
+        "n": 5,
+        "p50": 155.6,
+        "p95": 213,
+        "p99": 213,
+        "max": 213,
+        "errors": 0,
+        "statuses": {
+          "200": 5
+        }
+      }
+    },
+    "containers": {
+      "api": {
+        "cpuPeak": 143.6,
+        "memPeakMiB": 41
+      },
+      "worker": {
+        "cpuPeak": 5,
+        "memPeakMiB": 33
+      },
+      "postgres": {
+        "cpuPeak": 5.8,
+        "memPeakMiB": 155
+      },
+      "redis": {
+        "cpuPeak": 2.5,
+        "memPeakMiB": 71
+      }
+    }
+  },
+  "burst_signup_25": {
+    "wallSignupMs": 1073,
+    "wallLoginMs": 1026,
+    "latency": {
+      "register": {
+        "n": 25,
+        "p50": 686.7,
+        "p95": 1031.8,
+        "p99": 1063.8,
+        "max": 1063.8,
+        "errors": 0,
+        "statuses": {
+          "201": 25
+        }
+      },
+      "device_register": {
+        "n": 25,
+        "p50": 17.3,
+        "p95": 28.6,
+        "p99": 35,
+        "max": 35,
+        "errors": 0,
+        "statuses": {
+          "201": 25
+        }
+      },
+      "login_burst": {
+        "n": 25,
+        "p50": 576.1,
+        "p95": 981.3,
+        "p99": 1023.6,
+        "max": 1023.6,
+        "errors": 0,
+        "statuses": {
+          "200": 25
+        }
+      }
+    },
+    "containers": {
+      "api": {
+        "cpuPeak": 792.7,
+        "memPeakMiB": 299
+      },
+      "worker": {
+        "cpuPeak": 9.6,
+        "memPeakMiB": 33
+      },
+      "postgres": {
+        "cpuPeak": 18.6,
+        "memPeakMiB": 166
+      },
+      "redis": {
+        "cpuPeak": 5.1,
+        "memPeakMiB": 72
+      }
+    }
+  },
+  "levels": {
+    "2": {
+      "users": 2,
+      "seconds": 25.1,
+      "cycles": 174,
+      "requests": 1218,
+      "requestsPerSecond": 48.5,
+      "listingsIngestedPerSecond": 346,
+      "latency": {
+        "ingest50": {
+          "n": 174,
+          "p50": 250.4,
+          "p95": 290.3,
+          "p99": 400,
+          "max": 405.9,
+          "errors": 0,
+          "statuses": {
+            "200": 174
+          }
+        },
+        "get_watches": {
+          "n": 174,
+          "p50": 4.5,
+          "p95": 6.7,
+          "p99": 8.1,
+          "max": 12.9,
+          "errors": 0,
+          "statuses": {
+            "200": 174
+          }
+        },
+        "get_products": {
+          "n": 174,
+          "p50": 4.6,
+          "p95": 6.4,
+          "p99": 7.5,
+          "max": 8,
+          "errors": 0,
+          "statuses": {
+            "200": 174
+          }
+        },
+        "get_feedback": {
+          "n": 174,
+          "p50": 4.5,
+          "p95": 6.4,
+          "p99": 14.5,
+          "max": 15.4,
+          "errors": 0,
+          "statuses": {
+            "200": 174
+          }
+        },
+        "heartbeat": {
+          "n": 174,
+          "p50": 6,
+          "p95": 8.4,
+          "p99": 11.8,
+          "max": 11.9,
+          "errors": 0,
+          "statuses": {
+            "200": 174
+          }
+        },
+        "put_watch": {
+          "n": 174,
+          "p50": 7.3,
+          "p95": 9.9,
+          "p99": 12.8,
+          "max": 14,
+          "errors": 0,
+          "statuses": {
+            "200": 172,
+            "201": 2
+          }
+        },
+        "put_product": {
+          "n": 174,
+          "p50": 7,
+          "p95": 9.8,
+          "p99": 12.5,
+          "max": 13,
+          "errors": 0,
+          "statuses": {
+            "200": 172,
+            "201": 2
+          }
+        }
+      },
+      "containers": {
+        "api": {
+          "cpuPeak": 61.4,
+          "memPeakMiB": 43
+        },
+        "worker": {
+          "cpuPeak": 5.1,
+          "memPeakMiB": 33
+        },
+        "postgres": {
+          "cpuPeak": 63.1,
+          "memPeakMiB": 168
+        },
+        "redis": {
+          "cpuPeak": 12.6,
+          "memPeakMiB": 76
+        }
+      }
+    },
+    "5": {
+      "users": 5,
+      "seconds": 25.3,
+      "cycles": 350,
+      "requests": 2450,
+      "requestsPerSecond": 97,
+      "listingsIngestedPerSecond": 693,
+      "latency": {
+        "ingest50": {
+          "n": 350,
+          "p50": 305.2,
+          "p95": 425,
+          "p99": 487.9,
+          "max": 500.4,
+          "errors": 0,
+          "statuses": {
+            "200": 350
+          }
+        },
+        "get_watches": {
+          "n": 350,
+          "p50": 4.8,
+          "p95": 7.4,
+          "p99": 9.9,
+          "max": 12.5,
+          "errors": 0,
+          "statuses": {
+            "200": 350
+          }
+        },
+        "get_products": {
+          "n": 350,
+          "p50": 4.9,
+          "p95": 7.8,
+          "p99": 12.2,
+          "max": 14.5,
+          "errors": 0,
+          "statuses": {
+            "200": 350
+          }
+        },
+        "get_feedback": {
+          "n": 350,
+          "p50": 4.9,
+          "p95": 8.1,
+          "p99": 9.8,
+          "max": 12.8,
+          "errors": 0,
+          "statuses": {
+            "200": 350
+          }
+        },
+        "heartbeat": {
+          "n": 350,
+          "p50": 7.1,
+          "p95": 11.5,
+          "p99": 20.8,
+          "max": 32.6,
+          "errors": 0,
+          "statuses": {
+            "200": 350
+          }
+        },
+        "put_watch": {
+          "n": 350,
+          "p50": 8.1,
+          "p95": 12.5,
+          "p99": 17.9,
+          "max": 27.2,
+          "errors": 0,
+          "statuses": {
+            "200": 345,
+            "201": 5
+          }
+        },
+        "put_product": {
+          "n": 350,
+          "p50": 8.1,
+          "p95": 13.3,
+          "p99": 20.9,
+          "max": 24.6,
+          "errors": 0,
+          "statuses": {
+            "200": 345,
+            "201": 5
+          }
+        }
+      },
+      "containers": {
+        "api": {
+          "cpuPeak": 74.2,
+          "memPeakMiB": 43
+        },
+        "worker": {
+          "cpuPeak": 6.3,
+          "memPeakMiB": 34
+        },
+        "postgres": {
+          "cpuPeak": 105.2,
+          "memPeakMiB": 188
+        },
+        "redis": {
+          "cpuPeak": 30.7,
+          "memPeakMiB": 89
+        }
+      }
+    },
+    "10": {
+      "users": 10,
+      "seconds": 25.4,
+      "cycles": 588,
+      "requests": 4116,
+      "requestsPerSecond": 162.2,
+      "listingsIngestedPerSecond": 1158,
+      "latency": {
+        "ingest50": {
+          "n": 588,
+          "p50": 377.4,
+          "p95": 456.6,
+          "p99": 517.4,
+          "max": 552.8,
+          "errors": 0,
+          "statuses": {
+            "200": 588
+          }
+        },
+        "get_watches": {
+          "n": 588,
+          "p50": 5.5,
+          "p95": 8.8,
+          "p99": 12.9,
+          "max": 20.2,
+          "errors": 0,
+          "statuses": {
+            "200": 588
+          }
+        },
+        "get_products": {
+          "n": 588,
+          "p50": 5.6,
+          "p95": 9.6,
+          "p99": 12.9,
+          "max": 16.5,
+          "errors": 0,
+          "statuses": {
+            "200": 588
+          }
+        },
+        "get_feedback": {
+          "n": 588,
+          "p50": 5.7,
+          "p95": 9.9,
+          "p99": 13.5,
+          "max": 17.4,
+          "errors": 0,
+          "statuses": {
+            "200": 588
+          }
+        },
+        "heartbeat": {
+          "n": 588,
+          "p50": 8.4,
+          "p95": 13.7,
+          "p99": 20,
+          "max": 45.4,
+          "errors": 0,
+          "statuses": {
+            "200": 588
+          }
+        },
+        "put_watch": {
+          "n": 588,
+          "p50": 9.2,
+          "p95": 15.4,
+          "p99": 21.6,
+          "max": 24.8,
+          "errors": 0,
+          "statuses": {
+            "200": 578,
+            "201": 10
+          }
+        },
+        "put_product": {
+          "n": 588,
+          "p50": 9.2,
+          "p95": 15.3,
+          "p99": 33.6,
+          "max": 49.5,
+          "errors": 0,
+          "statuses": {
+            "200": 578,
+            "201": 10
+          }
+        }
+      },
+      "containers": {
+        "api": {
+          "cpuPeak": 100.8,
+          "memPeakMiB": 44
+        },
+        "worker": {
+          "cpuPeak": 5.8,
+          "memPeakMiB": 34
+        },
+        "postgres": {
+          "cpuPeak": 154.4,
+          "memPeakMiB": 215
+        },
+        "redis": {
+          "cpuPeak": 74.2,
+          "memPeakMiB": 111
+        }
+      }
+    },
+    "25": {
+      "users": 25,
+      "seconds": 25.7,
+      "cycles": 625,
+      "requests": 4375,
+      "requestsPerSecond": 170.1,
+      "listingsIngestedPerSecond": 1215,
+      "latency": {
+        "ingest50": {
+          "n": 625,
+          "p50": 895.2,
+          "p95": 1121.1,
+          "p99": 1192.1,
+          "max": 1201.6,
+          "errors": 0,
+          "statuses": {
+            "200": 625
+          }
+        },
+        "get_watches": {
+          "n": 625,
+          "p50": 12.2,
+          "p95": 18.7,
+          "p99": 23.8,
+          "max": 26.6,
+          "errors": 0,
+          "statuses": {
+            "200": 625
+          }
+        },
+        "get_products": {
+          "n": 625,
+          "p50": 12.5,
+          "p95": 18.3,
+          "p99": 23.9,
+          "max": 52.7,
+          "errors": 0,
+          "statuses": {
+            "200": 625
+          }
+        },
+        "get_feedback": {
+          "n": 625,
+          "p50": 12.7,
+          "p95": 19,
+          "p99": 23.7,
+          "max": 56,
+          "errors": 0,
+          "statuses": {
+            "200": 625
+          }
+        },
+        "heartbeat": {
+          "n": 625,
+          "p50": 20.8,
+          "p95": 27.6,
+          "p99": 32.2,
+          "max": 65.6,
+          "errors": 0,
+          "statuses": {
+            "200": 625
+          }
+        },
+        "put_watch": {
+          "n": 625,
+          "p50": 21.9,
+          "p95": 31.4,
+          "p99": 34.9,
+          "max": 65.6,
+          "errors": 0,
+          "statuses": {
+            "200": 600,
+            "201": 25
+          }
+        },
+        "put_product": {
+          "n": 625,
+          "p50": 22.1,
+          "p95": 31.4,
+          "p99": 34.9,
+          "max": 37.1,
+          "errors": 0,
+          "statuses": {
+            "200": 600,
+            "201": 25
+          }
+        }
+      },
+      "containers": {
+        "api": {
+          "cpuPeak": 100.2,
+          "memPeakMiB": 45
+        },
+        "worker": {
+          "cpuPeak": 5,
+          "memPeakMiB": 33
+        },
+        "postgres": {
+          "cpuPeak": 158.3,
+          "memPeakMiB": 219
+        },
+        "redis": {
+          "cpuPeak": 86.6,
+          "memPeakMiB": 135
+        }
+      }
+    }
+  },
+  "aiRefusalPathAndFairness": {
+    "quiet_user_get_during_ai_burst": {
+      "n": 40,
+      "p50": 4.7,
+      "p95": 8,
+      "p99": 8.7,
+      "max": 8.7,
+      "errors": 0,
+      "statuses": {
+        "200": 40
+      }
+    },
+    "ai_refused_noisy_user": {
+      "n": 300,
+      "p50": 13.3,
+      "p95": 30.5,
+      "p99": 40.1,
+      "max": 40.3,
+      "errors": 300,
+      "statuses": {
+        "429": 282,
+        "503": 18
+      }
+    }
+  },
+  "failedLoginLimit": {
+    "sameForwardedFor": [
+      401,
+      401,
+      401,
+      401,
+      401,
+      401,
+      401,
+      401,
+      429,
+      429,
+      429,
+      429
+    ],
+    "rotatingForwardedFor": [
+      401,
+      401,
+      401,
+      401,
+      401,
+      401,
+      401,
+      401,
+      401,
+      401,
+      401,
+      401
+    ]
+  },
+  "finishedAt": "2026-10-14T05:35:20.719Z"
+}

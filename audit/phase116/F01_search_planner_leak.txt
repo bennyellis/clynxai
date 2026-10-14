@@ -1,0 +1,4 @@
+B triggered aggregation: HTTP 200
+B read demand: HTTP 200
+A's unique phrase visible to B: true
+sample watch ids visible: true

@@ -1,0 +1,146 @@
+{
+  "N=1000": {
+    "listings": 1000,
+    "products": 200,
+    "insertPerListingMs": 4.159,
+    "dbSizeMB": 0.4,
+    "feedFirstPage200": {
+      "p50": 6.6,
+      "p95": 9.33,
+      "max": 9.96
+    },
+    "feedDeepPage200": {
+      "p50": 5.76,
+      "p95": 7.06,
+      "max": 7.17
+    },
+    "countListings": {
+      "p50": 0.06,
+      "p95": 0.09,
+      "max": 0.26
+    },
+    "getById": {
+      "p50": 1.3,
+      "p95": 1.78,
+      "max": 2.01
+    },
+    "unsyncedBatch50": {
+      "p50": 0.76,
+      "p95": 0.95,
+      "max": 1.08
+    },
+    "productIndex": {
+      "p50": 0.15,
+      "p95": 0.23,
+      "max": 0.23
+    },
+    "findMatchingProduct": {
+      "p50": 1.35,
+      "p95": 1.92,
+      "max": 2.19
+    }
+  },
+  "N=10000": {
+    "listings": 10000,
+    "products": 2000,
+    "insertPerListingMs": 3.986,
+    "dbSizeMB": 3,
+    "feedFirstPage200": {
+      "p50": 32.36,
+      "p95": 33.74,
+      "max": 35.33
+    },
+    "feedDeepPage200": {
+      "p50": 46.99,
+      "p95": 64.72,
+      "max": 170.76
+    },
+    "countListings": {
+      "p50": 0.06,
+      "p95": 0.11,
+      "max": 0.43
+    },
+    "getById": {
+      "p50": 9.72,
+      "p95": 13.57,
+      "max": 16.67
+    },
+    "unsyncedBatch50": {
+      "p50": 3.56,
+      "p95": 3.8,
+      "max": 3.87
+    },
+    "productIndex": {
+      "p50": 0.95,
+      "p95": 1.35,
+      "max": 1.35
+    },
+    "findMatchingProduct": {
+      "p50": 10.32,
+      "p95": 11.59,
+      "max": 13.49
+    }
+  },
+  "N=50000": {
+    "listings": 50000,
+    "products": 5000,
+    "insertPerListingMs": 4.257,
+    "dbSizeMB": 13.6,
+    "feedFirstPage200": {
+      "p50": 128.61,
+      "p95": 147.79,
+      "max": 149.09
+    },
+    "feedDeepPage200": {
+      "p50": 207.13,
+      "p95": 249.78,
+      "max": 294.01
+    },
+    "countListings": {
+      "p50": 0.07,
+      "p95": 0.2,
+      "max": 1.18
+    },
+    "getById": {
+      "p50": 23.32,
+      "p95": 27.25,
+      "max": 29.56
+    },
+    "unsyncedBatch50": {
+      "p50": 16.29,
+      "p95": 17.84,
+      "max": 19.2
+    },
+    "productIndex": {
+      "p50": 2.22,
+      "p95": 2.78,
+      "max": 2.78
+    },
+    "findMatchingProduct": {
+      "p50": 25.36,
+      "p95": 28.44,
+      "max": 29.72
+    }
+  }
+}
+node:fs:1283
+  return binding.rmSync(getValidatedPath(path), opts.maxRetries, opts.recursive, opts.retryDelay);
+                 ^
+
+Error: EPERM, Permission denied: \\?\C:\Users\biggt\AppData\Local\Temp\clynx-bench-z8gCDd '\\?\C:\Users\biggt\AppData\Local\Temp\clynx-bench-z8gCDd'
+    at rmSync (node:fs:1283:18)
+    at Object.<anonymous> (C:\Users\biggt\AppData\Local\Temp\clynx-bench-b-lGvIAd\bench.cjs:4546:28)
+    at Module._compile (node:internal/modules/cjs/loader:1872:14)
+    at Object..js (node:internal/modules/cjs/loader:2003:10)
+    at Module.load (node:internal/modules/cjs/loader:1594:32)
+    at Module._load (node:internal/modules/cjs/loader:1396:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)
+    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)
+    at node:internal/main/run_main_module:33:47 {
+  errno: 1,
+  code: 'EPERM',
+  path: '\\\\?\\C:\\Users\\biggt\\AppData\\Local\\Temp\\clynx-bench-z8gCDd',
+  syscall: 'rm'
+}
+
+Node.js v24.19.0

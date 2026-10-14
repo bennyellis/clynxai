@@ -1,0 +1,1 @@
+after logout the access token answered HTTP 200 (access tokens live 900s)

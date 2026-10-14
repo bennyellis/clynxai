@@ -1,0 +1,7 @@
+GET /health -> 200 0.004019s
+GET /health/ready -> 000 8.002181s
+GET /watches -> 200 0.007568s
+POST /auth/login -> 000 8.003045s
+POST /listings/ingest -> 000 8.002152s
+POST /ai/chat/completions -> 000 8.002984s
+GET /server/info -> 200 0.016999s

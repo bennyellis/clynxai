@@ -1,0 +1,1 @@
+disabled user's existing access token answered HTTP 200

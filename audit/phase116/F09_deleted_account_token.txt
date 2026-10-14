@@ -1,0 +1,1 @@
+PUT /watches with a deleted user's token: HTTP 500; GET: 200

@@ -1,0 +1,30 @@
+routes probed: 112
+answered 401/403 to an anonymous caller: 85
+answered something else (public by design, or a validation error):
+GET /ebay/callback -> 303
+GET /gate -> 200
+GET /health -> 200
+GET /health/ready -> 200
+GET /metrics -> 404
+GET /plans/public -> 200
+GET /releases -> 200
+GET /releases/:id/download -> 404
+GET /releases/latest -> 200
+GET /server/info -> 200
+GET /updates/:channel/latest -> 400
+GET /updates/:channel/versions/:version -> 400
+GET /updates/status -> 200
+POST /auth/login -> 400
+POST /auth/logout -> 400
+POST /auth/refresh -> 400
+POST /auth/register -> 400
+POST /billing/webhook -> 503
+POST /gate/join -> 400
+POST /gate/login -> 400
+POST /support/requests -> 400
+POST /web/email/confirm-change -> 400
+POST /web/email/verify -> 400
+POST /web/login -> 400
+POST /web/password/forgot -> 400
+POST /web/password/reset -> 400
+POST /web/signup -> 400

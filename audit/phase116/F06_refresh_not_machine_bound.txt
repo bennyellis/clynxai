@@ -1,0 +1,1 @@
+refresh token created for device D1, presented naming device D2 (same user): HTTP 200
