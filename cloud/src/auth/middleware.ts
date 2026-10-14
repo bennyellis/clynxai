@@ -1,6 +1,6 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { query } from "../db/client.js";
-import { COOKIE_NAME, csrfMatches, lookupWebSession, originAllowed, parseCookies } from "../web/session.js";
+import { csrfMatches, lookupWebSession, originAllowed, readSessionCookie } from "../web/session.js";
 import { verifyAccessToken } from "./service.js";
 
 declare module "fastify" {
@@ -31,7 +31,7 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply):
     return;
   }
 
-  const session = await lookupWebSession(parseCookies(request.headers.cookie)[COOKIE_NAME]);
+  const session = await lookupWebSession(readSessionCookie(request.headers.cookie));
   if (!session) return reply.code(401).send({ error: "Missing or malformed Authorization header" });
   if (!SAFE_METHODS.has(request.method)) {
     if (!originAllowed(request)) return reply.code(403).send({ error: "csrf", message: "Cross-site request refused." });

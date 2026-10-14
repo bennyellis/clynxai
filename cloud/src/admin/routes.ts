@@ -6,7 +6,7 @@ import { pool, query } from "../db/client.js";
 import { listingProcessingQueue } from "../queue/listingProcessingQueue.js";
 import { redisConnection } from "../queue/connection.js";
 import { hashStored, removeStored, saveStream, TooLargeError } from "../releases/storage.js";
-import { verifySigned } from "../updates/manifest.js";
+import { attachSignedManifest, manifestTemplate } from "../releases/manifestOps.js";
 import { counters } from "../security/hooks.js";
 import { revokeAllWebSessions } from "../web/session.js";
 
@@ -223,62 +223,21 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   // 1. GET .../update-manifest-template returns the unsigned manifest for this release (the SHA-512 is computed by the server from the stored file).
   // 2. The publisher signs that exact text offline (node scripts/update-keys.cjs sign ...).
   // 3. PUT .../update-manifest uploads { manifest, signature }. The server verifies the signature and that it describes THIS release's stored file before keeping it.
-  const manifestUrl = (id: string) => `/releases/${id}/download`;
-  async function releaseForManifest(id: string) {
-    const r = await query<{ id: string; version: string; channel: string; status: string; platform: string; notes: string; file_name: string | null; storage_key: string | null; size_bytes: string | null; sha256: string | null }>(
-      "SELECT id, version, channel, status, platform, notes, file_name, storage_key, size_bytes, sha256 FROM releases WHERE id = $1",
-      [id]
-    );
-    return r.rows[0] ?? null;
-  }
-
   app.get("/admin/releases/:id/update-manifest-template", async (request, reply) => {
     const p = uuid.safeParse(request.params);
     if (!p.success) return reply.code(400).send({ error: "Invalid id" });
-    const rel = await releaseForManifest(p.data.id);
-    if (!rel) return reply.code(404).send({ error: "Not found" });
-    if (!rel.storage_key || !rel.file_name) return reply.code(409).send({ error: "Upload the installer first" });
-    const sha512 = await hashStored(rel.storage_key, "sha512");
-    if (!sha512) return reply.code(409).send({ error: "The stored file is missing" });
-    const [platform, arch] = rel.platform.split("-");
-    const manifest = {
-      product: "clynx",
-      version: rel.version,
-      channel: rel.channel,
-      publishedAt: new Date().toISOString(),
-      files: [{ name: rel.file_name, url: manifestUrl(rel.id), sha512, sha256: rel.sha256, size: Number(rel.size_bytes), platform, arch: arch ?? "x64" }],
-      notes: rel.notes.slice(0, 2000),
-    };
-    return reply.code(200).send({ manifest, configured: !!config.web.updatePublicKey });
+    const r = await manifestTemplate(p.data.id);
+    if (!r.ok) return reply.code(r.status).send({ error: r.error, message: r.message });
+    return reply.code(200).send({ manifest: r.manifest, configured: r.configured });
   });
 
   app.put("/admin/releases/:id/update-manifest", async (request, reply) => {
     const p = uuid.safeParse(request.params);
     if (!p.success) return reply.code(400).send({ error: "Invalid id" });
-    if (!config.web.updatePublicKey) return reply.code(409).send({ error: "updates_not_configured", message: "This server has no update public key (UPDATE_PUBLIC_KEY / UPDATE_PUBLIC_KEY_FILE), so it cannot check or serve signed updates." });
-    const rel = await releaseForManifest(p.data.id);
-    if (!rel) return reply.code(404).send({ error: "Not found" });
-    if (rel.status === "withdrawn") return reply.code(409).send({ error: "A withdrawn release cannot carry an update" });
-    if (!rel.storage_key) return reply.code(409).send({ error: "Upload the installer first" });
-    const checked = verifySigned(request.body, config.web.updatePublicKey);
-    if (!checked.ok) return reply.code(422).send({ error: "manifest_rejected", message: checked.reason });
-    const m = checked.manifest;
-    const sha512 = await hashStored(rel.storage_key, "sha512");
-    const [platform, arch] = rel.platform.split("-");
-    const f = m.files[0];
-    const problems: string[] = [];
-    if (m.version !== rel.version) problems.push("the version does not match this release");
-    if (m.channel !== rel.channel) problems.push("the channel does not match this release");
-    if (m.files.length !== 1 || f.platform !== platform || f.arch !== (arch ?? "x64")) problems.push("the file entry is not for this release's platform");
-    if (f.sha512 !== sha512) problems.push("the installer checksum (SHA-512) does not match the file stored on this server");
-    if (f.size !== Number(rel.size_bytes)) problems.push("the installer size does not match");
-    if (f.sha256 !== undefined && f.sha256 !== rel.sha256) problems.push("the installer checksum (SHA-256) does not match the file stored on this server");
-    if (f.url !== manifestUrl(rel.id)) problems.push("the download address must be " + manifestUrl(rel.id));
-    if (problems.length) return reply.code(422).send({ error: "manifest_mismatch", message: "The signed manifest does not describe this release: " + problems.join("; ") + "." });
-    const body = request.body as { manifest: string; signature: string };
-    await query("UPDATE releases SET sha512 = $1, update_manifest = $2, update_manifest_at = now(), update_manifest_by = $3 WHERE id = $4", [sha512, JSON.stringify({ manifest: body.manifest, signature: body.signature }), request.userId, rel.id]);
-    await audit(request, "release.update_manifest", rel.id, { version: rel.version, channel: rel.channel });
-    return reply.code(200).send({ ok: true, willBeOffered: rel.status === "published" });
+    const r = await attachSignedManifest(p.data.id, request.body, request.userId as string);
+    if (!r.ok) return reply.code(r.status).send({ error: r.error, message: r.message });
+    await audit(request, "release.update_manifest", p.data.id, { version: r.version, channel: r.channel });
+    return reply.code(200).send({ ok: true, willBeOffered: r.willBeOffered });
   });
 
   app.delete("/admin/releases/:id/update-manifest", async (request, reply) => {

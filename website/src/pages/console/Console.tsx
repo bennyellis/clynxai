@@ -3,7 +3,7 @@ import { Link, NavLink, Outlet, useNavigate, useParams } from "react-router-dom"
 import { Field, Loading, Notice, usePageMeta } from "../../components/ui";
 import { api, del, errorText, get, patch, post, put } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
-import { formatBytes, formatDate, formatDateTime } from "../../lib/format";
+import { copyText, formatBytes, formatDate, formatDateTime } from "../../lib/format";
 
 // The administration console. The server re-checks the administrator role on every call; hiding a page here is only a courtesy.
 
@@ -18,6 +18,7 @@ export function ConsoleLayout() {
         <NavLink to="/console/users">Customers</NavLink>
         <NavLink to="/console/beta">Beta testers</NavLink>
         <NavLink to="/console/releases">Releases</NavLink>
+        <NavLink to="/console/invites">Invitations</NavLink>
         <NavLink to="/console/support">Support</NavLink>
         <NavLink to="/console/health">Service health</NavLink>
         <NavLink to="/console/spending">Spending and safety</NavLink>
@@ -185,6 +186,92 @@ export function ConsoleUserDetail() {
 }
 
 interface AdminRelease { id: string; version: string; channel: string; status: string; notes: string; knownIssues: string; fileName: string | null; sha256: string | null; sizeBytes: number | null; createdAt: string; publishedAt: string | null; createdBy: string | null; downloads: number; hasUpdateManifest?: boolean }
+
+interface InviteRow { id: string; email: string | null; note: string; createdAt: string; expiresAt: string; usedAt: string | null; usedBy: string | null; revokedAt: string | null; status: "open" | "used" | "expired" | "revoked" }
+
+export function ConsoleInvites() {
+  const [data, e, reload] = useLoad<{ invites: InviteRow[]; registration: string; access: string }>("/admin/invites");
+  const [email, setEmail] = useState("");
+  const [note, setNote] = useState("");
+  const [hours, setHours] = useState("72");
+  const [fresh, setFresh] = useState<{ code: string; expiresAt: string; email: string } | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const create = async (ev: FormEvent) => {
+    ev.preventDefault();
+    setBusy(true);
+    setErr(null);
+    setFresh(null);
+    try {
+      const r = await post<{ code: string; expiresAt: string }>("/admin/invites", { email: email.trim() || undefined, note: note.trim() || undefined, hours: Number(hours) || 72 });
+      setFresh({ code: r.code, expiresAt: r.expiresAt, email: email.trim() });
+      setEmail("");
+      setNote("");
+      reload();
+    } catch (x) {
+      setErr(errorText(x));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <h1 style={{ fontSize: "1.9rem" }}>Invitations</h1>
+      <Notice>
+        {data?.registration === "invite" ? "This server is invitation-only: nobody can create an account without a code from this page." : data?.registration === "closed" ? "Registration is closed: not even a code creates an account." : "Registration is OPEN on this server: anyone who can reach it can create an account (codes are not required). Set REGISTRATION=invite to require them."}
+        {" "}Access is <strong>{data?.access === "private" ? "private (sign-in required for everything)" : "open"}</strong>.
+      </Notice>
+      <Err e={e ?? err} />
+      {fresh && (
+        <div className="success" role="status" data-testid="new-invite">
+          <strong>Invitation code (shown only now):</strong>
+          <div style={{ margin: "8px 0" }}><code className="code" data-testid="invite-code">{fresh.code}</code></div>
+          <div className="row">
+            <button className="btn small" onClick={async () => { setCopied(await copyText(fresh.code)); setTimeout(() => setCopied(false), 2000); }}>{copied ? "Copied" : "Copy code"}</button>
+            <span className="muted">Valid until {formatDateTime(fresh.expiresAt)}{fresh.email ? `, only for ${fresh.email}` : ""}. Send it privately; it works once.</span>
+          </div>
+        </div>
+      )}
+      <section className="card">
+        <h2 style={{ fontSize: "1.2rem" }}>New invitation</h2>
+        <form className="form" onSubmit={create} style={{ maxWidth: 560 }}>
+          <Field label="Only for this email (optional)" htmlFor="i-email"><input id="i-email" type="email" placeholder="tester@example.com" value={email} onChange={(x) => setEmail(x.target.value)} /></Field>
+          <div className="row">
+            <Field label="Note (optional, only you see it)" htmlFor="i-note"><input id="i-note" type="text" maxLength={200} value={note} onChange={(x) => setNote(x.target.value)} /></Field>
+            <Field label="Valid for (hours)" htmlFor="i-hours"><input id="i-hours" type="number" min={1} max={720} value={hours} onChange={(x) => setHours(x.target.value)} /></Field>
+          </div>
+          <div><button className="btn primary small" disabled={busy}>Create invitation</button></div>
+        </form>
+      </section>
+      <section className="card">
+        <h2 style={{ fontSize: "1.2rem" }}>All invitations</h2>
+        {!data ? <Loading /> : data.invites.length === 0 ? <p className="muted">None yet.</p> : (
+          <div className="table-scroll">
+            <table className="compare">
+              <thead><tr><th scope="col">Status</th><th scope="col">For</th><th scope="col">Note</th><th scope="col">Created</th><th scope="col">Expires</th><th scope="col">Used by</th><th scope="col"></th></tr></thead>
+              <tbody>
+                {data.invites.map((i) => (
+                  <tr key={i.id} data-testid={`invite-${i.status}`}>
+                    <td><span className={`pill ${i.status === "open" ? "ok" : i.status === "used" ? "" : "bad"}`}>{i.status}</span></td>
+                    <td>{i.email ?? "anyone with the code"}</td>
+                    <td>{i.note || "-"}</td>
+                    <td>{formatDateTime(i.createdAt)}</td>
+                    <td>{formatDateTime(i.expiresAt)}</td>
+                    <td>{i.usedBy ?? "-"}</td>
+                    <td>{i.status === "open" && <button className="btn small ghost danger" onClick={async () => { try { await del(`/admin/invites/${i.id}`); reload(); } catch (x) { setErr(errorText(x)); } }}>Revoke</button>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
 
 export function ConsoleReleases() {
   const [data, e, reload] = useLoad<{ releases: AdminRelease[] }>("/admin/releases");

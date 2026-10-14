@@ -74,6 +74,7 @@ export function LoginScreen({
   const [beta, setBeta] = useState<BetaInfo | null>(null);
   const [showCloud, setShowCloud] = useState(false);
   const [importLocal, setImportLocal] = useState(false);
+  const [inviteCode, setInviteCode] = useState("");
   useEffect(() => {
     void api.beta
       .info()
@@ -109,6 +110,14 @@ export function LoginScreen({
     }
   }
 
+  // Registering on a private server needs an invitation code: find out before asking for it (the check also runs, and gates the password, on submit).
+  useEffect(() => {
+    if (mode !== "register" || !apiUrl.trim() || test.state !== "idle") return;
+    const t = setTimeout(() => void runTest(apiUrl), 700); // (not on every keystroke)
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, apiUrl, test.state]);
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (busy) return;
@@ -125,7 +134,7 @@ export function LoginScreen({
       const result =
         mode === "login"
           ? await api.auth.login(trimmedUrl, trimmedEmail, password, importLocal && !!beta?.localDataExists)
-          : await api.auth.register(trimmedUrl, trimmedEmail, password, importLocal && !!beta?.localDataExists);
+          : await api.auth.register(trimmedUrl, trimmedEmail, password, importLocal && !!beta?.localDataExists, inviteCode.trim() || undefined);
       if (!result.ok && result.startupProblem) {
         setProblem(result.startupProblem);
         return;
@@ -241,6 +250,15 @@ export function LoginScreen({
             required
           />
         </Field>
+        {mode === "register" && test.state === "ok" && test.result?.ok && test.result.registration === "invite" && (
+          <Field label="Invitation code">
+            <input data-testid="invite-code-input" value={inviteCode} onChange={(e) => setInviteCode(e.target.value)} placeholder="XXXX-XXXX-XXXX-XXXX" autoComplete="off" spellCheck={false} required />
+            <span style={{ fontSize: 12.5, color: "var(--text-dim)" }}>This is a private server: the person who runs it gives you a one-time code.</span>
+          </Field>
+        )}
+        {mode === "register" && test.state === "ok" && test.result?.ok && test.result.registration === "closed" && (
+          <p data-testid="registration-closed" style={{ margin: 0, fontSize: 13.5, color: "var(--warn)" }}>This server is not creating new accounts. Ask the person who runs it, or log in if you already have one.</p>
+        )}
         <Field label="Password">
           <input
             type="password"

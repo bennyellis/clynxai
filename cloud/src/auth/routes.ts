@@ -8,6 +8,7 @@ const credentialsSchema = z.object({
   email: emailSchema,
   password: passwordSchema,
   deviceId: z.string().uuid().optional(),
+  inviteCode: z.string().max(40).optional(), // only used by /auth/register on a server that requires invitations
 });
 
 const refreshSchema = z.object({
@@ -31,7 +32,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
     const { email, password, deviceId } = parsed.data;
     try {
-      const userId = await registerUser(email, password, request.ip);
+      const userId = await registerUser(email, password, request.ip, undefined, parsed.data.inviteCode);
       const accessToken = await issueAccessToken(userId);
       const refresh = await issueRefreshToken(userId, deviceId ?? null);
       return reply.code(201).send({ accessToken, refreshToken: refresh.rawToken, userId });

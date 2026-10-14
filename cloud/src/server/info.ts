@@ -34,6 +34,9 @@ export async function serverInfoRoutes(app: FastifyInstance): Promise<void> {
       apiVersion: API_VERSION,
       minClientVersion: config.web.minClientVersion,
       https: config.web.publicUrl.startsWith("https://"),
+      // how this server treats strangers: "private" = sign-in required for everything; registration = open | invite | closed
+      access: config.web.accessPrivate ? "private" : "open",
+      registration: config.web.registration,
       services: { sharedAi, sharedEbay, billing: config.billing.configured ? "stripe" : config.billingFake ? "simulated" : "none", updates: !!config.web.updatePublicKey },
       time: new Date().toISOString(),
     });

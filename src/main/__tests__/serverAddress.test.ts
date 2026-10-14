@@ -50,6 +50,9 @@ run(async () => {
   section("Test connection");
   const ok = await testServer("10.0.0.81:8788", { clientVersion: "0.3.0-beta.2", fetchImpl: fakeFetch({ "/server/info": () => json(200, INFO) }) });
   check("a Clynx server is recognised, with its name, version and shared services", ok.ok && ok.name === "Home server" && ok.serverVersion === "0.1.0" && ok.services.sharedAi === true && ok.url === "http://10.0.0.81:8788", ok);
+  const priv = await testServer("10.0.0.81:8788", { clientVersion: "0.3.0", fetchImpl: fakeFetch({ "/server/info": () => json(200, { ...INFO, access: "private", registration: "invite" }) }) });
+  check("a private, invitation-only server is reported as such (the sign-in screen asks for a code)", priv.ok && priv.access === "private" && priv.registration === "invite", priv);
+  check("a server that says nothing about it is treated as open", ok.ok && ok.access === "open" && ok.registration === "open");
   const notClynx = await testServer("10.0.0.81:80", { clientVersion: "0.3.0", fetchImpl: fakeFetch({ "/server/info": () => json(200, { hello: "world" }) }) });
   check("a web server that is not Clynx is rejected", !notClynx.ok && notClynx.stage === "not-clynx", notClynx);
   const legacy = await testServer("10.0.0.81:8787", { clientVersion: "0.3.0", fetchImpl: fakeFetch({ "/health": () => json(200, { status: "ok" }) }) });

@@ -45,3 +45,4 @@ backups/docker/
 .env.lan
 .env.lan.bak-*
 backups/lan/
+updates/

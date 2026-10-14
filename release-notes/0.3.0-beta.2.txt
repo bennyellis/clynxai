@@ -1,0 +1,8 @@
+Clynx Beta 2 - what is new
+* Connect Clynx to a Clynx server: type the server address once, press Test connection, then sign in or register. Several computers share one account, one shared AI/eBay service (no keys needed on the computers) and automatic updates.
+* Private beta: this server is invitation-only. Ask for an invitation code to create an account.
+* Works offline: if the server cannot be reached Clynx keeps using the data on the computer and reconnects by itself.
+* Automatic updates (when signed in to a server): newer signed versions are found, downloaded and checked in the background and installed only when you click Restart and install. A return to the earlier version is one click.
+* Local mode (no server, your own keys) is unchanged. Scanning, the Database, Watches, backups and recovery are as in Beta 1.
+* Owner accounts are recognised ("Owner - Full Access"); the server's OpenAI/eBay keys never reach your computer.
+Installing over Beta 1 keeps all your data.

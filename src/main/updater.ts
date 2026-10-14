@@ -59,6 +59,8 @@ export interface UpdateInfo {
 export interface UpdaterDeps {
   /** The signed-in server's address, or null when there is no server (local mode, signed out): then nothing is checked. */
   getServerBase: () => string | null;
+  /** The Authorization header for the signed-in server (a private server refuses update checks and installer downloads without it). Sent ONLY to that server, never to another address. */
+  authHeader?: () => string | null;
   /** The public half of the update signing key. Null: this build cannot verify updates, so it does not install any. */
   publicKeyPem: string | null;
   currentVersion: string;
@@ -103,6 +105,16 @@ export class Updater {
       writeUpdateState(this.deps.stateFile, this.state);
     } catch (err) {
       this.deps.log?.(`[updates] could not save update state: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  /** The sign-in header, but only for requests to the server we are signed in to: an update file hosted elsewhere never receives it. */
+  private authFor(url: string, base: string): Record<string, string> {
+    const h = this.deps.authHeader?.();
+    if (!h) return {};
+    try {
+      return new URL(url).origin === new URL(base).origin ? { Authorization: h } : {};
+    } catch {
+      return {};
     }
   }
   private set(s: UpdateStatus): void {
@@ -210,7 +222,7 @@ export class Updater {
       const url = `${base.replace(/\/+$/, "")}/updates/${channel}/latest?platform=${encodeURIComponent(this.deps.platform)}&arch=${encodeURIComponent(this.deps.arch)}`;
       let res: Response;
       try {
-        res = await doFetch(url, { signal: AbortSignal.timeout(15_000), redirect: "error", headers: { Accept: "application/json" } });
+        res = await doFetch(url, { signal: AbortSignal.timeout(15_000), redirect: "error", headers: { Accept: "application/json", ...this.authFor(url, base) } });
       } catch {
         this.set({ state: "error", stage: "check", message: "Could not reach the server to check for updates. It will try again later." });
         return this.status;
@@ -218,6 +230,10 @@ export class Updater {
       if (res.status === 404) {
         this.lastCheckedAt = this.now();
         this.set({ state: "up-to-date", checkedAt: this.lastCheckedAt }); // an older server without update support
+        return this.status;
+      }
+      if (res.status === 401) {
+        this.set({ state: "error", stage: "check", message: "The server did not accept this sign-in for the update check. Sign out and in again; it will try again later." });
         return this.status;
       }
       if (!res.ok) {
@@ -278,7 +294,7 @@ export class Updater {
         file,
         stage,
         async (u) => {
-          const res = await doFetch(u, { redirect: "error", signal: AbortSignal.timeout(30 * 60_000) });
+          const res = await doFetch(u, { redirect: "error", signal: AbortSignal.timeout(30 * 60_000), headers: this.authFor(u, base) });
           if (!res.ok || !res.body) throw new Error(`The server answered ${res.status} for the download.`);
           return res.body as unknown as AsyncIterable<Uint8Array>;
         },
@@ -340,7 +356,7 @@ export class Updater {
       const url = `${base.replace(/\/+$/, "")}/updates/${this.deps.channel()}/versions/${encodeURIComponent(target)}?platform=${encodeURIComponent(this.deps.platform)}&arch=${encodeURIComponent(this.deps.arch)}`;
       let body: { update?: unknown } | null = null;
       try {
-        const res = await doFetch(url, { signal: AbortSignal.timeout(15_000), redirect: "error" });
+        const res = await doFetch(url, { signal: AbortSignal.timeout(15_000), redirect: "error", headers: this.authFor(url, base) });
         body = res.ok ? ((await res.json().catch(() => null)) as { update?: unknown } | null) : null;
       } catch {
         body = null;
@@ -360,7 +376,7 @@ export class Updater {
         { ...file, url: new URL(file.url, base).toString() },
         stage,
         async (u) => {
-          const res = await doFetch(u, { redirect: "error", signal: AbortSignal.timeout(30 * 60_000) });
+          const res = await doFetch(u, { redirect: "error", signal: AbortSignal.timeout(30 * 60_000), headers: this.authFor(u, base) });
           if (!res.ok || !res.body) throw new Error(`The server answered ${res.status} for the download.`);
           return res.body as unknown as AsyncIterable<Uint8Array>;
         },

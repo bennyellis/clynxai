@@ -25,6 +25,8 @@ import { integrationsRoutes } from "./admin/integrationsRoutes.js";
 import { ebayRoutes } from "./ebay/routes.js";
 import { updatesRoutes } from "./updates/routes.js";
 import { serverInfoRoutes } from "./server/info.js";
+import { registerAccessGate } from "./access/gate.js";
+import { invitesRoutes } from "./admin/invitesRoutes.js";
 import { FakeStripe } from "./billing/fakeProvider.js";
 
 export interface BuildOptions {
@@ -47,6 +49,7 @@ export function buildApp(options: BuildOptions = {}) {
   const billing = options.billing === undefined ? defaultBillingProvider() : options.billing;
 
   registerSecurity(app);
+  registerAccessGate(app);
   app.register(healthRoutes);
   app.register(authRoutes);
   app.register(accountRoutes(billing));
@@ -68,6 +71,7 @@ export function buildApp(options: BuildOptions = {}) {
   app.register(ebayRoutes);
   app.register(updatesRoutes);
   app.register(serverInfoRoutes);
+  app.register(invitesRoutes);
   app.register(plansRoutes);
   if (billing instanceof FakeStripe) app.register(billing.routes());
   registerWebsite(app);

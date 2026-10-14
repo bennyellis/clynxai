@@ -18,6 +18,12 @@ export interface PublicRelease {
   downloadUrl: string | null;
 }
 
+/** "0.3.0-beta.2" -> "Clynx Beta 2"; any other version -> "Clynx <version>". */
+export function releaseTitle(r: Pick<PublicRelease, "version" | "channel">): string {
+  const m = /-beta\.(\d+)(?:\.\d+)?$/.exec(r.version);
+  return m ? `Clynx Beta ${m[1]}` : `Clynx ${r.version}`;
+}
+
 export default function Download() {
   usePageMeta("Download Clynx for Windows", "Download the Clynx Windows beta: latest version, SHA-256 checksum, system requirements, installation steps, release notes and known issues.");
   const [channel, setChannel] = useState<"beta" | "stable">("beta");
@@ -25,6 +31,9 @@ export default function Download() {
   const [history, setHistory] = useState<PublicRelease[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedAddr, setCopiedAddr] = useState(false);
+  // the address a computer should type into Clynx: the one this page was opened from
+  const serverAddress = typeof window !== "undefined" ? window.location.origin : "";
 
   useEffect(() => {
     setLatest(undefined);
@@ -37,7 +46,7 @@ export default function Download() {
     <div className="wrap section">
       <span className="eyebrow">Download</span>
       <h1 style={{ fontSize: "clamp(2rem,4.5vw,3rem)" }}>Clynx for Windows</h1>
-      <p className="lead">Windows 10 or 11 (64-bit). The beta runs on your computer with no account and no payment.</p>
+      <p className="lead">Windows 10 or 11 (64-bit). You are seeing this page because you are signed in to a private beta; only approved testers can download the installer.</p>
 
       <div className="toggle" role="group" aria-label="Release channel" style={{ margin: "18px 0 26px" }}>
         <button aria-pressed={channel === "beta"} onClick={() => setChannel("beta")}>
@@ -64,8 +73,8 @@ export default function Download() {
         <div className="card" data-testid="release-card">
           <div className="row" style={{ justifyContent: "space-between" }}>
             <div>
-              <h2 style={{ marginBottom: 4 }}>
-                Clynx {latest.version} <span className="pill warn">{latest.channel}</span>
+              <h2 style={{ marginBottom: 4 }} data-testid="release-title">
+                {releaseTitle(latest)} <span className="pill warn">{latest.channel}</span> <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 500 }}>version {latest.version}</span>
               </h2>
               <p className="muted" style={{ margin: 0 }}>
                 Published {formatDate(latest.publishedAt)} - {formatBytes(latest.sizeBytes)} - {latest.platform === "win32-x64" ? "Windows x64" : latest.platform}
@@ -113,13 +122,31 @@ export default function Download() {
         <section className="card">
           <h2 style={{ fontSize: "1.35rem" }}>Installing</h2>
           <ol className="muted" style={{ paddingLeft: 20, margin: 0 }}>
-            <li>Download the installer and, if you like, check its checksum.</li>
-            <li>Run it. <strong>Windows may warn "Unknown publisher"</strong> (see below). Choose More info, then Run anyway.</li>
-            <li>Open Clynx from the Start menu and press <strong>Start Clynx</strong>.</li>
-            <li>Follow the Get started checklist: connect Facebook, choose where to look, add a product.</li>
+            <li>Download the installer and check its checksum (below).</li>
+            <li>Run it. <strong>Windows will warn "Unknown publisher"</strong> (see below). Choose More info, then Run anyway.</li>
+            <li>Open Clynx and click <strong>I have a Clynx Cloud account</strong>.</li>
+            <li>Under <strong>Server address</strong> enter the address shown here, click <strong>Test connection</strong>, then sign in (or register with your invitation code).</li>
+            <li>Connect Facebook and follow the Get started checklist.</li>
           </ol>
         </section>
       </div>
+
+      <section className="card" style={{ marginTop: 26 }} data-testid="server-address-card">
+        <h2 style={{ fontSize: "1.35rem" }}>Your Clynx server address</h2>
+        <p className="muted" style={{ marginTop: 0 }}>Type this into Clynx (sign-in screen, Server address) on each computer. It is encrypted (https) and works from anywhere you can open this page.</p>
+        <code className="code" data-testid="server-address">{serverAddress}</code>
+        <div className="row" style={{ marginTop: 10 }}>
+          <button
+            className="btn small ghost"
+            onClick={async () => {
+              setCopiedAddr(await copyText(serverAddress));
+              setTimeout(() => setCopiedAddr(false), 2000);
+            }}
+          >
+            {copiedAddr ? "Copied" : "Copy address"}
+          </button>
+        </div>
+      </section>
 
       <div style={{ marginTop: 26 }}>
         <Notice kind="warn">
@@ -144,7 +171,7 @@ export default function Download() {
         <h2>Your data, updating and uninstalling</h2>
         <ul className="checks">
           <li>Your Database, settings and Facebook login live in <code className="mono">%APPDATA%\Clynx</code> on your computer.</li>
-          <li>To update, run the newer installer over the old one. Your data is kept.</li>
+          <li>Updates: when you are signed in to this server, Clynx finds newer signed versions by itself, downloads and checks them, and installs only when you click <em>Restart and install</em>. You can always run a newer installer over the old one instead. Your data is kept either way.</li>
           <li>Uninstalling removes the program but keeps that data folder. Delete the folder yourself for a complete removal.</li>
         </ul>
       </section>

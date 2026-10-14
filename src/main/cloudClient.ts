@@ -936,15 +936,21 @@ export class CloudClient {
     return this.authenticate(apiUrl, email, password, "/auth/login");
   }
 
-  async register(apiUrl: string, email: string, password: string): Promise<CloudResult<{ userId: string; email: string }>> {
-    return this.authenticate(apiUrl, email, password, "/auth/register");
+  async register(apiUrl: string, email: string, password: string, inviteCode?: string): Promise<CloudResult<{ userId: string; email: string }>> {
+    return this.authenticate(apiUrl, email, password, "/auth/register", inviteCode);
+  }
+
+  /** The Authorization header value for calls to the server we are signed in to (updates and installer downloads on a private server need it), or null when there is no session. */
+  getAuthHeader(): string | null {
+    return this.accessToken ? `Bearer ${this.accessToken}` : null;
   }
 
   private async authenticate(
     rawApiUrl: string,
     email: string,
     password: string,
-    path: "/auth/login" | "/auth/register"
+    path: "/auth/login" | "/auth/register",
+    inviteCode?: string
   ): Promise<CloudResult<{ userId: string; email: string }>> {
     try {
       const apiUrl = rawApiUrl.replace(/\/+$/, "");
@@ -953,11 +959,14 @@ export class CloudClient {
       const result = await safeFetch(`${apiUrl}${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, ...(path === "/auth/register" && inviteCode?.trim() ? { inviteCode: inviteCode.trim() } : {}) }),
       });
 
       if (!result.ok || !result.data?.accessToken || !result.data?.refreshToken || !result.data?.userId) {
-        return { ok: false, status: result.status, error: result.error ?? "Login failed" };
+        // the server explains an invitation problem in a sentence; show that rather than its short code
+        const d = result.data as { error?: string; message?: string } | undefined;
+        const text = d?.message && (d.error === "invitation_required" || d.error === "registration_closed" || d.error === "account_disabled") ? d.message : (result.error ?? "Login failed");
+        return { ok: false, status: result.status, error: text };
       }
 
       const userId: string = result.data.userId;

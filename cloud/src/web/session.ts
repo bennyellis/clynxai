@@ -7,7 +7,12 @@ import { query } from "../db/client.js";
 // site is served over https. State-changing requests made with the cookie must also carry the session's CSRF token (see requireAuth in ../auth/middleware.ts).
 // In https mode the cookie uses the __Host- prefix, which stops a sibling sub-domain from planting or overwriting it.
 
-export const COOKIE_NAME = config.web.secureCookies ? "__Host-clynx_sid" : "clynx_sid";
+// The cookie is "secure" (Secure attribute + the __Host- prefix) whenever the request arrived over https: either the whole site is configured as https (COOKIE_SECURE / PUBLIC_URL), or the
+// request came through a TLS-terminating tunnel/proxy that said so (X-Forwarded-Proto, honoured only when TRUST_PROXY is on). This lets ONE server answer on plain http inside the home
+// network AND on https through a private tunnel, each with the right kind of cookie. Reading accepts either name.
+export const SECURE_COOKIE_NAME = "__Host-clynx_sid";
+export const PLAIN_COOKIE_NAME = "clynx_sid";
+export const isSecureRequest = (request: FastifyRequest): boolean => config.web.secureCookies || request.protocol === "https";
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 
@@ -24,11 +29,22 @@ export function parseCookies(header: string | undefined): Record<string, string>
   return out;
 }
 
-function cookieAttrs(maxAgeSec: number): string {
-  return `Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}${config.web.secureCookies ? "; Secure" : ""}`;
+function cookieAttrs(maxAgeSec: number, secure: boolean): string {
+  return `Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}${secure ? "; Secure" : ""}`;
 }
-export const setSessionCookie = (reply: FastifyReply, value: string) => reply.header("Set-Cookie", `${COOKIE_NAME}=${value}; ${cookieAttrs(config.web.sessionTtlDays * 86400)}`);
-export const clearSessionCookie = (reply: FastifyReply) => reply.header("Set-Cookie", `${COOKIE_NAME}=; ${cookieAttrs(0)}`);
+export const setSessionCookie = (reply: FastifyReply, value: string, request: FastifyRequest) => {
+  const secure = isSecureRequest(request);
+  return reply.header("Set-Cookie", `${secure ? SECURE_COOKIE_NAME : PLAIN_COOKIE_NAME}=${value}; ${cookieAttrs(config.web.sessionTtlDays * 86400, secure)}`);
+};
+export const clearSessionCookie = (reply: FastifyReply, request: FastifyRequest) => {
+  const secure = isSecureRequest(request);
+  return reply.header("Set-Cookie", `${secure ? SECURE_COOKIE_NAME : PLAIN_COOKIE_NAME}=; ${cookieAttrs(0, secure)}`);
+};
+/** The session secret from a Cookie header (either cookie name). */
+export const readSessionCookie = (header: string | undefined): string | undefined => {
+  const c = parseCookies(header);
+  return c[SECURE_COOKIE_NAME] ?? c[PLAIN_COOKIE_NAME];
+};
 
 export interface WebSession {
   id: string;

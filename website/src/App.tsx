@@ -17,6 +17,7 @@ const ConsoleOverview = lazy(() => import("./pages/console/Console").then((m) =>
 const ConsoleUsers = lazy(() => import("./pages/console/Console").then((m) => ({ default: m.ConsoleUsers })));
 const ConsoleBeta = lazy(() => import("./pages/console/Console").then((m) => ({ default: () => <m.ConsoleUsers betaOnly /> })));
 const ConsoleUserDetail = lazy(() => import("./pages/console/Console").then((m) => ({ default: m.ConsoleUserDetail })));
+const ConsoleInvites = lazy(() => import("./pages/console/Console").then((m) => ({ default: m.ConsoleInvites })));
 const ConsoleReleases = lazy(() => import("./pages/console/Console").then((m) => ({ default: m.ConsoleReleases })));
 const ConsoleSupport = lazy(() => import("./pages/console/Console").then((m) => ({ default: m.ConsoleSupport })));
 const ConsoleHealth = lazy(() => import("./pages/console/Console").then((m) => ({ default: m.ConsoleHealth })));
@@ -63,6 +64,7 @@ export default function App() {
             <Route path="users/:id" element={<ConsoleUserDetail />} />
             <Route path="beta" element={<ConsoleBeta />} />
             <Route path="releases" element={<ConsoleReleases />} />
+            <Route path="invites" element={<ConsoleInvites />} />
             <Route path="support" element={<ConsoleSupport />} />
             <Route path="health" element={<ConsoleHealth />} />
             <Route path="integrations" element={<RequireOwner><ConsoleIntegrations /></RequireOwner>} />

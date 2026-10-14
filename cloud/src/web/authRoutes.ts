@@ -14,7 +14,7 @@ import { clearSessionCookie, createWebSession, originAllowed, revokeAllWebSessio
 // The website's account endpoints (cookie sessions). They sit on the SAME accounts and rules as the desktop app's /auth/* endpoints (see ../auth/accounts.ts); everything a signed-in
 // customer does after this (billing, devices, password change, deleting the account) goes through the existing endpoints, which accept the cookie as well as the bearer token.
 
-const signupSchema = z.object({ email: emailSchema, password: passwordSchema, displayName: z.string().trim().max(80).optional() });
+const signupSchema = z.object({ email: emailSchema, password: passwordSchema, displayName: z.string().trim().max(80).optional(), inviteCode: z.string().max(40).optional() });
 const loginSchema = z.object({ email: emailSchema, password: z.string().min(1).max(200) });
 const tokenSchema = z.object({ token: z.string().min(10).max(200) });
 const resetSchema = z.object({ token: z.string().min(10).max(200), newPassword: passwordSchema });
@@ -58,7 +58,7 @@ export async function webAuthRoutes(app: FastifyInstance): Promise<void> {
 
   async function startSession(request: import("fastify").FastifyRequest, reply: import("fastify").FastifyReply, userId: string, status = 200) {
     const s = await createWebSession(userId, request.headers["user-agent"]);
-    setSessionCookie(reply, s.cookieValue);
+    setSessionCookie(reply, s.cookieValue, request);
     return reply.code(status).send({ user: await profileOf(userId), csrfToken: s.csrfToken });
   }
 
@@ -67,7 +67,7 @@ export async function webAuthRoutes(app: FastifyInstance): Promise<void> {
     const parsed = signupSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "Invalid request body", details: parsed.error.flatten() });
     try {
-      const userId = await registerUser(parsed.data.email, parsed.data.password, request.ip, parsed.data.displayName);
+      const userId = await registerUser(parsed.data.email, parsed.data.password, request.ip, parsed.data.displayName, parsed.data.inviteCode);
       return await startSession(request, reply, userId, 201);
     } catch (err) {
       return sendAccountError(reply, err);
@@ -154,7 +154,7 @@ export async function webAuthRoutes(app: FastifyInstance): Promise<void> {
 
     authed.post("/web/logout", async (request, reply) => {
       if (request.sessionId) await revokeWebSession(request.sessionId, request.userId as string);
-      clearSessionCookie(reply);
+      clearSessionCookie(reply, request);
       return reply.code(200).send({ ok: true });
     });
 
@@ -204,7 +204,7 @@ export async function webAuthRoutes(app: FastifyInstance): Promise<void> {
       if (!p.success) return reply.code(400).send({ error: "Invalid session id" });
       const ok = await revokeWebSession(p.data.id, request.userId as string);
       if (!ok) return reply.code(404).send({ error: "Session not found" });
-      if (p.data.id === request.sessionId) clearSessionCookie(reply);
+      if (p.data.id === request.sessionId) clearSessionCookie(reply, request);
       return reply.code(200).send({ ok: true });
     });
     authed.post("/web/sessions/revoke-others", async (request, reply) => {

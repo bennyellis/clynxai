@@ -5,7 +5,7 @@ import { requireAuth } from "../auth/middleware.js";
 import { query } from "../db/client.js";
 import { emails, queueEmail } from "../mail/mailer.js";
 import { hit } from "../security/rateLimit.js";
-import { COOKIE_NAME, lookupWebSession, originAllowed, parseCookies } from "../web/session.js";
+import { lookupWebSession, originAllowed, readSessionCookie } from "../web/session.js";
 
 // Support requests from the website (and, later, the app). Anyone may send one (signed in or not); it is rate limited, size limited and stored for administrators. A pasted support
 // report from the app is scrubbed of anything that looks like a key or token before it is stored, even though the app already removes them.
@@ -40,7 +40,7 @@ export async function supportRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(429).send({ error: "rate_limited", retryAfterSec: rl.retryAfterSec });
     }
     // Link the request to the account when the sender is signed in on the website (read only: this endpoint needs no CSRF token because it changes nothing of the account's).
-    const session = await lookupWebSession(parseCookies(request.headers.cookie)[COOKIE_NAME]);
+    const session = await lookupWebSession(readSessionCookie(request.headers.cookie));
     const d = parsed.data;
     const r = await query<{ id: string }>(
       `INSERT INTO support_requests (user_id, email, category, subject, message, diagnostics) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,

@@ -465,8 +465,8 @@ const api = {
       ipcRenderer.invoke("auth:getSession"),
     login: (apiUrl: string, email: string, password: string, importLocal?: boolean): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem; imported?: string }> =>
       ipcRenderer.invoke("auth:login", { apiUrl, email, password, importLocal }),
-    register: (apiUrl: string, email: string, password: string, importLocal?: boolean): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem; imported?: string }> =>
-      ipcRenderer.invoke("auth:register", { apiUrl, email, password, importLocal }),
+    register: (apiUrl: string, email: string, password: string, importLocal?: boolean, inviteCode?: string): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem; imported?: string }> =>
+      ipcRenderer.invoke("auth:register", { apiUrl, email, password, importLocal, inviteCode }),
     onSignedOut: (cb: (info: { reason: string }) => void) => {
       const listener = (_e: unknown, info: { reason: string }) => cb(info);
       ipcRenderer.on("auth:signedOut", listener);

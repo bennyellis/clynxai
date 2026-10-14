@@ -71,6 +71,12 @@ const envSchema = z.object({
   UPDATE_PUBLIC_KEY_FILE: z.string().optional(),
   // The oldest desktop version this server still supports (shown to apps; they tell the person to update).
   MIN_CLIENT_VERSION: z.string().optional(),
+  // ---- private beta
+  // "private": nothing is reachable without signing in, except a short list of endpoints a desktop app needs before it has a session (see access/gate.ts). A visitor gets only a
+  // sign-in page. "open" (the default) is the normal behaviour.
+  ACCESS_MODE: z.enum(["open", "private"]).default("open"),
+  // Who may create an account: "open" (anyone), "invite" (only with a valid invitation code from the Owner/an administrator), "closed" (nobody).
+  REGISTRATION: z.enum(["open", "invite", "closed"]).default("open"),
 });
 
 function loadPublicKey(text: string | undefined, file: string | undefined): string | null {
@@ -110,7 +116,9 @@ function loadConfig() {
     refreshTokenTtlSeconds: 30 * 24 * 60 * 60, // 30 days
     web: {
       publicUrl: d.PUBLIC_URL.replace(/\/+$/, ""),
-      secureCookies: d.COOKIE_SECURE === undefined || d.COOKIE_SECURE === "" ? d.PUBLIC_URL.startsWith("https://") : d.COOKIE_SECURE === "true" || d.COOKIE_SECURE === "1",
+      // Whole-site setting: Secure cookies for EVERY request. Unset: only when the site is https and there is no TLS-terminating proxy in front (with a proxy, each request is judged by
+      // X-Forwarded-Proto instead, so one server can answer on plain http inside a home network and on https through a tunnel; see web/session.ts).
+      secureCookies: d.COOKIE_SECURE === undefined || d.COOKIE_SECURE === "" ? d.PUBLIC_URL.startsWith("https://") && !d.TRUST_PROXY : d.COOKIE_SECURE === "true" || d.COOKIE_SECURE === "1",
       sessionTtlDays: d.SESSION_TTL_DAYS,
       smtpUrl: d.SMTP_URL ?? null,
       mailFrom: d.MAIL_FROM,
@@ -125,6 +133,8 @@ function loadConfig() {
       serverName: d.SERVER_NAME,
       minClientVersion: d.MIN_CLIENT_VERSION ?? null,
       updatePublicKey: loadPublicKey(d.UPDATE_PUBLIC_KEY, d.UPDATE_PUBLIC_KEY_FILE),
+      accessPrivate: d.ACCESS_MODE === "private",
+      registration: d.REGISTRATION,
     },
     billingFake: d.BILLING_FAKE && d.NODE_ENV !== "production",
     billing: {

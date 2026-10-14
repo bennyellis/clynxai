@@ -85,6 +85,9 @@ export interface ServerTestOk {
   secure: boolean;
   kind: "loopback" | "local-network" | "internet";
   services: { sharedAi: boolean; sharedEbay: boolean; billing: string; updates: boolean };
+  /** "private": the server shows strangers only a sign-in page. registration: who may create an account. */
+  access: "open" | "private";
+  registration: "open" | "invite" | "closed";
   warnings: string[];
   /** The server is too old to describe itself (it answered /health only). */
   legacy: boolean;
@@ -132,7 +135,7 @@ export async function testServer(input: string, opts: { clientVersion: string; f
     try {
       const h = await get("/health");
       const body = (await h.json().catch(() => null)) as { status?: string } | null;
-      if (h.ok && body && body.status === "ok") return { ok: true, name: "Clynx Cloud", serverVersion: null, apiVersion: null, services: noServices, legacy: true, ...base };
+      if (h.ok && body && body.status === "ok") return { ok: true, name: "Clynx Cloud", serverVersion: null, apiVersion: null, services: noServices, access: "open", registration: "open", legacy: true, ...base };
     } catch {
       /* fall through */
     }
@@ -156,6 +159,8 @@ export async function testServer(input: string, opts: { clientVersion: string; f
     serverVersion: typeof info.serverVersion === "string" ? info.serverVersion.slice(0, 40) : null,
     apiVersion,
     services: { sharedAi: s.sharedAi === true, sharedEbay: s.sharedEbay === true, billing: typeof s.billing === "string" ? s.billing : "none", updates: s.updates === true },
+    access: info.access === "private" ? "private" : "open",
+    registration: info.registration === "invite" || info.registration === "closed" ? info.registration : "open",
     legacy: false,
     ...base,
   };

@@ -38,6 +38,14 @@ export async function api<T = unknown>(method: string, url: string, body?: unkno
   let res: Response;
   try {
     res = await fetch(url, { method, headers, body: payload, credentials: "same-origin" });
+    // a private beta answers "private_beta" once the sign-in has expired: go back to its sign-in page instead of showing a broken screen
+    if (res.status === 401 && typeof window !== "undefined" && res.headers.get("content-type")?.includes("json")) {
+      const peek = await res.clone().json().catch(() => null);
+      if (peek && peek.error === "private_beta") {
+        window.location.assign("/gate");
+        throw new Error("Redirecting to sign in");
+      }
+    }
   } catch {
     throw new ApiError(0, "network", "Could not reach the server. Check your connection and try again.");
   }

@@ -58,7 +58,8 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-clynx}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-clynx_cloud}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       PORT: 8787
-      TRUST_PROXY: "false"
+      # "true" only when a TLS tunnel/proxy on this PC forwards to the API (Enable-ClynxPrivateAccess.ps1 sets it): then the visitor address and https come from its headers
+      TRUST_PROXY: "${TRUST_PROXY:-false}"
       NODE_ENV: production
     ports:
       # the ONLY published port. LAN_BIND is the host's LAN address (set by Start-ClynxLan.ps1); never 0.0.0.0 on a computer that is also on another network.

@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { claimInvite, markInviteUsedBy, releaseInvite } from "../access/invites.js";
+import { config } from "../config.js";
 import { query } from "../db/client.js";
 import { emails, queueEmail } from "../mail/mailer.js";
 import { hit, peek, reset } from "../security/rateLimit.js";
@@ -22,16 +24,35 @@ export class AccountError extends Error {
   }
 }
 
-export async function registerUser(email: string, password: string, ip: string, displayName?: string): Promise<string> {
+export async function registerUser(email: string, password: string, ip: string, displayName?: string, inviteCode?: string): Promise<string> {
   const rl = await hit(`register:${ip}`, REGISTER_PER_HOUR, 3600);
   if (!rl.allowed) throw new AccountError(429, { error: "rate_limited", retryAfterSec: rl.retryAfterSec }, rl.retryAfterSec);
-  const existing = await query<{ id: string }>("SELECT id FROM users WHERE lower(email) = $1", [email]);
-  if (existing.rows.length > 0) throw new AccountError(409, { error: "An account with this email already exists" });
-  const passwordHash = await hashPassword(password);
-  const inserted = await query<{ id: string }>("INSERT INTO users (email, password_hash, display_name) VALUES ($1, $2, $3) RETURNING id", [email, passwordHash, displayName?.trim() || null]);
-  const userId = inserted.rows[0].id;
-  await sendVerificationEmail(userId, email);
-  return userId;
+  // Who may create an account (REGISTRATION): the same rule for the website, the desktop app and the private sign-in page.
+  let invite: { inviteId: string } | null = null;
+  if (config.web.registration === "closed") throw new AccountError(403, { error: "registration_closed", message: "New accounts are not being created on this server." });
+  if (config.web.registration === "invite") {
+    // codes are guessable only by brute force: only WRONG guesses count against a client
+    const guessKey = `invite-guess:${ip}`;
+    const blockedGuesses = await peek(guessKey, 10);
+    if (blockedGuesses.blocked) throw new AccountError(429, { error: "rate_limited", retryAfterSec: blockedGuesses.retryAfterSec }, blockedGuesses.retryAfterSec);
+    const claim = await claimInvite(inviteCode, email);
+    if (!claim.ok) await hit(guessKey, 10, 3600);
+    if (!claim.ok) throw new AccountError(403, { error: "invitation_required", message: "An invitation code is needed to create an account here, and that code did not work (it may be wrong, used, expired, or for a different email address)." });
+    invite = claim;
+  }
+  try {
+    const existing = await query<{ id: string }>("SELECT id FROM users WHERE lower(email) = $1", [email]);
+    if (existing.rows.length > 0) throw new AccountError(409, { error: "An account with this email already exists" });
+    const passwordHash = await hashPassword(password);
+    const inserted = await query<{ id: string }>("INSERT INTO users (email, password_hash, display_name) VALUES ($1, $2, $3) RETURNING id", [email, passwordHash, displayName?.trim() || null]);
+    const userId = inserted.rows[0].id;
+    if (invite) await markInviteUsedBy(invite.inviteId, userId);
+    await sendVerificationEmail(userId, email);
+    return userId;
+  } catch (err) {
+    if (invite) await releaseInvite(invite.inviteId); // the account was not created: the code is usable again
+    throw err;
+  }
 }
 
 /** A new verification link (the older one stops working). Never throws: a mail problem must not break signing up. */

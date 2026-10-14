@@ -319,6 +319,31 @@ run(async () => {
     check("a launch failure is reported, nothing is left pending, and the app does not quit", !inst.ok && r.quits === 0 && JSON.parse(fs.readFileSync(r.stateFile, "utf-8")).pending === null, inst);
   }
 
+  section("a private server wants the sign-in on update requests");
+  {
+    const seen: Array<{ url: string; auth: string | null }> = [];
+    const r = rig({ authHeader: () => "Bearer test-token" } as never);
+    r.u.init();
+    r.server.publish("0.3.0-beta.3", {}, { url: "https://other.example/Clynx.exe" });
+    const base = r.server.fetch;
+    // wrap the rig's fetch to record the Authorization header per URL
+    (r.u as unknown as { deps: { fetchImpl: typeof fetch } }).deps.fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      seen.push({ url: String(input), auth: (init?.headers as Record<string, string> | undefined)?.Authorization ?? null });
+      return base(input, init);
+    }) as typeof fetch;
+    await r.u.check();
+    check("the update check carries the sign-in header to the server it is signed in to", seen[0]?.url.includes("10.0.0.81:8788/updates/beta/latest") && seen[0].auth === "Bearer test-token", seen);
+    await r.u.download();
+    const off = seen.find((s) => s.url.startsWith("https://other.example"));
+    check("a file hosted on ANOTHER address never receives it", !off || off.auth === null, seen);
+    const r2 = rig();
+    r2.u.init();
+    r2.server.fetch = (async () => new Response("{}", { status: 401 })) as typeof fetch;
+    (r2.u as unknown as { deps: { fetchImpl: typeof fetch } }).deps.fetchImpl = r2.server.fetch;
+    const s401 = await r2.u.check();
+    check("a refused sign-in is explained and nothing is offered", s401.state === "error" && /sign out and in again/i.test((s401 as { message: string }).message), s401);
+  }
+
   section("the installer hand-off command");
   {
     const win = planInstallerLaunch("win32", "C:\\Users\\me\\AppData\\Roaming\\Clynx\\updates\\staging\\0.3.0\\Setup.exe", ["/S", "--updated"], "C:\\Users\\me\\AppData\\Local\\Programs\\Clynx\\Clynx.exe", "C:\\Users\\me\\AppData\\Roaming\\Clynx");

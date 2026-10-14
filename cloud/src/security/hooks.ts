@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { config } from "../config.js";
+import { isSecureRequest } from "../web/session.js";
 
 // Response headers for an API that never serves pages, a non-leaking error handler, and in-process request counters for /metrics.
 
@@ -12,14 +13,16 @@ export interface Counters {
 export const counters: Counters = { startedAt: Date.now(), requests: 0, byClass: {}, errors5xx: 0 };
 
 export function registerSecurity(app: FastifyInstance): void {
-  app.addHook("onSend", async (_request, reply, payload) => {
+  app.addHook("onSend", async (request, reply, payload) => {
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("X-Frame-Options", "DENY");
     reply.header("Referrer-Policy", "no-referrer");
     reply.header("Cross-Origin-Resource-Policy", "same-origin");
     // (the website's pages and the simulated payment pages set their own policy; everything else is an API that serves no page)
     if (!reply.hasHeader("Content-Security-Policy")) reply.header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
-    if (config.web.secureCookies) reply.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    if (isSecureRequest(request)) reply.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    // a private beta must never be indexed or cached by a search engine
+    if (config.web.accessPrivate) reply.header("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet");
     // an API answer (tokens, account data) must never be cached by a proxy or the client
     if (!reply.hasHeader("Cache-Control")) reply.header("Cache-Control", "no-store");
     return payload;

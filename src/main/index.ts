@@ -3691,11 +3691,11 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     "auth:register",
-    async (_e, args: { apiUrl: string; email: string; password: string; importLocal?: boolean }): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem; imported?: string }> => {
+    async (_e, args: { apiUrl: string; email: string; password: string; importLocal?: boolean; inviteCode?: string }): Promise<{ ok: boolean; userId?: string; email?: string; error?: string; startupProblem?: StartupProblem; imported?: string }> => {
       const addr = normalizeServerUrl((args.apiUrl || appSettings.cloudApiUrl || "").trim());
       if (!addr.ok) return { ok: false, error: addr.error };
       const apiUrl = addr.url;
-      const result = await cloudClient.register(apiUrl, args.email.trim(), args.password);
+      const result = await cloudClient.register(apiUrl, args.email.trim(), args.password, typeof args.inviteCode === "string" ? args.inviteCode.slice(0, 40) : undefined);
       if (!result.ok || !result.data) return { ok: false, error: result.error ?? "Registration failed" };
       appSettings = { ...appSettings, cloudApiUrl: apiUrl, localMode: false };
       saveAppSettings(appSettings);
@@ -3775,6 +3775,7 @@ app.whenReady().then(() => {
   }
   const updateChannel = (): UpdateChannel => appSettings.updateChannel ?? (buildInfo.channel === "production" ? "stable" : "beta");
   const updater = new Updater({
+    authHeader: () => cloudClient.getAuthHeader(),
     getServerBase: () => (hasActiveUserSession && !isLocalMode() ? (cloudClient.getSessionInfo().apiUrl ?? appSettings.cloudApiUrl) || null : null),
     publicKeyPem: updatePublicKey,
     currentVersion: buildInfo.version,
