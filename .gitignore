@@ -46,3 +46,4 @@ backups/docker/
 .env.lan.bak-*
 backups/lan/
 updates/
+dist-*/

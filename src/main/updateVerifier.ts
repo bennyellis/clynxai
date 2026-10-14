@@ -321,9 +321,12 @@ export async function downloadAndVerify(file: UpdateFile, stagingDir: string, do
     return { ok: true, path: final };
   } catch (err) {
     if (out) {
+      // let what was already received reach the disk (so a cut-off download can be continued later); only a failing disk is abandoned at once
       await new Promise<void>((resolve) => {
         out!.once("close", () => resolve());
-        out!.destroy();
+        out!.once("error", () => out!.destroy());
+        if (streamError) out!.destroy();
+        else out!.end();
       });
     }
     const keep = !verificationFailed && !streamError && o.resume === true && fs.existsSync(partial) && fs.statSync(partial).size > 0 && fs.statSync(partial).size < file.size;

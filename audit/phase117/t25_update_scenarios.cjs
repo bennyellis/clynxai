@@ -13,7 +13,7 @@ const { execFileSync, spawnSync } = require("node:child_process");
 const { _electron } = require(path.join(L.PROJECT, "node_modules", "playwright"));
 
 const SCENARIO = process.env.SCENARIO || "A";
-const EXE = SCENARIO === "C" ? process.env.BETA3_EXE : path.join(L.PROJECT, "dist", "win-unpacked", "Clynx.exe");
+const EXE = SCENARIO === "C" ? process.env.BETA3_EXE : (process.env.APP_EXE || path.join(L.PROJECT, "dist", "win-unpacked", "Clynx.exe"));
 const HOST = "10.0.0.81", PORT = 8796, PROXY_PORT = 8797, LAN = `http://${HOST}:${PORT}`;
 const STATE = "C:\\Users\\biggt\\ClynxLanTest", ENVFILE = path.join(STATE, ".env.lan");
 const WIN = path.join(L.PROJECT, "cloud", "deploy", "windows");
