@@ -1,15 +1,16 @@
-// Server-side release tool (runs on the server computer, like the Owner tool). It PREPARES a release; it never approves or publishes one - that stays a deliberate step in the website
-// console (approve, then publish by typing the version).
+// Server-side release tool (runs on the server computer, like the Owner tool). It PREPARES a release. Publishing stays a deliberate step (the website console: approve, then type the version) except
+// for the one narrow `publish` command below, which the host script calls only while the Owner's "publish betas automatically" permission file exists.
 //
 //   node dist/scripts/release.js list
 //   node dist/scripts/release.js draft    --version 0.3.0-beta.2 --channel beta --file /tmp/Clynx-Beta-Setup-0.3.0-beta.2.exe [--notes-file n.txt] [--issues-file i.txt] [--expect-sha256 <hex>]
 //   node dist/scripts/release.js template --version 0.3.0-beta.2 --channel beta            (prints the UNSIGNED update manifest; sign it offline with scripts/update-keys.cjs)
 //   node dist/scripts/release.js attach   --version 0.3.0-beta.2 --channel beta --file /tmp/signed.json
+//   node dist/scripts/release.js publish  --version 0.3.0-beta.7 --channel beta   (BETA ONLY; for the Owner's standing permission to publish betas automatically; every check is repeated, see publishBetaFromTool)
 import { createReadStream, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { config } from "../config.js";
 import { closePool, query } from "../db/client.js";
-import { attachSignedManifest, manifestTemplate } from "../releases/manifestOps.js";
+import { attachSignedManifest, manifestTemplate, publishBetaFromTool } from "../releases/manifestOps.js";
 import { removeStored, saveStream } from "../releases/storage.js";
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -96,6 +97,15 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(r.manifest, null, 2));
     return;
   }
+  if (cmd === "publish") {
+    const r = await publishBetaFromTool(version, channel);
+    if (!r.ok) {
+      console.error(`NOT PUBLISHED: ${r.message}`);
+      process.exit(1);
+    }
+    console.log(`Published ${r.version} (beta). Computers on the beta channel are offered it now.`);
+    return;
+  }
   if (cmd === "attach") {
     const signed = JSON.parse(readFileSync(need("file"), "utf-8"));
     const r = await attachSignedManifest(rel.id, signed, null);
@@ -107,7 +117,7 @@ async function main(): Promise<void> {
     console.log(`The signed manifest for ${version} (${channel}) was verified against the update public key and the stored installer, and kept.${r.willBeOffered ? " Clients on this channel are offered it." : " It is offered to clients once the release is published."}`);
     return;
   }
-  console.error("usage: release.js list | draft | template | attach (see the header of this file)");
+  console.error("usage: release.js list | draft | template | attach | publish (see the header of this file)");
   process.exit(2);
 }
 
