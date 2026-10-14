@@ -634,6 +634,8 @@ run(async () => {
     check("a download that dies half way is reported, nothing is installed, and the received part is kept", first.state === "error" && (first as any).stage === "download" && /continues from there/.test((first as any).message) && r.launched.length === 0, first);
     const part = path.join(r.dir, "updates", "0.3.0-beta.3", "Clynx-Beta-Setup-0.3.0-beta.3.exe.part");
     check("the kept part is the bytes received so far", fs.existsSync(part) && fs.statSync(part).size === 40_000);
+    r.u.confirmHealthy(); // the start-up tidy-up must not throw away a half-downloaded update that is waiting to be continued
+    check("the kept part survives the tidy-up that runs once the app has proved itself", fs.existsSync(part) && fs.statSync(part).size === 40_000);
     const again = await r.u.download();
     check("the next try asks only for the rest (Range) and the whole file then passes its signed checksums", again.state === "ready" && r.server.rangeRequests[0] === "bytes=40000-", r.server.rangeRequests);
     const r2 = rig({ mode: "download" });

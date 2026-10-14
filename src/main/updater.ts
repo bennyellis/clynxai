@@ -238,6 +238,8 @@ export class Updater {
       for (const dir of fs.existsSync(this.deps.stagingDir) ? fs.readdirSync(this.deps.stagingDir) : []) {
         const full = path.join(this.deps.stagingDir, dir);
         if (!fs.statSync(full).isDirectory()) continue;
+        // the release being fetched right now (or kept half-downloaded for resuming) is not leftovers
+        if (this.offered && dir === this.offered.manifest.version) continue;
         const files = fs.readdirSync(full).map((f) => path.join(full, f));
         if (!files.some((f) => keep.has(f))) fs.rmSync(full, { recursive: true, force: true });
       }
