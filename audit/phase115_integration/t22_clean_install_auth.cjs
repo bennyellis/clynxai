@@ -138,11 +138,11 @@ const toCloudForm = async (h) => {
     await L.sleep(500);
     await clickText(h.win, /^account$/);
     await h.win.waitForSelector('[data-testid="account-section"]', { timeout: 30000 });
-    const loggedOut = await h.win.evaluate(() => window.api.auth.logout());
+    const clicked = (await clickText(h.win, /^Log out$/)) || (await h.win.evaluate(() => { const t = [...document.querySelectorAll("button")].find((x) => /^Log out$/i.test(x.textContent.trim())); t?.click(); return !!t; }));
     await h.win.waitForFunction(() => !!document.querySelector('input[type="password"], [data-testid="beta-welcome"]'), null, { timeout: 30000 }).catch(() => {});
-    L.check("[S4] signing out returns to the sign-in screen", !/Start Scanner/i.test(await text(h.win)) || loggedOut?.ok === true);
+    L.check("[S4] signing out (the Log out button) returns to the sign-in screen", clicked && !/Start Scanner/i.test(await text(h.win)));
     if ((await h.win.locator('[data-testid="beta-welcome"]').count()) > 0) await clickText(h.win, /I have a Clynx Cloud account/);
-    await h.win.waitForSelector('[data-testid="server-url-input"]', { timeout: 20000 });
+    await h.win.waitForSelector('[data-testid="server-url-input"]', { timeout: 20000 }).catch(async (e) => { console.log("SCREEN AFTER LOGOUT:", (await text(h.win)).slice(0, 600)); throw e; });
     L.check("[S4] the sign-in form remembers the server the person used", (await h.win.locator('[data-testid="server-url-input"]').inputValue()) === LAN);
     await h.win.waitForSelector('[data-testid="server-ok"]', { timeout: 30000 });
     await h.win.fill('input[type="email"]', EMAIL);
