@@ -63,6 +63,8 @@ Install Beta 3 as a new draft the same way (`Register-ClynxRelease.ps1 -Installe
 
 **Update (Beta 4 onwards, Phase 11.7):** installations from Beta 4 on install new releases by themselves when Clynx is idle (see `PHASE_11_7_AUTOMATIC_UPDATES.md`). In the console, Releases: only the Owner can create, approve, publish, withdraw or **Require** a release; "Require this update" sets a deadline (in hours) by which every online Clynx must have installed it. The Overview page shows how many computers run each version, so you can watch a release arrive.
 
+**Automatic publishing of betas (standing permission, Phase 12):** `cloud\deploy\windows\Set-ClynxAutoPublish.ps1 -On` creates `C:\Users\biggt\ClynxLan\auto-publish-beta.consent`; while it exists, `Publish-ClynxRelease.ps1 -Installer ... -Version 0.3.0-beta.N -ExpectSha256 ...` prepares, signs, verifies and PUBLISHES a beta in one step (beta channel only, never stable, never "required", the version must be newer than every published beta, checksum and signature are re-checked on the server, audited as `release.cli_publish`). `Set-ClynxAutoPublish.ps1 -Off` (or deleting the file) stops it. To undo one release: console, Releases, **Withdraw**. It needs the server code that has the `publish` command (`Update-ClynxLan.ps1`).
+
 ## 6. Rollback
 * Internet off: `.\Set-ClynxTunnel.ps1 -Action Stop`.
 * Private mode off (back to Phase 11 behaviour): `.\Disable-ClynxPrivateAccess.ps1` (stop the tunnel first). Accounts and data are untouched.
