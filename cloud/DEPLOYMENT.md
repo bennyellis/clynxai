@@ -71,6 +71,47 @@ Behaviour: a trial is offered once per account; `past_due` keeps the paid plan f
 ## eBay
 The company's eBay *application* credentials let the server read public listing data for customers (Browse API) through `/ebay/*`; they do **not** give access to any customer's own eBay account. A customer connects their own account separately through eBay's consent page (`EBAY_RUNAME` must be registered with eBay for your domain); their tokens are stored encrypted per customer. eBay's sold-listing data (Marketplace Insights) needs separate approval from eBay and is not used. Start with the SANDBOX environment.
 
+## Which stack is which
+
+| File | For | Published ports |
+|---|---|---|
+| `docker-compose.yml` | **Developer stack** (tests, `npm run dev`). Its own database. | PostgreSQL 5432, Redis 6379, API 8787 — all bound to `127.0.0.1` (this PC only) since Phase 11 |
+| `docker-compose.lan.yml` | **Server for other computers on your network** (`LAN_SETUP_GUIDE.md`, `OPERATIONS.md`) | only the API/website, on the server's LAN address, port 8788. PostgreSQL and Redis: none |
+| `docker-compose.https.yml` + `Caddyfile.https` | **Internet-facing** server with TLS (prepared, not started) | Caddy only: 80 and 443 |
+| `docker-compose.prod.yml` | Single server with your own reverse proxy in front (older form) | API on `127.0.0.1:8787` |
+
+The tests (`cloud/test`) run against a **disposable** database (`clynx_cloud_test`) and Redis database 9 named in `.env.test`; `test/env.ts` refuses to run against anything else. (Before Phase 11 an import-order bug made them use the developer database `clynx_cloud`; if you see thousands of `…@example.com` accounts there, they are test leftovers and can be removed.)
+
+## Automatic desktop updates
+
+How it works: the server stores each release's installer and a **signed manifest** (`{ manifest, signature }`, Ed25519). The desktop app holds only the **public** key (`resources/update-public.pem`, baked into the installer); the **private** key stays on the publisher's machine (`C:\Users\biggt\ClynxKeys\update-signing\update-private.pem`; never in git, never on a server, never in OneDrive). The server verifies a manifest with the public key before keeping it and serves only **published** releases; the app verifies again and refuses anything with a bad signature, another channel/platform, an older version (no downgrade), a publish time older than one already accepted (no replay), or a version that previously failed to start. The installer download is trusted only if its size, SHA-512 and SHA-256 equal the signed values (hashed again right before it runs). Nothing installs without the person clicking *Restart and install*. A build without the key cannot install updates at all; the checks cannot be switched off.
+
+Publishing an update (all steps are yours; nothing is automatic):
+1. Build the installer (`npm run dist:beta`), keep its checksum.
+2. Website console → **Releases** → *New draft* (version like `0.3.0-beta.3`, channel `beta` or `stable`, notes) → upload the installer → the server computes SHA-256/size.
+3. **Manifest to sign** downloads `manifest-<version>.json` (the server fills in SHA-256, SHA-512, size and a relative download address).
+4. On the machine that holds the private key: `node scripts/update-keys.cjs sign C:\Users\biggt\ClynxKeys\update-signing\update-private.pem manifest-<version>.json signed-<version>.json`.
+5. **Upload signed manifest** (the server rejects a wrong key, a changed file, a different version/channel/checksum/address).
+6. *Approve*, then *Publish* (type the version). From now on clients on that channel see it: *Clynx x.y.z is available* → verified download → *Restart and install* → Clynx closes, the installer runs silently, Clynx reopens on the same data. Withdraw a release and it disappears at once.
+7. Keep the previous release published: it is the way back (*Go back to …*) for clients whose new version fails to start.
+
+Channels: `beta` and `stable`; each person chooses in Config → Account → Updates (default: beta for beta builds). Promoting a beta creates a *draft* stable release that needs its own signed manifest.
+
+Setting the key on a server: `UPDATE_PUBLIC_KEY_FILE` (path to the PEM) or `UPDATE_PUBLIC_KEY` (the PEM, newlines as `\n`); the LAN scripts do this when `Initialize-ClynxLan.ps1 -UpdatePublicKeyFile …` is given the file. Without it the server refuses manifests and offers no updates.
+
+Local mode (no server) never checks; those installs update by installing a newer installer over the old one — manual installers always keep working.
+
+## Putting Clynx on the internet (prepared, NOT started — needs your decision)
+
+Do not forward port 8788 and do not give the LAN address to anyone outside your network. When you decide to go public:
+1. **Domain + DNS**: a name pointing at your home IP (a dynamic-DNS name is fine); your router forwards **only 80 and 443** to this PC. A residential connection may block 80/443 or change address — a small cloud server (paid) is the sturdier choice; creating one is your decision.
+2. `.env.https` (copy `.env.prod.example`): `PUBLIC_URL=https://your-domain`, `CLYNX_DOMAIN=your-domain`, `CLYNX_ACME_EMAIL`, fresh secrets, `SMTP_URL` (without email nobody can verify addresses or reset passwords), `SUPPORT_EMAIL`, `UPDATE_PUBLIC_KEY`, `ENFORCE_ENTITLEMENTS` decided, `REQUIRE_VERIFIED_EMAIL_FOR_BILLING=true`.
+3. `docker compose -f docker-compose.https.yml --env-file .env.https up -d --build` (Caddy fetches the certificate; the API sets Secure + `__Host-` cookies and HSTS because `PUBLIC_URL` is https).
+4. Owner setup via `docker compose … exec api node dist/scripts/owner.js begin|complete`; set the **spending limits first** (anyone on the internet who can register would otherwise be able to spend your OpenAI budget up to the limits) and keep the emergency stop in mind.
+5. Desktop clients: *Server address* `https://your-domain`. Plain `http` to an internet address is refused by the app.
+6. Before opening registration: lawyer review of the draft legal pages, a password-reset email that really arrives, backups copied off the PC, `Restore -CheckOnly` tested, monitoring of `/metrics`, a plan for abuse reports, and a decision about whether sign-up should be invite-only at first (the Owner can disable accounts; there is no invitation system yet).
+7. Not done and worth doing first: two-factor authentication for the Owner, an external uptime monitor, DDoS protection in front (Cloudflare or similar), a code-signing certificate for the installer, and a penetration test.
+
 ## Backups and recovery
 - **Postgres**: daily `docker compose exec -T postgres pg_dump -U $POSTGRES_USER $POSTGRES_DB | gzip > backups/clynx-$(date +%F).sql.gz`, copied off the server; keep 14 daily + 12 monthly. Test a restore (`gunzip -c file | psql`) into a scratch database at least once.
 - **Releases volume**: `docker run --rm -v clynx_releases_data:/data -v $PWD/backups:/b alpine tar czf /b/releases-$(date +%F).tgz -C /data .` (volume name is prefixed by your compose project). The database also records each file's SHA-256, so a restored file can be verified.

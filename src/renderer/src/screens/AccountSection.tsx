@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { BillingStatus } from "../../../main/types.js";
 import { api } from "../lib/api.js";
 import { describeSubscription } from "../lib/subscriptionText.js";
+import { useScreenActive } from "../lib/screenActive.js";
 
 // Config > Account: plan and subscription status, upgrade / manage billing (opens the user's browser), password change, account deletion. The app never sees a card number: payment
 // happens on the billing provider's own page. Everything shown comes from the server (the single source of truth for what a plan allows).
@@ -19,11 +20,13 @@ function ServerStatus({ onReconnected }: { onReconnected?: () => void }) {
       setS({ apiUrl: c.apiUrl, online, lastContactAt: c.lastContactAt ?? null });
     });
   }, [onReconnected]);
+  const screenActive = useScreenActive();
   useEffect(() => {
+    if (!screenActive) return; // like every other poll in Config: nothing runs while another screen is showing
     refresh();
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
-  }, [refresh]);
+  }, [refresh, screenActive]);
   if (!s) return null;
   const ago = s.lastContactAt ? Math.max(1, Math.round((Date.now() - s.lastContactAt) / 1000)) : null;
   return (

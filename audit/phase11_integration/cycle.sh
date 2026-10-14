@@ -8,6 +8,7 @@ ROOT="$(pwd)"
 S="${SCRATCH:?set SCRATCH to a folder for the built installers}"
 LOG="${CYCLE_LOG:-/tmp/cycle.log}"
 {
+  if [ "${SKIP_BUILD:-0}" != "1" ]; then
   echo "== build Beta 2"
   node scripts/build-info.cjs beta >/dev/null && npm run dist:beta 2>&1 | tail -1
   cp "dist/Clynx-Beta-Setup-0.3.0-beta.2.exe" "$S/Clynx-Beta-Setup-0.3.0-beta.2.exe"
@@ -18,6 +19,7 @@ LOG="${CYCLE_LOG:-/tmp/cycle.log}"
   rm -f dist/Clynx-Beta-Setup-0.3.0-beta.3.exe dist/Clynx-Beta-Setup-0.3.0-beta.3.exe.blockmap
   git checkout package.json
   node scripts/build-info.cjs beta >/dev/null
+  fi
   echo "== fresh test stack"
   export CLYNX_ENV_FILE='C:\Users\biggt\ClynxLanTest\.env.lan' LAN_BIND=10.0.0.81 LAN_PORT=8796 CLYNX_IMAGE=clynx-lan-test-api:latest
   (cd cloud && docker compose -p clynx-lan-test -f docker-compose.lan.yml --env-file "$CLYNX_ENV_FILE" down -v 2>&1 | tail -1)
