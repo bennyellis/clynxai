@@ -105,14 +105,20 @@ async function quitApp(h) {
     await pg.fill("#je", OWNER);
     await pg.fill("#jp", OPW);
     await pg.fill("#jc", "AAAA-BBBB-CCCC-DDDD");
-    await pg.click('form[action="/gate/join"] button');
-    L.check("[B] a wrong invitation code is refused with a clear message and creates nothing", /did not work/.test(await pg.textContent("body")) && psql(`select count(*) from users where email='${OWNER}'`) === "0");
+    await Promise.all([pg.waitForURL(/gate\/join/, { timeout: 20000 }), pg.click('form[action="/gate/join"] button')]);
+    const wrongBody = (await pg.textContent("body")).replace(/\s+/g, " ").slice(0, 300);
+    L.check("[B] a wrong invitation code is refused with a clear message and creates nothing", /did not work/.test(wrongBody) && psql(`select count(*) from users where email='${OWNER}'`) === "0", wrongBody);
     const code1 = newCode();
     await pg.evaluate(() => { const d = document.querySelector("details"); if (d) d.open = true; });
     await pg.fill("#je", OWNER);
     await pg.fill("#jp", OPW);
     await pg.fill("#jc", code1);
-    await Promise.all([pg.waitForURL(`${SECURE}/`, { timeout: 30000 }), pg.click('form[action="/gate/join"] button')]);
+    try {
+      await Promise.all([pg.waitForURL(`${SECURE}/`, { timeout: 30000 }), pg.click('form[action="/gate/join"] button')]);
+    } catch (e) {
+      console.log("JOIN PAGE SAID:", (await pg.textContent("body")).replace(/\s+/g, " ").slice(0, 400));
+      throw e;
+    }
     await pg.waitForSelector("nav, header", { timeout: 20000 });
     L.check("[B] a valid invitation creates the account, signs in, and opens the real website", psql(`select count(*) from users where email='${OWNER}'`) === "1" && !(await pg.textContent("body")).includes("Private beta"));
     const ck = (await ctxOwner.cookies()).find((c) => /clynx_sid/.test(c.name));

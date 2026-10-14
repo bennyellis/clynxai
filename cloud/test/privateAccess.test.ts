@@ -48,6 +48,7 @@ describe("a visitor who is not signed in", () => {
     expect(r.headers["x-robots-tag"]).toMatch(/noindex/);
     expect(String(r.headers["content-security-policy"])).toContain("default-src 'none'");
     expect(r.headers["cache-control"]).toBe("no-store");
+    expect(r.headers["referrer-policy"]).toBe("same-origin"); // so a browser form post carries its real Origin (with no-referrer Chrome sends "Origin: null")
   });
   it("gets the same page for any website address (no hint which pages exist)", async () => {
     for (const p of ["/download", "/pricing", "/console/releases", "/anything/at/all"]) {

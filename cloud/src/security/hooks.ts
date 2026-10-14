@@ -16,7 +16,7 @@ export function registerSecurity(app: FastifyInstance): void {
   app.addHook("onSend", async (request, reply, payload) => {
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("X-Frame-Options", "DENY");
-    reply.header("Referrer-Policy", "no-referrer");
+    if (!reply.hasHeader("Referrer-Policy")) reply.header("Referrer-Policy", "no-referrer");
     reply.header("Cross-Origin-Resource-Policy", "same-origin");
     // (the website's pages and the simulated payment pages set their own policy; everything else is an API that serves no page)
     if (!reply.hasHeader("Content-Security-Policy")) reply.header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");

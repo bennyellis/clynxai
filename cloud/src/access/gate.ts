@@ -74,6 +74,8 @@ function sendGate(reply: FastifyReply, status: number, opts: Parameters<typeof g
   reply.header("Content-Type", "text/html; charset=utf-8");
   reply.header("Cache-Control", "no-store");
   reply.header("Content-Security-Policy", GATE_CSP);
+  // (with "no-referrer" a browser sends "Origin: null" on a form post, which the same-site check must refuse; same-origin keeps the real Origin and still leaks nothing to other sites)
+  reply.header("Referrer-Policy", "same-origin");
   return reply.code(status).send(gatePage(opts));
 }
 
