@@ -282,7 +282,20 @@ async function main() {
       await a.page.waitForSelector('[data-testid="support-item"]');
       check("[admin] customers list and support inbox work", /Installer warning question/.test(await text(a.page)));
     });
-    await step("[releases] nothing is public until an administrator uploads, approves and publishes; then the download matches its checksum", async () => {
+    // releases are the Owner's alone (Phase 11.7): the account is the Owner for this step (the server tool is the only way to become one; the test opens the database guard for these statements)
+    const asRole = async (role) => {
+      await db.query("SELECT set_config('clynx.owner_change', 'on', false)");
+      await db.query("UPDATE users SET role = $2 WHERE lower(email) = lower($1)", [adminEmail, role]);
+      await db.query("SELECT set_config('clynx.owner_change', 'off', false)");
+    };
+    await step("[releases] a plain administrator sees releases but none of the buttons that change them, and the server refuses them", async () => {
+      await a.page.goto(BASE + "/console/releases", { waitUntil: "networkidle" });
+      const visible = await a.page.locator("button:has-text('Create draft')").count();
+      const refused = await a.page.request.post(BASE + "/admin/releases", { data: { version: "9.9.9-admin.1", channel: "beta" }, headers: { "x-csrf-token": (await (await a.page.request.get(BASE + "/web/session")).json()).csrfToken } });
+      check("[releases] a plain administrator sees releases but none of the buttons that change them, and the server refuses them", visible === 0 && refused.status() === 403, `${visible} ${refused.status()}`);
+    });
+    await asRole("owner");
+    await step("[releases] nothing is public until the Owner uploads, approves and publishes; then the download matches its checksum", async () => {
       const bytes = crypto.randomBytes(200_000);
       const file = path.join(os.tmpdir(), `Clynx-Test-${rnd()}.exe`);
       fs.writeFileSync(file, bytes);
@@ -307,9 +320,10 @@ async function main() {
       const shown = await page.locator('[data-testid="sha256"]').innerText();
       const dl = await fetch(BASE + (await page.locator('[data-testid="download-button"]').getAttribute("href")));
       const got = Buffer.from(await dl.arrayBuffer());
-      check("[releases] nothing is public until an administrator uploads, approves and publishes; then the download matches its checksum", publicBefore.release === null && shown.trim() === sha && crypto.createHash("sha256").update(got).digest("hex") === sha && /End-to-end test build/.test(await text(page)));
+      check("[releases] nothing is public until the Owner uploads, approves and publishes; then the download matches its checksum", publicBefore.release === null && shown.trim() === sha && crypto.createHash("sha256").update(got).digest("hex") === sha && /End-to-end test build/.test(await text(page)));
       fs.rmSync(file, { force: true });
     });
+    await asRole("admin");
     await a.ctx.close();
 
     // ------------------------------------------------------------ 6. the Owner

@@ -185,7 +185,7 @@ export function ConsoleUserDetail() {
   );
 }
 
-interface AdminRelease { id: string; version: string; channel: string; status: string; notes: string; knownIssues: string; fileName: string | null; sha256: string | null; sizeBytes: number | null; createdAt: string; publishedAt: string | null; createdBy: string | null; downloads: number; hasUpdateManifest?: boolean }
+interface AdminRelease { id: string; version: string; channel: string; status: string; notes: string; knownIssues: string; fileName: string | null; sha256: string | null; sizeBytes: number | null; createdAt: string; publishedAt: string | null; createdBy: string | null; downloads: number; hasUpdateManifest?: boolean; requiredAt?: string | null; requiredDeadline?: string | null }
 
 interface InviteRow { id: string; email: string | null; note: string; createdAt: string; expiresAt: string; usedAt: string | null; usedBy: string | null; revokedAt: string | null; status: "open" | "used" | "expired" | "revoked" }
 
@@ -283,6 +283,10 @@ export function ConsoleReleases() {
   const [issues, setIssues] = useState("");
   const [confirmText, setConfirmText] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [reqHours, setReqHours] = useState<Record<string, string>>({});
+  const { user } = useAuth();
+  // Only the Owner may change releases (the server enforces it); an administrator sees them but not the buttons.
+  const isOwner = user?.role === "owner";
 
   const run = async (key: string, fn: () => Promise<unknown>, ok?: string) => {
     setBusy(key);
@@ -327,10 +331,10 @@ export function ConsoleReleases() {
   return (
     <>
       <h1 style={{ fontSize: "1.9rem" }}>Releases</h1>
-      <Notice>Nothing is ever published automatically. A release goes draft &rarr; (upload) &rarr; approved &rarr; published, and publishing needs you to type the version number. Only published releases appear on the Download page.</Notice>
+      <Notice>Nothing is ever published automatically. A release goes draft &rarr; (upload) &rarr; approved &rarr; published, and publishing needs you to type the version number. Only published releases appear on the Download page. Once published, installed apps update by themselves; "Require this update" makes it compulsory by a deadline.{!isOwner && " Only the Owner can create, approve, publish, withdraw or require a release; you can look at them here."}</Notice>
       <Err e={e ?? err} />
       {info && <div className="success" role="status">{info}</div>}
-      <section className="card">
+      {isOwner && <section className="card">
         <h2 style={{ fontSize: "1.2rem" }}>New draft</h2>
         <form className="form" onSubmit={create} style={{ maxWidth: 640 }}>
           <div className="row">
@@ -341,7 +345,7 @@ export function ConsoleReleases() {
           <Field label="Known issues" htmlFor="r-issues"><textarea id="r-issues" value={issues} onChange={(x) => setIssues(x.target.value)} /></Field>
           <div><button className="btn primary small" disabled={busy === "create"}>Create draft</button></div>
         </form>
-      </section>
+      </section>}
       {!data ? <Loading /> : data.releases.map((r) => (
         <section className="card" key={r.id} data-testid={`release-${r.version}`}>
           <div className="row" style={{ justifyContent: "space-between" }}>
@@ -353,9 +357,18 @@ export function ConsoleReleases() {
             <dt>SHA-256</dt><dd className="mono">{r.sha256 ?? "-"}</dd>
             <dt>Created</dt><dd>{formatDateTime(r.createdAt)}{r.createdBy ? ` by ${r.createdBy}` : ""}</dd>
             <dt>Published</dt><dd>{formatDateTime(r.publishedAt)}</dd>
+            {r.requiredDeadline && <><dt>Required</dt><dd data-testid={`required-${r.version}`}><span className="pill warn">required</span> by {formatDateTime(r.requiredDeadline)} (apps that are online install it by then)</dd></>}
           </dl>
           <div className="row" style={{ marginTop: 14 }}>
-            {r.status === "draft" && (
+            {r.sha256 && <button className="btn small ghost" onClick={() => verify(r)}>Re-check checksum</button>}
+            {isOwner && r.status === "published" && r.hasUpdateManifest && !r.requiredDeadline && (
+              <>
+                <input type="number" min={1} max={1440} aria-label={`Hours until ${r.version} is required`} value={reqHours[r.id] ?? "72"} onChange={(x) => setReqHours({ ...reqHours, [r.id]: x.target.value })} style={{ maxWidth: 90 }} />
+                <button className="btn small" disabled={busy !== null} onClick={() => void run(`req-${r.id}`, () => post(`/admin/releases/${r.id}/require`, { hours: Number(reqHours[r.id] ?? "72") }), "Marked as required. Apps that are online will install it within that time (waiting for an idle moment until then).")}>Require this update (hours)</button>
+              </>
+            )}
+            {isOwner && r.requiredDeadline && <button className="btn small ghost" disabled={busy !== null} onClick={() => void run(`unreq-${r.id}`, () => del(`/admin/releases/${r.id}/require`), "No longer required.")}>Lift the requirement</button>}
+            {isOwner && r.status === "draft" && (
               <>
                 <label className="btn small" style={{ cursor: "pointer" }}>
                   {busy === `up-${r.id}` ? "Uploading..." : r.fileName ? "Replace installer" : "Upload installer"}
@@ -365,25 +378,24 @@ export function ConsoleReleases() {
                 <button className="btn small ghost danger" onClick={() => void run(`del-${r.id}`, () => del(`/admin/releases/${r.id}`))}>Delete draft</button>
               </>
             )}
-            {r.sha256 && <button className="btn small ghost" onClick={() => verify(r)}>Re-check checksum</button>}
-            {r.status === "approved" && (
+            {isOwner && r.status === "approved" && (
               <>
                 <input type="text" aria-label={`Type ${r.version} to publish`} placeholder={`type ${r.version} to publish`} value={confirmText[r.id] ?? ""} onChange={(x) => setConfirmText({ ...confirmText, [r.id]: x.target.value })} style={{ maxWidth: 240 }} />
                 <button className="btn primary small" disabled={(confirmText[r.id] ?? "") !== r.version || busy !== null} onClick={() => void run(`pub-${r.id}`, () => post(`/admin/releases/${r.id}/publish`, { confirmVersion: confirmText[r.id] }), `${r.version} is now public.`)}>Publish</button>
               </>
             )}
-            {(r.status === "approved" || r.status === "published") && <button className="btn small ghost danger" onClick={() => void run(`wd-${r.id}`, () => post(`/admin/releases/${r.id}/withdraw`), "Withdrawn. It is no longer public.")}>Withdraw</button>}
+            {isOwner && (r.status === "approved" || r.status === "published") && <button className="btn small ghost danger" onClick={() => void run(`wd-${r.id}`, () => post(`/admin/releases/${r.id}/withdraw`), "Withdrawn. It is no longer public.")}>Withdraw</button>}
             {r.sha256 && r.status !== "withdrawn" && (
               <>
-                <button className="btn small ghost" onClick={() => downloadTemplate(r)} title="Download the unsigned update manifest to sign offline">Manifest to sign</button>
-                <label className="btn small ghost" style={{ cursor: "pointer" }} title="Upload the manifest you signed offline">
+                {isOwner && <button className="btn small ghost" onClick={() => downloadTemplate(r)} title="Download the unsigned update manifest to sign offline">Manifest to sign</button>}
+                {isOwner && <label className="btn small ghost" style={{ cursor: "pointer" }} title="Upload the manifest you signed offline">
                   {busy === `sig-${r.id}` ? "Checking..." : r.hasUpdateManifest ? "Replace signed manifest" : "Upload signed manifest"}
                   <input type="file" accept=".json" hidden onChange={(x) => void uploadSigned(r, x.target.files?.[0])} />
-                </label>
+                </label>}
                 <span className={`pill ${r.hasUpdateManifest ? "ok" : ""}`}>{r.hasUpdateManifest ? "auto-update ready" : "no auto-update"}</span>
               </>
             )}
-            {r.status === "published" && r.channel === "beta" && <button className="btn small" onClick={() => void run(`pr-${r.id}`, () => post(`/admin/releases/${r.id}/promote`), "A stable DRAFT was created. Approve and publish it separately.")}>Promote to stable (draft)</button>}
+            {isOwner && r.status === "published" && r.channel === "beta" && <button className="btn small" onClick={() => void run(`pr-${r.id}`, () => post(`/admin/releases/${r.id}/promote`), "A stable DRAFT was created. Approve and publish it separately.")}>Promote to stable (draft)</button>}
           </div>
         </section>
       ))}

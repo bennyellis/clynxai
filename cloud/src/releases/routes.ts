@@ -65,14 +65,29 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
       [p.data.id]
     );
     const rel = r.rows[0];
-    const file = rel?.storage_key ? openRead(rel.storage_key) : null;
+    // Resume support for an interrupted download: "Range: bytes=N-" (open-ended, one range) answers 206 with the rest of the file. Anything else is a plain full download.
+    const m = /^bytes=(\d{1,15})-$/.exec(String(request.headers.range ?? ""));
+    const start = m ? Number(m[1]) : 0;
+    const file = rel?.storage_key ? openRead(rel.storage_key, start) : null;
     if (!rel || !file) return reply.code(404).send({ error: "Not found" });
-    await query(
-      "INSERT INTO download_counts (release_id, day, count) VALUES ($1, CURRENT_DATE, 1) ON CONFLICT (release_id, day) DO UPDATE SET count = download_counts.count + 1",
-      [rel.id]
-    ).catch(() => undefined);
+    if (m && start >= file.size) {
+      file.stream.destroy();
+      reply.header("Content-Range", `bytes */${file.size}`);
+      return reply.code(416).send({ error: "Range not satisfiable" });
+    }
+    if (start === 0) {
+      await query(
+        "INSERT INTO download_counts (release_id, day, count) VALUES ($1, CURRENT_DATE, 1) ON CONFLICT (release_id, day) DO UPDATE SET count = download_counts.count + 1",
+        [rel.id]
+      ).catch(() => undefined);
+    }
+    reply.header("Accept-Ranges", "bytes");
+    if (start > 0) {
+      reply.code(206);
+      reply.header("Content-Range", `bytes ${start}-${file.size - 1}/${file.size}`);
+    }
     reply.header("Content-Type", "application/octet-stream");
-    reply.header("Content-Length", String(file.size));
+    reply.header("Content-Length", String(file.size - start));
     reply.header("Content-Disposition", `attachment; filename="${rel.file_name}"`);
     if (rel.sha256) reply.header("X-Content-SHA256", rel.sha256);
     reply.header("Cache-Control", "no-store");

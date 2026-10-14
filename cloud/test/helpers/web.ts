@@ -50,3 +50,16 @@ export async function lastEmailToken(email: string, purpose: string): Promise<st
 export async function emailCount(email: string, purpose: string): Promise<number> {
   return (await pool.query<{ n: number }>("SELECT count(*)::int AS n FROM email_outbox WHERE lower(to_email) = lower($1) AND purpose = $2", [email, purpose])).rows[0].n;
 }
+
+/** Makes this account THE Owner (the Owner role can only be granted by the server-side tool, so the database guard is opened for this one statement). Any earlier Owner becomes a normal user. */
+export async function makeOwner(id: string): Promise<void> {
+  const c = await pool.connect();
+  try {
+    await c.query("SELECT set_config('clynx.owner_change', 'on', false)");
+    await c.query("UPDATE users SET role = 'user' WHERE role = 'owner' AND id <> $1", [id]);
+    await c.query("UPDATE users SET role = 'owner' WHERE id = $1", [id]);
+    await c.query("SELECT set_config('clynx.owner_change', 'off', false)");
+  } finally {
+    c.release();
+  }
+}

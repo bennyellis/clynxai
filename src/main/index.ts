@@ -2148,7 +2148,17 @@ function scheduleIdentityBackfill(): void {
   setTimeout(step, Number(process.env.CLYNX_IDENTITY_BACKFILL_DELAY_MS) || 60_000);
 }
 
-async function runProductLookup(
+// Research in progress (Database lookups, eBay comps): an automatic update waits for it, the same way it waits for a scan.
+let researchActive = 0;
+async function runProductLookup(...args: Parameters<typeof runProductLookupInner>): Promise<void> {
+  researchActive++;
+  try {
+    return await runProductLookupInner(...args);
+  } finally {
+    researchActive--;
+  }
+}
+async function runProductLookupInner(
   id: string,
   name: string,
   // Per explicit instruction — set true only for a sibling THIS function
@@ -3151,6 +3161,34 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   currentUserId = userId;
   void email; // not otherwise needed by this function — kept for signature symmetry with the auth:* handlers' data
   sendToRenderer("config:updated", config);
+  resumeScannersAfterUpdate();
+}
+
+// After an automatic update restarted Clynx while scanners were running, start those scanners again (once the new version has been up for a short while). The note is deleted first, so a
+// scanner that fails or an app that crashes cannot be restarted in a loop.
+function resumeScannersAfterUpdate(): void {
+  const file = path.join(baseDir, "updates", "resume-scanners.json");
+  try {
+    if (!existsSync(file)) return;
+    const note = JSON.parse(readFileSync(file, "utf-8")) as { accounts?: unknown; at?: string };
+    unlinkSync(file);
+    const ids = Array.isArray(note.accounts) ? note.accounts.filter((x): x is string => typeof x === "string") : [];
+    if (!ids.length || (note.at && Date.now() - Date.parse(note.at) > 30 * 60_000)) return; // an old note is not acted on
+    setTimeout(() => {
+      for (const id of ids) {
+        if (!config.accounts.some((a) => a.id === id && a.enabled)) continue;
+        const eng = ensureEngineFor(id);
+        if (!eng.getStatus().running) {
+          const line: LogLine = { ts: Date.now(), level: "info", message: "Clynx was updated; starting the scanner again." };
+          recordLog(line);
+          sendToRenderer("engine:log", line);
+          eng.start();
+        }
+      }
+    }, 20_000).unref?.();
+  } catch (err) {
+    console.error("[updates] could not resume scanners after the update:", err);
+  }
 }
 
 // Records every way a Clynx process can die or hang. The renderer (the window's page) is reloaded when it crashes - the scanner runs in this main
@@ -3781,7 +3819,21 @@ app.whenReady().then(() => {
     currentVersion: buildInfo.version,
     channel: updateChannel,
     mode: () => appSettings.updateMode ?? "automatic",
-    isBusy: () => watchSearching || [...engines.values()].some((e) => e.getStatus().running),
+    isBusy: () => watchSearching || researchActive > 0 || [...engines.values()].some((e) => e.getStatus().running),
+    refreshAuth: () => cloudClient.refreshSessionNow(),
+    beforeInstall: () => {
+      // scanners that are running now are started again by the new version once it is up (an update must not silently end a scan the person left running)
+      try {
+        const running = [...engines.entries()].filter(([, e]) => e.getStatus().running).map(([id]) => id);
+        const file = path.join(baseDir, "updates", "resume-scanners.json");
+        if (running.length) {
+          mkdirSync(path.dirname(file), { recursive: true });
+          writeFileSync(file, JSON.stringify({ accounts: running, at: new Date().toISOString() }));
+        }
+      } catch (err) {
+        console.error("[updates] could not note the running scanners:", err);
+      }
+    },
     platform: process.platform,
     arch: process.arch,
     stateFile: path.join(baseDir, "updates", "update-state.json"),
@@ -3807,7 +3859,11 @@ app.whenReady().then(() => {
       const info = updater.getStatus();
       sendToRenderer("updates:status", info);
       const s = info.status;
-      if (s.state === "available") {
+      const req = info.required;
+      if (req && (s.state === "ready" || s.state === "available" || s.state === "downloading")) {
+        const when = new Date(req.deadline).toLocaleString();
+        notices.set({ id: "update", severity: "warning", title: `Clynx ${req.version} is a required update`, message: req.overdue ? "It is installing now. Clynx closes for a moment and reopens, and anything running is started again." : `It installs by itself when Clynx is idle, and at the latest by ${when}. Your data is not affected.`, action: s.state === "ready" ? "install-update" : "dismiss", actionLabel: s.state === "ready" ? "Install now" : "Got it" });
+      } else if (s.state === "available") {
         notices.set({ id: "update", severity: "info", title: `Clynx ${s.version} is available`, message: "A new version is ready to download. Your data is not affected. It installs only when you say so.", action: "download-update", actionLabel: "Download it" });
       } else if (s.state === "ready") {
         const auto = info.mode === "automatic";
@@ -4468,7 +4524,13 @@ app.whenReady().then(() => {
     const product = store.getProductById(args.id);
     if (!product) return { ok: false, message: "Product not found." };
     try {
-      const analysis = await fetchAndStoreEbayComps(args.id, product.name);
+      researchActive++;
+      let analysis: Awaited<ReturnType<typeof fetchAndStoreEbayComps>>;
+      try {
+        analysis = await fetchAndStoreEbayComps(args.id, product.name);
+      } finally {
+        researchActive--;
+      }
       sendToRenderer("products:updated", store.getProductById(args.id));
       const rejectedParts = [
         analysis.rejectedCount > 0 ? `${analysis.rejectedCount} didn't match this exact product` : null,

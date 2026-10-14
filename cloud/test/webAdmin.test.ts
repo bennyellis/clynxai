@@ -8,7 +8,7 @@ import { buildApp } from "../src/index.js";
 import { closePool, pool } from "../src/db/client.js";
 import { config } from "../src/config.js";
 import { redisConnection } from "../src/queue/connection.js";
-import { asWeb, makeAdmin, PASSWORD, signup, uniqueEmail, type WebUser } from "./helpers/web.js";
+import { asWeb, makeAdmin, makeOwner, PASSWORD, signup, uniqueEmail, type WebUser } from "./helpers/web.js";
 
 // Administration (role-based access control, audit trail, secrets never exposed), support requests and the release lifecycle.
 let app: FastifyInstance;
@@ -24,7 +24,7 @@ beforeAll(async () => {
   app = buildApp({ billing: null });
   await app.ready();
   admin = await signup(app);
-  await makeAdmin(admin.id);
+  await makeOwner(admin.id);
 });
 afterAll(async () => {
   await app?.close();

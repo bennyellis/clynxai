@@ -60,10 +60,11 @@ export async function saveStream(releaseId: string, fileName: string, input: Rea
   }
 }
 
-export function openRead(key: string): { stream: Readable; size: number } | null {
+export function openRead(key: string, start = 0): { stream: Readable; size: number } | null {
   const full = resolveKey(key);
   if (!existsSync(full)) return null;
-  return { stream: createReadStream(full), size: statSync(full).size };
+  const size = statSync(full).size;
+  return { stream: createReadStream(full, start > 0 ? { start } : undefined), size };
 }
 
 export async function hashStored(key: string, algorithm: "sha256" | "sha512" = "sha256"): Promise<string | null> {

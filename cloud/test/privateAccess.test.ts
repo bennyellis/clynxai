@@ -4,7 +4,7 @@ import { buildApp } from "../src/index.js";
 import { closePool, pool } from "../src/db/client.js";
 import { config } from "../src/config.js";
 import { redisConnection } from "../src/queue/connection.js";
-import { asWeb, makeAdmin, PASSWORD, signup, uniqueEmail, type WebUser } from "./helpers/web.js";
+import { asWeb, makeAdmin, makeOwner, PASSWORD, signup, uniqueEmail, type WebUser } from "./helpers/web.js";
 
 // The private beta: ACCESS_MODE=private (nothing reachable without signing in) and REGISTRATION=invite (accounts only with an invitation from the Owner/an administrator).
 let app: FastifyInstance;
@@ -19,7 +19,7 @@ beforeAll(async () => {
   app = buildApp({ billing: null });
   await app.ready();
   admin = await signup(app); // while registration is still open
-  await makeAdmin(admin.id);
+  await makeOwner(admin.id);
   member = await signup(app);
   config.web.accessPrivate = true;
   config.web.registration = "invite";

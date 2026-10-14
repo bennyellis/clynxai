@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { signManifest, type UpdateManifest } from "../updateVerifier.js";
-import { AUTO_INSTALL_START_GRACE_MS, MAX_BUSY_WAIT_MS, Updater, type UpdateMode, type UpdaterDeps } from "../updater.js";
+import { AUTO_INSTALL_START_GRACE_MS, MAX_BUSY_WAIT_MS, OVERDUE_BUSY_GRACE_MS, REQUIRED_RETRY_AFTER_FAILURE_MS, RETRY_BACKOFF_MS, Updater, type UpdateMode, type UpdaterDeps } from "../updater.js";
 import { isSafeForCommandLine, planInstallerLaunch } from "../installerLauncher.js";
 import { check, run, section } from "./_testkit.js";
 
@@ -37,18 +37,54 @@ class FakeServer {
   byVersion = new Map<string, unknown>();
   downloads = new Map<string, Buffer<ArrayBufferLike>>();
   requests: string[] = [];
-  fetch: typeof fetch = (async (input: string | URL | Request) => {
+  /** Phase 11.7 controls: a REQUIRED update, the server's clock, answers to give to the next "latest" requests (e.g. 401), a download that dies after N bytes, a server that ignores Range. */
+  required: unknown = null;
+  serverTime: string | null = null;
+  clockFn: (() => number) | null = null;
+  latestStatuses: number[] = [];
+  cutDownloadAt: number | null = null;
+  ignoreRange = false;
+  rangeRequests: string[] = [];
+  authSeen: Array<string | null> = [];
+  fetch: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const u = new URL(String(input));
     this.requests.push(u.pathname);
+    const hdrs = (init?.headers ?? {}) as Record<string, string>;
     const m = /^\/updates\/(beta|stable)\/latest$/.exec(u.pathname);
-    if (m) return new Response(JSON.stringify(this.latest), { status: 200 });
+    if (m) {
+      this.authSeen.push(hdrs.Authorization ?? null);
+      const forced = this.latestStatuses.shift();
+      if (forced) return new Response("{}", { status: forced });
+      return new Response(JSON.stringify({ ...(this.latest as object), required: this.required, serverTime: this.serverTime ?? new Date(this.clockFn ? this.clockFn() : Date.now()).toISOString() }), { status: 200 });
+    }
     const v = /^\/updates\/(beta|stable)\/versions\/(.+)$/.exec(u.pathname);
     if (v) {
       const e = this.byVersion.get(decodeURIComponent(v[2]));
       return e ? new Response(JSON.stringify({ update: e }), { status: 200 }) : new Response("{}", { status: 404 });
     }
     const d = /^\/releases\/(.+)\/download$/.exec(u.pathname);
-    if (d && this.downloads.has(decodeURIComponent(d[1]))) return new Response(new Uint8Array(this.downloads.get(decodeURIComponent(d[1])) as Buffer), { status: 200 });
+    if (d && this.downloads.has(decodeURIComponent(d[1]))) {
+      const all = this.downloads.get(decodeURIComponent(d[1])) as Buffer;
+      const rm = /^bytes=(\d+)-$/.exec(hdrs.Range ?? "");
+      if (rm) this.rangeRequests.push(hdrs.Range);
+      const start = rm && !this.ignoreRange ? Number(rm[1]) : 0;
+      if (rm && !this.ignoreRange && start >= all.length) return new Response("{}", { status: 416 });
+      const body = all.subarray(start);
+      if (this.cutDownloadAt !== null && start === 0) {
+        const cut = this.cutDownloadAt;
+        this.cutDownloadAt = null; // only the first attempt dies
+        const stream = new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(new Uint8Array(body.subarray(0, cut)));
+          },
+          pull(c) {
+            c.error(new Error("connection reset"));
+          },
+        });
+        return new Response(stream, { status: 200 });
+      }
+      return new Response(new Uint8Array(body), { status: rm && !this.ignoreRange ? 206 : 200 });
+    }
     return new Response("{}", { status: 404 });
   }) as typeof fetch;
   publish(version: string, over: Partial<UpdateManifest> = {}, fileOver: Record<string, unknown> = {}, opts: { key?: string; bytes?: Buffer; latest?: boolean } = {}): UpdateManifest {
@@ -112,10 +148,11 @@ run(async () => {
     check("with no server (local mode / signed out) nothing is requested", (await r2.u.check()).state === "idle" && r2.server.requests.length === 0);
     const r3 = rig({ mode: "off" });
     r3.u.init();
-    await r3.u.check();
-    check("mode 'off' makes no automatic request", r3.server.requests.length === 0);
-    await r3.u.check({ manual: true });
-    check("...but a manual check still works", r3.server.requests.length === 1);
+    r3.server.publish("0.3.0-beta.3");
+    const quiet = await r3.u.check();
+    check("mode 'off': an ordinary update is neither announced nor downloaded by itself", quiet.state === "up-to-date" && !r3.server.requests.some((x) => x.includes("/download")), quiet);
+    const manual = await r3.u.check({ manual: true });
+    check("...but a manual check still offers it (and still downloads nothing until asked)", manual.state === "available" && !r3.server.requests.some((x) => x.includes("/download")), manual);
   }
 
   section("nothing newer");
@@ -412,6 +449,206 @@ run(async () => {
     const s = await r.u.check();
     clock += 10 * MAX_BUSY_WAIT_MS;
     check("an update that fails verification is never installed automatically", s.state === "error" && (await r.u.autoInstallTick()) === "none" && r.launched.length === 0);
+  }
+
+  section("REQUIRED updates (Owner-designated)");
+  {
+    const HOUR = 3_600_000;
+    let clock = 100 * HOUR;
+    const mk = (mode: UpdateMode, over: Record<string, unknown> = {}) => {
+      const r = rig({ mode, now: () => clock, monotonic: () => clock, ...over });
+      r.server.clockFn = () => clock; // the server's clock is the test's clock (a real server's clock is real time)
+      r.u.init();
+      return r;
+    };
+    for (const mode of ["off", "notify", "download"] as const) {
+      const r = mk(mode);
+      r.server.publish("0.3.0-beta.3");
+      r.server.required = { version: "0.3.0-beta.3", deadline: new Date(clock + 24 * HOUR).toISOString() };
+      const st = await r.u.check();
+      check(`mode '${mode}': a required update is downloaded anyway`, st.state === "ready", st);
+      check(`mode '${mode}': the app reports it is required, with the deadline, not yet overdue`, r.u.getStatus().required?.version === "0.3.0-beta.3" && r.u.getStatus().required?.overdue === false, r.u.getStatus().required);
+      clock += AUTO_INSTALL_START_GRACE_MS + 1000;
+      check(`mode '${mode}': ...and then installs by itself while idle`, (await r.u.autoInstallTick()) === "installed" && r.launched.length === 1, r.launched);
+    }
+    {
+      clock += 5 * HOUR;
+      let busy = true;
+      const r = mk("notify", { isBusy: () => busy });
+      r.server.publish("0.3.0-beta.3");
+      r.server.required = { version: "0.3.0-beta.3", deadline: new Date(clock + 2 * HOUR).toISOString() };
+      await r.u.check();
+      clock += AUTO_INSTALL_START_GRACE_MS + 1000;
+      check("before the deadline a running scan is waited for", (await r.u.autoInstallTick()) === "waiting-busy" && r.launched.length === 0);
+      clock += 2 * HOUR;
+      check("just past the deadline a running scan still gets a short grace period (and the status says overdue)", (await r.u.autoInstallTick()) === "waiting-busy" && r.u.getStatus().autoInstall?.phase === "overdue-waiting" && r.u.getStatus().required?.overdue === true);
+      clock += OVERDUE_BUSY_GRACE_MS + 1000;
+      check("after the grace period it installs even though a scan is still running (safe stop, restarted afterwards)", (await r.u.autoInstallTick()) === "installed" && r.launched.length === 1);
+    }
+    {
+      clock += 5 * HOUR;
+      let mono = 0; // a clock that only moves forward
+      const r = mk("off", { monotonic: () => mono });
+      r.server.publish("0.3.0-beta.3");
+      r.server.required = { version: "0.3.0-beta.3", deadline: new Date(clock + 50 * HOUR).toISOString() };
+      await r.u.check();
+      clock -= 400 * HOUR; // the person sets this computer's clock far back to dodge the deadline
+      mono += 49 * HOUR;
+      check("setting the computer's clock back does not move the deadline (time is counted from the server's last answer)", r.u.getStatus().required?.overdue === false);
+      mono += 2 * HOUR;
+      check("...and once 50 real hours have passed it is overdue, whatever the clock says", r.u.getStatus().required?.overdue === true);
+    }
+    {
+      clock += 5 * HOUR;
+      const r = mk("download");
+      r.server.publish("0.3.0-beta.3");
+      r.server.required = { version: "0.3.0-beta.3", deadline: new Date(clock + HOUR).toISOString() };
+      await r.u.check();
+      r.server.required = null; // the Owner lifts the requirement
+      r.server.publish("0.3.0-beta.3");
+      await r.u.check();
+      clock += 10 * HOUR;
+      check("when the Owner lifts the requirement, the person's own setting applies again (mode 'download' waits for a click)", r.u.getStatus().required === null && (await r.u.autoInstallTick()) === "none" && r.launched.length === 0);
+    }
+    {
+      clock += 5 * HOUR;
+      const r = mk("download");
+      r.server.publish("0.3.0-beta.3", {}, {}, { key: OTHER_PRIV });
+      r.server.required = { version: "0.3.0-beta.3", deadline: new Date(clock - HOUR).toISOString() };
+      const st = await r.u.check();
+      clock += 10 * HOUR;
+      check("a REQUIRED update that fails signature verification is still never installed", st.state === "error" && (st as any).stage === "signature" && (await r.u.autoInstallTick()) === "none" && r.launched.length === 0);
+    }
+    {
+      clock += 5 * HOUR;
+      const r = mk("notify", { version: "0.3.0-beta.9" });
+      r.server.required = { version: "0.3.0-beta.3", deadline: new Date(clock - HOUR).toISOString() };
+      await r.u.check();
+      check("an app already past the required version is not affected", r.u.getStatus().required === null);
+    }
+    {
+      clock += 5 * HOUR;
+      const f = { lastGoodVersion: null, newestSeenPublishedAt: null, pending: null, badVersions: [], lastFailure: { version: "0.3.0-beta.3", at: new Date(clock - HOUR).toISOString(), reason: "The installer did not finish." } };
+      const r = mk("off", { seed: f });
+      r.server.publish("0.3.0-beta.3");
+      r.server.required = { version: "0.3.0-beta.3", deadline: new Date(clock - 20 * HOUR).toISOString() };
+      await r.u.check();
+      clock += AUTO_INSTALL_START_GRACE_MS + 1000 + OVERDUE_BUSY_GRACE_MS;
+      check("a required update whose installer failed a moment ago is not hammered again", (await r.u.autoInstallTick()) === "skipped" && r.launched.length === 0);
+      clock += REQUIRED_RETRY_AFTER_FAILURE_MS;
+      check("...but is tried again after a few hours", (await r.u.autoInstallTick()) === "installed" && r.launched.length === 1);
+    }
+  }
+
+  section("withdrawn or replaced after it was downloaded");
+  {
+    let clock = 50_000_000;
+    const r = rig({ mode: "automatic", now: () => clock });
+    r.u.init();
+    r.server.publish("0.3.0-beta.3");
+    await r.u.check();
+    r.server.latest = { update: null }; // the Owner withdraws it
+    clock += AUTO_INSTALL_START_GRACE_MS + 1000;
+    check("an update withdrawn after it was downloaded is not installed", (await r.u.autoInstallTick()) === "skipped" && r.launched.length === 0 && r.u.getStatus().status.state !== "ready", r.u.getStatus().status);
+    const r2 = rig({ mode: "automatic", now: () => clock });
+    r2.u.init();
+    r2.server.publish("0.3.0-beta.3");
+    await r2.u.check();
+    r2.server.publish("0.3.0-beta.4");
+    clock += 2 * AUTO_INSTALL_START_GRACE_MS;
+    check("an update replaced by a newer release is not installed; the newer one is picked up instead", (await r2.u.autoInstallTick()) === "skipped" && r2.launched.length === 0);
+    await sleep(100);
+    check("...and the newer one is downloaded", r2.u.getStatus().status.state === "ready" && (r2.u.getStatus().status as any).version === "0.3.0-beta.4", r2.u.getStatus().status);
+    const r3 = rig({ mode: "automatic", now: () => clock });
+    r3.u.init();
+    r3.server.publish("0.3.0-beta.3");
+    await r3.u.check();
+    clock += AUTO_INSTALL_START_GRACE_MS + 1000;
+    const down = r3.server.fetch;
+    r3.server.fetch = (async (i: any, init?: any) => { if (String(i).includes("/updates/")) throw new TypeError("fetch failed"); return down(i, init); }) as typeof fetch;
+    (r3.u as any).deps.fetchImpl = r3.server.fetch;
+    check("if the server cannot be reached at install time, it waits instead of guessing", (await r3.u.autoInstallTick()) === "waiting-server" && r3.launched.length === 0);
+    (r3.u as any).deps.fetchImpl = down;
+    check("...and installs on the next look once the server answers", (await r3.u.autoInstallTick()) === "installed");
+    const r4 = rig({ mode: "download", now: () => clock });
+    r4.u.init();
+    r4.server.publish("0.3.0-beta.3");
+    await r4.u.check();
+    r4.server.latest = { update: null };
+    const click = await r4.u.installNow();
+    check("clicking 'install' on a withdrawn update is refused with an explanation", !click.ok && /no longer offers/.test(click.error ?? "") && r4.launched.length === 0, click);
+  }
+
+  section("skipped versions, signatures and server problems");
+  {
+    const r = rig({ mode: "download", version: "0.3.0-beta.3" });
+    r.u.init();
+    r.server.publish("0.3.0-beta.4", {}, {}, { latest: false });
+    r.server.publish("0.3.0-beta.6");
+    const st = await r.u.check();
+    check("several releases published since: the app goes straight to the newest (beta.3 to beta.6)", st.state === "ready" && (st as any).version === "0.3.0-beta.6");
+    const r2 = rig({ mode: "download", version: "0.3.0-beta.3", seed: { lastGoodVersion: null, newestSeenPublishedAt: null, pending: null, badVersions: ["0.3.0-beta.5"] } });
+    r2.u.init();
+    r2.server.publish("0.3.0-beta.5");
+    check("a version that once failed to start here is skipped", (await r2.u.check()).state === "up-to-date");
+    r2.server.publish("0.3.0-beta.6");
+    check("...and the next good release is still offered", (await r2.u.check()).state === "ready");
+    const r3 = rig({ mode: "automatic" });
+    r3.u.init();
+    r3.server.latestStatuses = [500, 500];
+    const e1 = await r3.u.check();
+    check("a server error is reported in plain words and counted", e1.state === "error" && /error 500/.test((e1 as any).message) && r3.u.getStatus().consecutiveFailures === 1, e1);
+    r3.server.latestStatuses = [];
+    r3.server.publish("0.3.0-beta.3");
+    await r3.u.check();
+    check("...and a later good answer clears the failure count", r3.u.getStatus().consecutiveFailures === 0 && r3.u.getStatus().status.state === "ready");
+    const r4 = rig({ mode: "automatic", refreshAuth: async () => true, authHeader: () => "Bearer t" });
+    r4.u.init();
+    r4.server.publish("0.3.0-beta.3");
+    r4.server.latestStatuses = [401];
+    const a = await r4.u.check();
+    check("a 401 (the access token just expired) triggers one token refresh and a second try instead of failing", a.state === "ready" && r4.server.authSeen.length === 2, { a, seen: r4.server.authSeen.length });
+    const r5 = rig({ mode: "automatic", refreshAuth: async () => false, authHeader: () => "Bearer t" });
+    r5.u.init();
+    r5.server.publish("0.3.0-beta.3");
+    r5.server.latestStatuses = [401];
+    check("...and a 401 that stays a 401 is reported with what to do", (await r5.u.check()).state === "error");
+    check("the retry delay after failures is 5, 15, then 30 minutes, never longer than the normal interval", RETRY_BACKOFF_MS.join() === "300000,900000,1800000");
+  }
+
+  section("interrupted downloads");
+  {
+    const r = rig({ mode: "download" });
+    r.u.init();
+    r.server.publish("0.3.0-beta.3");
+    r.server.cutDownloadAt = 40_000;
+    const first = await r.u.check();
+    check("a download that dies half way is reported, nothing is installed, and the received part is kept", first.state === "error" && (first as any).stage === "download" && /continues from there/.test((first as any).message) && r.launched.length === 0, first);
+    const part = path.join(r.dir, "updates", "0.3.0-beta.3", "Clynx-Beta-Setup-0.3.0-beta.3.exe.part");
+    check("the kept part is the bytes received so far", fs.existsSync(part) && fs.statSync(part).size === 40_000);
+    const again = await r.u.download();
+    check("the next try asks only for the rest (Range) and the whole file then passes its signed checksums", again.state === "ready" && r.server.rangeRequests[0] === "bytes=40000-", r.server.rangeRequests);
+    const r2 = rig({ mode: "download" });
+    r2.u.init();
+    r2.server.publish("0.3.0-beta.3");
+    r2.server.ignoreRange = true;
+    r2.server.cutDownloadAt = 30_000;
+    await r2.u.check();
+    const full = await r2.u.download();
+    check("a server that ignores Range sends the whole file again and the download still ends up verified", full.state === "ready");
+    const r3 = rig({ mode: "download" });
+    r3.u.init();
+    r3.server.publish("0.3.0-beta.3");
+    r3.server.cutDownloadAt = 20_000;
+    await r3.u.check();
+    const part3 = path.join(r3.dir, "updates", "0.3.0-beta.3", "Clynx-Beta-Setup-0.3.0-beta.3.exe.part");
+    const bytes = fs.readFileSync(part3);
+    bytes[5] ^= 0xff; // the kept part is damaged on disk
+    fs.writeFileSync(part3, bytes);
+    const bad = await r3.u.download();
+    check("a kept part that was damaged is caught by the checksum, thrown away, and never installed", bad.state === "error" && !fs.existsSync(part3) && r3.launched.length === 0, bad);
+    const good = await r3.u.download();
+    check("...and the next try downloads the file afresh and succeeds", good.state === "ready");
   }
 
   section("the installer hand-off command");

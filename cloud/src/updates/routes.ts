@@ -16,11 +16,12 @@ interface Row {
   version: string;
   platform: string;
   update_manifest: string;
+  required_deadline: Date | null;
 }
 
 async function candidates(channel: string, platform: string, arch: string): Promise<Row[]> {
   const r = await query<Row>(
-    `SELECT version, platform, update_manifest FROM releases WHERE channel = $1 AND status = 'published' AND update_manifest IS NOT NULL AND platform = $2`,
+    `SELECT version, platform, update_manifest, required_deadline FROM releases WHERE channel = $1 AND status = 'published' AND update_manifest IS NOT NULL AND platform = $2`,
     [channel, `${platform}-${arch}`]
   );
   return r.rows;
@@ -39,7 +40,14 @@ export async function updatesRoutes(app: FastifyInstance): Promise<void> {
     if (!p.success || !q.success) return reply.code(400).send({ error: "Unknown channel or platform" });
     const rows = (await candidates(p.data.channel, q.data.platform, q.data.arch)).sort((a, b) => compareVersions(b.version, a.version));
     reply.header("Cache-Control", "no-store");
-    return reply.code(200).send({ update: rows[0] ? JSON.parse(rows[0].update_manifest) : null, serverTime: new Date().toISOString() });
+    // The Owner can mark a release REQUIRED. The highest required version among the published ones is the floor every app must reach by that release's deadline. This is advice about WHEN to
+    // install a release the app has verified for itself (signature, checksums); it can never make an app install anything unsigned.
+    const required = rows.filter((r) => r.required_deadline).sort((x, y) => compareVersions(y.version, x.version))[0];
+    return reply.code(200).send({
+      update: rows[0] ? JSON.parse(rows[0].update_manifest) : null,
+      serverTime: new Date().toISOString(),
+      required: required ? { version: required.version, deadline: required.required_deadline!.toISOString() } : null,
+    });
   });
 
   // One specific published version (used for a user-approved return to the previous version).

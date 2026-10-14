@@ -9,7 +9,7 @@ import { closePool, pool } from "../src/db/client.js";
 import { config } from "../src/config.js";
 import { redisConnection } from "../src/queue/connection.js";
 import { compareVersions } from "../src/updates/manifest.js";
-import { asWeb, makeAdmin, signup, type WebUser } from "./helpers/web.js";
+import { asWeb, makeAdmin, makeOwner, signup, type WebUser } from "./helpers/web.js";
 
 // Automatic desktop updates, server side: the server checks signed manifests with the PUBLIC key only, serves them only for published releases, and the pieces around it
 // (server info for "Test connection", the multi-address same-origin check).
@@ -35,7 +35,7 @@ beforeAll(async () => {
   app = buildApp({ billing: null });
   await app.ready();
   admin = await signup(app);
-  await makeAdmin(admin.id);
+  await makeOwner(admin.id);
 });
 afterAll(async () => {
   await app?.close();

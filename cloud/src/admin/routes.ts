@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { requireAdmin } from "../auth/middleware.js";
+import { requireAdmin, requireOwner } from "../auth/middleware.js";
 import { config } from "../config.js";
 import { pool, query } from "../db/client.js";
 import { listingProcessingQueue } from "../queue/listingProcessingQueue.js";
@@ -139,7 +139,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
 
   // ------------------------------------------------------------------ releases
   const releaseSelect = `SELECT r.id, r.version, r.channel, r.status, r.platform, r.notes, r.known_issues AS "knownIssues", r.file_name AS "fileName", r.sha256, r.size_bytes::float8 AS "sizeBytes", (r.update_manifest IS NOT NULL) AS "hasUpdateManifest",
-      r.created_at AS "createdAt", r.approved_at AS "approvedAt", r.published_at AS "publishedAt", cu.email AS "createdBy", au.email AS "approvedBy",
+      r.created_at AS "createdAt", r.approved_at AS "approvedAt", r.published_at AS "publishedAt", r.required_at AS "requiredAt", r.required_deadline AS "requiredDeadline", cu.email AS "createdBy", au.email AS "approvedBy",
       (SELECT coalesce(sum(count), 0)::int FROM download_counts d WHERE d.release_id = r.id) AS downloads
     FROM releases r LEFT JOIN users cu ON cu.id = r.created_by LEFT JOIN users au ON au.id = r.approved_by`;
 
@@ -154,7 +154,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     notes: z.string().max(10_000).default(""),
     knownIssues: z.string().max(10_000).default(""),
   });
-  app.post("/admin/releases", async (request, reply) => {
+  app.post("/admin/releases", { preHandler: requireOwner }, async (request, reply) => {
     const b = newRelease.safeParse(request.body);
     if (!b.success) return reply.code(400).send({ error: "Invalid request body", details: b.error.flatten() });
     try {
@@ -170,7 +170,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.patch("/admin/releases/:id", async (request, reply) => {
+  app.patch("/admin/releases/:id", { preHandler: requireOwner }, async (request, reply) => {
     const p = uuid.safeParse(request.params);
     const b = z.object({ notes: z.string().max(10_000).optional(), knownIssues: z.string().max(10_000).optional() }).safeParse(request.body);
     if (!p.success || !b.success) return reply.code(400).send({ error: "Invalid request" });
@@ -183,7 +183,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   // The installer is uploaded as the raw request body. The server stores it and computes the SHA-256 itself; a checksum sent by the client would not be trusted.
   app.register(async (upload) => {
     upload.addContentTypeParser("application/octet-stream", (_req, payload, done) => done(null, payload));
-    upload.put("/admin/releases/:id/file", { bodyLimit: config.web.maxReleaseBytes }, async (request, reply) => {
+    upload.put("/admin/releases/:id/file", { bodyLimit: config.web.maxReleaseBytes, preHandler: requireOwner }, async (request, reply) => {
       const p = uuid.safeParse(request.params);
       const q = z.object({ name: z.string().min(1).max(200) }).safeParse(request.query);
       if (!p.success || !q.success) return reply.code(400).send({ error: "Invalid request" });
@@ -231,7 +231,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(200).send({ manifest: r.manifest, configured: r.configured });
   });
 
-  app.put("/admin/releases/:id/update-manifest", async (request, reply) => {
+  app.put("/admin/releases/:id/update-manifest", { preHandler: requireOwner }, async (request, reply) => {
     const p = uuid.safeParse(request.params);
     if (!p.success) return reply.code(400).send({ error: "Invalid id" });
     const r = await attachSignedManifest(p.data.id, request.body, request.userId as string);
@@ -240,7 +240,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(200).send({ ok: true, willBeOffered: r.willBeOffered });
   });
 
-  app.delete("/admin/releases/:id/update-manifest", async (request, reply) => {
+  app.delete("/admin/releases/:id/update-manifest", { preHandler: requireOwner }, async (request, reply) => {
     const p = uuid.safeParse(request.params);
     if (!p.success) return reply.code(400).send({ error: "Invalid id" });
     const r = await query("UPDATE releases SET update_manifest = NULL, update_manifest_at = NULL WHERE id = $1 AND update_manifest IS NOT NULL", [p.data.id]);
@@ -249,7 +249,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(200).send({ ok: true });
   });
 
-  app.post("/admin/releases/:id/approve", async (request, reply) => {
+  app.post("/admin/releases/:id/approve", { preHandler: requireOwner }, async (request, reply) => {
     const p = uuid.safeParse(request.params);
     if (!p.success) return reply.code(400).send({ error: "Invalid id" });
     const rel = await query<{ storage_key: string | null; sha256: string | null; status: string }>("SELECT storage_key, sha256, status FROM releases WHERE id = $1", [p.data.id]);
@@ -263,7 +263,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Publishing is a separate, deliberate step: the administrator must type the version number. Nothing is ever published automatically.
-  app.post("/admin/releases/:id/publish", async (request, reply) => {
+  app.post("/admin/releases/:id/publish", { preHandler: requireOwner }, async (request, reply) => {
     const p = uuid.safeParse(request.params);
     const b = z.object({ confirmVersion: z.string() }).safeParse(request.body);
     if (!p.success || !b.success) return reply.code(400).send({ error: "Invalid request" });
@@ -277,17 +277,43 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(200).send({ ok: true });
   });
 
-  app.post("/admin/releases/:id/withdraw", async (request, reply) => {
+  app.post("/admin/releases/:id/withdraw", { preHandler: requireOwner }, async (request, reply) => {
     const p = uuid.safeParse(request.params);
     if (!p.success) return reply.code(400).send({ error: "Invalid id" });
-    const r = await query("UPDATE releases SET status = 'withdrawn' WHERE id = $1 AND status IN ('approved','published')", [p.data.id]);
+    const r = await query("UPDATE releases SET status = 'withdrawn', required_at = NULL, required_deadline = NULL WHERE id = $1 AND status IN ('approved','published')", [p.data.id]);
     if (!r.rowCount) return reply.code(409).send({ error: "Only an approved or published release can be withdrawn" });
     await audit(request, "release.withdraw", p.data.id);
     return reply.code(200).send({ ok: true });
   });
 
+  // REQUIRED updates (Owner only). A published release can be marked required, with a deadline: desktop apps that are online install it by then, whatever their update setting. They still
+  // wait for an idle moment until the deadline and no longer wait after it. The release must already be published and carry a verified signed manifest, so a required update is always one
+  // the apps can verify. Everything older than the highest required version is affected (an app already at or past it is not).
+  app.post("/admin/releases/:id/require", { preHandler: requireOwner }, async (request, reply) => {
+    const p = uuid.safeParse(request.params);
+    const b = z.object({ hours: z.number().int().min(1).max(24 * 60).default(72) }).safeParse(request.body ?? {});
+    if (!p.success || !b.success) return reply.code(400).send({ error: "Invalid request" });
+    const r = await query(
+      `UPDATE releases SET required_at = now(), required_deadline = now() + make_interval(hours => $2)
+       WHERE id = $1 AND status = 'published' AND update_manifest IS NOT NULL RETURNING version, required_deadline AS "requiredDeadline"`,
+      [p.data.id, b.data.hours]
+    );
+    if (!r.rowCount) return reply.code(409).send({ error: "not_requirable", message: "Only a published release that has a verified signed update manifest can be required." });
+    await audit(request, "release.require", p.data.id, { hours: b.data.hours, version: r.rows[0].version });
+    return reply.code(200).send({ ok: true, requiredDeadline: r.rows[0].requiredDeadline });
+  });
+
+  app.delete("/admin/releases/:id/require", { preHandler: requireOwner }, async (request, reply) => {
+    const p = uuid.safeParse(request.params);
+    if (!p.success) return reply.code(400).send({ error: "Invalid id" });
+    const r = await query("UPDATE releases SET required_at = NULL, required_deadline = NULL WHERE id = $1 AND required_deadline IS NOT NULL", [p.data.id]);
+    if (!r.rowCount) return reply.code(404).send({ error: "That release is not marked as required" });
+    await audit(request, "release.unrequire", p.data.id);
+    return reply.code(200).send({ ok: true });
+  });
+
   // Promotion: a published beta build becomes a DRAFT on the stable channel (same file and checksum). It still has to be approved and published like any other release.
-  app.post("/admin/releases/:id/promote", async (request, reply) => {
+  app.post("/admin/releases/:id/promote", { preHandler: requireOwner }, async (request, reply) => {
     const p = uuid.safeParse(request.params);
     if (!p.success) return reply.code(400).send({ error: "Invalid id" });
     const rel = await query<{ version: string; channel: string; status: string; notes: string; known_issues: string; file_name: string | null; storage_key: string | null; sha256: string | null; size_bytes: string | null }>(
@@ -310,7 +336,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.delete("/admin/releases/:id", async (request, reply) => {
+  app.delete("/admin/releases/:id", { preHandler: requireOwner }, async (request, reply) => {
     const p = uuid.safeParse(request.params);
     if (!p.success) return reply.code(400).send({ error: "Invalid id" });
     const rel = await query<{ storage_key: string | null }>("DELETE FROM releases WHERE id = $1 AND status = 'draft' RETURNING storage_key", [p.data.id]);

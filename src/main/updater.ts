@@ -5,8 +5,11 @@
 //   * The server is NOT trusted. It hands over a manifest signed with the update key; this app holds only the PUBLIC half (resources/update-public.pem) and refuses anything whose
 //     signature does not verify, that is for another channel/platform, that is not newer than the running version, or whose publish time is older than one already accepted.
 //   * The downloaded installer is NOT trusted either: it is used only if its size, SHA-512 and SHA-256 equal what the signed manifest states, and is hashed again right before it runs.
-//   * In mode "automatic" a verified update installs by itself, but only when Clynx is idle (no scan or Watch check running; after at most MAX_BUSY_WAIT it installs anyway), never in the
-//     first minutes after start, never while the version now running is still unproven (a just-installed update), and never again for a version whose last install did not finish.
+//   * In mode "automatic" a verified update installs by itself, but only when Clynx is idle (no scan, Watch check or research running; after at most MAX_BUSY_WAIT it installs anyway), never in
+//     the first minutes after start, never while the version now running is still unproven (a just-installed update), and never again for a version whose last install did not finish.
+//   * The Owner can mark a release REQUIRED (with a deadline). The server only tells the app WHEN; the app still verifies the release itself. While online, such an update installs by the
+//     deadline whatever the person chose (even "off"): it waits for an idle moment until then, and after the deadline waits only a short while more (OVERDUE_BUSY_GRACE).
+//   * Just before it installs, the app asks the server once more whether that release is still the one on offer: a release withdrawn after it was downloaded is dropped, not installed.
 //     In the other modes nothing installs without the person's click ("Restart and install"). User data (Database, settings, Facebook profile, keys) lives outside the install folder and is never touched
 //     by the installer; a Database backup is made first anyway.
 //   * Signature checks cannot be switched off. A build without the public key simply cannot install updates (manual installers keep working).
@@ -33,11 +36,18 @@ import {
 } from "./updateVerifier.js";
 
 export type UpdateMode = "off" | "notify" | "download" | "automatic";
+export type AutoPhase = "waiting-busy" | "waiting-start" | "waiting-unproven" | "waiting-server" | "skipped-failed-before" | "overdue-waiting" | null;
 
 /** How often a ready update is reconsidered for automatic installation, how long after start Clynx waits before it may restart itself, and how long a busy scanner can postpone it. */
 export const AUTO_INSTALL_CHECK_MS = 60_000;
 export const AUTO_INSTALL_START_GRACE_MS = 90_000;
 export const MAX_BUSY_WAIT_MS = 12 * 60 * 60_000;
+/** After a REQUIRED update's deadline a running scan gets this much longer to finish; then the update goes ahead (scans stop safely and are restarted afterwards). */
+export const OVERDUE_BUSY_GRACE_MS = 10 * 60_000;
+/** A REQUIRED update whose installer failed once is tried again after this long (an ordinary update is not retried by itself). */
+export const REQUIRED_RETRY_AFTER_FAILURE_MS = 6 * 60 * 60_000;
+/** When a check or download fails the next try comes sooner than the normal interval: 5 minutes, then 15, then 30. */
+export const RETRY_BACKOFF_MS = [5 * 60_000, 15 * 60_000, 30 * 60_000];
 export type UpdateChannel = "beta" | "stable";
 
 export type UpdateStatus =
@@ -62,6 +72,13 @@ export interface UpdateInfo {
   lastFailure: string | null;
   enabled: boolean;
   badVersions: string[];
+  /** The Owner has marked an update as REQUIRED for this computer (it is behind that version). `overdue` = the deadline has passed. */
+  required: { version: string; deadline: string; overdue: boolean } | null;
+  /** Why a downloaded update is waiting (automatic mode), or null. */
+  autoInstall: { phase: AutoPhase; waitingSince: number | null } | null;
+  /** When the next automatic check will happen, and how many checks or downloads in a row have failed. */
+  nextCheckAt: number | null;
+  consecutiveFailures: number;
 }
 
 export interface UpdaterDeps {
@@ -83,6 +100,10 @@ export interface UpdaterDeps {
   backupBeforeInstall?: () => Promise<boolean>;
   /** True while a scan or a Watch check is running: an automatic install waits for it to finish (up to MAX_BUSY_WAIT). */
   isBusy?: () => boolean;
+  /** Gets a new access token after the server answered 401 to an update request (so a token that just expired does not make a check fail). Returns whether there is a fresh one. */
+  refreshAuth?: () => Promise<boolean>;
+  /** Called just before the installer is started, so the app can remember what must be resumed afterwards (a running scanner). */
+  beforeInstall?: () => void;
   /** Starts the installer and returns; the app is quit by `quit` right after. */
   launchInstaller: (installerPath: string, args: string[]) => void;
   quit: () => void;
@@ -91,6 +112,8 @@ export interface UpdaterDeps {
   onProblem?: (p: { kind: "installer-did-not-finish" | "rollback-offered"; version: string; message: string; canRollback: boolean }) => void;
   log?: (msg: string) => void;
   now?: () => number;
+  /** A clock that only moves forward and ignores the person changing the computer's clock (default: performance.now). Used to measure time since the server last told us its time. */
+  monotonic?: () => number;
 }
 
 const hashFile = (file: string, algorithm: "sha512" | "sha256"): string => crypto.createHash(algorithm).update(fs.readFileSync(file)).digest("hex");
@@ -105,6 +128,10 @@ export class Updater {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private autoTimer: ReturnType<typeof setInterval> | null = null;
   private readySince: number | null = null;
+  private autoPhase: AutoPhase = null;
+  private failures = 0;
+  private nextCheckAt: number | null = null;
+  private anchor: { serverMs: number; monoMs: number } | null = null;
   private readonly startedAt: number;
   private readonly now: () => number;
 
@@ -164,6 +191,10 @@ export class Updater {
       lastFailure: this.state.lastFailure ? `${this.state.lastFailure.reason} (update to ${this.state.lastFailure.version})` : null,
       enabled: !!this.deps.publicKeyPem,
       badVersions: this.state.badVersions,
+      required: this.requiredActive() ? { version: this.state.required!.version, deadline: this.state.required!.deadline, overdue: this.overdueMs() > 0 } : null,
+      autoInstall: this.status.state === "ready" ? { phase: this.autoPhase, waitingSince: this.readySince } : null,
+      nextCheckAt: this.nextCheckAt,
+      consecutiveFailures: this.failures,
     };
   }
 
@@ -215,7 +246,65 @@ export class Updater {
     }
   }
 
+  // ---------------------------------------------------------------- required updates
+  /** The server's clock (best estimate): this computer's clock corrected by the difference measured at the last successful check, so setting the local clock back does not delay a deadline. */
+  private serverNow(): number {
+    // measured since the server last told us its time with a clock that cannot be set back; before the first check of this run, the offset saved from the last run is applied to the local clock
+    if (this.anchor) return this.anchor.serverMs + ((this.deps.monotonic ?? (() => performance.now()))() - this.anchor.monoMs);
+    return this.now() + (this.state.required?.offsetMs ?? 0);
+  }
+  /** True while the Owner's "required" mark applies to this computer (it is behind the required version). */
+  private requiredActive(): boolean {
+    const r = this.state.required;
+    return !!r && compareVersions(r.version, this.deps.currentVersion) > 0;
+  }
+  /** Milliseconds past the required deadline (0 or negative while the deadline is still ahead). */
+  private overdueMs(): number {
+    const r = this.state.required;
+    return r && this.requiredActive() ? this.serverNow() - Date.parse(r.deadline) : -1;
+  }
+  /** The mode that really applies: a required update behaves like "automatic" whatever the person chose. */
+  private effectiveMode(): UpdateMode {
+    return this.requiredActive() ? "automatic" : this.deps.mode();
+  }
+  private noteRequired(raw: unknown, serverTime: unknown): void {
+    const r = raw as { version?: unknown; deadline?: unknown } | null | undefined;
+    const st = typeof serverTime === "string" ? Date.parse(serverTime) : NaN;
+    const offset = Number.isNaN(st) ? (this.state.required?.offsetMs ?? 0) : st - this.now();
+    if (!Number.isNaN(st)) this.anchor = { serverMs: st, monoMs: (this.deps.monotonic ?? (() => performance.now()))() };
+    if (r && typeof r.version === "string" && typeof r.deadline === "string" && !Number.isNaN(Date.parse(r.deadline)) && compareVersions(r.version, this.deps.currentVersion) > 0) {
+      this.state = { ...this.state, required: { version: r.version, deadline: r.deadline, offsetMs: offset } };
+    } else if (this.state.required) {
+      this.state = { ...this.state, required: null };
+    }
+    this.save();
+  }
+
   // ---------------------------------------------------------------- checking
+  /** One request for the newest signed manifest. A 401 triggers one token refresh and a second try. */
+  private async fetchLatest(base: string): Promise<{ ok: true; res: Response } | { ok: false; unreachable: boolean }> {
+    const channel = this.deps.channel();
+    const doFetch = this.deps.fetchImpl ?? fetch;
+    const url = `${base.replace(/\/+$/, "")}/updates/${channel}/latest?platform=${encodeURIComponent(this.deps.platform)}&arch=${encodeURIComponent(this.deps.arch)}`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let res: Response;
+      try {
+        res = await doFetch(url, { signal: AbortSignal.timeout(15_000), redirect: "error", headers: { Accept: "application/json", ...this.authFor(url, base) } });
+      } catch {
+        return { ok: false, unreachable: true };
+      }
+      if (res.status === 401 && attempt === 0 && this.deps.refreshAuth && (await this.deps.refreshAuth().catch(() => false))) continue;
+      return { ok: true, res };
+    }
+    return { ok: false, unreachable: true };
+  }
+
+  private fail(stage: "check" | "signature" | "download", message: string): UpdateStatus {
+    this.failures++;
+    this.set({ state: "error", stage, message });
+    return this.status;
+  }
+
   async check(opts: { manual?: boolean } = {}): Promise<UpdateStatus> {
     if (this.busy) return this.status;
     if (!this.deps.publicKeyPem) {
@@ -227,35 +316,26 @@ export class Updater {
       if (opts.manual) this.set({ state: "error", stage: "check", message: "Sign in to a Clynx server to check for updates." });
       return this.status;
     }
-    if (this.deps.mode() === "off" && !opts.manual) return this.status;
+    // (mode "off" still asks the server, quietly, because an update the Owner has REQUIRED must be heard about; unless required, nothing is announced or downloaded in that mode)
     this.busy = true;
     this.set({ state: "checking" });
     try {
       const channel = this.deps.channel();
-      const doFetch = this.deps.fetchImpl ?? fetch;
-      const url = `${base.replace(/\/+$/, "")}/updates/${channel}/latest?platform=${encodeURIComponent(this.deps.platform)}&arch=${encodeURIComponent(this.deps.arch)}`;
-      let res: Response;
-      try {
-        res = await doFetch(url, { signal: AbortSignal.timeout(15_000), redirect: "error", headers: { Accept: "application/json", ...this.authFor(url, base) } });
-      } catch {
-        this.set({ state: "error", stage: "check", message: "Could not reach the server to check for updates. It will try again later." });
-        return this.status;
-      }
+      const got = await this.fetchLatest(base);
+      if (!got.ok) return this.fail("check", "Could not reach the server to check for updates. It will try again soon.");
+      const res = got.res;
       if (res.status === 404) {
         this.lastCheckedAt = this.now();
+        this.failures = 0;
         this.set({ state: "up-to-date", checkedAt: this.lastCheckedAt }); // an older server without update support
         return this.status;
       }
-      if (res.status === 401) {
-        this.set({ state: "error", stage: "check", message: "The server did not accept this sign-in for the update check. Sign out and in again; it will try again later." });
-        return this.status;
-      }
-      if (!res.ok) {
-        this.set({ state: "error", stage: "check", message: `The server could not check for updates (error ${res.status}).` });
-        return this.status;
-      }
-      const body = (await res.json().catch(() => null)) as { update?: unknown } | null;
+      if (res.status === 401) return this.fail("check", "The server did not accept this sign-in for the update check. Sign out and in again; it will try again soon.");
+      if (!res.ok) return this.fail("check", `The server could not check for updates (error ${res.status}).`);
+      const body = (await res.json().catch(() => null)) as { update?: unknown; required?: unknown; serverTime?: unknown } | null;
       this.lastCheckedAt = this.now();
+      this.failures = 0;
+      this.noteRequired(body?.required, body?.serverTime);
       if (!body || body.update === null || body.update === undefined) {
         this.set({ state: "up-to-date", checkedAt: this.lastCheckedAt });
         return this.status;
@@ -263,12 +343,15 @@ export class Updater {
       const verified = verifyManifest(body.update, this.deps.publicKeyPem);
       if (!verified.ok) {
         this.log(`REJECTED an update from the server: ${verified.reason}`);
-        this.set({ state: "error", stage: "signature", message: `An update was offered, but it could not be verified (${verified.reason}) so it was ignored.` });
-        return this.status;
+        return this.fail("signature", `An update was offered, but it could not be verified (${verified.reason}) so it was ignored.`);
       }
       const m = verified.manifest;
       const offer = evaluateOffer(m, { currentVersion: this.deps.currentVersion, channel, platform: this.deps.platform, arch: this.deps.arch, state: this.state });
       if (!offer.offer || !offer.file) {
+        this.set({ state: "up-to-date", checkedAt: this.lastCheckedAt });
+        return this.status;
+      }
+      if (this.deps.mode() === "off" && !opts.manual && !this.requiredActive()) {
         this.set({ state: "up-to-date", checkedAt: this.lastCheckedAt });
         return this.status;
       }
@@ -287,8 +370,25 @@ export class Updater {
     } finally {
       this.busy = false;
     }
-    if (this.deps.mode() === "download" || this.deps.mode() === "automatic") await this.download();
+    const em = this.effectiveMode();
+    if (em === "download" || em === "automatic") await this.download();
     return this.status;
+  }
+
+  /** Just before installing: is this still the release the server offers? A release withdrawn (or replaced) after it was downloaded must not be installed. */
+  private async confirmStillOffered(): Promise<"yes" | "gone" | "unreachable"> {
+    const o = this.offered;
+    const base = this.deps.getServerBase();
+    if (!o || !base || !this.deps.publicKeyPem) return "unreachable";
+    const got = await this.fetchLatest(base);
+    if (!got.ok || !got.res.ok) return "unreachable";
+    const body = (await got.res.json().catch(() => null)) as { update?: unknown; required?: unknown; serverTime?: unknown } | null;
+    if (!body) return "unreachable";
+    this.noteRequired(body.required, body.serverTime);
+    if (body.update === null || body.update === undefined) return "gone";
+    const v = verifyManifest(body.update, this.deps.publicKeyPem);
+    if (!v.ok) return "gone";
+    return v.manifest.version === o.manifest.version ? "yes" : "gone";
   }
 
   // ---------------------------------------------------------------- downloading
@@ -308,13 +408,21 @@ export class Updater {
       const result = await downloadAndVerify(
         file,
         stage,
-        async (u) => {
-          const res = await doFetch(u, { redirect: "error", signal: AbortSignal.timeout(30 * 60_000), headers: this.authFor(u, base) });
+        async (u, range) => {
+          const headers: Record<string, string> = { ...this.authFor(u, base) };
+          if (range) headers.Range = `bytes=${range.start}-`;
+          let res = await doFetch(u, { redirect: "error", signal: AbortSignal.timeout(30 * 60_000), headers });
+          if (range && res.status === 416) {
+            // what is kept does not fit the file on the server: ask for the whole file
+            delete headers.Range;
+            res = await doFetch(u, { redirect: "error", signal: AbortSignal.timeout(30 * 60_000), headers });
+          }
           if (!res.ok || !res.body) throw new Error(`The server answered ${res.status} for the download.`);
-          return res.body as unknown as AsyncIterable<Uint8Array>;
+          return { body: res.body as unknown as AsyncIterable<Uint8Array>, resumed: res.status === 206 && !!headers.Range };
         },
         {
           allowLocalNetworkHttp: true,
+          resume: true,
           onProgress: (received, total) => {
             if (received === total || received % (4 * 1024 * 1024) < 65536) this.set({ state: "downloading", version: o.manifest.version, received, total });
           },
@@ -322,9 +430,11 @@ export class Updater {
       );
       if (!result.ok) {
         this.log(`download failed: ${result.reason}`);
-        this.set({ state: "error", stage: "download", message: `The update could not be downloaded safely (${result.reason}). Nothing was installed.` });
+        this.failures++;
+        this.set({ state: "error", stage: "download", message: `The update could not be downloaded safely (${result.reason}). Nothing was installed.${result.resumable ? " What was received is kept, and the download continues from there." : ""}` });
         return this.status;
       }
+      this.failures = 0;
       this.readyPath = result.path;
       this.set({ state: "ready", version: o.manifest.version, notes: o.manifest.notes ?? "" });
       this.armAutoInstall();
@@ -337,7 +447,7 @@ export class Updater {
   // ---------------------------------------------------------------- automatic installation
   /** Starts watching a ready update (mode "automatic" only). Safe to call repeatedly. */
   private armAutoInstall(): void {
-    if (this.deps.mode() !== "automatic") return;
+    if (this.effectiveMode() !== "automatic") return;
     this.readySince ??= this.now();
     if (this.autoTimer) return;
     this.autoTimer = setInterval(() => void this.autoInstallTick(), AUTO_INSTALL_CHECK_MS);
@@ -347,36 +457,78 @@ export class Updater {
     if (this.autoTimer) clearInterval(this.autoTimer);
     this.autoTimer = null;
     this.readySince = null;
+    this.autoPhase = null;
   }
 
   /** One look at whether the ready update may be installed now. Public so it can be tested with a fake clock. Returns what it decided. */
-  async autoInstallTick(): Promise<"installed" | "waiting-busy" | "waiting-start" | "waiting-unproven" | "skipped" | "none"> {
-    if (this.deps.mode() !== "automatic" || this.status.state !== "ready" || !this.offered) {
+  async autoInstallTick(): Promise<"installed" | "waiting-busy" | "waiting-start" | "waiting-unproven" | "waiting-server" | "skipped" | "none"> {
+    if (this.effectiveMode() !== "automatic" || this.status.state !== "ready" || !this.offered) {
+      this.autoPhase = null;
       if (this.status.state !== "ready") this.disarmAutoInstall();
       return "none";
     }
     const version = this.offered.manifest.version;
-    // a version whose installer already failed to finish once is never retried by itself (the person can still click)
-    if (this.state.lastFailure && this.state.lastFailure.version === version) return "skipped";
+    const required = this.requiredActive();
+    // a version whose installer already failed to finish once is not retried by itself (the person can still click); a REQUIRED one is tried again after a few hours
+    const f = this.state.lastFailure;
+    if (f && f.version === version && !(required && this.now() - Date.parse(f.at) > REQUIRED_RETRY_AFTER_FAILURE_MS)) {
+      this.autoPhase = "skipped-failed-before";
+      return "skipped";
+    }
     // the version now running must have proven it starts, or a bad update could restart the app in a loop
-    if (this.state.pending) return "waiting-unproven";
-    if (this.now() - this.startedAt < AUTO_INSTALL_START_GRACE_MS) return "waiting-start";
+    if (this.state.pending) {
+      this.autoPhase = "waiting-unproven";
+      return "waiting-unproven";
+    }
+    if (this.now() - this.startedAt < AUTO_INSTALL_START_GRACE_MS) {
+      this.autoPhase = "waiting-start";
+      return "waiting-start";
+    }
     const waited = this.now() - (this.readySince ?? this.now());
-    if (this.deps.isBusy?.() && waited < MAX_BUSY_WAIT_MS) return "waiting-busy";
-    this.log(`installing ${version} automatically${this.deps.isBusy?.() ? " (waited the longest it may for a scan to finish)" : ""}`);
+    const overdue = this.overdueMs();
+    const mustGoNow = required && overdue >= OVERDUE_BUSY_GRACE_MS;
+    if (this.deps.isBusy?.() && !mustGoNow && waited < MAX_BUSY_WAIT_MS) {
+      this.autoPhase = required && overdue > 0 ? "overdue-waiting" : "waiting-busy";
+      return "waiting-busy";
+    }
+    // one last question to the server: is this still the release on offer (not withdrawn, not replaced)?
+    const still = await this.confirmStillOffered();
+    if (still === "gone") {
+      this.log(`${version} is no longer offered by the server (withdrawn or replaced): it will not be installed`);
+      this.offered = null;
+      this.readyPath = null;
+      this.autoPhase = null;
+      this.disarmAutoInstall();
+      this.set({ state: "up-to-date", checkedAt: this.now() });
+      void this.check().catch(() => undefined); // a newer release may be waiting
+      return "skipped";
+    }
+    if (still === "unreachable") {
+      this.autoPhase = "waiting-server";
+      return "waiting-server";
+    }
+    this.log(`installing ${version} automatically${this.deps.isBusy?.() ? " (waited the longest it may for a scan to finish)" : ""}${required ? " [required update]" : ""}`);
+    this.autoPhase = null;
     this.disarmAutoInstall();
-    const r = await this.installNow();
+    const r = await this.installNow({ confirmed: true });
     return r.ok ? "installed" : "skipped";
   }
 
   // ---------------------------------------------------------------- installing (on the person's click, or by itself in mode "automatic")
-  async installNow(): Promise<{ ok: boolean; error?: string }> {
+  async installNow(opts: { confirmed?: boolean } = {}): Promise<{ ok: boolean; error?: string }> {
     const o = this.offered;
     if (this.status.state !== "ready" || !o || !this.readyPath) return { ok: false, error: "There is no downloaded update to install." };
     if (!fs.existsSync(this.readyPath) || hashFile(this.readyPath, "sha512") !== o.file.sha512 || (o.file.sha256 && hashFile(this.readyPath, "sha256") !== o.file.sha256)) {
       this.readyPath = null;
       this.set({ state: "error", stage: "install", message: "The downloaded update no longer matches its signed checksum, so it was not installed. Check for updates again." });
       return { ok: false, error: "The downloaded file failed its final check." };
+    }
+    if (!opts.confirmed && (await this.confirmStillOffered()) === "gone") {
+      this.offered = null;
+      this.readyPath = null;
+      this.disarmAutoInstall();
+      this.set({ state: "up-to-date", checkedAt: this.now() });
+      return { ok: false, error: "The server no longer offers this update (it was withdrawn or replaced), so it was not installed." };
     }
     return this.runInstaller(this.readyPath, { version: o.manifest.version, path: this.readyPath, sha512: o.file.sha512, size: o.file.size }, "install");
   }
@@ -452,6 +604,11 @@ export class Updater {
     } catch {
       backedUp = false;
     }
+    try {
+      this.deps.beforeInstall?.();
+    } catch {
+      /* remembering what to resume is best effort */
+    }
     this.log(`handing ${record.version} to its installer (${kind}); data backup ${backedUp ? "made" : "not made"}`);
     this.state = markInstalled(this.state, record.version, record, this.deps.currentVersion);
     this.save();
@@ -470,29 +627,24 @@ export class Updater {
   }
 
   // ---------------------------------------------------------------- schedule
-  /** First check shortly after start, then every `everyMs`. Safe to call once. */
-  startSchedule(firstDelayMs = 2 * 60_000, everyMs = 6 * 60 * 60_000): void {
+  /** First check shortly after start, then every `everyMs` (sooner after a failure: see RETRY_BACKOFF_MS). Safe to call once. */
+  startSchedule(firstDelayMs = 2 * 60_000, everyMs = 60 * 60_000): void {
     if (this.timer) return;
-    const tick = () => {
+    const schedule = (delay: number) => {
+      this.nextCheckAt = this.now() + delay;
       this.timer = setTimeout(async () => {
         try {
           await this.check();
         } catch (err) {
+          this.failures++;
           this.log(`scheduled check failed: ${err instanceof Error ? err.message : err}`);
         }
-        tick();
-      }, everyMs);
+        const failing = this.status.state === "error" && this.status.stage !== "signature";
+        schedule(failing ? Math.min(everyMs, RETRY_BACKOFF_MS[Math.min(Math.max(this.failures, 1), RETRY_BACKOFF_MS.length) - 1]) : everyMs);
+      }, delay);
       this.timer.unref?.();
     };
-    this.timer = setTimeout(async () => {
-      try {
-        await this.check();
-      } catch (err) {
-        this.log(`first check failed: ${err instanceof Error ? err.message : err}`);
-      }
-      tick();
-    }, firstDelayMs);
-    this.timer.unref?.();
+    schedule(firstDelayMs);
   }
   stopSchedule(): void {
     if (this.timer) clearTimeout(this.timer);

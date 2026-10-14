@@ -120,12 +120,14 @@ export interface UpdateState {
   lastFailure?: { version: string; at: string; reason: string } | null;
   /** The version that was running before the current one was installed by an update (the target of a way back). */
   previousVersion?: string | null;
+  /** An Owner-designated REQUIRED update the server told this app about: the version to reach, the deadline (the server's clock) and how far the server's clock was from this computer's when it said so. */
+  required?: { version: string; deadline: string; offsetMs: number } | null;
   lastGoodVersion: string | null; // newest version that started and confirmed healthy
   newestSeenPublishedAt: string | null; // newest manifest time ever accepted (replay protection)
   pending: { version: string; startsSinceInstall: number; installer?: InstallerRecord | null; from?: string | null } | null; // installed but not yet confirmed healthy
   badVersions: string[]; // versions that failed to start; never offered again
 }
-export const EMPTY_UPDATE_STATE: UpdateState = { lastGoodVersion: null, newestSeenPublishedAt: null, pending: null, badVersions: [], currentInstaller: null, previousInstaller: null, lastFailure: null };
+export const EMPTY_UPDATE_STATE: UpdateState = { required: null, lastGoodVersion: null, newestSeenPublishedAt: null, pending: null, badVersions: [], currentInstaller: null, previousInstaller: null, lastFailure: null };
 export const MAX_FAILED_STARTS = 3;
 
 function readInstaller(v: unknown): InstallerRecord | null {
@@ -141,6 +143,7 @@ export function readUpdateState(file: string): UpdateState {
       newestSeenPublishedAt: typeof raw.newestSeenPublishedAt === "string" ? raw.newestSeenPublishedAt : null,
       pending: raw.pending && typeof raw.pending.version === "string" ? { version: raw.pending.version, startsSinceInstall: Number(raw.pending.startsSinceInstall) || 0, installer: readInstaller(raw.pending.installer), from: typeof raw.pending.from === "string" ? raw.pending.from : null } : null,
       badVersions: Array.isArray(raw.badVersions) ? raw.badVersions.filter((x: unknown) => typeof x === "string") : [],
+      required: raw.required && typeof raw.required.version === "string" && typeof raw.required.deadline === "string" && !Number.isNaN(Date.parse(raw.required.deadline)) ? { version: raw.required.version, deadline: raw.required.deadline, offsetMs: Number(raw.required.offsetMs) || 0 } : null,
       currentInstaller: readInstaller(raw.currentInstaller),
       previousInstaller: readInstaller(raw.previousInstaller),
       previousVersion: typeof raw.previousVersion === "string" ? raw.previousVersion : null,
@@ -210,7 +213,8 @@ export function markInstalled(state: UpdateState, version: string, installer?: I
 }
 
 // ---- download (untrusted) -> verified file -----------------------------------------------------------------------------------------------------------------------
-export type Download = (url: string) => Promise<AsyncIterable<Uint8Array>>;
+/** Gets the installer's bytes. With `range`, asks for the rest of the file from that byte on; the answer says whether the server really sent only the rest (`resumed`), otherwise it is the whole file. */
+export type Download = (url: string, range?: { start: number }) => Promise<AsyncIterable<Uint8Array> | { body: AsyncIterable<Uint8Array>; resumed: boolean }>;
 
 /** Plain http is acceptable for the download ONLY on a network the person controls (this computer or a private address): the file is not trusted until its signed checksums match anyway. */
 export function isLocalNetworkUrl(url: string): boolean {
@@ -226,9 +230,21 @@ export interface DownloadOptions {
   /** Allow http:// for a download from this computer / a private network address (a home server). Never for an internet address. */
   allowLocalNetworkHttp?: boolean;
   onProgress?: (received: number, total: number) => void;
+  /** Continue from a kept partial file (an earlier download that was cut off) instead of starting again. The whole file is still verified against the signed checksums at the end. */
+  resume?: boolean;
 }
 
-export async function downloadAndVerify(file: UpdateFile, stagingDir: string, download: Download, opts: DownloadOptions | number = {}): Promise<{ ok: true; path: string } | { ok: false; reason: string }> {
+/** Hashes what an earlier, cut-off download already wrote, so the rest can be appended and the final checksum still covers every byte. */
+async function hashExisting(file: string, hashes: crypto.Hash[]): Promise<number> {
+  let n = 0;
+  for await (const chunk of fs.createReadStream(file)) {
+    n += (chunk as Buffer).length;
+    for (const h of hashes) h.update(chunk as Buffer);
+  }
+  return n;
+}
+
+export async function downloadAndVerify(file: UpdateFile, stagingDir: string, download: Download, opts: DownloadOptions | number = {}): Promise<{ ok: true; path: string } | { ok: false; reason: string; resumable?: boolean }> {
   const o: DownloadOptions = typeof opts === "number" ? { maxBytes: opts } : opts;
   const maxBytes = o.maxBytes ?? 600 * 1024 * 1024;
   if (file.size > maxBytes) return { ok: false, reason: "The update is larger than allowed." };
@@ -238,44 +254,86 @@ export async function downloadAndVerify(file: UpdateFile, stagingDir: string, do
   fs.mkdirSync(stagingDir, { recursive: true });
   const partial = path.join(stagingDir, `${safeName}.part`);
   const final = path.join(stagingDir, safeName);
-  const hash = crypto.createHash("sha512");
-  const hash256 = crypto.createHash("sha256");
+  let hash = crypto.createHash("sha512");
+  let hash256 = crypto.createHash("sha256");
   let received = 0;
-  const out = fs.createWriteStream(partial);
+  // an earlier download that was cut off left its bytes behind: pick up from there (only when asked to, and only if what is there is plausible)
+  let start = 0;
+  if (o.resume && fs.existsSync(partial)) {
+    const have = fs.statSync(partial).size;
+    if (have > 0 && have <= file.size) start = have;
+    else fs.rmSync(partial, { force: true });
+  }
+  let out: fs.WriteStream | null = null;
   let streamError: Error | null = null;
-  out.on("error", (e) => {
-    streamError = e; // surfaced below; without a listener a late open/write error would crash the app
-  });
+  let verificationFailed = false; // a download that arrived whole but is WRONG is thrown away; one that was merely cut off is kept for resuming
   try {
-    for await (const chunk of await download(file.url)) {
-      received += chunk.byteLength;
-      if (received > file.size || received > maxBytes) throw new Error("The download is larger than the update says it is.");
-      hash.update(chunk);
-      hash256.update(chunk);
-      o.onProgress?.(received, file.size);
-      if (streamError) throw streamError;
-      if (!out.write(chunk)) await new Promise<void>((r) => out.once("drain", r));
+    if (start > 0) {
+      received = await hashExisting(partial, [hash, hash256]);
+      if (received !== start) throw new Error("The kept part of the download could not be read.");
+    }
+    let body: AsyncIterable<Uint8Array> | null = null;
+    if (start < file.size) {
+      const got = await download(file.url, start > 0 ? { start } : undefined);
+      const resumed = start > 0 && !(Symbol.asyncIterator in (got as object)) && (got as { resumed: boolean }).resumed === true;
+      body = Symbol.asyncIterator in (got as object) ? (got as AsyncIterable<Uint8Array>) : (got as { body: AsyncIterable<Uint8Array> }).body;
+      if (start > 0 && !resumed) {
+        // the server sent the whole file again (it does not support resuming): start over
+        hash = crypto.createHash("sha512");
+        hash256 = crypto.createHash("sha256");
+        received = 0;
+        start = 0;
+      }
+    }
+    out = fs.createWriteStream(partial, { flags: start > 0 ? "a" : "w" });
+    out.on("error", (e) => {
+      streamError = e; // surfaced below; without a listener a late open/write error would crash the app
+    });
+    if (body) {
+      for await (const chunk of body) {
+        received += chunk.byteLength;
+        if (received > file.size || received > maxBytes) {
+          verificationFailed = true;
+          throw new Error("The download is larger than the update says it is.");
+        }
+        hash.update(chunk);
+        hash256.update(chunk);
+        o.onProgress?.(received, file.size);
+        if (streamError) throw streamError;
+        if (!out.write(chunk)) await new Promise<void>((r) => out!.once("drain", r));
+      }
     }
     await new Promise<void>((resolve, reject) => {
-      out.once("error", reject);
-      out.end(() => resolve());
+      out!.once("error", reject);
+      out!.end(() => resolve());
     });
     if (streamError) throw streamError;
     if (received !== file.size) throw new Error("The download is incomplete.");
-    if (hash.digest("hex") !== file.sha512) throw new Error("The download does not match the signed update (checksum).");
-    if (file.sha256 && hash256.digest("hex") !== file.sha256) throw new Error("The download does not match the signed update (SHA-256).");
+    if (hash.digest("hex") !== file.sha512) {
+      verificationFailed = true;
+      throw new Error("The download does not match the signed update (checksum).");
+    }
+    if (file.sha256 && hash256.digest("hex") !== file.sha256) {
+      verificationFailed = true;
+      throw new Error("The download does not match the signed update (SHA-256).");
+    }
     fs.renameSync(partial, final);
     return { ok: true, path: final };
   } catch (err) {
-    await new Promise<void>((resolve) => {
-      out.once("close", () => resolve());
-      out.destroy();
-    });
-    try {
-      fs.rmSync(partial, { force: true });
-    } catch {
-      /* ignore */
+    if (out) {
+      await new Promise<void>((resolve) => {
+        out!.once("close", () => resolve());
+        out!.destroy();
+      });
     }
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    const keep = !verificationFailed && !streamError && o.resume === true && fs.existsSync(partial) && fs.statSync(partial).size > 0 && fs.statSync(partial).size < file.size;
+    if (!keep) {
+      try {
+        fs.rmSync(partial, { force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+    return { ok: false, reason: err instanceof Error ? err.message : String(err), resumable: keep };
   }
 }

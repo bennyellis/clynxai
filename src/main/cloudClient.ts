@@ -1216,6 +1216,16 @@ export class CloudClient {
     }
   }
 
+  /** Gets a new access token now (used when a request was answered 401 because the token had just expired). True when there is a usable token afterwards. */
+  async refreshSessionNow(): Promise<boolean> {
+    try {
+      await this.refreshAccessToken();
+    } catch {
+      /* the answer is whether a token exists afterwards */
+    }
+    return !!this.accessToken;
+  }
+
   private async refreshAccessToken(): Promise<void> {
     if (this.refreshingAuth) return;
     if (!this.refreshToken || !this.sessionApiUrl) return;

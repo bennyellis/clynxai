@@ -1,5 +1,8 @@
 Clynx Beta 4 - what is new
-* Clynx now updates itself. When a newer, signed version is published it is downloaded in the background, checked (signature and checksums) and installed automatically while Clynx is idle: it never restarts in the middle of a scan or a Watch check (unless one has been running for 12 hours), and never in the first minutes after you open it. Your data is kept.
-* You can still choose, in Config > Account > Updates, to be asked first or to be only told.
-* A version that fails to install is not retried by itself, and a version that will not start is rolled back as before.
-* From Beta 3 you still install this build once by hand (download page); from then on updates are automatic.
+* Clynx now updates itself. When a newer, signed version is published it is downloaded in the background, checked (signature and checksums) and installed automatically while Clynx is idle: it never restarts in the middle of a scan, a Watch check or research (unless one has been running for 12 hours), and never in the first minutes after you open it. Your data is kept, and a scanner that was running is started again afterwards.
+* Required updates: the Owner can mark a release as required. Every Clynx that is online then installs it by the deadline, even if you chose "ask me" or "do not announce updates". Until the deadline it still waits for an idle moment.
+* Safer: just before installing, Clynx asks the server whether the release is still the current one. A release that was withdrawn after it was downloaded is not installed.
+* More dependable downloads: an interrupted download continues where it stopped; a failed check or download is retried after 5, 15 and 30 minutes instead of waiting hours; Clynx checks for updates every hour.
+* Config > Account > Updates now says exactly what is happening (waiting for a scan to finish, retrying at a given time, required by a given date).
+* Only the Owner can approve, publish, withdraw or require a release.
+* From Beta 3 you install this build once (download page: Beta 3 downloads it by itself and asks you to press "Restart and install"); from then on updates are automatic.

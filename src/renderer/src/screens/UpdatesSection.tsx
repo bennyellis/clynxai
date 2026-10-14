@@ -53,8 +53,27 @@ export function UpdatesSection({ localMode }: { localMode: boolean }) {
         return `Clynx ${s.version} is available (${fmtSize(s.size)}).`;
       case "downloading":
         return `Downloading Clynx ${s.version}… ${s.total ? Math.round((s.received / s.total) * 100) : 0}%`;
-      case "ready":
-        return `Clynx ${s.version} was downloaded and checked. Ready to install.`;
+      case "ready": {
+        const base = `Clynx ${s.version} was downloaded and checked (signature and checksums).`;
+        const phase = info.autoInstall?.phase;
+        if (info.mode !== "automatic" && !info.required) return `${base} Ready to install.`;
+        switch (phase) {
+          case "waiting-busy":
+            return `${base} It installs by itself as soon as the scanner, the Watches and any research are idle.`;
+          case "overdue-waiting":
+            return `${base} This update is required and its deadline has passed: it installs as soon as what is running finishes, within a few minutes.`;
+          case "waiting-start":
+            return `${base} It installs by itself in a moment (Clynx waits a minute or two after it opens).`;
+          case "waiting-unproven":
+            return `${base} It installs by itself once the version you are running now has proved it starts correctly (a few minutes).`;
+          case "waiting-server":
+            return `${base} Clynx could not reach the server to confirm it is still the current release, so it is waiting. It tries again every minute.`;
+          case "skipped-failed-before":
+            return `${base} An earlier attempt to install it did not finish, so it will not be tried again by itself. Press "Restart and install" to try again.`;
+          default:
+            return `${base} It installs by itself when Clynx is idle.`;
+        }
+      }
       case "installing":
         return `Installing Clynx ${s.version}… Clynx will close and reopen.`;
       case "error":
@@ -74,6 +93,20 @@ export function UpdatesSection({ localMode }: { localMode: boolean }) {
           {statusText}
         </div>
         {(s.state === "available" || s.state === "ready") && s.notes && <pre style={{ whiteSpace: "pre-wrap", margin: "8px 0 0", fontFamily: "inherit", color: "var(--text-muted)" }}>{s.notes}</pre>}
+        {info.required && (
+          <div data-testid="updates-required" role="status" style={{ marginTop: 8, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--warn)", color: "var(--text)" }}>
+            <strong>Clynx {info.required.version} is a required update.</strong>{" "}
+            {info.required.overdue ? "Its deadline has passed, so it installs as soon as possible." : `It installs by itself when Clynx is idle, and at the latest by ${new Date(info.required.deadline).toLocaleString()}.`} This applies whatever you chose below.
+          </div>
+        )}
+        {s.state === "error" && info.nextCheckAt && info.mode !== "off" && (
+          <div data-testid="updates-retry" style={{ color: "var(--text-dim)", marginTop: 4 }}>
+            {info.consecutiveFailures > 1 ? `${info.consecutiveFailures} attempts in a row have failed. ` : ""}Clynx will try again at {new Date(info.nextCheckAt).toLocaleTimeString()}. Nothing was changed on this computer.
+          </div>
+        )}
+        {s.state !== "error" && info.nextCheckAt && info.mode !== "off" && s.state !== "downloading" && s.state !== "installing" && (
+          <div data-testid="updates-next" style={{ color: "var(--text-dim)", marginTop: 4 }}>Next automatic check: {new Date(info.nextCheckAt).toLocaleTimeString()}.</div>
+        )}
         {info.lastFailure && <div style={{ color: "var(--warn)", marginTop: 6 }}>{info.lastFailure}</div>}
       </div>
 
@@ -136,7 +169,7 @@ export function UpdatesSection({ localMode }: { localMode: boolean }) {
             <option value="automatic">Update by itself (recommended): download, then install when Clynx is idle</option>
             <option value="download">Download it in the background, then ask me to install</option>
             <option value="notify">Only tell me</option>
-            <option value="off">Do not check by itself</option>
+            <option value="off">Do not announce updates (a required update still installs)</option>
           </select>
         </label>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
