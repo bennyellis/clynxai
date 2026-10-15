@@ -63,6 +63,8 @@ import { createSafeguardLogger } from "./identity/safeguardLog.js";
 import { IdentityReview } from "./identityReview.js";
 import { fetchActiveAsks } from "./ebayActive.js";
 import { resolveIdentityTarget } from "./productIdentity.js";
+import { beta13Flags } from "./beta13.js";
+import { noteDecision } from "./aiDecisionLog.js";
 import { buyerTotalUsd, estimateMarketValue } from "./marketValue.js";
 import { compMatchesSpecs, modelLettersConflict, titleLooksLikeProduct } from "./compFilter.js";
 import { focalProductName } from "./dealSummary.js";
@@ -2204,6 +2206,14 @@ function applyIdentitySafeguard(): void {
   const mode = config.identitySafeguard?.mode === "shadow" || config.identitySafeguard?.mode === "enforce" ? config.identitySafeguard.mode : "off";
   store.setIdentitySafeguard(mode, mode === "off" ? null : createSafeguardLogger(path.join(app.getPath("userData"), "logs")));
   if (mode !== "off") console.log(`[identity] safeguard mode: ${mode}`);
+  // Beta 13: the best-match resolver (productResolver.ts). "shadow" keeps today's answer and records every disagreement in AI Activity; "enforce" uses the best match.
+  const resolverMode = beta13Flags(config).resolver;
+  store.setResolverMode(
+    resolverMode,
+    resolverMode === "off"
+      ? null
+      : (m) => noteDecision({ kind: "product_resolver", subject: m.subject, verdict: m.mode === "enforce" ? `used: ${m.resolved ?? "nothing (" + m.status + ")"}` : `would use: ${m.resolved ?? "nothing (" + m.status + ")"}`, thought: `Today's lookup chose ${m.legacy ?? "nothing"}. ${m.why}.` })
+  );
 }
 
 function scheduleIdentityBackfill(): void {

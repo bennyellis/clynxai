@@ -27,7 +27,7 @@ function reasonsOf(j: CompJudgement): string[] {
 }
 
 // Reasons that mean "this is a different thing", as opposed to "the title just doesn't say".
-const HARD = new Set(["MODEL_NUMBER", "MODEL_LETTER", "GENERATION", "TIER", "CAPACITY", "COLOR", "EDITION", "ACCESSORY", "LOT_OR_BUNDLE", "NOT_WORKING", "MEDIA"]);
+const HARD = new Set(["MODEL_NUMBER", "MODEL_LETTER", "GENERATION", "TIER", "CAPACITY", "COLOR", "EDITION", "ACCESSORY", "LOT_OR_BUNDLE", "NOT_WORKING", "MEDIA", "DRIVE", "BOARD_DESIGN", "REGION", "LOCK", "SKU"]);
 
 /**
  * The verdict from TEXT alone: the product's name against the words that came with the image (an eBay listing's title, a Wikipedia article's title).
@@ -43,7 +43,8 @@ export function judgeCandidateByText(productName: string, candidateText: string 
   const acc = accessorySignal(text);
   if (acc && productKind === "hardware") return { status: "mismatch", basis: "title", reasons: [`accessory: the title is about a "${acc}", something for the product, not the product`], strength: "none" };
   const j = classifyComparable({ name: productName }, text);
-  const hard = j.reasons.filter((r) => HARD.has(r.code));
+  // An accessory word that only appears among the EXTRAS ("Nintendo Switch with 2 games and charger") does not make the picture an accessory's: the title's head decides.
+  const hard = j.reasons.filter((r) => HARD.has(r.code) && !(r.code === "ACCESSORY" && !accessorySignal(text) && !/says it is for the product/.test(r.text)));
   if (j.verdict === "rejected" && hard.length) return { status: "mismatch", basis: "title", reasons: reasonsOf({ verdict: j.verdict, reasons: hard }), strength: "none" };
   if (j.verdict === "exact") return { status: "match", basis: "title", reasons: [], strength: "exact" };
   // compatible / uncertain: the title does not contradict, but does not confirm every attribute the product states (an unstated color or edition is not the same product's photo)

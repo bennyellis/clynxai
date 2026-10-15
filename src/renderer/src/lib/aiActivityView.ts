@@ -111,6 +111,10 @@ export function kindLabel(kind: string): string {
     listing_judgement: "Judged a listing from its text",
     comparable_check: "Checked comparable sales",
     product_identity: "Decided which product it is",
+    product_resolver: "Matched a name to a Library entry",
+    identity_gate: "Checked a picture before filing it",
+    condition_check: "Looked for damage",
+    library_op: "Changed the Library",
   };
   return map[kind] ?? kind.replace(/_/g, " ");
 }

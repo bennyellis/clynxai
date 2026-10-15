@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import { timedSync, recordEvent } from "./metrics.js";
 import type { BlacklistedImage, BlacklistTerm, FeedbackExample, FeedbackVerdict, FlawFeedbackExample, GateFactsSnapshot, GateReasonRecord, ListingRecord, MyStoreReference, PhotoFlaw, ProductImage, ProductProfile, ScoredListing, SellerRiskResult, Watch, WatchMatch, WatchPlatform, WatchSearchLink, WatchTerm } from "./types.js";
 import { REFERENCE_STATUSES } from "./types.js";
+import { resolveProduct, type ResolveResult } from "./productResolver.js";
 import { brokenVariantName, isBrokenVariantName } from "./brokenVariant.js";
 import { assessListingAge } from "./listingAge.js";
 import { codesMissingFrom } from "./identity/codes.js";
@@ -1800,8 +1801,29 @@ export class Store {
     const exact = this.getProductByName(name);
     if (exact) return exact;
     // Fuzzy: compare against names only, then load just the one product that matched.
-    const similar = this.listProductIndex().find((p) => isSimilarProductName(name, p.name));
-    return similar ? this.getProductById(similar.id) : null;
+    const legacy = (() => {
+      const similar = this.listProductIndex().find((p) => isSimilarProductName(name, p.name));
+      return similar ? this.getProductById(similar.id) : null;
+    })();
+    if (this.resolverMode === "off") return legacy;
+    const best = this.resolveTarget(name);
+    const resolved = best.status === "resolved" && best.best ? this.getProductById(best.best.id) : null;
+    if ((resolved?.id ?? null) !== (legacy?.id ?? null)) this.resolverLog?.({ subject: name, legacy: legacy?.name ?? null, resolved: resolved?.name ?? null, status: best.status, why: best.why, mode: this.resolverMode });
+    // "shadow" computes and records the disagreement but keeps today's answer; "enforce" uses the best match (a tie or only-a-parent is null: nothing is attached on a guess).
+    return this.resolverMode === "enforce" ? resolved : legacy;
+  }
+
+  private resolverMode: "off" | "shadow" | "enforce" = "off";
+  private resolverLog: ((m: { subject: string; legacy: string | null; resolved: string | null; status: string; why: string; mode: string }) => void) | null = null;
+  setResolverMode(mode: "off" | "shadow" | "enforce", log?: Store["resolverLog"]): void {
+    this.resolverMode = mode;
+    this.resolverLog = log ?? null;
+  }
+
+  /** Best-match resolution (productResolver.ts) of a name against every live entry: unique best or "unresolved" - never a first-come fuzzy hit. Always available, whatever the mode. */
+  resolveTarget(name: string): ResolveResult & { product: ProductProfile | null } {
+    const r = resolveProduct(name, this.listProductIndex());
+    return { ...r, product: r.status === "resolved" && r.best ? this.getProductById(r.best.id) : null };
   }
 
   // Clynx Cloud Phase 6 — productSync.ts's own applier, mirroring

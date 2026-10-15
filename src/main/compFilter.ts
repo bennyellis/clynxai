@@ -132,7 +132,7 @@ export function specReference(query: string, productName: string): string {
 export const NOT_THE_PRODUCT_WORDS = /\b(parts?|repair|broken|not working|non[- ]?working|doesn'?t work|won'?t (turn on|power on|boot)|no power|faulty|defective|bricked|case only|empty box|box only|replacement|skin|decal|cover|stand only|charger only|cable only|manual only|lot of|bundle|read description|for parts|limited edition|special edition|collector'?s|steelbook)\b/i;
 
 // Things that get sold FOR a product (parts and accessories), whose photos and prices are not the product's.
-export const ACCESSORY_WORDS = /\b(motherboard|mainboard|controllers?|joysticks?|thumbsticks?|fan|heatsink|faceplate|remote|keyboard|headset|battery|charger|cable|adapter|dock|mount|psu|hdmi|protector|tempered|holster|backplate|housing)\b/g;
+export const ACCESSORY_WORDS = /\b(motherboard|mainboard|controllers?|joysticks?|thumbsticks?|fan|heatsink|faceplate|remote|keyboard|headset|battery|charger|cable|adapter|dock|mount|psu|hdmi|protector|tempered|holster|backplate|housing|pouch|sleeve|lanyard|tripod|stylus|stands?|grips?|straps?|joy-?cons?)\b/g;
 
 /**
  * Does an eBay listing title look like it is for exactly this product? Plain text checks, no AI: every word of the

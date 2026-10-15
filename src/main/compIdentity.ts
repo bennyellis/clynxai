@@ -22,8 +22,9 @@ import {
   tokens,
 } from "./compFilter.js";
 import { colorsIn } from "./colors.js";
-import { mediaSignal } from "./productKind.js";
+import { hardwareTail, mediaSignal, stripDescriptors } from "./productKind.js";
 import { editionConflict, extractVariantAttributes, identityTokens } from "./variantIdentity.js";
+import { attributeFindings } from "./identityModel.js";
 
 export type CompVerdict = "exact" | "compatible" | "uncertain" | "rejected";
 
@@ -45,7 +46,13 @@ export type CompReason =
   | "MORE_SPECIFIC"
   | "WORDS_MISSING"
   | "COLOR_NOT_STATED"
-  | "EDITION_NOT_STATED";
+  | "EDITION_NOT_STATED"
+  | "DRIVE"
+  | "BOARD_DESIGN"
+  | "BOARD_DESIGN_NOT_STATED"
+  | "REGION"
+  | "LOCK"
+  | "SKU";
 
 export interface CompJudgement {
   verdict: CompVerdict;
@@ -115,8 +122,10 @@ function judgeAgainst(reference: string, title: string, requiredTerms: string[],
     if (m && !/^(limited edition|special edition|collector'?s|steelbook)$/i.test(m[0])) mark("rejected", /lot|bundle/i.test(m[0]) ? "LOT_OR_BUNDLE" : "NOT_WORKING", `the title says "${m[0]}"`);
   }
   const lowerRef = reference.toLowerCase();
-  for (const m of title.toLowerCase().matchAll(ACCESSORY_WORDS)) {
-    if (!lowerRef.includes(m[1])) {
+  const scanned = stripDescriptors(title).toLowerCase();
+  for (const m of scanned.matchAll(ACCESSORY_WORDS)) {
+    // "Console Neon Blue Red Joy-Con 32GB HAC-001": an accessory word followed by the machine's own capacity / model code is describing the machine
+    if (!lowerRef.includes(m[1]) && !hardwareTail(scanned.slice((m.index ?? 0) + m[0].length))) {
       mark("rejected", "ACCESSORY", `the title mentions "${m[1]}", which is something for the product, not the product`);
       break;
     }
@@ -206,6 +215,9 @@ function judgeAgainst(reference: string, title: string, requiredTerms: string[],
   else if (extractVariantAttributes(reference).editionTerms.length === 0 && requiredTerms.length === 0) {
     // nothing to compare
   }
+
+  // ---- Beta 13 attributes: optical drive, board design (GPU partner line), region, carrier lock, manufacturer model codes
+  for (const f of attributeFindings(reference, title)) mark(f.verdict, f.code, f.text);
 
   // ---- the product's own plain words, when nothing above settled it: a missing brand is normal, several missing words are not
   const refWords = identityTokens(reference).filter((t) => /^[a-z]+$/.test(t) && t.length > 2 && !TIER_WORDS.includes(t) && !colorsIn(t).size);
