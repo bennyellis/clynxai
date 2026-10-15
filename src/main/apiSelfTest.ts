@@ -2,7 +2,7 @@
 // scripts\api-diagnose.cjs. It makes at most: one tiny AI request (a few dozen tokens), one eBay search of 20 results, and one reachability request to WatchCount. Every failure is returned
 // with its reason; nothing is retried, hidden or turned into a pass.
 import { classifyComparable } from "./compIdentity.js";
-import { scrub } from "./apiActivity.js";
+import { apiActivity, scrub } from "./apiActivity.js";
 import { median } from "./marketValue.js";
 
 export interface SelfTestDeps {
@@ -108,6 +108,7 @@ export async function testEbay(d: SelfTestDeps): Promise<EbayTest> {
       } else if (j.verdict === "rejected") rejected++;
       else uncertain++;
     }
+    apiActivity.identity("ebay", { retrieved: items.length, accepted, rejected, uncertain });
     return { ...base, ok: true, retrieved: items.length, accepted, rejected, uncertain, medianAskUsd: median(prices), ms: Date.now() - t0 };
   } catch (err) {
     return { ...base, ok: false, ms: Date.now() - t0, error: scrub((err as Error).message) };
