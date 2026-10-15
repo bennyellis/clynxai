@@ -6,17 +6,23 @@
 // caller asks and none was chosen; the gallery never grows past its limit (and never pushes out an existing photo); "added" is the number of photos actually saved.
 import type { ProductImage, ProductProfile } from "./types.js";
 import { queryFromSearchUrl } from "./searchLinks.js";
+import { fileImage, type FileImageEvidence, type FileImageStore } from "./fileImage.js";
+import type { Beta13Mode } from "./beta13.js";
+import { titleFromLabel } from "./photoIdentity.js";
 
 export interface ReferencePhotoStore {
   getProductById(id: string): ProductProfile | null;
   listProductImages(id: string): ProductImage[];
-  addProductImage(productId: string, imageData: string, sourceTitle: string | null, kind?: "normal" | "poor_condition"): ProductImage;
+  addProductImage: FileImageStore["addProductImage"];
+  listReferenceTitles?: FileImageStore["listReferenceTitles"];
+  findImageByHash?: FileImageStore["findImageByHash"];
+  addReviewItem?: FileImageStore["addReviewItem"];
   editProductProfile(id: string, patch: { imageUrl: string }): unknown;
   touchProduct(id: string): void;
 }
 
 export interface PhotoFinder {
-  (name: string, opts: { want: number; existingImages: string[]; extraQueries?: string[]; realWorld?: boolean }): Promise<{ photos: Array<{ imageData: string; label: string }>; examined: number }>;
+  (name: string, opts: { want: number; existingImages: string[]; extraQueries?: string[]; realWorld?: boolean }): Promise<{ photos: Array<{ imageData: string; label: string; text?: string | null; verified?: boolean; url?: string | null }>; examined: number }>;
 }
 
 export interface TopUpResult {
@@ -52,6 +58,8 @@ export async function topUpReferencePhotos(opts: {
   replaceThumbnail?: boolean;
   extraQueries?: string[];
   realWorld?: boolean;
+  /** Beta 13 identity gate mode (beta13.ts); "enforce" unless the owner switched it. */
+  identityMode?: Beta13Mode;
 }): Promise<TopUpResult> {
   const { store, id, name, limit } = opts;
   const all = store.listProductImages(id);
@@ -68,9 +76,18 @@ export async function topUpReferencePhotos(opts: {
     for (const photo of found.photos.slice(0, toAdd)) {
       // re-check the room each time: another save may have used it
       if (store.listProductImages(id).length >= limit) break;
-      store.addProductImage(id, photo.imageData, photo.label);
+      const evidence: FileImageEvidence = {
+        sourceKind: /wikipedia/i.test(photo.label) ? "wikipedia" : /^eBay/i.test(photo.label) ? "ebay" : /^stock/i.test(photo.label) ? "stock" : "web",
+        title: photo.text ?? titleFromLabel(photo.label),
+        url: photo.url ?? null,
+        proposer: "reference-search",
+        picture: photo.verified ? { verdict: "yes" } : null,
+      };
+      const filed = fileImage(store, id, photo.imageData, evidence, { mode: opts.identityMode ?? "enforce" });
+      if (filed.outcome === "rejected" || filed.outcome === "duplicate") continue;
       result.added++;
-      best ??= photo.imageData;
+      // only a trusted picture may become the product's thumbnail
+      if (filed.outcome === "trusted" || filed.outcome === "user") best ??= photo.imageData;
     }
   } catch (err) {
     result.error = (err as Error).message;
@@ -108,6 +125,7 @@ export interface AddPhotosToolDeps {
   inFlight: Set<string>;
   limit: number;
   lowAiMode: boolean;
+  identityMode?: Beta13Mode;
   /** Called with the product after a search that saved photos (refresh the screen, start the photo analysis). */
   onSaved?(product: ProductProfile, added: number): void;
   onUpdated?(product: ProductProfile): void;
@@ -134,7 +152,7 @@ export async function runAddReferencePhotos(args: Record<string, unknown>, userM
   deps.inFlight.add(target.id);
   try {
     const r = await Promise.race([
-      topUpReferencePhotos({ store, id: target.id, name: target.name, want, limit: deps.limit, find: deps.find, extraQueries: queries, realWorld: true }),
+      topUpReferencePhotos({ store, id: target.id, name: target.name, want, limit: deps.limit, find: deps.find, extraQueries: queries, realWorld: true, identityMode: deps.identityMode }),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), deps.timeoutMs ?? 170_000)),
     ]);
     if (!r) return `The photo search for "${target.name}" is taking longer than expected and was cut off; any photos saved so far are on its page. Say that plainly; do not claim a number.`;

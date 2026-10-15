@@ -65,6 +65,7 @@ import { fetchActiveAsks } from "./ebayActive.js";
 import { resolveIdentityTarget } from "./productIdentity.js";
 import { beta13Flags } from "./beta13.js";
 import { noteDecision } from "./aiDecisionLog.js";
+import { fileImage, setFilingRecorder, type FileImageEvidence } from "./fileImage.js";
 import { buyerTotalUsd, estimateMarketValue } from "./marketValue.js";
 import { compMatchesSpecs, modelLettersConflict, titleLooksLikeProduct } from "./compFilter.js";
 import { focalProductName } from "./dealSummary.js";
@@ -1552,45 +1553,25 @@ function ensurePhotoGalleryAudit(productId: string): void {
         console.error(`[photo-audit] failed for "${product.name}": ${result.error}`);
         return;
       }
+      // Beta 13 (audit LB-03, ID-02): this check judges pictures by APPEARANCE, so it can only SUGGEST. It used to delete the photo and re-file it under whatever it
+      // looked like (an owner database shows it confusing Series S, Series X and Xbox One). Now a doubted photo is set aside (not used as a reference, still visible,
+      // restorable) with a review item; nobody loses a photo and nothing is filed under a guess. A photo a person added is never questioned.
       let changed = false;
       for (const finding of result.findings) {
         if (!finding.confident) continue;
         if (finding.actualSubject.toLowerCase() === product.name.toLowerCase()) continue;
         const image = images[finding.photoIndex - 1];
-        if (!image) continue;
-        store.deleteProductImage(image.id);
-        store.appendProductWatchNote(
-          productId,
-          `Correction: auto-removed a reference photo that actually showed "${finding.actualSubject}"${
-            finding.reason ? ` — ${finding.reason}` : ""
-          }.`
-        );
+        if (!image || image.status === "user" || image.status === "quarantined" || image.status === "needs_review") continue;
+        const suggestion = store.resolveTarget(finding.actualSubject);
+        store.setImageStatus(image.id, "needs_review");
+        store.addReviewItem({
+          kind: "image",
+          subjectId: image.id,
+          reasons: [`a picture-based check thinks this shows "${finding.actualSubject}"${finding.reason ? ` (${finding.reason})` : ""}; appearance alone is not enough to move it`],
+          evidence: { productId, productName: product.name, sourceTitle: image.sourceTitle, suggestedSubject: finding.actualSubject, suggestedProductId: suggestion.product?.id ?? null, proposer: "gallery-audit" },
+        });
+        noteDecision({ kind: "identity_gate", subject: `${image.sourceTitle ?? "(no title)"} in ${product.name}`, verdict: "set aside for review", thought: `Gallery check says it looks like "${finding.actualSubject}". ${finding.reason ?? ""}`, imageDataUri: image.imageData });
         changed = true;
-        // No else-branch spinning up a brand-new product for an unmatched
-        // subject here on purpose — an unattended background pass
-        // shouldn't create whole new Database entries on its own; if there
-        // is an existing match it gets the photo, otherwise the photo is
-        // just removed from where it clearly didn't belong (turning a
-        // stray photo into a new product is still the manual feedback
-        // path's job, same as it always has been).
-        // The entry for what the photo really shows: that exact name, else the same product in that exact color, else
-        // a fuzzy name match. A DIFFERENT COLOR of this very product with no entry yet gets one of its own (the white
-        // Xbox Series S found among the black ones); anything else unmatched is just removed, as before.
-        const wantedColors = colorsIn(finding.actualSubject);
-        const target =
-          store.getProductByName(finding.actualSubject) ??
-          (wantedColors.size > 0 ? store.findColorVariant(finding.actualSubject) : null) ??
-          store.findMatchingProduct(finding.actualSubject);
-        if (target && target.id !== productId) {
-          store.addProductImage(target.id, image.imageData, image.sourceTitle);
-          sendToRenderer("products:updated", store.getProductById(target.id));
-        } else if (!target && wantedColors.size > 0 && colorsConflict(product.name, finding.actualSubject)) {
-          const created = createSpecificModel(finding.actualSubject, image.imageData, image.sourceTitle ?? product.name, {
-            parentId: product.parentProductId,
-            familyFromId: product.id,
-          });
-          store.appendProductWatchNote(productId, `Correction: moved a reference photo to its own "${created.product.name}" entry (a different color of this product).`);
-        }
       }
       if (changed) {
         const updated = store.getProductById(productId);
@@ -2007,8 +1988,13 @@ async function addEbayReferencePhotos(productId: string, productName: string, ph
     const want = Math.min(EBAY_REFERENCE_PHOTOS_PER_PASS, EBAY_REFERENCE_PHOTOS_MAX - fromEbay, GALLERY_SOFT_LIMIT - existing.length);
     if (want <= 0) return;
     const found = await findReferencePhotos(productName, { want, existingImages: existing.map((img) => img.imageData), candidates: photos });
-    for (const photo of found.photos) store.addProductImage(productId, photo.imageData, photo.label);
-    if (found.photos.length > 0) {
+    let stored = 0;
+    for (const photo of found.photos) {
+      const evidence: FileImageEvidence = { sourceKind: "ebay", title: photo.text ?? photo.label, url: photo.url ?? null, proposer: "ebay-reference-search", picture: photo.verified ? { verdict: "yes" } : null };
+      const filed = fileImage(store, productId, photo.imageData, evidence, { mode: identityMode() });
+      if (filed.outcome !== "rejected" && filed.outcome !== "duplicate") stored++;
+    }
+    if (stored > 0) {
       store.touchProduct(productId);
       ensurePhotoDifferenceAnalysis(productId);
       const updated = store.getProductById(productId);
@@ -2092,6 +2078,7 @@ async function fillReferencePhotos(id: string, name: string, replaceThumbnail: b
       limit: Store.MAX_IMAGES_PER_PRODUCT,
       find: (n, o) => findReferencePhotos(n, o),
       replaceThumbnail,
+      identityMode: identityMode(),
     });
     if (r.added > 0) {
       ensurePhotoDifferenceAnalysis(id);
@@ -2118,6 +2105,7 @@ async function runAddReferencePhotosTool(args: Record<string, unknown>, userMess
       inFlight: referencePhotoFillInFlight,
       limit: Store.MAX_IMAGES_PER_PRODUCT,
       lowAiMode: isLowAiMode(),
+      identityMode: identityMode(),
       onSaved: (product, added) => {
         ensurePhotoDifferenceAnalysis(product.id);
         discovery.note(product.id, "step", `Saved ${plural(added, "reference photo")} you asked for.`);
@@ -2203,6 +2191,7 @@ function reviewService(): IdentityReview {
 }
 
 function applyIdentitySafeguard(): void {
+  setFilingRecorder((d) => noteDecision(d));
   const mode = config.identitySafeguard?.mode === "shadow" || config.identitySafeguard?.mode === "enforce" ? config.identitySafeguard.mode : "off";
   store.setIdentitySafeguard(mode, mode === "off" ? null : createSafeguardLogger(path.join(app.getPath("userData"), "logs")));
   if (mode !== "off") console.log(`[identity] safeguard mode: ${mode}`);
@@ -2445,7 +2434,7 @@ async function runProductLookupInner(
       try {
         const poorConditionImage = await findPoorConditionProductImage(name);
         if (poorConditionImage) {
-          store.addProductImage(id, poorConditionImage, null, "poor_condition");
+          fileImage(store, id, poorConditionImage, { sourceKind: "web", title: null, proposer: "poor-condition-search", kind: "poor_condition", allowUntitled: true }, { mode: identityMode() });
           discovery.note(id, "step", "Found a photo of a damaged one too, so I can tell the difference.");
         }
       } catch (err) {
@@ -2802,13 +2791,24 @@ function createEngineForAccount(accountId: string): ScrapeEngine {
   return eng;
 }
 
+// Beta 13: every picture goes through fileImage (identity gate, provenance, review queue); these two wrap it for the common cases.
+function identityMode() {
+  return beta13Flags(config).identityGate;
+}
+function fileListingPhoto(productId: string, imageData: string, title: string, proposer: string) {
+  return fileImage(store, productId, imageData, { sourceKind: "listing", title, proposer }, { mode: identityMode() });
+}
+function fileUserPhoto(productId: string, imageData: string) {
+  return fileImage(store, productId, imageData, { sourceKind: "user", title: null, proposer: "manual", userAuthored: true }, { mode: identityMode() });
+}
+
 // A product the scanner found that nothing in the Database matches: its own entry, with the listing's photo as a
 // placeholder (the background lookup replaces it with a clean one), researched in the background.
 function createPlainProduct(name: string, imageDataUri: string | null, sourceTitle: string): ProductProfile {
   const id = store.addProductStub(randomUUID(), name);
   if (imageDataUri) {
     store.editProductProfile(id, { imageUrl: imageDataUri });
-    store.addProductImage(id, imageDataUri, sourceTitle);
+    fileListingPhoto(id, imageDataUri, sourceTitle, "scanner-new-entry");
     ensurePhotoDifferenceAnalysis(id);
   }
   sendToRenderer("products:updated", store.getProductById(id));
@@ -2829,7 +2829,7 @@ function createSpecificModel(
   const twin = store.getProductByName(name) ?? store.findColorVariant(name);
   if (twin) {
     if (imageDataUri) {
-      store.addProductImage(twin.id, imageDataUri, sourceTitle);
+      fileListingPhoto(twin.id, imageDataUri, sourceTitle, "scanner-specific-model");
       ensurePhotoDifferenceAnalysis(twin.id);
       sendToRenderer("products:updated", store.getProductById(twin.id));
     }
@@ -2840,7 +2840,7 @@ function createSpecificModel(
   if (relation.parentId) store.setProductParent(id, relation.parentId);
   if (imageDataUri) {
     store.editProductProfile(id, { imageUrl: imageDataUri });
-    store.addProductImage(id, imageDataUri, sourceTitle);
+    fileListingPhoto(id, imageDataUri, sourceTitle, "scanner-specific-model");
     ensurePhotoDifferenceAnalysis(id);
   }
   sendToRenderer("products:updated", store.getProductById(id));
@@ -2886,9 +2886,13 @@ async function researchBlankProduct(id: string): Promise<void> {
   // First the free way (no AI, no credits): see findFreeReferencePhotos.
   const free = await findFreeReferencePhotos(fresh.name, { want: BLANK_SWEEP_PHOTOS });
   if (free.length > 0) {
-    for (const photo of free) store.addProductImage(id, photo.imageData, photo.label);
+    const kept: string[] = [];
+    for (const photo of free) {
+      const filed = fileImage(store, id, photo.imageData, { sourceKind: /wikipedia/i.test(photo.label) ? "wikipedia" : "ebay", title: photo.text ?? photo.label, url: photo.url ?? null, proposer: "free-search", picture: null }, { mode: identityMode() });
+      if (filed.outcome === "trusted") kept.push(photo.imageData);
+    }
     const current = store.getProductById(id);
-    if (current && !current.imageUrl && !current.keepThumbnail) store.editProductProfile(id, { imageUrl: free[0].imageData });
+    if (current && !current.imageUrl && !current.keepThumbnail && kept.length) store.editProductProfile(id, { imageUrl: kept[0] });
     store.touchProduct(id);
     sendToRenderer("products:updated", store.getProductById(id));
   }
@@ -4421,7 +4425,7 @@ app.whenReady().then(() => {
       const photo = await listingPhoto();
       if (photo) {
         store.editProductProfile(id, { imageUrl: photo });
-        store.addProductImage(id, photo, listing.title);
+        fileListingPhoto(id, photo, listing.title, "mark-interested");
         ensurePhotoDifferenceAnalysis(id);
       }
       if (reason) {
@@ -4585,7 +4589,7 @@ app.whenReady().then(() => {
     const id = randomUUID();
     store.createManualProduct(id, name, args.category || "Other", imageDataUri);
     if (imageDataUri) {
-      store.addProductImage(id, imageDataUri, null);
+      fileUserPhoto(id, imageDataUri);
       ensurePhotoDifferenceAnalysis(id);
     }
     return store.getProductById(id);
@@ -4671,7 +4675,7 @@ app.whenReady().then(() => {
   ipcMain.handle("products:addImage", async (_e, args: { productId: string }) => {
     const dataUri = await pickImageAsDataUri("Add a reference photo");
     if (!dataUri) return null;
-    const added = store.addProductImage(args.productId, dataUri, null);
+    const added = fileUserPhoto(args.productId, dataUri).image;
     ensurePhotoDifferenceAnalysis(args.productId);
     return added;
   });
@@ -5090,20 +5094,19 @@ app.whenReady().then(() => {
           if (updated) sendToRenderer("products:updated", updated);
         }
         if (recon.actualSubject && recon.actualSubject.toLowerCase() !== args.currentLabel.toLowerCase()) {
-          store.deleteProductImage(args.imageId);
-          let target = store.findMatchingProduct(recon.actualSubject);
-          if (target) {
-            store.addProductImage(target.id, args.imageDataUri, args.sourceTitle ?? null);
-            ensurePhotoDifferenceAnalysis(target.id);
-            sendToRenderer("products:updated", store.getProductById(target.id));
-          } else {
-            const newId = store.addProductStub(randomUUID(), recon.actualSubject);
-            store.editProductProfile(newId, { imageUrl: args.imageDataUri, keepThumbnail: true });
-            sendToRenderer("products:updated", store.getProductById(newId));
-            runProductLookup(newId, recon.actualSubject);
-            target = store.getProductById(newId);
-          }
-          return { ok: true, message: `Moved to "${target?.name ?? recon.actualSubject}" — thanks for catching that.` };
+          // Beta 13: the person said it is wrong, so it is set aside at once (not used as a reference); where it belongs is decided in Needs review, not by a picture-only
+          // guess, and nothing is deleted before something else is added (audit LB-03).
+          const suggestion = store.resolveTarget(recon.actualSubject);
+          store.setImageStatus(args.imageId, "needs_review");
+          store.addReviewItem({
+            kind: "image",
+            subjectId: args.imageId,
+            reasons: [`you flagged it ("${args.feedback.slice(0, 120)}"); a picture check thinks it shows "${recon.actualSubject}"`],
+            evidence: { productId: args.productId, productName: args.currentLabel, sourceTitle: args.sourceTitle ?? null, suggestedSubject: recon.actualSubject, suggestedProductId: suggestion.product?.id ?? null, proposer: "feedback", userFeedback: args.feedback },
+          });
+          const updated = store.getProductById(args.productId);
+          if (updated) sendToRenderer("products:updated", updated);
+          return { ok: true, message: `Set that photo aside for review (it looks like "${recon.actualSubject}"). It is no longer used as a reference for "${args.currentLabel}"; open Needs review to move it or put it back.` };
         }
         return { ok: true, message: "Thanks — noted for next time." };
       }

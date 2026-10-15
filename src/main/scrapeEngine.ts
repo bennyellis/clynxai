@@ -170,7 +170,9 @@ import { estimateListingAgeHours, isListingTooOld } from "./listingAge.js";
 import { conditionTextOf } from "./listingText.js";
 import { feedCandidates } from "./feedCandidates.js";
 import { apiActivity } from "./apiActivity.js";
-import { listingMayFeedProduct } from "./photoIdentity.js";
+import { judgeCandidateByText } from "./photoIdentity.js";
+import { fileImage } from "./fileImage.js";
+import { beta13Flags } from "./beta13.js";
 import { REEVAL_MAX_PER_VISIT, currentAgeText, reevaluationReason, requalifyEligible, scoredFromRecord, type ReevalReason } from "./relisting.js";
 import { checkArrivedLocation, type LocationCheck } from "./locationCheck.js";
 import { PassAccount, type ListingOutcome } from "./passAccount.js";
@@ -2863,6 +2865,13 @@ export class ScrapeEngine {
           imageDataUri: subjectImageDataUri,
         });
         if (action.kind === "create" && config.autoResearchListings) {
+          // Beta 13: the AI's new name must be confirmed by the listing's own words; a name made from the picture alone goes to review instead of becoming a product.
+          const corroborated = judgeCandidateByText(action.name, listing.title);
+          if (corroborated.status === "mismatch" || (corroborated.status !== "match" && corroborated.strength !== "compatible")) {
+            this.opts.store.addReviewItem({ kind: "product", subjectId: listing.id, reasons: [corroborated.status === "mismatch" ? `the title contradicts "${action.name}": ${corroborated.reasons[0] ?? ""}` : `the title does not confirm "${action.name}"`], evidence: { proposedName: action.name, title: listing.title, nearestEntry: existingProduct.name, source: "ai-identity-judge" } });
+            this.log("info", `Not creating "${action.name}" from "${listing.title}": the title does not confirm it, so it is waiting for your review instead.`, undefined, existingProduct.name);
+            continue;
+          }
           this.log(
             "info",
             `"${listing.title}" isn't the same product as "${existingProduct.name}" — it's a more specific model (${action.name}). Adding it to the Database under "${existingProduct.name}".${verdict?.reason ? ` ${verdict.reason}` : ""}`,
@@ -2893,14 +2902,29 @@ export class ScrapeEngine {
           const updatedProduct = this.opts.store.appendProductObservation(target, subject, noteParts.join(" — "));
           if (updatedProduct) this.opts.onProductUpdated(updatedProduct);
         }
-        // Beta 12: a listing whose own title says it is a game, an accessory or another model never lends its photo to this entry (photoIdentity.ts).
-        if (subjectImageDataUri && photoAllowed && !listingMayFeedProduct(target.name, listing.title)) {
-          this.log("info", `Kept the photo of "${listing.title}" out of "${target.name}": the listing's title says it is a different kind of thing.`, undefined, target.name);
-        } else if (subjectImageDataUri && photoAllowed) {
-          this.opts.store.addProductImage(target.id, subjectImageDataUri, listing.title);
-          this.opts.onReferencePhotoAdded?.(target.id);
+        // Beta 13: the ONE picture writer (fileImage.ts) decides: a listing whose own title says it is a game, an accessory or another model never lends its photo
+        // (refused), a photo that disagrees with what the gallery already shows (another card design, drive version, capacity...) is set aside for review, and a
+        // photo only counts as a reference when the title confirms the entry.
+        if (subjectImageDataUri && photoAllowed) {
+          const filed = fileImage(this.opts.store, target.id, subjectImageDataUri, { sourceKind: "listing", title: listing.title, proposer: "scanner" }, { mode: beta13Flags(config as never).identityGate });
+          if (filed.outcome === "rejected") {
+            this.log("info", `Kept the photo of "${listing.title}" out of "${target.name}": ${filed.reasons[0] ?? "the listing's title says it is a different product"}.`, undefined, target.name);
+          } else if (filed.outcome === "quarantined") {
+            this.log("info", `Set the photo of "${listing.title}" aside for review (not used as a reference for "${target.name}"): ${filed.reasons[0] ?? "it disagrees with the photos already there"}.`, undefined, target.name);
+            this.opts.onReferencePhotoAdded?.(target.id);
+          } else if (filed.outcome !== "duplicate") {
+            this.opts.onReferencePhotoAdded?.(target.id);
+          }
         }
       } else if (specificSubjects.has(subject) && config.autoResearchListings) {
+        // Beta 13: a name that only the PICTURE gave (not the Search For item, not the listing's words) never becomes a product on its own.
+        const fromText = subject === scored.extraction.matchedItem;
+        const corroborated = judgeCandidateByText(subject, listing.title);
+        if (!fromText && (corroborated.status === "mismatch" || (corroborated.status !== "match" && corroborated.strength !== "compatible"))) {
+          this.opts.store.addReviewItem({ kind: "product", subjectId: listing.id, reasons: [corroborated.status === "mismatch" ? `the title contradicts "${subject}": ${corroborated.reasons[0] ?? ""}` : `only the photos say this is "${subject}"; the title does not`], evidence: { proposedName: subject, title: listing.title, source: "photo-only" } });
+          this.log("info", `Not adding "${subject}" to the Database from "${listing.title}": only the photos said so (${corroborated.status === "mismatch" ? "the title says otherwise" : "the title does not confirm it"}). It is waiting for your review.`, undefined, subject);
+          continue;
+        }
         this.log(
           "info",
           `New item of interest: "${subject}" isn't tracked yet — adding it to the Database.${correctionNote ? ` ${correctionNote}` : ""}`,

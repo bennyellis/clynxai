@@ -2017,6 +2017,55 @@ export class Store {
     return { id, productId, imageData, sourceTitle, createdAt, kind, status, sourceKind: extra.sourceKind ?? null, sourceUrl: extra.sourceUrl ?? null, isPrimary: !!extra.isPrimary, sortOrder: 0, contentHash: extra.contentHash ?? null };
   }
 
+  /** An existing live photo of this product with the same content hash (exact duplicate), or null. */
+  findImageByHash(productId: string, hash: string): ProductImage | null {
+    const row = this.db.prepare("SELECT * FROM product_images WHERE product_id = ? AND content_hash = ? AND deleted_at IS NULL LIMIT 1").get(productId, hash) as any;
+    return row ? rowToProductImage(row) : null;
+  }
+
+  getProductImage(id: string): ProductImage | null {
+    const row = this.db.prepare("SELECT * FROM product_images WHERE id = ?").get(id) as any;
+    return row ? rowToProductImage(row) : null;
+  }
+
+  /** Changes how far a picture is trusted (and records why). Never deletes it. */
+  setImageStatus(imageId: string, status: ProductImage["status"], verdictJson?: string | null): boolean {
+    const res = verdictJson === undefined
+      ? this.db.prepare("UPDATE product_images SET status = ? WHERE id = ?").run(status, imageId)
+      : this.db.prepare("UPDATE product_images SET status = ?, verdict_json = ? WHERE id = ?").run(status, verdictJson, imageId);
+    return Number(res.changes) > 0;
+  }
+
+  /** The source titles of the photos in a product that may serve as references (trusted, user, legacy): what a new photo must stay consistent with. */
+  listReferenceTitles(productId: string): string[] {
+    const rows = this.db
+      .prepare("SELECT source_title, status FROM product_images WHERE product_id = ? AND deleted_at IS NULL AND kind = 'normal' AND source_title IS NOT NULL AND status IN ('trusted','user','legacy')")
+      .all(productId) as Array<{ source_title: string }>;
+    return rows.map((r) => r.source_title);
+  }
+
+  // --- Review queue: things a person should look at (a picture whose evidence disagrees, a name made from a picture alone). Suggestions only; nothing here changes the Library.
+  addReviewItem(item: { kind: "image" | "product" | "merge"; subjectId: string; reasons: string[]; evidence: Record<string, unknown> }): string {
+    // one open item per (kind, subject): re-detecting the same problem updates it instead of piling up
+    const open = this.db.prepare("SELECT id FROM review_items WHERE kind = ? AND subject_id = ? AND state = 'open'").get(item.kind, item.subjectId) as { id: string } | undefined;
+    if (open) {
+      this.db.prepare("UPDATE review_items SET reasons_json = ?, evidence_json = ? WHERE id = ?").run(JSON.stringify(item.reasons), JSON.stringify(item.evidence), open.id);
+      return open.id;
+    }
+    const id = randomUUID();
+    this.db.prepare("INSERT INTO review_items (id, kind, subject_id, reasons_json, evidence_json, state, created_at) VALUES (?, ?, ?, ?, ?, 'open', ?)").run(id, item.kind, item.subjectId, JSON.stringify(item.reasons), JSON.stringify(item.evidence), Date.now());
+    return id;
+  }
+
+  listReviewItems(state: "open" | "all" = "open"): Array<{ id: string; kind: string; subjectId: string; reasons: string[]; evidence: Record<string, unknown>; state: string; createdAt: number }> {
+    const rows = (state === "open" ? this.db.prepare("SELECT * FROM review_items WHERE state = 'open' ORDER BY created_at DESC") : this.db.prepare("SELECT * FROM review_items ORDER BY created_at DESC")).all() as any[];
+    return rows.map((r) => ({ id: r.id, kind: r.kind, subjectId: r.subject_id, reasons: JSON.parse(r.reasons_json), evidence: JSON.parse(r.evidence_json), state: r.state, createdAt: r.created_at }));
+  }
+
+  resolveReviewItem(id: string, state: "accepted" | "rejected" | "snoozed", by: string): boolean {
+    return Number(this.db.prepare("UPDATE review_items SET state = ?, resolved_at = ?, resolved_by = ? WHERE id = ? AND state = 'open'").run(state, Date.now(), by, id).changes) > 0;
+  }
+
   private pruneProductImages(productId: string): void {
     const rows = this.db
       .prepare("SELECT id, status, is_primary, created_at FROM product_images WHERE product_id = ? AND deleted_at IS NULL")

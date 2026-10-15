@@ -961,6 +961,10 @@ export interface ReferencePhoto {
   // Short human label for where it came from — stored as the reference
   // photo's sourceTitle so the Database shows it wasn't a real listing.
   label: string;
+  // Beta 13: the words that came with the picture, whether a picture check confirmed it, and where it came from - what fileImage.ts decides on.
+  text?: string | null;
+  verified?: boolean;
+  url?: string | null;
 }
 
 export interface ReferenceCandidate {
@@ -1081,7 +1085,7 @@ export async function findFreeReferencePhotos(
       const normalized = await normalizeReferencePhoto(download.buffer);
       if (!normalized || hashes.some((h) => hammingDistance(h, normalized.hash) <= NEAR_DUPLICATE_HAMMING)) continue;
       hashes.push(normalized.hash);
-      photos.push({ imageData: normalized.dataUri, label: candidate.label });
+      photos.push({ imageData: normalized.dataUri, label: candidate.label, text: candidate.text ?? titleFromLabel(candidate.label), verified: false, url: candidate.url });
     }
   } catch (err) {
     console.error(`[freePhotos] "${productName}" failed: ${(err as Error).message}`);
@@ -1180,7 +1184,7 @@ export async function findReferencePhotos(
         }
         consecutiveVerifyErrors = 0;
         if (!check.matches) continue;
-        if (photos.length < opts.want) photos.push({ imageData: normalized.dataUri, label: candidate.label, rank });
+        if (photos.length < opts.want) photos.push({ imageData: normalized.dataUri, label: candidate.label, text: candidate.text ?? titleFromLabel(candidate.label), verified: true, url: candidate.url, rank });
       }
     };
     await Promise.all(Array.from({ length: REFERENCE_CONCURRENCY }, worker));
@@ -1189,5 +1193,5 @@ export async function findReferencePhotos(
   }
   photos.sort((a, b) => a.rank - b.rank);
   console.log(`[referencePhotos] "${productName}": kept ${photos.length}/${opts.want} (checked ${examined}, ${rejectedByIdentity} rejected by identity)`);
-  return { photos: photos.map(({ imageData, label }) => ({ imageData, label })), examined, rejectedByIdentity };
+  return { photos: photos.map(({ imageData, label, text, verified, url }) => ({ imageData, label, text, verified, url })), examined, rejectedByIdentity };
 }

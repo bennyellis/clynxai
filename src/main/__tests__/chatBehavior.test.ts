@@ -73,7 +73,7 @@ run(async () => {
   let finderPhotos = 6;
   const finder: PhotoFinder = async (name, o) => {
     finderCalls.push({ name, want: o.want, extraQueries: o.extraQueries, realWorld: o.realWorld, existing: o.existingImages.length });
-    const photos = Array.from({ length: Math.min(o.want, finderPhotos) }, () => ({ imageData: img(nextPhoto++), label: "Stock photo — example.com" }));
+    const photos = Array.from({ length: Math.min(o.want, finderPhotos) }, () => ({ imageData: img(nextPhoto++), label: "Stock photo — example.com", verified: true }));
     return { photos, examined: photos.length + 4 };
   };
   const inFlight = new Set<string>();
@@ -171,7 +171,7 @@ run(async () => {
       for (let i = 0; i < count; i++) st.addProductImage("p", img(2000 + i), "x");
       return st;
     };
-    const f6: PhotoFinder = async (_n, o) => ({ photos: Array.from({ length: o.want }, (_v, i) => ({ imageData: img(3000 + i), label: "l" })), examined: o.want });
+    const f6: PhotoFinder = async (_n, o) => ({ photos: Array.from({ length: o.want }, (_v, i) => ({ imageData: img(3000 + i), label: "l", verified: true })), examined: o.want });
     let st = mkStore(true, 2);
     let r = await topUpReferencePhotos({ store: st, id: "p", name: "Test Console", want: 5, limit: 20, find: f6, replaceThumbnail: true });
     check("a thumbnail the user chose is never replaced, even when asked to", st.getProductById("p")?.imageUrl === img(1) && r.thumbnailKept && r.added === 5, r);
