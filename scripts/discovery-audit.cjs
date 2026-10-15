@@ -94,7 +94,7 @@ function selftest(): string {
 }
 
 (async () => {
-  const given = args.find((a) => !a.startsWith("--") && a !== opt("--since-hours") && a !== opt("--csv"));
+  const given = args.find((a) => !a.startsWith("--") && a !== opt("--since-hours") && a !== opt("--csv") && a !== opt("--show"));
   const isSelf = flag("--selftest");
   const src = isSelf ? selftest() : given;
   if (!src || !fs.existsSync(src)) { console.error("Give the path to scout.db, or --selftest."); process.exit(2); }
@@ -103,6 +103,14 @@ function selftest(): string {
   fs.copyFileSync(src, copy);
   for (const ext of ["-wal", "-shm"]) if (fs.existsSync(src + ext)) fs.copyFileSync(src + ext, copy + ext);
 
+  const showId = opt("--show");
+  if (showId) {
+    const d = new DatabaseSync(copy, { readOnly: true });
+    const row = d.prepare("SELECT title, price, listing_age, description FROM listings WHERE url LIKE ? OR id = ?").get("%" + showId + "%", showId) as any;
+    if (!row) { console.log("No listing matches " + showId); process.exit(0); }
+    console.log("TITLE: " + row.title + "  PRICE: " + row.price + "  AGE: " + row.listing_age + "\n----- stored page text (first 4000 characters, what the scanner reads) -----\n" + row.description);
+    process.exit(0);
+  }
   const store = new Store(copy);
   const db = new DatabaseSync(copy, { readOnly: true });
   const sinceH = Number(opt("--since-hours") ?? 0);
