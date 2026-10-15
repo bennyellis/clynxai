@@ -8,18 +8,18 @@ import { colorsConflict } from "./colors.js";
 
 // Tier/variant words that make a different product from the base one. A listing must agree with the
 // reference on every one of them: "3060 Ti" isn't a "3060", and a "Switch" isn't a "Switch OLED".
-const TIER_WORDS = ["ti", "super", "xt", "xtx", "pro", "max", "plus", "slim", "oled", "lite", "mini", "se", "xl", "air", "ultra", "fe"];
+export const TIER_WORDS = ["ti", "super", "xt", "xtx", "pro", "max", "plus", "slim", "oled", "lite", "mini", "se", "xl", "air", "ultra", "fe"];
 
 const CAPACITY_TOKEN = /^\d+(?:p\d+)?(?:tb|gb|mb)$/;
 
-function normalize(text: string): string {
+export function normalize(text: string): string {
   return text
     .toLowerCase()
     .replace(/(\d)\.(\d)/g, "$1p$2")
     .replace(/(\d)\s*[-]?\s*(tb|gb|mb|hz|mah|mm)\b/g, "$1$2");
 }
 
-function tokens(text: string): string[] {
+export function tokens(text: string): string[] {
   return normalize(text)
     .split(/[^a-z0-9]+/)
     .filter(Boolean);
@@ -35,7 +35,7 @@ export function capacityTokens(text: string): string[] {
 }
 
 // "3060" is present in "3060", "3060ti", "rtx3060" and "rtx3060ti" (a model number glued to letters) but not in "30601" or "13060".
-function hasSpecToken(titleTokens: string[], wanted: string): boolean {
+export function hasSpecToken(titleTokens: string[], wanted: string): boolean {
   return titleTokens.some((tok) => {
     for (let at = tok.indexOf(wanted); at !== -1; at = tok.indexOf(wanted, at + 1)) {
       if (!/\d/.test(tok[at - 1] ?? "") && !/\d/.test(tok[at + wanted.length] ?? "")) return true;
@@ -44,14 +44,14 @@ function hasSpecToken(titleTokens: string[], wanted: string): boolean {
   });
 }
 
-function hasTierWord(text: string, word: string): boolean {
+export function hasTierWord(text: string, word: string): boolean {
   // letters on either side would make it part of another word ("pro" in "protector"); digits are fine ("3060ti").
   return new RegExp(`(?<![a-z])${word}(?![a-z])`).test(normalize(text));
 }
 
 // A lone letter after a word is part of a model's name: "Series S" / "Series X", "One S" / "One X", "Galaxy Z". Maps each such
 // word to the letters that follow it ("series" -> {s} for "Xbox Series S"; "Series X|S" gives {x, s}).
-function modelLetters(text: string): Map<string, Set<string>> {
+export function modelLetters(text: string): Map<string, Set<string>> {
   const toks = tokens(text);
   const map = new Map<string, Set<string>>();
   for (let i = 0; i < toks.length; i++) {
@@ -129,10 +129,10 @@ export function specReference(query: string, productName: string): string {
 
 // Words that mean an eBay listing is for something ELSE than the product itself (its case, a box, parts, a lot of them,
 // a different edition).
-const NOT_THE_PRODUCT_WORDS = /\b(parts?|repair|broken|not working|non[- ]?working|doesn'?t work|won'?t (turn on|power on|boot)|no power|faulty|defective|bricked|case only|empty box|box only|replacement|skin|decal|cover|stand only|charger only|cable only|manual only|lot of|bundle|read description|for parts|limited edition|special edition|collector'?s|steelbook)\b/i;
+export const NOT_THE_PRODUCT_WORDS = /\b(parts?|repair|broken|not working|non[- ]?working|doesn'?t work|won'?t (turn on|power on|boot)|no power|faulty|defective|bricked|case only|empty box|box only|replacement|skin|decal|cover|stand only|charger only|cable only|manual only|lot of|bundle|read description|for parts|limited edition|special edition|collector'?s|steelbook)\b/i;
 
 // Things that get sold FOR a product (parts and accessories), whose photos and prices are not the product's.
-const ACCESSORY_WORDS = /\b(motherboard|mainboard|controllers?|joysticks?|thumbsticks?|fan|heatsink|faceplate|remote|keyboard|headset|battery|charger|cable|adapter|dock|mount|psu|hdmi|protector|tempered|holster|backplate|housing)\b/g;
+export const ACCESSORY_WORDS = /\b(motherboard|mainboard|controllers?|joysticks?|thumbsticks?|fan|heatsink|faceplate|remote|keyboard|headset|battery|charger|cable|adapter|dock|mount|psu|hdmi|protector|tempered|holster|backplate|housing)\b/g;
 
 /**
  * Does an eBay listing title look like it is for exactly this product? Plain text checks, no AI: every word of the

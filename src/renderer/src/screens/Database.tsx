@@ -2783,6 +2783,20 @@ function ProductDetailPage({
             </div>
           )}
 
+          {product.compsValidation && (product.compsValidation.sold || product.compsValidation.active) && (
+            <div style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)", fontSize: 12.5, color: "var(--text-muted)" }}>
+              <strong style={{ color: "var(--text)" }}>Price check:</strong>{" "}
+              {[
+                { label: "sold", v: product.compsValidation.sold },
+                { label: "asking", v: product.compsValidation.active },
+              ]
+                .filter((x) => x.v)
+                .map((x) => `${x.label}: ${x.v!.retrieved} found, ${x.v!.exact + x.v!.compatible} verified as this product, ${x.v!.uncertain} unsure, ${x.v!.rejected} rejected`)
+                .join(" · ")}
+              . Only verified results are used for the price.
+            </div>
+          )}
+
           {(product.variantEvidence || product.variantClaims.length > 0) && (
             <div style={{ padding: "12px 18px", borderBottom: "1px solid var(--border)", fontSize: 12.5, color: "var(--text-muted)", display: "flex", flexDirection: "column", gap: 6 }}>
               {product.variantEvidence && (

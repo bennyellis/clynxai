@@ -77,6 +77,7 @@ function cloudProductToLocal(cp: CloudProduct): ProductProfile {
     parentProductId: null,
     variantEvidence: null,
     variantClaims: [],
+    compsValidation: null,
     loading: false,
     createdAt: cp.createdAt,
     updatedAt: cp.updatedAt,

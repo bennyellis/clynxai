@@ -45,6 +45,7 @@ import { verifyVariant, reconcileVerdict, type VariantVerdict } from "./variantE
 import { createVerdictMemory, makeClaimVerifier, publicHttpUrls } from "./variantResearch.js";
 import { runResearchProductTool } from "./researchTool.js";
 import { settleLateMarketCheck } from "./marketCheckSettle.js";
+import { describeSummary, emptySummary } from "./compIdentity.js";
 import { distinguishingTokens } from "./variantIdentity.js";
 import {
   answerImageQuestion,
@@ -1654,15 +1655,26 @@ async function researchEbayComps(
   const self = store.getProductById(id);
   const parentEntry = self?.parentProductId ? store.getProductById(self.parentProductId) : null;
   const requiredTerms = parentEntry ? distinguishingTokens(fallbackName, parentEntry.name).other.filter((t) => !/^\d+$/.test(t)) : [];
-  const analysis = await analyzeEbayComps(query, comps, fallbackName, photoCheck, false, requiredTerms);
+  const analysis = await analyzeEbayComps(query, comps, fallbackName, photoCheck, false, requiredTerms, sourceTitle);
   // What sellers are asking for the same thing right now: sold comps stay the main evidence, asking prices fill in
   // when there are few of them (see marketValue.ts). Never fails the research: no data just means sold comps alone.
-  const active = await fetchActiveAsks(query, fallbackName, analysis.dominantCondition, photoCheck, false, store.getProductById(id)?.family ?? null, requiredTerms);
+  const active = await fetchActiveAsks(query, fallbackName, analysis.dominantCondition, photoCheck, false, store.getProductById(id)?.family ?? null, requiredTerms, sourceTitle);
   // Both sides are what a buyer pays IN TOTAL (sold: item + shipping paid; asking: item + the seller's shipping charge).
   const estimate = estimateMarketValue(
     { mean: buyerTotalUsd(analysis.avgSoldPriceUsd, analysis.avgShippingUsd), n: analysis.sampleSize },
     { median: active.medianUsd, n: active.sampleSize }
   );
+  // Say how many results were retrieved, accepted, uncertain and rejected, and why: no price from a result that was not verified as this product.
+  const soldLine = describeSummary("Sold results", analysis.validation ?? emptySummary());
+  const askLine = describeSummary("Asking results", active.validation ?? emptySummary());
+  recordLog({ ts: Date.now(), level: "info", message: `Comparable check for "${fallbackName}": ${soldLine} ${askLine}` });
+  discovery.note(id, "step", `${soldLine} ${askLine}`);
+  const retrievedTotal = (analysis.validation?.retrieved ?? 0) + (active.validation?.retrieved ?? 0);
+  const acceptedTotal = (analysis.validation ? analysis.validation.exact + analysis.validation.compatible : 0) + (active.validation ? active.validation.exact + active.validation.compatible : 0);
+  if (retrievedTotal > 0 && acceptedTotal === 0) {
+    discovery.note(id, "warn", "None of the results could be verified as this exact product, so I set no price from them (not enough evidence). I did not borrow another model's price.");
+  }
+  store.setProductCompsValidation(id, { at: Date.now(), sold: analysis.validation ?? null, active: active.validation ?? null });
   store.updateProductEbayComps(id, {
     avgSoldPriceUsd: analysis.avgSoldPriceUsd,
     avgRunTimeDays: analysis.avgRunTimeDays,

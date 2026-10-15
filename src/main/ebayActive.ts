@@ -6,7 +6,7 @@ import type { PhotoCheck } from "./compPhotoCheck.js";
 import { compMatchesSpecs, specReference } from "./compFilter.js";
 import { median } from "./marketValue.js";
 import { judgeSameProduct } from "./watchcount.js";
-import { editionConflict } from "./variantIdentity.js";
+import { classifyComparable, emptySummary, tallyJudgement, usableForValuation, type ValidationSummary } from "./compIdentity.js";
 
 export interface ActiveAsks {
   // Listings dropped because their photo showed a different product than the product's reference photos.
@@ -16,6 +16,8 @@ export interface ActiveAsks {
   // Photos of the listings confirmed to be this exact product, best match first: real pictures of the real thing,
   // offered as candidate reference photos (they still get checked before being kept).
   photos: Array<{ url: string; label: string }>;
+  // How the listings were judged against the product's identity before any asking price was used (see compIdentity.ts).
+  validation?: ValidationSummary;
 }
 
 const NO_ASKS: ActiveAsks = { photoRejected: 0, medianUsd: null, sampleSize: 0, photos: [] };
@@ -58,20 +60,27 @@ export async function fetchActiveAsks(
   // The product's Database family ("PlayStation > Consoles"): for a console, only listings filed under a console category count.
   familyHint: string | null = null,
   // See watchcount.ts's analyzeEbayComps: the words that separate this product from its general parent.
-  requiredTerms: string[] = []
+  requiredTerms: string[] = [],
+  // The Marketplace listing the product came from (states the capacity / color the name may leave open).
+  sourceTitle: string | null = null
 ): Promise<ActiveAsks> {
   if (!hasEbayCredentials()) return NO_ASKS;
   if (broken) return fetchBrokenAsks(query, productName, familyHint, requiredTerms);
+  const validation = emptySummary();
   try {
     const items = onlyRightCategory(await searchEbayItems(query, { limit: ACTIVE_LISTINGS_TO_FETCH }), familyHint);
-    const reference = specReference(query, productName);
-    // Parts-only / not-working listings say nothing about what a working one is worth.
-    const candidates = items.filter(
-      (i) => i.priceCurrency === "USD" && i.priceValue !== null && Number.isFinite(Number(i.priceValue)) && !/parts|not working/i.test(i.condition ?? "") && compMatchesSpecs(reference, i.title) && !editionConflict(`${query} ${productName}`, i.title, requiredTerms)
-    );
-    if (candidates.length === 0) return NO_ASKS;
+    // Every listing is compared with the product's identity before its price is used (see compIdentity.ts); exact and compatible ones count.
+    const identity = { name: productName, query, sourceTitle, requiredTerms };
+    const candidates = items.filter((i) => {
+      if (!(i.priceCurrency === "USD" && i.priceValue !== null && Number.isFinite(Number(i.priceValue)))) return false;
+      const j = classifyComparable(identity, i.title);
+      tallyJudgement(validation, i.title, j);
+      // Parts-only / not-working listings say nothing about what a working one is worth.
+      return usableForValuation(j.verdict) && !/parts|not working/i.test(i.condition ?? "");
+    });
+    if (candidates.length === 0) return { ...NO_ASKS, validation };
 
-    let kept = (await judgeSameProduct(query, candidates.map((i) => i.title))).map((idx) => candidates[idx]).filter(Boolean);
+    let kept = (await judgeSameProduct(query, candidates.map((i) => i.title), productName)).map((idx) => candidates[idx]).filter(Boolean);
     // Cross-check each listing's photo against the product's reference photos (see compPhotoCheck.ts).
     let photoRejected = 0;
     if (photoCheck && kept.length > 0) {
@@ -92,7 +101,7 @@ export async function fetchActiveAsks(
       .slice(0, PHOTO_CANDIDATES)
       // Search results carry a small thumbnail (s-l225); the same picture is available larger.
       .map((i) => ({ url: (i.imageUrl as string).replace(/\/s-l\d+\.(jpg|jpeg|png|webp)/i, "/s-l800.$1"), label: `eBay listing: ${i.title.slice(0, 90)}` }));
-    return { photoRejected, medianUsd: median(prices), sampleSize: prices.length, photos };
+    return { photoRejected, medianUsd: median(prices), sampleSize: prices.length, photos, validation };
   } catch (err) {
     console.error(`[ebayActive] active listings lookup failed for "${query}": ${(err as Error).message}`);
     return NO_ASKS;
@@ -108,7 +117,7 @@ async function fetchBrokenAsks(query: string, productName: string, familyHint: s
     const items = onlyRightCategory(await searchEbayItems(query, { limit: ACTIVE_LISTINGS_TO_FETCH, conditionIds: ["7000"] }), familyHint);
     const reference = specReference(query, productName);
     const kept = items.filter(
-      (i) => i.priceCurrency === "USD" && i.priceValue !== null && Number.isFinite(Number(i.priceValue)) && titleLooksLikeBrokenProduct(query, i.title, true) && compMatchesSpecs(reference, i.title) && !editionConflict(`${query} ${productName}`, i.title, requiredTerms)
+      (i) => i.priceCurrency === "USD" && i.priceValue !== null && Number.isFinite(Number(i.priceValue)) && titleLooksLikeBrokenProduct(query, i.title, true) && usableForValuation(classifyComparable({ name: productName, query, requiredTerms, broken: true }, i.title).verdict)
     );
     const all = kept.map(askedTotalUsd);
     // A loose part or accessory listed in the same condition (a $40 power supply) is far under the consoles: drop what is under

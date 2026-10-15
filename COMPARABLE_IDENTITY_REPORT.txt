@@ -1,0 +1,47 @@
+CLYNX BETA 9: COMPARABLE-SALE IDENTITY VALIDATION
+=================================================
+Nothing was published. Existing records and historical valuations were not touched (a stored value changes only when that product is researched again).
+
+WHAT THE CODE DID BEFORE (inspected)
+ - Sold (WatchCount) and asking (eBay) results were filtered by compFilter.compMatchesSpecs against the SEARCH QUERY (plus a capacity from the product name),
+   then by an AI "same product?" judge that was also shown only the query. In AI mode the query is AI-derived from the Marketplace title and can drop the
+   model number, so "16" was not required by either gate. Model numbers were required only as "this digit appears somewhere in the title", so "iPhone 14
+   case compatible with iPhone 16" passed, and nothing compared the number NEXT TO the word (iPhone 14 vs 16).
+ - Accessory / lot / part rules existed only in the no-AI text check (titleLooksLikeProduct); with AI on, the judge alone decided.
+ - Comparing a listing with the Database entry it was matched to (for its value) had no identity check unless the Phase 4 safeguard was switched on (off by default).
+ - How many results were retrieved / accepted / rejected, and why, was never logged or kept.
+
+WHAT WAS BUILT (extends the existing safeguards; no second matcher)
+ compIdentity.ts (new, pure, reuses compFilter hard facts, colors.ts, variantIdentity.ts editions): classifyComparable() gives every candidate title one of
+   exact / compatible / uncertain / rejected, with reason codes. Rejected: another model number (the number next to a word, glued or spaced: iphone 14 vs 16,
+   v8 vs v10, rtx 3060 vs 3070, m1 vs m2), another generation (2nd vs 5th), another tier (Pro/Max/Plus/Slim/OLED/Ti...), another lettered line (Series S/X, One X),
+   another capacity, another color, another edition (special/limited/themed), an accessory or "for/compatible with" listing, a part or not-working copy, a lot /
+   multi-pack / bundle. Uncertain: model number or capacity not stated when the product has one, several models named. Compatible: the title is narrower than a
+   generic entry, or an attribute that barely moves the price (color) is unstated. The product's NAME, the search QUERY and the Marketplace listing's own capacity
+   and color all have to hold, so a loose query can no longer let a contradicting title through.
+ Used for: watchcount.analyzeEbayComps (sold), ebayActive.fetchActiveAsks and its broken-variant path (asking), myStore reference, and the AI judge is now told
+   the product's name too. Only exact and compatible results feed a value, a profit, a sell-through figure or a Database price; with none, the value is empty
+   (insufficient evidence), never another model's.
+ Listing -> Database entry (valuation, signals for the Deal Quality Gate, Feed price display, by-title lookups): a listing whose title contradicts the entry's
+   identity (model, generation, tier, capacity, edition, "for" an accessory) gets no value from that entry. Missing information and a plain bundle listing do not.
+ Logging: every research logs and stores "Sold results: retrieved N, accepted A (e exact, c compatible), uncertain U, rejected R (model number x6, tier x2, ...)"
+   and the same for asking results, on Activity and the Discovery feed, plus a warning when nothing could be verified. The counts are kept on the product
+   (local-only column comps_validation) and shown on its Database page.
+ Automatic discovery, the pre-alert market check, Watches and the Deal Quality Gate all price through the same research and signals functions, so they inherit it.
+
+TESTS (npm test: 62 files, 1881 checks pass, 1 existing failure unrelated; typecheck and build clean)
+ compIdentity.test.ts (93): phones (iPhone 14/15/16, Pro vs Pro Max, capacity, Galaxy S23/S24, Pixel), consoles (Series S/X, One X, PS5 Pro/Slim, Switch OLED/Lite, Steam
+ Deck OLED), computers (MacBook M1/M2, XPS 13/15, RTX 3060/3060 Ti/3070, iPad generations), appliances (Dyson V8/V10, Instant Pot sizes), collectibles (Funko 01/02,
+ 1st vs 2nd edition), accessories (cases, controllers, AirPods generations and replacement cases), bundles and lots, special editions, missing-vs-stated attributes,
+ loose-query and listing-attribute cases; a 16-result mixed iPhone search priced only from the 5 verified sales with counts and reasons; only-wrong-model results
+ give no value; a real Database refuses to value an iPhone 14 listing from an iPhone 16 entry. The existing identityGate test caught one regression during the work
+ (a generic "Xbox Wireless Controller" entry) and drove the "narrower than a generic entry is compatible" rule.
+
+LIMITATIONS
+ - Not run against live WatchCount or eBay data, so where the iPhone 14 results actually enter (the AI query, WatchCount, or eBay) is not proven; both are now covered.
+ - Rules read the words of a title in English. A title that states nothing (no model, no capacity) is uncertain and unused, which lowers sample sizes for products
+   priced by capacity; that is the intended trade (fewer, verified comps; no value rather than a guessed one).
+ - Products with no digits or tier words rely on the existing word checks and the AI judge; a "uncertain" listing is never promoted by the judge.
+ - Re-researching a product that now finds no verified comps replaces its old value with "not enough evidence" (same as any re-research); nothing is rewritten in bulk.
+ - The Deal Quality Gate itself was not changed: it reads validated sample counts and values; it does not show the comparable counts.
+ - Needs a new installer; not built or published.

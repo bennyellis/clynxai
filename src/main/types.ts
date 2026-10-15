@@ -1214,6 +1214,8 @@ export interface ProductProfile {
   // and the variant claims checked against THIS product that were not confirmed enough to become entries. Local-only. null / empty until checked.
   variantEvidence: import("./variantEvidence.js").VariantVerdict | null;
   variantClaims: import("./variantEvidence.js").VariantVerdict[];
+  // How the latest eBay / WatchCount results were judged against this product's identity before any price was used (compIdentity.ts). Local-only.
+  compsValidation: { at: number; sold: import("./compIdentity.js").ValidationSummary | null; active: import("./compIdentity.js").ValidationSummary | null } | null;
   loading: boolean;
   createdAt: number;
   // Clynx Cloud Phase 6 — bumped on every mutating product write (see

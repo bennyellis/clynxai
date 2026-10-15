@@ -4,6 +4,7 @@
 // these are the user's active Buy-It-Now listings.
 import { hasEbayCredentials, searchEbaySellerItems } from "./ebayClient.js";
 import { titleLooksLikeProduct } from "./compFilter.js";
+import { classifyComparable, usableForValuation } from "./compIdentity.js";
 import { median } from "./marketValue.js";
 import type { MyStoreReference } from "./types.js";
 
@@ -30,7 +31,8 @@ export async function fetchMyStoreReference(seller: string, productName: string)
         i.priceCurrency === "USD" &&
         i.priceValue !== null &&
         Number.isFinite(Number(i.priceValue)) &&
-        titleLooksLikeProduct(productName, i.title)
+        titleLooksLikeProduct(productName, i.title) &&
+        usableForValuation(classifyComparable({ name: productName }, i.title).verdict)
     );
     if (mine.length === 0) return null;
     const prices = mine.map((i) => Number(i.priceValue));

@@ -2,6 +2,7 @@ import { DatabaseSync, backup as sqliteBackup } from "node:sqlite";
 import { colorsConflict, colorsIn, isColorWord, sameColors } from "./colors.js";
 import { compMatchesSpecs, hasSingleModelLetter, modelLettersConflict } from "./compFilter.js";
 import { extractVariantAttributes } from "./variantIdentity.js";
+import { listingContradictsEntry } from "./compIdentity.js";
 import type { VariantVerdict } from "./variantEvidence.js";
 import type { ProductSignals } from "./dealSummary.js";
 import path from "node:path";
@@ -507,6 +508,8 @@ export class Store {
       ["variant_status", "TEXT"],
       ["variant_evidence", "TEXT"],
       ["variant_claims", "TEXT"],
+      // How the last eBay / WatchCount results were judged against the product's identity (compIdentity.ts): counts and reasons. Local-only.
+      ["comps_validation", "TEXT"],
     ]) {
       if (!productCols.includes(column)) this.db.exec(`ALTER TABLE products ADD COLUMN ${column} ${type}`);
     }
@@ -939,6 +942,8 @@ export class Store {
       if (!record.matchedItem) return record;
       // A listing titled "Xbox Series S" that was matched to the "Xbox Series X" entry must not show the Series X's price.
       if (modelLettersConflict(record.matchedItem, record.title)) return { ...record, matchedProductAvgSoldPriceUsd: null, matchedProductAvgRunTimeDays: null };
+      // ...and no other contradiction of the matched entry's identity (iPhone 14 listed under an iPhone 16 entry) shows that entry's price either.
+      if (listingContradictsEntry(record.matchedItem, record.title)) return { ...record, matchedProductAvgSoldPriceUsd: null, matchedProductAvgRunTimeDays: null };
       const product = lookup(record.matchedItem);
       // Veto-only identity safeguard: a vetoed match's price is not shown as this listing's market value.
       if (product && this.safeguard.vetoes({ title: record.title, matchedName: record.matchedItem, entry: { id: product.id, name: product.name }, seller: record.sellerName, site: "display" })) return { ...record, matchedProductAvgSoldPriceUsd: null, matchedProductAvgRunTimeDays: null };
@@ -967,6 +972,9 @@ export class Store {
       const specific = this.moreSpecificProductForTitle(rows, found.name, title);
       if (specific) return specific.value !== null && specific.value > 0 ? specific.value : null;
     }
+    // A listing whose title CONTRADICTS the entry's identity (another model number, tier, capacity, edition) is never valued from that entry: no value
+    // is better than another model's value. (Missing information is not a contradiction.)
+    if (title && found && listingContradictsEntry(found.name, title)) return null;
     // Veto-only identity safeguard: a value taken from an entry the evidence says is a different product is not used (no value is better than a wrong one).
     if (title && found && this.safeguard.vetoes({ title, matchedName: name, entry: { id: found.id, name: found.name }, site: "valuation" })) return null;
     return found && found.value !== null && found.value > 0 ? found.value : null;
@@ -1108,6 +1116,8 @@ export class Store {
       const hit = rows.find((r) => r.name.toLowerCase() === lower) ?? rows.find((r) => isSimilarProductName(matchedItem, r.name));
       if (hit) {
         const chosen = this.moreSpecificProductForTitle(rows, hit.name, title) ?? hit;
+        // The title contradicts the chosen entry's identity (see compIdentity.ts): its value, sample and codes are not offered for this listing.
+        if (listingContradictsEntry(chosen.name, title)) return null;
         // Veto-only identity safeguard: signals (value, sample, codes) from an entry that is a different product are not offered; the caller sees "no matched product".
         if (this.safeguard.vetoes({ title, matchedName: matchedItem, entry: { id: chosen.id, name: chosen.name }, site: "signals" })) return null;
         return toSignals(chosen);
@@ -1120,6 +1130,7 @@ export class Store {
       if (words.length < 2 || !words.every((w) => haystack.includes(w)) || !compMatchesSpecs(r.name, title)) continue;
       if (!best || words.length > best.words) best = { row: r, words: words.length };
     }
+    if (best && listingContradictsEntry(best.row.name, title)) return null;
     if (best && this.safeguard.vetoes({ title, matchedName: null, entry: { id: best.row.id, name: best.row.name }, site: "signals-by-title" })) return null;
     return best ? toSignals(best.row) : null;
   }
@@ -1139,6 +1150,7 @@ export class Store {
       if (!compMatchesSpecs(r.name, title)) continue;
       if (!best || words.length > best.words) best = { name: r.name, value: r.value, words: words.length };
     }
+    if (best && listingContradictsEntry(best.name, title)) return null;
     if (best && this.safeguard.vetoes({ title, matchedName: null, entry: rows.find((r) => r.name === best!.name) ?? null, site: "valuation-by-title" })) return null;
     return best ? { name: best.name, value: best.value } : null;
   }
@@ -1410,6 +1422,11 @@ export class Store {
       .prepare("UPDATE products SET variant_status = ?, variant_evidence = ?, updated_at = ? WHERE id = ?")
       .run(verdict ? verdict.status : null, verdict ? JSON.stringify(compactVerdict(verdict)) : null, Date.now(), id);
     return Number(res.changes) > 0;
+  }
+
+  /** Keeps how the latest comparables were judged (counts and reasons only, no listing text beyond a few short examples). */
+  setProductCompsValidation(id: string, validation: ProductProfile["compsValidation"]): void {
+    this.db.prepare("UPDATE products SET comps_validation = ? WHERE id = ?").run(validation ? JSON.stringify(validation) : null, id);
   }
 
   /** A variant claim checked against this product that was not confirmed enough to become an entry: kept (newest first, 10 at most) so the next question starts from it. */
@@ -3102,6 +3119,7 @@ function rowToProduct(row: any): ProductProfile {
     parentProductId: row.parent_product_id ?? null,
     variantEvidence: parseVerdict(row.variant_evidence),
     variantClaims: parseVerdictList(row.variant_claims),
+    compsValidation: parseCompsValidation(row.comps_validation),
     loading: !!row.loading,
     createdAt: row.created_at,
     updatedAt: row.updated_at ?? row.created_at,
@@ -3127,6 +3145,16 @@ function parseVerdictList(raw: unknown): VariantVerdict[] {
     return Array.isArray(list) ? list.filter((v): v is VariantVerdict => !!v && typeof v.claim === "string" && VERDICT_STATUSES.has(v.status)) : [];
   } catch {
     return [];
+  }
+}
+
+function parseCompsValidation(raw: unknown): ProductProfile["compsValidation"] {
+  if (typeof raw !== "string" || !raw) return null;
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v.at === "number" ? v : null;
+  } catch {
+    return null;
   }
 }
 

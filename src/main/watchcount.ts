@@ -4,7 +4,7 @@ import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 import { compMatchesSpecs, sanitizeSearchQuery, specReference, titleLooksLikeProduct } from "./compFilter.js";
 import { titleLooksLikeBrokenProduct } from "./brokenVariant.js";
 import { isLowAiMode } from "./aiMode.js";
-import { editionConflict } from "./variantIdentity.js";
+import { classifyComparable, emptySummary, tallyJudgement, usableForValuation, type ValidationSummary } from "./compIdentity.js";
 import { trimmedMean } from "./marketValue.js";
 import { splitByPriceSeparators } from "./identity/populations.js";
 
@@ -239,6 +239,9 @@ export interface CompAnalysis {
   // products, so the cheapest group stood in as a floor. "unresolved": mixed, and nothing could stand in. Absent = exact.
   identity?: "exact" | "approximate" | "unresolved";
   identityNote?: string | null;
+  // How the results were judged against the product's identity before any price was used (see compIdentity.ts): retrieved, exact, compatible, uncertain,
+  // rejected, with the reasons. Only exact and compatible results are in the figures above.
+  validation?: ValidationSummary;
 }
 
 const EMPTY_ANALYSIS: CompAnalysis = { identity: "exact", identityNote: null, photoRejected: 0, avgSoldPriceUsd: null, avgRunTimeDays: null, avgShippingUsd: null, sampleSize: 0, dominantCondition: null, rejectedCount: 0 };
@@ -246,11 +249,11 @@ const EMPTY_ANALYSIS: CompAnalysis = { identity: "exact", identityNote: null, ph
 // The AI half of "is this listing the SAME product": brand/partner, edition, bundle, and anything else that
 // isn't a plain model number or capacity (those are checked in code first, see compFilter.ts). Returns the
 // indices of `titles` it considers the same product.
-export async function judgeSameProduct(query: string, titles: string[]): Promise<number[]> {
+export async function judgeSameProduct(query: string, titles: string[], productName?: string): Promise<number[]> {
   if (titles.length === 0) return [];
   // Plain text checks instead of an AI call (see compFilter.ts's titleLooksLikeProduct).
   if (isLowAiMode()) return titles.flatMap((t, i) => (titleLooksLikeProduct(query, t) ? [i] : []));
-  const prompt = `You're comparing eBay listings against ONE specific product a reseller is pricing: "${query}".
+  const prompt = `You're comparing eBay listings against ONE specific product a reseller is pricing: "${query}".${productName && productName.toLowerCase() !== query.toLowerCase() ? ` The Database names this product "${productName}": a listing that contradicts either name (another model number or generation, another tier, another capacity) is a different product.` : ""}
 For EACH listing below, decide whether it is for exactly that product, so its price is a fair comparison.
 
 Be strict about what makes products different in price: the manufacturer/brand (e.g. EVGA vs Gigabyte graphics cards of the same chip are different products), the exact model or product line, capacity/size/storage, generation, and special/limited/collector's editions or different bundles. Be relaxed about things that don't change the product: color, "new/used/open box" wording, seller filler. If the product name above does NOT name a manufacturer or model line (it is a generic name like a chip or console name), then any manufacturer's version counts. If the product name names a COLOR, a listing in a different color is a different product and must be rejected (a listing that names no color is fine); if it names no color, any color counts. Reject accessories, parts, cases, boxes-only, games, and unrelated items, and reject listings that bundle the product with other items (a console, controller, games, other accessories) or sell several units as a lot, since their price isn't the product's price.
@@ -306,14 +309,24 @@ export async function analyzeEbayComps(
   broken = false,
   // The words that separate this product from the general one it is a version of ("galaxy" for a special edition console): a sale whose
   // title doesn't carry them is the standard model's sale, not this product's (see variantIdentity.ts's editionConflict).
-  requiredTerms: string[] = []
+  requiredTerms: string[] = [],
+  // The Marketplace listing the product was found from: it states the capacity / color the product's own name may leave open.
+  sourceTitle: string | null = null
 ): Promise<CompAnalysis> {
-  if (comps.length === 0) return EMPTY_ANALYSIS;
+  const validation = emptySummary();
+  const withValidation = (a: CompAnalysis): CompAnalysis => ({ ...a, validation });
+  if (comps.length === 0) return withValidation(EMPTY_ANALYSIS);
 
-  const reference = specReference(query, productName);
+  // Every result is compared with the product's identity before its price is used: a search returning it proves nothing (see compIdentity.ts).
+  // Exact and compatible results are used; uncertain and rejected ones are counted and left out.
+  const compIdentity = { name: productName, query, sourceTitle, requiredTerms, broken };
   // Copies sold "for parts or not working" are not what a working one sells for (the broken research handles those on its own).
-  const specMatched = comps.filter((c) => compMatchesSpecs(reference, c.title) && !editionConflict(`${query} ${productName}`, c.title, requiredTerms) && (broken || !/parts|not working/i.test(c.condition ?? "")));
-  if (specMatched.length === 0) return { ...EMPTY_ANALYSIS, rejectedCount: comps.length };
+  const specMatched = comps.filter((c) => {
+    const j = classifyComparable(compIdentity, c.title);
+    tallyJudgement(validation, c.title, j);
+    return usableForValuation(j.verdict) && (broken || !/parts|not working/i.test(c.condition ?? ""));
+  });
+  if (specMatched.length === 0) return withValidation({ ...EMPTY_ANALYSIS, rejectedCount: comps.length });
 
   // Broken / for-parts research (a "(For Parts / Broken)" Database variant) keeps ONLY comps that are broken copies of the product,
   // by plain text checks: the normal judge throws exactly those away.
@@ -321,7 +334,8 @@ export async function analyzeEbayComps(
     ? specMatched.flatMap((c, i) => (titleLooksLikeBrokenProduct(query, c.title, /parts|not working/i.test(c.condition ?? "")) ? [i] : []))
     : await judgeSameProduct(
         query,
-        specMatched.map((c) => c.title)
+        specMatched.map((c) => c.title),
+        productName
       );
   let matched = keptIndices.map((i) => specMatched[i]).filter((c): c is EbayComp => !!c);
   // Last gate: each comp's photo against the product's reference photos. A title can say "Series S" over a Series X.
@@ -345,7 +359,7 @@ export async function analyzeEbayComps(
     }
   }
   const rejectedCount = comps.length - matched.length - photoRejected;
-  if (matched.length === 0) return { ...EMPTY_ANALYSIS, rejectedCount, photoRejected, identity, identityNote };
+  if (matched.length === 0) return withValidation({ ...EMPTY_ANALYSIS, rejectedCount, photoRejected, identity, identityNote });
 
   // Condition-awareness — segment the confirmed matches by each comp's own condition and average the LARGEST
   // segment (the condition a resale item is overwhelmingly likely to be in), falling back to everything when no
@@ -378,7 +392,7 @@ export async function analyzeEbayComps(
   // than counted as $0, so it can't drag the average down.
   const withShipping = source.filter((c) => c.shippingUsd !== null);
   const avgShippingUsd = withShipping.length > 0 ? withShipping.reduce((sum, c) => sum + (c.shippingUsd ?? 0), 0) / withShipping.length : null;
-  return {
+  return withValidation({
     avgSoldPriceUsd: price.value,
     avgRunTimeDays,
     avgShippingUsd,
@@ -388,5 +402,5 @@ export async function analyzeEbayComps(
     photoRejected,
     identity,
     identityNote,
-  };
+  });
 }
