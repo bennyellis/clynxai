@@ -2,6 +2,8 @@
 // fetch are faked. Xbox Series X 2TB Galaxy Black Special Edition is the case that failed in the field; nothing here special-cases it, and the other
 // cases (a phone color, a themed console, a seller-invented name, an accessory, a bundle, something that does not exist) go through the same code.
 import {
+  nameScore as nameScoreFn,
+  assessEvidence as assessLive,
   assessEvidence,
   classifySource,
   describeVerdictForAi,
@@ -52,6 +54,32 @@ const XBOX_PAGE: FakePage = {
   title: "Xbox Series X | Xbox",
   text: "Xbox Series X – 1TB Carbon Black. Xbox Series X – 2TB Galaxy Black Special Edition. Xbox Series X – 2TB Digital Edition White. Play thousands of games.",
 };
+
+
+// Strings taken from the first LIVE run of the verifier (the user's PC, 2026-10-15): real pages put a claim's words in captions and buttons.
+{
+  const real = [
+    ["An XBOX Series X Galaxy and an adaptive joystick controller.", "Xbox Series X Galaxy"],
+    ["Buy Halo Infinite XBOX Series X", "Xbox Series X Halo Infinite Edition"],
+  ] as const;
+  for (const [text, claim] of real) {
+    check(`a live caption / button is not a product name: "${text}"`, nameScoreFn(text, claim) < 0, nameScoreFn(text, claim));
+  }
+  for (const [text, claim] of [
+    ["Microsoft Xbox Series X Halo Infinite Limited Edition", "Xbox Series X Halo Infinite Edition"],
+    ["Xbox Series X 2TB Galaxy Black Special Edition", "Xbox Series X Galaxy"],
+    ["Halo Infinite Limited Edition Xbox Series X + Controller", "Xbox Series X Halo Infinite Edition"],
+  ] as const) {
+    check(`a product title reads as a name: "${text}"`, nameScoreFn(text, claim) >= 0, nameScoreFn(text, claim));
+  }
+  const v = assessLive("Xbox Series X Galaxy", [{ title: "Xbox | Microsoft Store", url: "https://www.microsoft.com/en-us/store/b/xbox", excerpt: "Shop consoles\nAn XBOX Series X Galaxy and an adaptive joystick controller.\nGames" }]);
+  check("the claim still verifies from that page, but the caption is never used as the product's name", v.status === "verified" && v.officialName === undefined, { status: v.status, name: v.officialName });
+  const h = assessLive("Xbox Series X Halo Infinite Edition", [
+    { title: "Xbox", url: "https://www.xbox.com/en-US/games/halo-infinite", excerpt: "Buy Halo Infinite XBOX Series X" },
+    { title: "Walmart", url: "https://www.walmart.com/ip/halo", excerpt: "Microsoft Xbox Series X Halo Infinite Limited Edition\nIn stock" },
+  ]);
+  check("the product title (not the 'Buy ...' button) becomes the official name", h.officialName === "Microsoft Xbox Series X Halo Infinite Limited Edition", h.officialName);
+}
 
 run(async () => {
   section("Xbox Series X 2TB Galaxy Black Special Edition: the exact title finds nothing, the plan keeps going until the manufacturer's page");

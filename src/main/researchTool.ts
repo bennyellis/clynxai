@@ -1,7 +1,7 @@
 // The research_product chat tool, with everything it touches passed in so the whole path (chat -> tool -> evidence check -> Database write) can be
 // run end to end in a test. index.ts supplies the real Database, the real web evidence check and the real research starter.
 import type { Store } from "./store.js";
-import { reconcileVerdict, type VariantVerdict } from "./variantEvidence.js";
+import { nameScore, reconcileVerdict, type VariantVerdict } from "./variantEvidence.js";
 import { identityTokens } from "./variantIdentity.js";
 import { createdVariantMessage, decideResearchTarget, publicHttpUrls, type TrackedProduct } from "./variantResearch.js";
 
@@ -62,7 +62,8 @@ function cleanOfficialName(name: string | undefined, claim: string): string | nu
   const cleaned = name.replace(/\s+/g, " ").replace(/^[\W_]+|[\W_]+$/g, "").trim();
   if (cleaned.length < claim.length - 2 || cleaned.length > 90 || /[<>{}\[\]]/.test(cleaned)) return null;
   const have = new Set(identityTokens(cleaned));
-  return identityTokens(claim).every((t) => have.has(t)) ? cleaned : null;
+  // It has to read like a product name (not a caption or a button) and hold every word of the claim.
+  return nameScore(cleaned, claim) >= 0 && identityTokens(claim).every((t) => have.has(t)) ? cleaned : null;
 }
 
 export async function runResearchProductTool(args: Record<string, unknown>, userMessage: string | undefined, deps: ResearchToolDeps): Promise<string> {

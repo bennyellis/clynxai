@@ -61,3 +61,21 @@ BETA TESTER ACCESS (separate change, same commit series)
  Desktop: Account screen shows "Beta Tester - Unlimited access"; the app accepts the new plan value from the server.
  Tests: cloud/test/testerPlan.test.ts (6, pass, no database needed); server typecheck clean. The database-backed cloud suites were not run (no Postgres/Redis in this session).
  Deployment: the server must be updated (it must know the "tester" plan) before the command is used; the desktop change ships in the Beta 9 installer.
+
+FIRST LIVE RUN (user's PC, 2026-10-15) - REAL-WORLD RESULT
+ node scripts\variant-live-check.cjs, the three claims:
+   Xbox Series X 2TB Galaxy Black Special Edition  -> VERIFIED (microsoft.com store page, manufacturer)
+   Xbox Series X Halo Infinite Edition             -> VERIFIED (walmart.com and amazon.com list "Halo Infinite Limited Edition"; xbox.com page matched too)
+   Xbox Series X Galaxy                            -> VERIFIED (microsoft.com store page)
+ EXACT RUNTIME FAILURE of the build that returned UNVERIFIED: on that PC both DuckDuckGo endpoints fail at the connection level ("fetch failed" for the HTML and the Lite
+   endpoint, every query). The old code searched through DuckDuckGo only, so every search errored, came back empty and ended as "UNVERIFIED". Bing answered every query
+   (6 results each) and the manufacturer and retailer pages were fetched as plain HTML (200, 2k-50k characters) with no browser needed. So it was neither a bot check nor
+   JavaScript-only pages here: it was a single search backend that could not be reached. The multi-backend search is the fix; a rebuilt installer is required.
+ Found in that output and fixed afterwards: the extracted "official name" was junk for two claims ("An XBOX Series X Galaxy and an adaptive joystick controller." is an
+   image caption; "Buy Halo Infinite XBOX Series X" is a button on the game's page), and the verified variant would have been filed under it. Names are now scored
+   (a caption, a button or a sentence scores below zero and is never used; a title with an edition word scores higher), the best-reading name across all sources wins
+   ("Microsoft Xbox Series X Halo Infinite Limited Edition"), and the entry is renamed only to a name that reads as a product title. Connection errors now show their
+   cause code in the trace. Regression checks use the real strings from this run.
+ Remaining weakness the run exposed: the xbox.com page for the Halo Infinite GAME mentions "Xbox Series X", so a manufacturer page about a game can count as a full match
+   for a console edition; here the retailers independently list the edition, but a claim supported only by a game page would be over-credited. The verdict also
+   does not yet tell a console from a game or accessory of the same name.

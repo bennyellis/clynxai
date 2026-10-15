@@ -193,18 +193,40 @@ export function tightestSpan(stream: string[], wanted: string[]): { size: number
   return best;
 }
 
-/** What a source calls the product: the shortest line / sentence / tile of its text that holds every word of the claim. */
-function officialNameIn(excerpt: string, wanted: string[]): string | undefined {
+const EDITION_WORDS = new Set(["special", "limited", "collector", "collectors", "anniversary", "exclusive", "deluxe", "signature", "commemorative", "founders"]);
+
+/**
+ * How much a piece of page text reads like a product's NAME rather than a caption, a button or a sentence. Real pages put the claim's words in image captions
+ * ("An Xbox Series X Galaxy and an adaptive joystick controller."), calls to action ("Buy Halo Infinite Xbox Series X") and prose; a product name starts with the
+ * product, may carry an edition word, and is not a sentence. A name below zero is not used.
+ */
+export function nameScore(name: string, claim: string): number {
+  const toks = identityTokens(name);
+  const claimToks = identityTokens(claim);
+  let score = 0;
+  if (/^(?:a|an|the|buy|shop|get|new|introducing|save|order|see|view|discover|explore|play|pre-?order|learn)\b/i.test(name)) score -= 6;
+  if (/\b(?:and an?|with an?|for your|your|you|our|we|is|are)\b/i.test(name)) score -= 4;
+  if (/[.!?]$/.test(name)) score -= 3;
+  if (toks.some((t) => EDITION_WORDS.has(t))) score += 3;
+  if (toks.length && claimToks.includes(toks[0])) score += 2;
+  if (name.length <= 70) score += 2;
+  else if (name.length > 100) score -= 2;
+  return score;
+}
+
+/** What a source calls the product: the best-reading line / sentence / tile of its text that holds every word of the claim (null when none reads like a name). */
+function officialNameIn(excerpt: string, wanted: string[], claim: string): string | undefined {
   const segments = excerpt.split(/[\n\r|•·]+|(?<=[.!?])\s+/);
-  let best: string | undefined;
+  let best: { text: string; score: number } | undefined;
   for (const seg of segments) {
     const cleaned = seg.replace(/[–—]/g, " ").replace(/\s+/g, " ").trim();
     if (cleaned.length < 6 || cleaned.length > 140) continue;
     const toks = new Set(normalizeName(cleaned).split(/[^a-z0-9]+/).filter(Boolean));
     if (!wanted.every((t) => t.length < 2 || toks.has(t))) continue;
-    if (!best || cleaned.length < best.length) best = cleaned;
+    const score = nameScore(cleaned, claim);
+    if (!best || score > best.score || (score === best.score && cleaned.length < best.text.length)) best = { text: cleaned, score };
   }
-  return best;
+  return best && best.score >= 0 ? best.text : undefined;
 }
 
 /** The words of one search result / page against the claim. */
@@ -254,7 +276,7 @@ export function assessSource(claim: string, input: EvidenceInput, brandHints: st
     fullMatch,
     negative,
     scattered: allPresent && !near,
-    officialName: fullMatch ? officialNameIn(`${input.title}\n${input.excerpt}`, wanted) : undefined,
+    officialName: fullMatch ? officialNameIn(`${input.title}\n${input.excerpt}`, wanted, claim) : undefined,
     excerpt: input.excerpt.slice(0, 2500),
   };
 }
@@ -290,7 +312,7 @@ export function assessEvidence(
   const rank = { manufacturer: 0, retailer: 1, reference: 2, other: 3, marketplace: 4 } as const;
   const officialName = [...full]
     .filter((s) => !s.negative && s.officialName)
-    .sort((a, b) => rank[a.sourceClass] - rank[b.sourceClass])[0]?.officialName;
+    .sort((a, b) => nameScore(b.officialName!, claim) + (b.sourceClass === "manufacturer" ? 1 : 0) - (nameScore(a.officialName!, claim) + (a.sourceClass === "manufacturer" ? 1 : 0)) || rank[a.sourceClass] - rank[b.sourceClass])[0]?.officialName;
   const base = { claim, officialName, sources: sources.slice(0, 12), matchedAttributes, missingAttributes, searched: opts.searched ?? [], checkedAt: opts.now ?? Date.now() };
 
   const positive = full.filter((s) => !s.negative);

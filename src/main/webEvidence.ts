@@ -276,7 +276,8 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
       } catch (err) {
         // A backend that cannot be reached at all is left alone for a minute, so a down network is one failure per backend, not dozens.
         blockedUntil.set(backend.name, now() + Math.min(blockedFor, 60_000));
-        trace.searches.push({ query, backend: backend.name, outcome: "error", results: 0, detail: (err as Error).message });
+        const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+        trace.searches.push({ query, backend: backend.name, outcome: "error", results: 0, detail: `${(err as Error).message}${cause?.code || cause?.message ? ` (${cause.code ?? cause.message})` : ""}` });
       }
     }
     return [];
