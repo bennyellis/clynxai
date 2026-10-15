@@ -1811,7 +1811,7 @@ export class Store {
   // deal for it (see scrapeEngine.ts's evaluateListing), plus whatever the
   // user adds/removes by hand from the product's own page.
 
-  private static readonly MAX_IMAGES_PER_PRODUCT = 20;
+  static readonly MAX_IMAGES_PER_PRODUCT = 20;
 
   listProductImages(productId: string): ProductImage[] {
     const rows = this.db

@@ -1,0 +1,50 @@
+CLYNX - CONVERSATIONAL INTELLIGENCE IMPROVEMENTS (branch master-wveebf, version 0.3.0-beta.10)
+
+WHAT WAS IMPLEMENTED
+Phase 1 - photos from chat
+- New chat tool add_reference_photos (Database, product and global chats). Uses the open product automatically, or a product named in the message.
+- Default 8 photos (1-12), searching official AND real-world ("used for sale") photos. Same engine as the Database button (src/main/referencePhotos.ts): image verification, duplicate prevention, 20-image gallery cap, your chosen thumbnail is kept, nothing existing is pushed out. Replies state the number actually saved.
+- A pasted Google Images / search-results link is treated as a search (its query is used) and Clynx is told it did NOT open it as a page.
+Phase 2 - behavior (shared, not per-prompt)
+- Persona "ACTING RULES": act on clear requests, use the open product, pick defaults, no A/B menus, brief replies. Old "ask one follow-up question" allowance removed.
+- Deterministic code (src/main/chatIntent.ts): "both / yes / do it / the first one / no" are resolved against Clynx's last question and handed to the model as an explicit instruction; repeating yourself or frustration forces "ask nothing".
+- Promise guard: if a reply says "I'll pull both..." and no tool ran, the text is withheld, the model is told to call the tool, one retry; if it still doesn't, the reply honestly says nothing was run.
+Phase 3 - context and speed
+- The full Database list is no longer injected. Prompt carries only relevant products (open product, parent/variants, starred, name matches) + a find_products tool. Prompt size stays flat as the Database grows.
+- Open product's thumbnail is sent (low detail) only when the message is about how it looks.
+- Independent tools in one round (web_research, find_products, add_reference_photos) now run in parallel.
+- "Have you sold one before?" asked only once per conversation, only after researching a NEW product, never mid-task.
+- Per-turn timing recorded (turn, each AI round, each tool) into the existing metrics and console.
+- Reasoning effort is configurable (default unchanged: minimal, same model) for benchmarking.
+
+ROLLBACK (no rebuild): config.chatFlags = { followUpHints, promiseGuard, leanContext, thumbnail, parallelTools: false, reasoningEffort }. Each is on unless set false. Env CLYNX_CHAT_REASONING overrides effort.
+
+MEASURED (this sandbox, scripted model, real Store and real chat/tool code)
+- npm run typecheck: clean. npm run build: OK.
+- npm test: all files pass except startupErrors.test.ts, which also fails on the untouched branch (environmental, pre-existing).
+- New chatBehavior.test.ts: 83 checks, 0 failed.
+- Galaxy reference-photo replay: promise caught, tool call forced, 6 photos saved to the variant only, thumbnail unchanged, 3 AI calls; third "both" gets the no-questions instruction; pasted Google URL becomes the query "xbox series x galaxy black".
+- Prompt size: ~flat (60 product lines) with 900 Database products vs 900 lines before.
+- Three 200 ms tools: ~200 ms in parallel vs ~600 ms sequential.
+
+NOT MEASURED / LIMITATIONS
+- Live 23-scenario audit NOT run: this sandbox has no OpenAI key or network. No live latency, task-completion, question-count or unsupported-claim numbers exist yet, and real-model behavior with the new prompts is unproven. Nothing here is a live result.
+- Reasoning-effort benchmark NOT run, model NOT changed.
+- Sequential tool calls: only the independent read-style tools were parallelized; research_product and writes stay sequential on purpose.
+- Promise detection is phrase-based; unusual wording can slip past it.
+
+TO RUN THE LIVE COMPARISON (your PC, costs a few cents)
+  $env:OPENAI_API_KEY="sk-..."
+  $env:CLYNX_AUDIT_MODE="baseline"
+  $env:CLYNX_AUDIT_LABEL="before"
+  node scripts\chat-audit.cjs
+  Remove-Item Env:CLYNX_AUDIT_MODE
+  $env:CLYNX_AUDIT_LABEL="after"
+  node scripts\chat-audit.cjs
+  $env:CLYNX_CHAT_REASONING="low"
+  $env:CLYNX_AUDIT_LABEL="after-low"
+  node scripts\chat-audit.cjs
+Compare chat-audit-results-before.json / -after.json / -after-low.json.
+(Baseline mode switches the new behaviors off; prompts/tools text changes remain, so it is an approximation of the old build.)
+
+NEW INSTALLER NEEDED: YES (main-process changes). Existing Database records, settings and chosen images untouched. Nothing published or deployed.

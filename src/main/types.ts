@@ -369,6 +369,11 @@ export interface Config {
   // makes and writes the decision to logs/identity-safeguard.jsonl without changing anything; "enforce" additionally stops a match the evidence says is a materially
   // different product from being filed, valued or added to. It never chooses another product. Uncertainty is never a veto.
   identitySafeguard?: { mode: "off" | "shadow" | "enforce" };
+  // Chat improvements, each on unless set to false in config.json (a rollback without a new build): followUpHints reads short answers ("both", "do it") and repeated
+  // or frustrated instructions in code; promiseGuard re-runs a reply that promised an action without calling a tool; leanContext lists only the relevant products
+  // instead of the whole Database; thumbnail sends the open product's picture when the message is about how it looks; parallelTools runs independent tools together.
+  // reasoningEffort ("minimal" default | "low" | "medium" | "high") is for benchmarking the chat model's reasoning setting.
+  chatFlags?: { followUpHints?: boolean; promiseGuard?: boolean; leanContext?: boolean; thumbnail?: boolean; parallelTools?: boolean; reasoningEffort?: "minimal" | "low" | "medium" | "high" };
   // Database review screen (Database > Review). It always works in REVIEW-ONLY mode: it shows suspected problems and the suggestion for each and changes nothing. `decisions`
   // (off by default, config.json only) would let a person record approve / reject for ONE suggestion at a time; even then nothing is applied to the Database by the app.
   databaseReview?: { decisions: boolean; apply?: boolean };

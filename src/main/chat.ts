@@ -4,6 +4,7 @@ import { CLYNX_VOICE } from "./voice.js";
 import { isLowAiMode } from "./aiMode.js";
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 import { describeVerdictForAi, type VariantVerdict } from "./variantEvidence.js";
+import { followUpHint, promisesAction, relevantProducts, wantsProductPicture } from "./chatIntent.js";
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -32,6 +33,8 @@ export interface ToolCall {
     | "remove_search_item"
     | "add_custom_instruction"
     | "research_product"
+    | "add_reference_photos"
+    | "find_products"
     | "web_research"
     | "add_product_watch_note"
     | "add_blacklist_term"
@@ -101,15 +104,15 @@ const DASHBOARD_TOOL_NAMES = new Set<ToolCall["name"]>([
   "web_research",
 ]);
 
-const DATABASE_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "web_research", "add_blacklist_term", "remove_blacklist_term"]);
+const DATABASE_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "add_blacklist_term", "remove_blacklist_term"]);
 
-const PRODUCT_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "web_research", "add_product_watch_note"]);
+const PRODUCT_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "add_product_watch_note"]);
 
 // Per explicit instruction — everything Dashboard can do, plus
 // research_product (Database's own product-research tool). Deliberately
 // NOT add_product_watch_note — that tool only makes sense already scoped
 // to one specific product's own page, which this bar never is.
-const GLOBAL_TOOL_NAMES = new Set<ToolCall["name"]>([...DASHBOARD_TOOL_NAMES, "research_product"]);
+const GLOBAL_TOOL_NAMES = new Set<ToolCall["name"]>([...DASHBOARD_TOOL_NAMES, "research_product", "add_reference_photos", "find_products"]);
 
 export function allowedToolNames(context: ChatContext): Set<ToolCall["name"]> {
   if (context === "dashboard") return DASHBOARD_TOOL_NAMES;
@@ -219,6 +222,36 @@ const TOOLS = [
           },
         },
         required: ["product"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "add_reference_photos",
+      description:
+        "Find more reference photos of a product already in the Database and save them to it, right now. It searches official/retailer shots AND real-world photos of actual units, downloads each candidate, drops duplicates and checks every photo is really this product before saving it, so only verified, new photos are kept. Use it whenever the user asks for more photos, pictures, images or references of a product (\"find more reference photos\", \"get more pictures of this\", \"similar to the thumbnail\"). Call it immediately with defaults: do not ask which kind of photos, how many, or from where. It never replaces a thumbnail the user chose and never exceeds the gallery limit. The result says how many photos were really saved: relay that number exactly.",
+      parameters: {
+        type: "object",
+        properties: {
+          product: { type: "string", description: "The Database product's name. Omit to use the product the user currently has open (the right choice whenever they say \"this\", \"it\" or \"the thumbnail\")." },
+          count: { type: "number", description: "How many more photos to look for. Omit for the default (8); only set it if the user gave a number." },
+          searchPhrase: { type: "string", description: "Extra words to search images for, only if the user gave them (for example the query inside a Google Images link they pasted)." },
+          url: { type: "string", description: "A search-results link the user pasted (Google Images, Bing...): its search words are used as the image search." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "find_products",
+      description:
+        "Look up products in the user's Database by name: returns the best matches with their status and value. The chat only lists the open product and a few related ones, so use this whenever you need to know whether the Database has some other product, or which entries exist for a family or edition.",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string", description: "Words from the product's name, e.g. 'galaxy black xbox'." } },
+        required: ["query"],
       },
     },
   },
@@ -565,7 +598,7 @@ You have full admin access to this app's own settings and controls. Whatever the
 - add_blacklist_term / remove_blacklist_term — manage the scanning blacklist directly from here. Only for things categorically unrelated to reselling (real estate, job postings, services, event tickets), not for resalable items that are just uninteresting.
 - create_watch / pause_watch / resume_watch / delete_watch / list_watch_matches — a Watch is fundamentally different from a Search For item: it's PERSISTENT (survives app/scanner restarts, keeps looking even with the Scanner stopped), has its own optional conditions (price/profit/discount/freshness/location), and alerts the moment a real match appears. Use "watch for X" / "keep an eye out for X" / "alert me when X shows up" as the signal to create one, not add_search_item — the Watch screen (eye icon in the sidebar) is where the user reviews/edits them directly, so you don't need to explain their conditions back in full, just confirm what was created.${
     isGlobal
-      ? '\n- research_product — build (or refresh) a Database profile for a product, right from wherever the user currently is, without sending them to the Database screen first. Same tool the Database assistant itself uses — see its own description for when to call it.'
+      ? '\n- research_product — build (or refresh) a Database profile for a product, right from wherever the user currently is, without sending them to the Database screen first. Same tool the Database assistant itself uses — see its own description for when to call it.\n- add_reference_photos / find_products — find and save more verified reference photos for a Database product (call it at once when asked, no questions), and look products up by name. Same tools as the Database assistant.'
       : ""
   }
 
@@ -606,10 +639,17 @@ ${listingTail || "(none yet)"}
 This renders in a normal chat window, so write like a person chatting, not a report, and stay in character as Clynx. After you use a tool, say what you did in a line or two in your own words (e.g. "Done, I'll hunt for Series S under $250 next time I scan" beats "Added to Search For list"), and mention anything the tool result says they still need to do (like starting the scanner).`;
 }
 
-function buildDatabaseSystemPrompt(products: ProductProfile[], blacklistTerms: BlacklistTerm[], focus: ProductProfile | null = null): string {
+function buildDatabaseSystemPrompt(
+  products: ProductProfile[],
+  blacklistTerms: BlacklistTerm[],
+  focus: ProductProfile | null = null,
+  // lean: list only the products relevant to this message (the open product with its parent/variants, starred ones, name matches) instead of the whole Database
+  lean: { message: string; history: ChatMessage[] } | null = null
+): string {
+  const shown = lean ? relevantProducts(products, lean.message, lean.history, focus) : products;
   const blacklistList = blacklistTerms.length ? blacklistTerms.map((t) => `- "${t.term}"${t.source === "ai" ? " (auto-added)" : ""}`).join("\n") : "(none yet)";
-  const productList = products.length
-    ? products
+  const productList = shown.length
+    ? shown
         .map((p) => {
           // Real personal sales history the user typed in themselves — see
           // types.ts's ProductProfile — is worth more than anything web
@@ -652,9 +692,11 @@ ${whereYouAre("database")} This chat has its own conversation and its own tools,
 Your tools:
 - web_research — look something up on the web yourself, like a person with a search engine, and explain what you found in your own words. Use it for questions and opinions ("is the Series S worth flipping?", "what breaks on these?"); it doesn't save anything.
 - research_product — build (or refresh) an in-depth product profile from a real live web search for specs/variants/common issues (not just your own training knowledge), saved to the Database so it's there for next time. Call this whenever the user asks you to learn about/research/build a profile for a product. A broad, family-level request ("research iPhones", "look into Nintendo Switch") is completely normal — call this once with the general family name and let the writeup itself cover the real variants (storage sizes, generations, OLED vs base, etc.); don't refuse it or demand they narrow it down to one exact SKU first. Only ask a clarifying question if the request could genuinely mean different, unrelated products. Pass the product the user asked about, in their words. A family-level request gets the general name ("Xbox Series X", "iPhone", "Nintendo Switch"). A request for ONE specific edition, color, capacity, bundle or regional model gets its FULL name exactly as they said it ("Xbox Series X Galaxy", "Xbox Series X 2TB Galaxy Black Special Edition", "iPhone 15 Pro 256GB Natural Titanium"): that is a different product from the general one, and the app checks it against manufacturer and retailer evidence and files it as its own entry linked to the general one. So NEVER shorten a named version to its parent, NEVER ask whether to "keep it under the main entry" or "flag it as a separate variant" (the app does that itself), and NEVER ask whether it is "official" or an aftermarket custom first: call the tool right away and report what it says. A parenthetical qualifier or a list tacked onto a general name is still wrong (NOT "Xbox Series X (console, all variants/bundles/accessories)").
+- add_reference_photos — find more reference photos of a product and save them to it right now (official/retailer shots and real-world photos of actual units, each verified as this product, no duplicates, never replacing a thumbnail the user chose). Call it the moment the user asks for more photos, pictures or references, with no questions: it defaults to the product they have open. Relay the number of photos it says it saved, exactly.
+- find_products — look up products in the Database by name when you need one that is not in the short list below.
 - add_blacklist_term / remove_blacklist_term — manage the scanning blacklist: any listing whose title matches a blacklisted term gets skipped automatically before it's ever opened, with no credits spent on it. Only for things categorically unrelated to reselling (real estate, rentals, job postings, services, event tickets), not just uninteresting resalable items. Call add_blacklist_term whenever the user says to blacklist/ignore/stop showing something like that.
 
-${focusSection}Existing products in the Database:
+${focusSection}${lean ? `The Database has ${products.length} products. The ones relevant to this conversation (look up any other with find_products):` : "Existing products in the Database:"}
 ${productList}
 
 Current blacklist:
@@ -721,6 +763,8 @@ ${facts}
 Your tools:
 - web_research — look something up on the web yourself, like a person with a search engine, and explain what you found in your own words (specs, faults, what it really sells for, what to check). It doesn't save anything.
 - research_product — refresh this product's research from a fresh live web search. Call it with "${product.name}" as the product argument to refresh this product. If the user names a more specific version of it (an edition, color, capacity, bundle or regional model) or a different product, pass THAT full name exactly as they said it: a specific version is its own product (checked against evidence and filed under this one), so never shorten it back to "${product.name}".
+- add_reference_photos — find more reference photos of THIS product and save them to it right now (verified, no duplicates, never replacing a thumbnail the user chose). Call it the moment they ask for more photos or pictures, with no questions; relay the number it says was saved.
+- find_products — look up other products in the Database by name.
 - add_product_watch_note — log something to actively check for in real listings of this product: a commonly bundled extra that adds resale value and that sellers often photograph without mentioning in the title (games with a console, a lens with a camera, cables/accessories), or a condition red flag. Call this whenever the user describes something like that. If they mention something bundle- or condition-related but haven't given you a clear, actionable instruction yet, ask a short clarifying question first (e.g. "should I flag listings that mention games, or just check photos for game cases?").
 
 This renders in a normal chat window, so write like a person chatting, not a report, and stay in character as Clynx. After using a tool, say what you did in your own words.`;
@@ -745,7 +789,8 @@ const OPENAI_TIMEOUT_MS = 45_000;
 async function streamOnce(
   messages: unknown[],
   tools: typeof TOOLS | null,
-  onChunk: (delta: string) => void
+  onChunk: (delta: string) => void,
+  effort: "minimal" | "low" | "medium" | "high" = "minimal"
 ): Promise<{ content: string; toolCalls: AccumulatedToolCall[] }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
@@ -760,7 +805,7 @@ async function streamOnce(
         // gpt-5-mini is a reasoning model — verified live it silently burns
         // the whole completion-token budget on invisible reasoning tokens
         // without this (see openai.ts).
-        reasoning_effort: "minimal",
+        reasoning_effort: effort,
         stream: true,
         // OpenAI rejects tool_choice entirely when no tools array is
         // present (verified live: 400 "'tool_choice' is only allowed when
@@ -842,6 +887,25 @@ async function streamOnce(
 // won't stop calling tools can't hang the request forever.
 const MAX_TOOL_ROUNDS = 4;
 
+/** Timing and decisions of one chat turn: what each model round and each tool cost, and which safeguards stepped in. Filled in by streamChat when given one. */
+export interface ChatTrace {
+  rounds: Array<{ round: number; ms: number; firstWordMs: number | null; promptChars: number; toolCalls: number }>;
+  tools: Array<{ name: string; ms: number; parallel: boolean }>;
+  totalMs: number;
+  aiCalls: number;
+  /** Safeguards that acted: "follow-up-hint", "frustration", "thumbnail", "promise-guard". */
+  guards: string[];
+}
+
+// Tools that only read, or that touch one product's photos: several of them in one round run at the same time instead of one after another.
+const PARALLEL_SAFE_TOOLS = new Set<string>(["web_research", "find_products", "add_reference_photos"]);
+
+type EffortSetting = "minimal" | "low" | "medium" | "high";
+function chatEffort(config: Config): EffortSetting {
+  const v = (config as { chatFlags?: { reasoningEffort?: string } }).chatFlags?.reasoningEffort ?? process.env.CLYNX_CHAT_REASONING ?? "minimal";
+  return v === "low" || v === "medium" || v === "high" ? v : "minimal";
+}
+
 export async function streamChat(
   userMessage: string,
   history: ChatMessage[],
@@ -863,24 +927,48 @@ export async function streamChat(
   // alongside the text in one normal request, tool-calling and streaming
   // both included.
   attachments: ChatAttachment[] = [],
-  watches: Watch[] = []
+  watches: Watch[] = [],
+  trace?: ChatTrace
 ): Promise<string> {
+  const turnStart = Date.now();
+  // Feature flags (config.json "chatFlags"): every improvement below is on unless explicitly set to false, so any one can be switched off without a new build.
+  const flagsRaw = (config as { chatFlags?: { followUpHints?: boolean; promiseGuard?: boolean; leanContext?: boolean; thumbnail?: boolean; parallelTools?: boolean } }).chatFlags ?? {};
+  const flags = {
+    followUpHints: flagsRaw.followUpHints !== false,
+    promiseGuard: flagsRaw.promiseGuard !== false,
+    leanContext: flagsRaw.leanContext !== false,
+    thumbnail: flagsRaw.thumbnail !== false,
+    parallelTools: flagsRaw.parallelTools !== false,
+  };
+  const guards: string[] = [];
   const systemPrompt =
     context === "dashboard" || context === "global"
       ? buildDashboardSystemPrompt(config, recentLogs, recentListings, blacklistTerms, products.length, watches, context === "global")
       : context === "product" && currentProduct
         ? buildProductSystemPrompt(currentProduct)
-        : buildDatabaseSystemPrompt(products, blacklistTerms, currentProduct);
+        : buildDatabaseSystemPrompt(products, blacklistTerms, currentProduct, flags.leanContext ? { message: userMessage, history } : null);
   const tools = toolsForContext(context);
-  const userContent: unknown = attachments.length
-    ? [
-        { type: "text", text: userMessage.trim() || "(see attached photo — what is this?)" },
-        ...attachments.map((a) => ({ type: "image_url", image_url: { url: a.dataUri } })),
-      ]
-    : userMessage;
+
+  // Short answers ("both", "yes", "do it", "the first one") and repeated or frustrated instructions are read in code, not left to the model to infer.
+  const hint = flags.followUpHints ? followUpHint(userMessage, history) : null;
+  if (hint) guards.push(/repeating|frustrated/.test(hint) ? "frustration" : "follow-up-hint");
+
+  // The open product's picture goes along only when the message is about how it looks (one small image, low detail), so the model can see "the thumbnail".
+  const thumb = currentProduct?.imageUrl && currentProduct.imageUrl.startsWith("data:image") ? currentProduct.imageUrl : null;
+  const sendThumb = flags.thumbnail && !!thumb && attachments.length === 0 && wantsProductPicture(userMessage);
+  if (sendThumb) guards.push("thumbnail");
+  const userContent: unknown =
+    attachments.length || sendThumb
+      ? [
+          { type: "text", text: userMessage.trim() || "(see attached photo — what is this?)" },
+          ...(sendThumb ? [{ type: "text", text: `(The attached picture is the thumbnail of "${currentProduct!.name}", the product the user has open.)` }, { type: "image_url", image_url: { url: thumb, detail: "low" } }] : []),
+          ...attachments.map((a) => ({ type: "image_url", image_url: { url: a.dataUri } })),
+        ]
+      : userMessage;
   const messages: unknown[] = [
     { role: "system", content: systemPrompt },
     ...history.slice(-12),
+    ...(hint ? [{ role: "system", content: hint }] : []),
     { role: "user", content: userContent },
   ];
 
@@ -889,35 +977,71 @@ export async function streamChat(
   // Adding only queues it now (the scanner picks it up on its next pass), and Clynx confirms in its own words using what the
   // tool result says. Everything the model says is streamed live, including a lead-in before a tool call ("Let me dig into
   // that."), so it reads like a person thinking out loud; text from separate rounds is separated by a blank line.
+  let roundNo = 0;
   const streamRound = async (roundTools: typeof tools | null) => {
     const needsGap = fullContent.length > 0;
     let started = false;
-    const result = await streamOnce(messages, roundTools, (delta) => {
-      if (!started) {
-        if (!delta.trim()) return;
-        started = true;
-        if (needsGap) onChunk("\n\n");
-      }
-      onChunk(delta);
-    });
+    const roundStart = Date.now();
+    let firstWordMs: number | null = null;
+    const result = await streamOnce(
+      messages,
+      roundTools,
+      (delta) => {
+        if (!started) {
+          if (!delta.trim()) return;
+          started = true;
+          firstWordMs = Date.now() - roundStart;
+          if (needsGap) onChunk("\n\n");
+        }
+        onChunk(delta);
+      },
+      chatEffort(config)
+    );
+    trace?.rounds.push({ round: ++roundNo, ms: Date.now() - roundStart, firstWordMs, promptChars: JSON.stringify(messages).length, toolCalls: result.toolCalls.length });
     const text = result.content.trim();
     if (text) fullContent += (fullContent ? "\n\n" : "") + text;
     return result;
   };
-  // Set once research_product succeeds — per explicit instruction, every research reply ends with a prompt asking whether the
-  // user has sold this item before, so they're invited to log their real sales history (see ProductProfile's
-  // resalePriceUsd/resaleTimeToSell) instead of that feature going unused. Deterministic rather than left to the model to
-  // remember to ask every single time.
-  let researchedProduct = false;
+  // After a NEW product is researched, the reply ends by inviting the user to log their own sales history (see ProductProfile's resalePriceUsd/resaleTimeToSell).
+  // It is asked once per conversation, never mid-task (a follow-up answer, a repeated or frustrated instruction), never for a product whose sales are already
+  // logged, and never after other tools: otherwise it is noise on every reply.
+  let researchedNewProduct = false;
+  let toolsRunThisTurn = 0;
   const RESOLD_PROMPT = " By the way, have you sold one of these before? If you add what it went for and how long it took on this product's page, I'll use it to judge deals better.";
-  const withResoldPrompt = (content: string) => (researchedProduct ? `${content}${RESOLD_PROMPT}` : content);
+  const alreadyAskedResold = history.some((m) => m.role === "assistant" && /have you sold one of these before/i.test(m.content));
+  const withResoldPrompt = (content: string) =>
+    researchedNewProduct && !alreadyAskedResold && !hint && currentProduct?.resalePriceUsd == null ? `${content}${RESOLD_PROMPT}` : content;
+  const finish = (content: string) => {
+    if (trace) {
+      trace.totalMs = Date.now() - turnStart;
+      trace.aiCalls = trace.rounds.length;
+      trace.guards = guards;
+    }
+    return withResoldPrompt(content);
+  };
+  let promiseGuardUsed = false;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const lenBefore = fullContent.length;
     const result = await streamRound(tools);
 
-    // No tool call this round: that was the answer.
+    // No tool call this round: that was the answer, unless it PROMISED an action that no tool performed. A promise with nothing behind it is the failure
+    // this guards against: one more round, told to call the tool now or say plainly that it cannot.
     if (!result.toolCalls.length) {
-      return withResoldPrompt(fullContent);
+      if (flags.promiseGuard && !promiseGuardUsed && tools.length > 0 && toolsRunThisTurn === 0 && promisesAction(result.content)) {
+        promiseGuardUsed = true;
+        guards.push("promise-guard");
+        fullContent = fullContent.slice(0, lenBefore);
+        messages.push({ role: "assistant", content: result.content });
+        messages.push({
+          role: "system",
+          content:
+            "You just said you would do something but called no tool, so nothing happened. Call the right tool NOW with sensible defaults, without asking the user anything. If no tool can do it, say so in one plain sentence and say what you can do instead. Do not promise again.",
+        });
+        continue;
+      }
+      if (promiseGuardUsed && toolsRunThisTurn === 0 && promisesAction(result.content)) fullContent += " (I haven't actually run anything yet.)";
+      return finish(fullContent);
     }
 
     messages.push({
@@ -930,25 +1054,38 @@ export async function streamChat(
       })),
     });
 
-    for (const tc of result.toolCalls) {
+    const runOne = async (tc: { id: string; name: string; args: string }, parallel: boolean): Promise<{ id: string; content: string }> => {
+      const started = Date.now();
       let toolResult: string;
       try {
         const args = tc.args ? JSON.parse(tc.args) : {};
         toolResult = await executeTool({ name: tc.name as ToolCall["name"], args, userMessage });
-        if (tc.name === "research_product" && !toolResult.startsWith("Failed:")) {
-          researchedProduct = true;
-        }
+        if (tc.name === "research_product" && /^Started researching|^Added|new entry/.test(toolResult) && !toolResult.startsWith("Failed:")) researchedNewProduct = true;
       } catch (err) {
         toolResult = `Failed: ${(err as Error).message}`;
       }
-      messages.push({ role: "tool", tool_call_id: tc.id, content: toolResult });
+      toolsRunThisTurn++;
+      trace?.tools.push({ name: tc.name, ms: Date.now() - started, parallel });
+      return { id: tc.id, content: toolResult };
+    };
+    // Independent tools in one round run at the same time (a web search and a Database lookup need not wait for each other); everything that changes settings,
+    // the scanner or the Search For list keeps its order.
+    const safe = flags.parallelTools ? result.toolCalls.filter((tc) => PARALLEL_SAFE_TOOLS.has(tc.name)) : [];
+    const parallelRun = safe.length > 1 ? Promise.all(safe.map((tc) => runOne(tc, true))) : null;
+    const answers = new Map<string, string>();
+    for (const tc of result.toolCalls) {
+      if (parallelRun && safe.includes(tc)) continue;
+      const r = await runOne(tc, false);
+      answers.set(r.id, r.content);
     }
+    if (parallelRun) for (const r of await parallelRun) answers.set(r.id, r.content);
+    for (const tc of result.toolCalls) messages.push({ role: "tool", tool_call_id: tc.id, content: answers.get(tc.id) ?? "Failed: no result" });
   }
 
   // Hit the round cap with the model still wanting to call tools — force a
   // final text-only reply so the user gets a wrap-up instead of nothing.
   await streamRound(null);
-  return withResoldPrompt(fullContent);
+  return finish(fullContent);
 }
 
 export interface DealNarrationContext {

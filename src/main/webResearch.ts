@@ -18,6 +18,7 @@ import { isLowAiMode } from "./aiMode.js";
 import { assessEvidence, describeVerdictForAi, verifyVariant, type VariantVerdict, type VerifyDeps } from "./variantEvidence.js";
 import { extractVariantAttributes } from "./variantIdentity.js";
 import { isPublicHttpUrl } from "./variantResearch.js";
+import { queryFromSearchUrl } from "./searchLinks.js";
 import { createEvidenceDeps, extractEvidenceText, searchWasUnavailable, type EvidenceDeps } from "./webEvidence.js";
 import { checkBrowsers } from "./browserCheck.js";
 import { getStealthChromium } from "./stealthBrowser.js";
@@ -290,7 +291,11 @@ export async function lookUpWithDeps(query: string, deps: VerifyDeps, url: strin
   const evidenceInputs: Array<{ title: string; url: string; excerpt: string }> = [];
   const userUrls: string[] = [];
 
-  if (url) {
+  // A pasted search-results link (Google / Bing / eBay...) is not a page that can be read; the words it searched for are searched instead.
+  const linkQuery = url ? queryFromSearchUrl(url) : null;
+  if (url && linkQuery) {
+    blocks.push(`The link the user gave is a search-results page (searched for "${linkQuery}"), not a product page. I did not read it as a page; I used its search words as the search instead. Do NOT say you opened it.`);
+  } else if (url) {
     if (!isPublicHttpUrl(url)) {
       blocks.push(`The address given (${url}) is not a public web page, so I did not open it.`);
     } else {
@@ -307,13 +312,14 @@ export async function lookUpWithDeps(query: string, deps: VerifyDeps, url: strin
 
   let results: Array<{ title: string; url: string; snippet: string }> = [];
   let searchFailed: string | null = null;
-  if (q) {
+  for (const searchQ of [...new Set([q, linkQuery ?? ""].filter(Boolean))]) {
     try {
-      results = await deps.search(q, 5);
+      for (const r of await deps.search(searchQ, 5)) if (!results.some((x) => x.url === r.url)) results.push(r);
     } catch (err) {
       searchFailed = (err as Error).message;
     }
   }
+  results = results.slice(0, 6);
   const searchTrace = deps.trace?.();
   if (q && results.length === 0 && searchTrace && searchTrace.searches.length > 0 && searchTrace.searches.every((x) => x.outcome === "blocked" || x.outcome === "error")) {
     blocks.push(`The web search itself was blocked or failed (${searchTrace.searches.slice(0, 3).map((x) => `${x.backend}: ${x.detail ?? x.outcome}`).join("; ")}). Say the lookup failed and offer to retry; do NOT say the search found nothing.`);
@@ -953,7 +959,7 @@ export interface ReferenceCandidate {
   label: string;
 }
 
-async function gatherReferenceCandidates(productName: string): Promise<ReferenceCandidate[]> {
+async function gatherReferenceCandidates(productName: string, extra: { queries?: string[]; realWorld?: boolean } = {}): Promise<ReferenceCandidate[]> {
   const candidates: ReferenceCandidate[] = [];
   const seen = new Set<string>();
   const add = (url: string, label: string) => {
@@ -968,7 +974,14 @@ async function gatherReferenceCandidates(productName: string): Promise<Reference
   // Two phrasings: the bare name, then "product photo" appended, which
   // steers Bing toward clean retail shots (and away from wallpapers and
   // gameplay screenshots) for products whose bare name is mostly media.
-  const [plain, productShots] = await Promise.all([searchBingImages(productName, 24), searchBingImages(`${productName} product photo`, 24)]);
+  // The user's own search words (a pasted Google Images link's query) are searched first; "real-world" adds listing-style photos of actual units (how people
+  // photograph them for sale), next to the official-looking shots.
+  const [plain, productShots, userShots, realShots] = await Promise.all([
+    searchBingImages(productName, 24),
+    searchBingImages(`${productName} product photo`, 24),
+    Promise.all((extra.queries ?? []).slice(0, 2).map((q) => searchBingImages(q, 16))).then((r) => r.flat()),
+    extra.realWorld ? searchBingImages(`${productName} used for sale`, 16) : Promise.resolve([] as string[]),
+  ]);
   const hostOf = (u: string) => {
     try {
       return new URL(u).hostname.replace(/^www\./, "");
@@ -976,6 +989,8 @@ async function gatherReferenceCandidates(productName: string): Promise<Reference
       return "web";
     }
   };
+  for (const u of userShots) add(u, `Image search — ${hostOf(u)}`);
+  for (const u of realShots) add(u, `Real-world photo — ${hostOf(u)}`);
   // Interleave so a poor first query can't crowd out a good second one.
   for (let i = 0; i < Math.max(plain.length, productShots.length); i++) {
     if (plain[i]) add(plain[i], `Stock photo — ${hostOf(plain[i])}`);
@@ -1093,7 +1108,7 @@ export async function findReferencePhotos(
   productName: string,
   // `candidates`: photos already in hand (e.g. from eBay listings that were confirmed to be this product) to check
   // instead of searching the web for some. They go through the same download, duplicate and vision checks.
-  opts: { want: number; existingImages?: string[]; candidates?: ReferenceCandidate[] }
+  opts: { want: number; existingImages?: string[]; candidates?: ReferenceCandidate[]; extraQueries?: string[]; realWorld?: boolean }
 ): Promise<{ photos: ReferencePhoto[]; examined: number }> {
   // Save-credits mode: no vision check of any candidate. See findFreeReferencePhotos.
   if (isLowAiMode()) {
@@ -1102,7 +1117,7 @@ export async function findReferencePhotos(
   const photos: Array<ReferencePhoto & { rank: number }> = [];
   let examined = 0;
   try {
-    const candidates = opts.candidates ?? (await gatherReferenceCandidates(productName));
+    const candidates = opts.candidates ?? (await gatherReferenceCandidates(productName, { queries: opts.extraQueries, realWorld: opts.realWorld }));
     const hashes: string[] = [];
     for (const uri of opts.existingImages ?? []) {
       const parsed = parseDataUri(uri);

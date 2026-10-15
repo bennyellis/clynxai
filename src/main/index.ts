@@ -28,6 +28,7 @@ import { applyPendingRestore, backupDirFor, createBackup, listBackups, requestRe
 import { loadConfig, saveConfig, takeConfigLoadNotice, DEFAULT_CONFIG, DEFAULT_BROWSE_URLS, DEFAULT_COUNTRY_CITIES } from "./config.js";
 import {
   streamChat,
+  type ChatTrace,
   streamNarration,
   allowedToolNames,
   discoverSiblingProducts,
@@ -69,7 +70,9 @@ import { pushRecentSearch, removeRecentSearch } from "./recentSearches.js";
 import { baseNameOfBrokenVariant, brokenVariantName, isBrokenVariantName } from "./brokenVariant.js";
 import { clampMarginPercent, clampNetPercent } from "./resaleMath.js";
 import { snapToFacebookRadius, snapToWatchInterval } from "./watchOptions.js";
-import { timed, getMetricsSnapshot, resetMetrics } from "./metrics.js";
+import { timed, getMetricsSnapshot, resetMetrics, recordStage } from "./metrics.js";
+import { runAddReferencePhotos, topUpReferencePhotos } from "./referencePhotos.js";
+import { searchProducts } from "./chatIntent.js";
 import { DiscoveryFeed, type DiscoverySource } from "./discovery.js";
 import { breakDownListing, valueBundle, type BundleValuation, type PricedBundleItem } from "./bundleBreakdown.js";
 import { setClientVersion, CloudClient, isBillingStatus } from "./cloudClient.js";
@@ -960,6 +963,21 @@ async function executeChatTool(
     const url = publicHttpUrls(String(call.args.url ?? "") || query, 1)[0] ?? null;
     if (!query && !url) return "Failed: no search query given.";
     return await lookUpOnWeb(query, url);
+  }
+
+  if (call.name === "add_reference_photos") return await runAddReferencePhotosTool(call.args, call.userMessage, currentProductId);
+
+  if (call.name === "find_products") {
+    const hits = searchProducts(store.listProductIndex().map((p) => ({ id: p.id, name: p.name })), String(call.args.query ?? ""));
+    if (!hits.length) return `No product in the Database matches "${String(call.args.query ?? "")}".`;
+    return hits
+      .map((h) => {
+        const p = store.getProductById(h.id);
+        if (!p) return `- ${h.name}`;
+        const value = p.ebayEstimatedValueUsd ?? p.ebayAvgSoldPriceUsd;
+        return `- ${p.name}${p.parentProductId ? " (a version of another entry)" : ""}${p.variantEvidence ? `, variant ${p.variantEvidence.status}` : ""}, ${value != null ? `value ~$${Math.round(value)}` : "no value yet"}`;
+      })
+      .join("\n");
   }
 
   if (call.name === "research_product") {
@@ -2031,40 +2049,52 @@ async function fillReferencePhotos(id: string, name: string, replaceThumbnail: b
   if (referencePhotoFillInFlight.has(id)) return;
   referencePhotoFillInFlight.add(id);
   try {
-    const existing = store.listProductImages(id).filter((img) => img.kind === "normal");
-    const needed = target - existing.length;
-    let added = 0;
-    let bestPhoto: string | null = null;
-    if (needed > 0) {
-      const found = await findReferencePhotos(name, { want: needed, existingImages: existing.map((img) => img.imageData) });
-      for (const photo of found.photos) {
-        store.addProductImage(id, photo.imageData, photo.label);
-        added++;
-      }
-      bestPhoto = found.photos[0]?.imageData ?? null;
-    }
-    const current = store.getProductById(id);
-    if (!current) return;
-    // Re-read AFTER the slow search: the user may have picked their own
-    // thumbnail in the meantime, which always wins.
-    if (!current.keepThumbnail) {
-      if (bestPhoto && (replaceThumbnail || !current.imageUrl)) {
-        store.editProductProfile(id, { imageUrl: bestPhoto });
-      } else if (!current.imageUrl && existing[0]) {
-        store.editProductProfile(id, { imageUrl: existing[0].imageData });
-      }
-    }
-    if (added > 0) {
-      store.touchProduct(id);
+    const normalCount = store.listProductImages(id).filter((img) => img.kind === "normal").length;
+    const r = await topUpReferencePhotos({
+      store,
+      id,
+      name,
+      want: Math.max(0, target - normalCount),
+      limit: Store.MAX_IMAGES_PER_PRODUCT,
+      find: (n, o) => findReferencePhotos(n, o),
+      replaceThumbnail,
+    });
+    if (r.added > 0) {
       ensurePhotoDifferenceAnalysis(id);
-      discovery.note(id, "step", `Saved ${plural(added, "reference photo")} so I'll recognize it on sight next time.`);
+      discovery.note(id, "step", `Saved ${plural(r.added, "reference photo")} so I'll recognize it on sight next time.`);
     }
     const updated = store.getProductById(id);
     if (updated) sendToRenderer("products:updated", updated);
+    if (r.error) console.error(`[referencePhotos] fill failed for "${name}": ${r.error}`);
   } catch (err) {
     console.error(`[referencePhotos] fill failed for "${name}": ${(err as Error).message}`);
   } finally {
     referencePhotoFillInFlight.delete(id);
+  }
+}
+
+/** The chat's add_reference_photos tool (see referencePhotos.ts): wired to this app's Database, photo search and screen updates. */
+async function runAddReferencePhotosTool(args: Record<string, unknown>, userMessage: string | undefined, currentProductId?: string): Promise<string> {
+  const started = Date.now();
+  let failed = false;
+  try {
+    return await runAddReferencePhotos(args, userMessage, currentProductId, {
+      store,
+      find: (n, o) => findReferencePhotos(n, o),
+      inFlight: referencePhotoFillInFlight,
+      limit: Store.MAX_IMAGES_PER_PRODUCT,
+      lowAiMode: isLowAiMode(),
+      onSaved: (product, added) => {
+        ensurePhotoDifferenceAnalysis(product.id);
+        discovery.note(product.id, "step", `Saved ${plural(added, "reference photo")} you asked for.`);
+      },
+      onUpdated: (product) => sendToRenderer("products:updated", product),
+    });
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    recordStage("chat_tool_photo_search", Date.now() - started, !failed);
   }
 }
 
@@ -5099,6 +5129,7 @@ app.whenReady().then(() => {
         const blacklistTerms =
           args.context === "database" || args.context === "dashboard" || args.context === "global" ? store.listBlacklistTerms() : [];
         const watches = args.context === "dashboard" || args.context === "global" ? store.listWatches() : [];
+        const chatTrace: ChatTrace = { rounds: [], tools: [], totalMs: 0, aiCalls: 0, guards: [] };
         const full = await streamChat(
           args.message,
           args.history,
@@ -5122,8 +5153,14 @@ app.whenReady().then(() => {
           currentProduct,
           blacklistTerms,
           args.attachments ?? [],
-          watches
+          watches,
+          chatTrace
         );
+        // Model and tool timing for every chat turn (Activity > metrics): how long each model round and each tool took, and which safeguards acted.
+        recordStage("chat_turn", chatTrace.totalMs, true);
+        for (const r of chatTrace.rounds) recordStage("chat_ai_round", r.ms, true);
+        for (const t of chatTrace.tools) recordStage(`chat_tool_${t.name}`, t.ms, true);
+        console.log(`[chat] ${args.context}: ${chatTrace.totalMs}ms, ${chatTrace.aiCalls} AI call(s) [${chatTrace.rounds.map((r) => `${r.ms}ms/first word ${r.firstWordMs ?? "-"}ms/${r.promptChars} chars`).join(", ")}], tools [${chatTrace.tools.map((t) => `${t.name} ${t.ms}ms${t.parallel ? " (parallel)" : ""}`).join(", ") || "none"}]${chatTrace.guards.length ? `, safeguards: ${chatTrace.guards.join(", ")}` : ""}`);
         event.sender.send("ai:chatDone", { requestId: args.requestId, full });
       } catch (err) {
         event.sender.send("ai:chatError", { requestId: args.requestId, message: (err as Error).message });

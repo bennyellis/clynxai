@@ -69,6 +69,7 @@ const scenarios: Scenario[] = [
   { id: 23, name: "sold prices for the open product", ctx: "database", focus: "variant", user: "check ebay sold prices for this", expectTool: ["research_product", "web_research"] },
 ];
 
+// Before/after: set CLYNX_AUDIT_MODE=baseline (all new behavior off) or leave unset (new), CLYNX_CHAT_REASONING=minimal|low|medium to benchmark effort, CLYNX_AUDIT_LABEL=name for the output file.
 const only = process.argv.slice(2).map(Number).filter(Boolean);
 const ASKING = /(\\?\\s*$|\\?\\s|pick one|which (one|option)|do you want me to|would you like|should i|want me to|tell me (which|whether))/i;
 const OPTION_MENU = /(\\b[A-D]\\)|\\b[1-4]\\)|option [AB]|pick (one|A|B))/i;
@@ -113,7 +114,7 @@ const OPTION_MENU = /(\\b[A-D]\\)|\\b[1-4]\\)|option [AB]|pick (one|A|B))/i;
     let reply = "";
     let error = "";
     try {
-      reply = await streamChat(sc.user, sc.history ?? [], sc.ctx, { ...DEFAULT_CONFIG } as any, [], [], products, () => { if (!firstChunk) firstChunk = Date.now(); }, async (call: ToolCall) => {
+      reply = await streamChat(sc.user, sc.history ?? [], sc.ctx, { ...DEFAULT_CONFIG, ...(process.env.CLYNX_AUDIT_MODE === "baseline" ? { chatFlags: { followUpHints: false, promiseGuard: false, leanContext: false, thumbnail: false, parallelTools: false } } : {}) } as any, [], [], products, () => { if (!firstChunk) firstChunk = Date.now(); }, async (call: ToolCall) => {
         const s = Date.now();
         let r = "Failed: not available";
         if (!allowed.has(call.name)) r = 'Failed: "' + call.name + "\\" isn't available from this chat.";
@@ -143,8 +144,8 @@ const OPTION_MENU = /(\\b[A-D]\\)|\\b[1-4]\\)|option [AB]|pick (one|A|B))/i;
   }
   const done = results.filter((r) => r.completed).length;
   console.log("\\n" + done + " of " + results.length + " completed. Average total " + Math.round(results.reduce((a, r) => a + r.ms_total, 0) / Math.max(1, results.length)) + "ms; questions asked in " + results.filter((r) => r.asks_question).length + "; menus offered in " + results.filter((r) => r.offers_menu).length + ".");
-  fs.writeFileSync(path.join(${JSON.stringify(root)}, "chat-audit-results.json"), JSON.stringify(results, null, 2));
-  console.log("Details written to chat-audit-results.json");
+  fs.writeFileSync(path.join(${JSON.stringify(root)}, "chat-audit-results" + (process.env.CLYNX_AUDIT_LABEL ? "-" + process.env.CLYNX_AUDIT_LABEL : "") + ".json"), JSON.stringify(results, null, 2));
+  console.log("Details written to chat-audit-results" + (process.env.CLYNX_AUDIT_LABEL ? "-" + process.env.CLYNX_AUDIT_LABEL : "") + ".json");
   store.close();
 })();
 `
