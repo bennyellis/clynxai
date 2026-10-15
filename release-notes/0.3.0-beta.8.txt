@@ -1,0 +1,3 @@
+Clynx Beta 8
+* Version update only. No functional changes since Beta 7.
+* Your data, sign-in, Watches, Database and automatic updates are unchanged.
