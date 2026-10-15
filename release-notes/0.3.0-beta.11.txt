@@ -1,0 +1,7 @@
+Clynx Beta 11 - smarter chat
+* Clynx can now add reference photos from chat. Ask it to find photos for the open product (or name one): it searches official and real-world photos, verifies each image, skips duplicates, keeps the thumbnail you chose, and tells you how many it actually saved. A pasted Google Images link is used as a search.
+* Short replies like "both", "yes", "do it" and "the first one" are understood as answers to Clynx's last question. Clynx no longer re-asks what you already answered, offers fewer A/B menus, and stops asking questions when you repeat yourself.
+* If Clynx says it will do something, it now does it, or says plainly that it has not.
+* Chat is leaner and faster: the whole Database is no longer sent with every message (only relevant products, others are looked up on demand), the product thumbnail is sent only when you ask about how it looks, and independent lookups run at the same time.
+* "Have you sold one before?" is asked once, only after researching a new product.
+* Includes everything in Beta 10. Your data, sign-in, Watches, Database and automatic updates are unchanged.

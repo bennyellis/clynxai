@@ -12,10 +12,3 @@ Clynx Beta 10 - asking for a specific edition now researches that edition
 * Beta testers can be given unlimited access (no plan limits) without being administrators or owners. The Account screen shows "Beta Tester — Unlimited access".
 * Includes everything in Beta 8 and the unpublished Beta 9: editions, colors and capacities are verified from evidence (never called fake just because a search came up empty), links you paste are read, special editions are priced only from sales of that edition, and Clynx only says something was saved when it was.
 * Your data, sign-in, Watches, Database and automatic updates are unchanged.
-
-Chat (conversational intelligence)
-- Clynx can now add reference photos from chat (official and real-world, verified, duplicates skipped, your chosen thumbnail kept). It reports the number actually saved.
-- Short replies like "both", "yes", "do it", "the first one" are read as answers to Clynx's last question. Clynx no longer re-asks, offers fewer menus, and stops asking when you repeat yourself.
-- If a reply promises an action without doing it, Clynx now does it or says plainly that it has not.
-- The Database list is no longer sent with every message, only the products that matter to it (the rest are looked up on demand).
-- The "have you sold one before?" question is asked once, only after researching a new product.
