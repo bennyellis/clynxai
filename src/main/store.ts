@@ -12,6 +12,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { timedSync, recordEvent } from "./metrics.js";
 import type { BlacklistedImage, BlacklistTerm, FeedbackExample, FeedbackVerdict, FlawFeedbackExample, GateFactsSnapshot, GateReasonRecord, ListingRecord, MyStoreReference, PhotoFlaw, ProductImage, ProductProfile, ScoredListing, SellerRiskResult, Watch, WatchMatch, WatchPlatform, WatchSearchLink, WatchTerm } from "./types.js";
+import { REFERENCE_STATUSES } from "./types.js";
 import { brokenVariantName, isBrokenVariantName } from "./brokenVariant.js";
 import { assessListingAge } from "./listingAge.js";
 import { codesMissingFrom } from "./identity/codes.js";
@@ -106,6 +107,104 @@ export class Store {
         this.db.close();
       } catch {
         /* already closed */
+      }
+      throw err;
+    }
+  }
+
+  // Beta 13: additive columns and tables only (nothing is dropped or rewritten here). Older builds ignore them. Every existing photo starts as status 'legacy': still used
+  // as a reference, until the one-time suspect pass (markSuspectImages) proves its own title contradicts the entry it is filed under.
+  private migrateBeta13(): void {
+    const imageCols = (this.db.prepare("PRAGMA table_info(product_images)").all() as any[]).map((c) => c.name);
+    for (const [column, ddl] of [
+      ["status", "TEXT NOT NULL DEFAULT 'legacy'"],
+      ["source_kind", "TEXT"],
+      ["source_url", "TEXT"],
+      ["verdict_json", "TEXT"],
+      ["content_hash", "TEXT"],
+      ["sort_order", "INTEGER NOT NULL DEFAULT 0"],
+      ["is_primary", "INTEGER NOT NULL DEFAULT 0"],
+      ["origin_product_id", "TEXT"],
+      ["deleted_at", "INTEGER"],
+    ] as const) {
+      if (!imageCols.includes(column)) this.db.exec(`ALTER TABLE product_images ADD COLUMN ${column} ${ddl}`);
+    }
+    const productCols = (this.db.prepare("PRAGMA table_info(products)").all() as any[]).map((c) => c.name);
+    for (const [column, ddl] of [
+      ["folder_id", "TEXT"],
+      ["name_locked", "INTEGER NOT NULL DEFAULT 0"],
+      ["deleted_at", "INTEGER"],
+      ["identity_json", "TEXT"],
+      ["identity_status", "TEXT"],
+      ["suggested_family", "TEXT"],
+      ["thumbnail_image_id", "TEXT"],
+    ] as const) {
+      if (!productCols.includes(column)) this.db.exec(`ALTER TABLE products ADD COLUMN ${column} ${ddl}`);
+    }
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS library_folders (
+        id TEXT PRIMARY KEY,
+        parent_id TEXT REFERENCES library_folders(id),
+        name TEXT NOT NULL,
+        name_key TEXT NOT NULL,
+        position INTEGER NOT NULL DEFAULT 0,
+        kind TEXT NOT NULL DEFAULT 'user',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted_at INTEGER
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_library_folders_sibling ON library_folders(COALESCE(parent_id, ''), name_key) WHERE deleted_at IS NULL;
+      CREATE TABLE IF NOT EXISTS library_ops (
+        id TEXT PRIMARY KEY,
+        at INTEGER NOT NULL,
+        actor TEXT NOT NULL,
+        op TEXT NOT NULL,
+        args_json TEXT NOT NULL,
+        inverse_json TEXT,
+        batch_id TEXT,
+        undone_at INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS review_items (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        reasons_json TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'open',
+        created_at INTEGER NOT NULL,
+        resolved_at INTEGER,
+        resolved_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_review_items_state ON review_items(state, kind);
+      CREATE TABLE IF NOT EXISTS listing_condition (
+        id TEXT PRIMARY KEY,
+        listing_id TEXT NOT NULL,
+        defect_class TEXT NOT NULL,
+        area TEXT,
+        severity TEXT NOT NULL,
+        source TEXT NOT NULL,
+        confidence TEXT NOT NULL,
+        photo_ref INTEGER,
+        quote TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_listing_condition_listing ON listing_condition(listing_id);
+      CREATE INDEX IF NOT EXISTS idx_product_images_status ON product_images(product_id, status);
+    `);
+  }
+
+  /** Runs `fn` as one write transaction (BEGIN IMMEDIATE ... COMMIT; ROLLBACK when it throws). Not re-entrant: callers inside a transaction call the plain methods. */
+  transaction<T>(fn: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = fn();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (err) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        /* already rolled back */
       }
       throw err;
     }
@@ -521,6 +620,7 @@ export class Store {
     ]) {
       if (!productCols.includes(column)) this.db.exec(`ALTER TABLE products ADD COLUMN ${column} ${type}`);
     }
+    this.migrateBeta13();
     // A covering index for name lookups. A product row carries its photo (~90 KB of text) in the middle of the row, and SQLite has
     // to read past that photo to reach any column stored after it (created_at, family, the eBay prices), so even a query for just
     // names sorted by date read every photo. These columns, all together in a small index, are answered without touching the rows
@@ -936,10 +1036,10 @@ export class Store {
     const lookup = (name: string): Found | null => {
       if (byName.has(name)) return byName.get(name)!;
       let found: Found | null = null;
-      const exact = this.db.prepare(`SELECT ${columns} FROM products WHERE LOWER(name) = LOWER(?)`).get(name) as any;
+      const exact = this.db.prepare(`SELECT ${columns} FROM products WHERE LOWER(name) = LOWER(?) AND deleted_at IS NULL`).get(name) as any;
       if (exact) found = { id: exact.id, name: exact.name, sold: exact.sold ?? null, run: exact.run ?? null };
       else {
-        candidates ??= this.db.prepare(`SELECT ${columns} FROM products ORDER BY created_at DESC`).all() as any[];
+        candidates ??= this.db.prepare(`SELECT ${columns} FROM products WHERE deleted_at IS NULL ORDER BY created_at DESC`).all() as any[];
         const similar = candidates.find((p) => isSimilarProductName(name, p.name));
         if (similar) found = { id: similar.id, name: similar.name, sold: similar.sold ?? null, run: similar.run ?? null };
       }
@@ -967,7 +1067,7 @@ export class Store {
     const now = Date.now();
     if (!this.ebayValueCache || now - this.ebayValueCache.at > 10_000) {
       const rows = this.db
-        .prepare(`SELECT id, name, ${EBAY_VALUE_SQL} AS value FROM products`)
+        .prepare(`SELECT id, name, ${EBAY_VALUE_SQL} AS value FROM products WHERE deleted_at IS NULL`)
         .all() as Array<{ id: string; name: string; value: number | null }>;
       this.ebayValueCache = { at: now, rows };
     }
@@ -1221,7 +1321,7 @@ export class Store {
   addProductStub(id: string, name: string): string {
     const key = this.productDuplicateKey(name);
     if (key) {
-      const rows = this.db.prepare("SELECT id, name FROM products").all() as Array<{ id: string; name: string }>;
+      const rows = this.db.prepare("SELECT id, name FROM products WHERE deleted_at IS NULL").all() as Array<{ id: string; name: string }>;
       const existing = rows.find((r) => this.productDuplicateKey(r.name) === key);
       if (existing) return existing.id;
     }
@@ -1240,7 +1340,7 @@ export class Store {
   // are no duplicates: one query over names.
   mergeDuplicateProducts(): Map<string, string> {
     const merged = new Map<string, string>();
-    const names = this.db.prepare("SELECT id, name FROM products").all() as Array<{ id: string; name: string }>;
+    const names = this.db.prepare("SELECT id, name FROM products WHERE deleted_at IS NULL").all() as Array<{ id: string; name: string }>;
     const groups = new Map<string, string[]>();
     for (const row of names) {
       const key = this.productDuplicateKey(row.name);
@@ -1564,7 +1664,7 @@ export class Store {
     if (!segments.length) return null;
 
     const existingPaths = (
-      this.db.prepare("SELECT DISTINCT family FROM products WHERE family IS NOT NULL AND family != ''").all() as Array<{ family: string }>
+      this.db.prepare("SELECT DISTINCT family FROM products WHERE family IS NOT NULL AND family != '' AND deleted_at IS NULL").all() as Array<{ family: string }>
     ).map((row) => row.family.split(">").map((s) => s.trim()).filter(Boolean));
 
     const resolved: string[] = [];
@@ -1663,7 +1763,7 @@ export class Store {
   }
 
   listProducts(): ProductProfile[] {
-    const rows = this.db.prepare("SELECT * FROM products ORDER BY created_at DESC").all() as any[];
+    const rows = this.db.prepare("SELECT * FROM products WHERE deleted_at IS NULL ORDER BY created_at DESC").all() as any[];
     return rows.map(rowToProduct);
   }
 
@@ -1673,11 +1773,11 @@ export class Store {
   // for name matching and name lists; load the one row you need afterwards with getProductById.
   // The entries with no thumbnail yet (id and name only, never the photos of the others): what the background "research blank entries" sweep needs.
   listBlankProductIndex(): Array<{ id: string; name: string }> {
-    return this.db.prepare("SELECT id, name FROM products WHERE image_url IS NULL OR image_url = '' ORDER BY created_at DESC").all() as Array<{ id: string; name: string }>;
+    return this.db.prepare("SELECT id, name FROM products WHERE deleted_at IS NULL AND (image_url IS NULL OR image_url = '') ORDER BY created_at DESC").all() as Array<{ id: string; name: string }>;
   }
 
   listProductIndex(): Array<{ id: string; name: string; family: string | null }> {
-    return this.db.prepare("SELECT id, name, family FROM products ORDER BY created_at DESC").all() as Array<{ id: string; name: string; family: string | null }>;
+    return this.db.prepare("SELECT id, name, family FROM products WHERE deleted_at IS NULL ORDER BY created_at DESC").all() as Array<{ id: string; name: string; family: string | null }>;
   }
 
   getProductById(id: string): ProductProfile | null {
@@ -1688,7 +1788,7 @@ export class Store {
   // Case-insensitive exact-ish match used to link a Search For item's name
   // to a product profile for extra scoring context.
   getProductByName(name: string): ProductProfile | null {
-    const row = this.db.prepare("SELECT * FROM products WHERE LOWER(name) = LOWER(?)").get(name) as any;
+    const row = this.db.prepare("SELECT * FROM products WHERE LOWER(name) = LOWER(?) AND deleted_at IS NULL").get(name) as any;
     return row ? rowToProduct(row) : null;
   }
 
@@ -1792,14 +1892,47 @@ export class Store {
     return this.getProductById(product.id)!;
   }
 
+  // Hard delete (internal: merges, tests, "Clear all"). The photos go FIRST: product_images.product_id references products(id) and the database enforces it, so deleting the
+  // product row while it still had photos failed with "FOREIGN KEY constraint failed" (Beta 13 audit LB-02). Children and links are released in the same transaction.
   deleteProduct(id: string): void {
-    this.db.prepare("DELETE FROM products WHERE id = ?").run(id);
+    this.transaction(() => {
+      this.db.prepare("DELETE FROM product_images WHERE product_id = ?").run(id);
+      this.db.prepare("UPDATE products SET parent_product_id = NULL WHERE parent_product_id = ?").run(id);
+      this.db.prepare("UPDATE listings SET product_id = NULL WHERE product_id = ?").run(id);
+      this.db.prepare("UPDATE watches SET linked_product_id = NULL WHERE linked_product_id = ?").run(id);
+      this.db.prepare("DELETE FROM products WHERE id = ?").run(id);
+    });
     this.safeguard.invalidate();
-    this.db.prepare("DELETE FROM product_images WHERE product_id = ?").run(id);
     this.identity?.forgetProduct(id);
     // Batch 2 Fix B — see deleteWatch's own comment above; same reasoning,
     // productSync.ts's own pushPendingDeletes drains this resource type.
     this.addPendingCloudDelete("product", id);
+  }
+
+  /** The Library's delete: the product goes to the Trash (restorable for 30 days) and disappears from every list. Its photos stay with it. */
+  softDeleteProduct(id: string): boolean {
+    const res = this.db.prepare("UPDATE products SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL").run(Date.now(), Date.now(), id);
+    if (Number(res.changes) > 0) this.safeguard.invalidate();
+    this.ebayValueCache = null;
+    return Number(res.changes) > 0;
+  }
+
+  restoreProduct(id: string): boolean {
+    const res = this.db.prepare("UPDATE products SET deleted_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NOT NULL").run(Date.now(), id);
+    if (Number(res.changes) > 0) this.safeguard.invalidate();
+    this.ebayValueCache = null;
+    return Number(res.changes) > 0;
+  }
+
+  listTrashedProducts(): ProductProfile[] {
+    return (this.db.prepare("SELECT * FROM products WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC").all() as any[]).map(rowToProduct);
+  }
+
+  /** Permanently removes what has been in the Trash longer than `olderThanMs` (the Library does this itself; nothing else ever purges). */
+  purgeTrash(olderThanMs: number): number {
+    const ids = (this.db.prepare("SELECT id FROM products WHERE deleted_at IS NOT NULL AND deleted_at < ?").all(Date.now() - olderThanMs) as Array<{ id: string }>).map((r) => r.id);
+    for (const id of ids) this.deleteProduct(id);
+    return ids.length;
   }
 
   // Per explicit instruction — the Database's own "Clear all" button,
@@ -1823,28 +1956,61 @@ export class Store {
 
   listProductImages(productId: string): ProductImage[] {
     const rows = this.db
-      .prepare("SELECT * FROM product_images WHERE product_id = ? ORDER BY created_at DESC")
+      .prepare("SELECT * FROM product_images WHERE product_id = ? AND deleted_at IS NULL ORDER BY is_primary DESC, sort_order ASC, created_at DESC")
       .all(productId) as any[];
     return rows.map(rowToProductImage);
   }
 
-  // Auto-called on a confirmed deal, or the user manually adding one from
-  // the product's page — same storage either way. Prunes the oldest once
-  // over the cap so a long-running scan session can't grow this
-  // unboundedly; a manually-added photo is just as prunable as an
-  // auto-added one; the cap protects DB size, not curation intent.
-  addProductImage(productId: string, imageData: string, sourceTitle: string | null, kind: "normal" | "poor_condition" = "normal"): ProductImage {
+  /** The same list without the picture bytes (a gallery with 20 photos is several MB): ids, titles, status, order. For lists, selection and counts. */
+  listProductImageMeta(productId: string): Array<Omit<ProductImage, "imageData">> {
+    const rows = this.db
+      .prepare(
+        "SELECT id, product_id, source_title, created_at, kind, status, source_kind, source_url, is_primary, sort_order, content_hash FROM product_images WHERE product_id = ? AND deleted_at IS NULL ORDER BY is_primary DESC, sort_order ASC, created_at DESC"
+      )
+      .all(productId) as any[];
+    return rows.map((r) => {
+      const { imageData: _unused, ...meta } = rowToProductImage({ ...r, image_data: "" });
+      return meta;
+    });
+  }
+
+  // Auto-called on a confirmed deal, or the user manually adding one from the product's page — same storage either way. Prunes once over the cap, but never a
+  // picture the user added, a primary picture or one that is the product's thumbnail source; the lowest-value picture goes first (unverified, then oldest).
+  addProductImage(
+    productId: string,
+    imageData: string,
+    sourceTitle: string | null,
+    kind: "normal" | "poor_condition" = "normal",
+    extra: { status?: ProductImage["status"]; sourceKind?: string | null; sourceUrl?: string | null; contentHash?: string | null; verdictJson?: string | null; originProductId?: string | null; isPrimary?: boolean } = {}
+  ): ProductImage {
     const id = randomUUID();
+    const status = extra.status ?? "legacy";
+    const createdAt = Date.now();
     this.db
-      .prepare("INSERT INTO product_images (id, product_id, image_data, source_title, created_at, kind) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(id, productId, imageData, sourceTitle, Date.now(), kind);
-    const excess = this.db
-      .prepare("SELECT id FROM product_images WHERE product_id = ? ORDER BY created_at DESC LIMIT -1 OFFSET ?")
-      .all(productId, Store.MAX_IMAGES_PER_PRODUCT) as Array<{ id: string }>;
-    for (const row of excess) {
+      .prepare(
+        "INSERT INTO product_images (id, product_id, image_data, source_title, created_at, kind, status, source_kind, source_url, verdict_json, content_hash, origin_product_id, is_primary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      )
+      .run(id, productId, imageData, sourceTitle, createdAt, kind, status, extra.sourceKind ?? null, extra.sourceUrl ?? null, extra.verdictJson ?? null, extra.contentHash ?? null, extra.originProductId ?? null, extra.isPrimary ? 1 : 0);
+    this.pruneProductImages(productId);
+    return { id, productId, imageData, sourceTitle, createdAt, kind, status, sourceKind: extra.sourceKind ?? null, sourceUrl: extra.sourceUrl ?? null, isPrimary: !!extra.isPrimary, sortOrder: 0, contentHash: extra.contentHash ?? null };
+  }
+
+  private pruneProductImages(productId: string): void {
+    const rows = this.db
+      .prepare("SELECT id, status, is_primary, created_at FROM product_images WHERE product_id = ? AND deleted_at IS NULL")
+      .all(productId) as Array<{ id: string; status: string; is_primary: number; created_at: number }>;
+    let excess = rows.length - Store.MAX_IMAGES_PER_PRODUCT;
+    if (excess <= 0) return;
+    const thumb = (this.db.prepare("SELECT thumbnail_image_id FROM products WHERE id = ?").get(productId) as { thumbnail_image_id?: string | null } | undefined)?.thumbnail_image_id ?? null;
+    const protectedRow = (r: { id: string; status: string; is_primary: number }) => r.status === "user" || !!r.is_primary || r.id === thumb;
+    // lowest value first: not-used-as-reference statuses, then legacy/trusted by age
+    const value = (r: { status: string }) => (r.status === "quarantined" || r.status === "needs_review" ? 0 : r.status === "unverified" ? 1 : 2);
+    const candidates = rows.filter((r) => !protectedRow(r)).sort((a, b) => value(a) - value(b) || a.created_at - b.created_at);
+    for (const row of candidates) {
+      if (excess <= 0) break;
       this.db.prepare("DELETE FROM product_images WHERE id = ?").run(row.id);
+      excess--;
     }
-    return { id, productId, imageData, sourceTitle, createdAt: Date.now(), kind };
   }
 
   // How many ordinary (non-poor-condition) reference photos each product
@@ -1852,7 +2018,7 @@ export class Store {
   // count them. Products with none are simply absent from the map.
   countNormalImagesByProduct(): Map<string, number> {
     const rows = this.db
-      .prepare("SELECT product_id, COUNT(*) as n FROM product_images WHERE kind = 'normal' GROUP BY product_id")
+      .prepare("SELECT product_id, COUNT(*) as n FROM product_images WHERE kind = 'normal' AND deleted_at IS NULL GROUP BY product_id")
       .all() as Array<{ product_id: string; n: number }>;
     return new Map(rows.map((r) => [r.product_id, r.n]));
   }
@@ -1877,7 +2043,7 @@ export class Store {
   listProductsWithImages(limit: number): Array<{ product: ProductProfile; images: ProductImage[] }> {
     const rows = this.db
       .prepare(
-        `SELECT DISTINCT product_id, MAX(created_at) as latest FROM product_images GROUP BY product_id ORDER BY latest DESC LIMIT ?`
+        `SELECT i.product_id, MAX(i.created_at) as latest FROM product_images i JOIN products p ON p.id = i.product_id WHERE p.deleted_at IS NULL AND i.deleted_at IS NULL GROUP BY i.product_id ORDER BY latest DESC LIMIT ?`
       )
       .all(limit) as Array<{ product_id: string }>;
     const result: Array<{ product: ProductProfile; images: ProductImage[] }> = [];
@@ -1887,7 +2053,7 @@ export class Store {
       // Condition-awareness — a poor-condition/damaged reference photo
       // isn't reliable "what does this normally look like" ground truth
       // for vision's own ground-truth comparison use of this list.
-      result.push({ product, images: this.listProductImages(row.product_id).filter((img) => img.kind === "normal") });
+      result.push({ product, images: this.listProductImages(row.product_id).filter((img) => img.kind === "normal" && REFERENCE_STATUSES.has(img.status)) });
     }
     return result;
   }
@@ -1904,13 +2070,13 @@ export class Store {
   // product with none yet has nothing to visually match on regardless of
   // how much it's prioritized.
   listPrioritizedProductsWithImages(): Array<{ product: ProductProfile; images: ProductImage[] }> {
-    const rows = this.db.prepare("SELECT id FROM products WHERE prioritized = 1").all() as Array<{ id: string }>;
+    const rows = this.db.prepare("SELECT id FROM products WHERE prioritized = 1 AND deleted_at IS NULL").all() as Array<{ id: string }>;
     const result: Array<{ product: ProductProfile; images: ProductImage[] }> = [];
     for (const row of rows) {
       const product = this.getProductById(row.id);
       if (!product) continue;
       // Condition-awareness — same reasoning as listProductsWithImages above.
-      const images = this.listProductImages(row.id).filter((img) => img.kind === "normal");
+      const images = this.listProductImages(row.id).filter((img) => img.kind === "normal" && REFERENCE_STATUSES.has(img.status));
       if (images.length) result.push({ product, images });
     }
     return result;
@@ -3237,6 +3403,12 @@ function rowToProductImage(row: any): ProductImage {
     sourceTitle: row.source_title ?? null,
     createdAt: row.created_at,
     kind: row.kind === "poor_condition" ? "poor_condition" : "normal",
+    status: ["trusted", "user", "legacy", "unverified", "needs_review", "quarantined"].includes(row.status) ? row.status : "legacy",
+    sourceKind: row.source_kind ?? null,
+    sourceUrl: row.source_url ?? null,
+    isPrimary: !!row.is_primary,
+    sortOrder: Number(row.sort_order ?? 0),
+    contentHash: row.content_hash ?? null,
   };
 }
 

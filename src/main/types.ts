@@ -376,6 +376,8 @@ export interface Config {
   // makes and writes the decision to logs/identity-safeguard.jsonl without changing anything; "enforce" additionally stops a match the evidence says is a materially
   // different product from being filed, valued or added to. It never chooses another product. Uncertainty is never a veto.
   identitySafeguard?: { mode: "off" | "shadow" | "enforce" };
+  // Beta 13 feature switches (see beta13.ts): identityGate / resolver / conditionEvidence are "off" | "shadow" | "enforce"; the rest are booleans. Missing = the defaults in beta13.ts.
+  beta13?: { identityGate?: "off" | "shadow" | "enforce"; resolver?: "off" | "shadow" | "enforce"; conditionEvidence?: "off" | "shadow" | "enforce"; libraryTree?: boolean; chatStatus?: boolean; chatChoices?: boolean; chatAttachments?: boolean; replyStyle?: boolean };
   // Chat improvements, each on unless set to false in config.json (a rollback without a new build): followUpHints reads short answers ("both", "do it") and repeated
   // or frustrated instructions in code; promiseGuard re-runs a reply that promised an action without calling a tool; leanContext lists only the relevant products
   // instead of the whole Database; thumbnail sends the open product's picture when the message is about how it looks; parallelTools runs independent tools together.
@@ -1265,7 +1267,19 @@ export interface ProductImage {
   // section, never used as vision.ts's "what does this normally look like"
   // ground truth. Every existing/normal reference photo is "normal".
   kind: "normal" | "poor_condition";
+  // Beta 13: how far this picture is trusted as a reference. trusted = the identity gate confirmed it; user = the user put it here; legacy = filed before Beta 13 and
+  // never contradicted (still used); unverified = nothing could confirm it (not used as a reference); needs_review / quarantined = something contradicts it (not used).
+  status: ImageStatus;
+  sourceKind: string | null;
+  sourceUrl: string | null;
+  isPrimary: boolean;
+  sortOrder: number;
+  contentHash: string | null;
 }
+
+export type ImageStatus = "trusted" | "user" | "legacy" | "unverified" | "needs_review" | "quarantined";
+/** The statuses whose pictures may be used as "what this product looks like". */
+export const REFERENCE_STATUSES: ReadonlySet<ImageStatus> = new Set(["trusted", "user", "legacy"]);
 
 // A term/phrase that instantly skips a listing (see store.ts's
 // isBlacklisted and scrapeEngine.ts's evaluateListing) before it's ever
