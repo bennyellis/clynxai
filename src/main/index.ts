@@ -44,6 +44,7 @@ import { downloadImageAsDataUri, shrinkImageDataUri, findBrandLogoImage, findGro
 import { verifyVariant, reconcileVerdict, type VariantVerdict } from "./variantEvidence.js";
 import { createVerdictMemory, makeClaimVerifier, publicHttpUrls } from "./variantResearch.js";
 import { runResearchProductTool } from "./researchTool.js";
+import { settleLateMarketCheck } from "./marketCheckSettle.js";
 import { distinguishingTokens } from "./variantIdentity.js";
 import {
   answerImageQuestion,
@@ -439,6 +440,21 @@ function restartEngineIfRunning(accountId: string, reason: string): void {
       recordLog(line);
       sendToRenderer("engine:log", line);
       await eng.stop();
+      // A saved location that has not been looked up on Facebook yet (a location change is exactly that) is resolved BEFORE the restart, the same
+      // as a manual Start (engine:start). Restarting without it scanned the previous, stale list of places while saying it applied the new setting.
+      const needsLookup = !!config.accounts.find((a) => a.id === accountId && !a.locationResolved);
+      if (needsLookup) eng.beginStarting("Looking up your location on Facebook...");
+      const resolved = await resolveAccountLocationIfNeeded(accountId);
+      if (needsLookup && eng.stopWasRequested) continue;
+      if (resolved.message) {
+        const resolvedLine: LogLine = { ts: Date.now(), level: resolved.ok ? "info" : "error", message: resolved.message };
+        recordLog(resolvedLine);
+        sendToRenderer("engine:log", resolvedLine);
+      }
+      if (!resolved.ok) {
+        eng.cancelStarting();
+        continue;
+      }
       eng.start();
     } while (guard!.queued);
   })()
@@ -881,27 +897,10 @@ async function executeChatTool(
       searchItems: [...config.searchItems, newItem],
       recentSearches: pushRecentSearch(config.recentSearches, { item, minPriceUsd, maxPriceUsd, linkedProductId, includeBroken }),
     };
-    // Bug fix (verified live: "I see it finding good listings at times but
-    // it really fails to stay on track long term") — this used to rely on
-    // the AI itself remembering to separately call
-    // set_general_deal_detection(false) per its own system-prompt
-    // guidance, which is exactly the kind of thing a model can forget to
-    // do across a long, varied conversation. search:addProducts (the
-    // Dashboard's own search box) already does this deterministically in
-    // its own handler rather than trusting the model — add_search_item
-    // (by far the more common path, since "search for X" in chat is how
-    // most Search For items actually get added) never did, so general
-    // (unverified) deal detection stayed on by default, and the passive
-    // general-browse pass that runs after every dedicated search (see
-    // scrapeEngine.ts's runCycle) kept flagging unrelated listings via the
-    // general pathway — reads as "wandering off the tracked item" the
-    // longer a session runs, since more and more of what shows up has
-    // nothing to do with what was actually asked for. Same fix, same
-    // place it belongs: guaranteed by the handler, not by hoping the model
-    // remembers a second tool call.
-    if (config.generalDeal.enabled) {
-      config = { ...config, generalDeal: { ...config.generalDeal, enabled: false } };
-    }
+    // Adding a product to Search For never turns general (unverified) deal detection off. The two coexist: the dedicated search runs first
+    // at each location and the general browse still runs after it. General detection is only turned off when the user explicitly says so
+    // (the set_general_deal_detection chat tool, or the Config toggle). It used to be switched off here on every add, which silently
+    // stopped all general discovery and made the scanner skip everything that was not on the Search For list.
     saveConfig(CONFIG_PATH, config);
     // Verified live miss — this was the actual root cause of "it doesn't
     // display the product that was searched for": every OTHER
@@ -1788,9 +1787,20 @@ async function runMarketCheck(name: string, listingTitle: string, existingId: st
   if (winner === timedOut || winner === null) {
     discovery.note(productId, "warn", winner === timedOut ? "eBay was too slow to answer, so I'm going with what the Database already knows." : "I couldn't get a price check through, so I'm going with what the Database already knows.");
     discovery.finish(productId, "failed");
-    if (winner === timedOut) research.catch(() => {}); // keeps going in the background and still files its answer
-    if (created) store.deleteProduct(productId);
-    return { productId: created ? null : productId, productName: name, valueUsd: null, refreshed: false, note: `Couldn't reach WatchCount/eBay in time for "${name}": using what the Database has.` };
+    if (winner === timedOut) {
+      // It keeps going in the background. The entry created for it stays until the late answer arrives, so that answer is filed instead of lost.
+      settleLateMarketCheck({
+        research,
+        created,
+        productId,
+        deleteProduct: (id) => store.deleteProduct(id),
+        fillIn: () => void runProductLookup(productId, name, { triggeringListing: { title: listingTitle, imageDataUri: null } }),
+        note: (message) => recordLog({ ts: Date.now(), level: "info", message: `"${name}": ${message}` }),
+      });
+    } else if (created) {
+      store.deleteProduct(productId);
+    }
+    return { productId, productName: name, valueUsd: null, refreshed: false, note: `Couldn't reach WatchCount/eBay in time for "${name}": using what the Database has${winner === timedOut ? " (the check is still running and will be filed when it finishes)" : ""}.` };
   }
   const valueUsd = winner.estimatedValueUsd ?? winner.avgSoldPriceUsd;
   if (created) {
@@ -4151,11 +4161,15 @@ app.whenReady().then(() => {
           locationMode: "country",
           selectedState: null,
           selectedCityOrZip: null,
-          searchRadiusMiles: 100,
+          searchRadiusMiles: 500,
+          // The guessed city-slug list is only a stand-in until the account's next start: its slugs are NOT confirmed places ("/marketplace/augusta"
+          // opens Augusta, Georgia; "/marketplace/salem" can stay on the account's own default city). Marking it resolved made the scanner rotate
+          // through them as if they were real. Unresolved, the next start drives Facebook's own "Change location" dialog for each nationwide city
+          // and keeps only the ones Facebook confirmed (resolveAccountLocationIfNeeded).
           browseUrls: [...DEFAULT_BROWSE_URLS],
-          locationResolved: true, // nothing to resolve — a static list
+          locationResolved: false,
         });
-        return { ok: true, message: `Switched to nationwide rotation — ${DEFAULT_BROWSE_URLS.length} locations. Applied next time this account starts.` };
+        return { ok: true, message: `Switched to nationwide rotation. The nationwide cities are looked up on Facebook the next time this account starts, so each one is a confirmed place.` };
       }
 
       if (args.mode === "city") {
@@ -4643,36 +4657,8 @@ app.whenReady().then(() => {
       });
       if (!names.length) return { ok: false, message: "No products given." };
 
-      // Per explicit instruction — using this box at all is an inherently
-      // exclusive ask, same as a chat request phrased "find me PS5s, I
-      // don't want to see t-shirts or random junk" (see the chat
-      // assistant's own set_general_deal_detection guidance above, which
-      // already turns this off for that kind of request) — just never
-      // wired up for the Dashboard's own search box until now. Without it,
-      // general deal detection staying on by default meant evaluateListing's
-      // off-topic skip (scrapeEngine.ts) never actually fired, so nothing
-      // stopped the scanner from opening whatever unrelated stuff the
-      // plain general-feed browse turned up right after the dedicated
-      // search finished — reported live as "searched xbox series x
-      // correctly, but after looking at one listing, lost all the terms
-      // and went back to a general search." Deliberately fires on EVERY
-      // submission through this box, not just a brand new item — hitting
-      // Search again for something already tracked is the same exclusive
-      // intent repeated, and it's also the only way an already-running
-      // session (started before this fix existed) gets it applied without
-      // a full app restart.
-      if (config.generalDeal.enabled) {
-        config = { ...config, generalDeal: { ...config.generalDeal, enabled: false } };
-        saveConfig(CONFIG_PATH, config);
-        sendToRenderer("config:updated", config);
-        const line: LogLine = {
-          ts: Date.now(),
-          level: "info",
-          message: "Turned general (unverified) deal detection off — searching for a specific product now stays focused on your Search For list only.",
-        };
-        recordLog(line);
-        sendToRenderer("engine:log", line);
-      }
+      // Adding products here never turns general (unverified) deal detection off: Search For and general discovery coexist unless the
+      // user explicitly disables one (see add_search_item's note above).
 
       const results: string[] = [];
       for (const name of names) {

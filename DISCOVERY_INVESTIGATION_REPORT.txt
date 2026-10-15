@@ -1,0 +1,75 @@
+CLYNX BETA 9: DISCOVERY INVESTIGATION (Activity log of 10:54 PM - 11:04 PM)
+============================================================================
+Evidence is the log lines quoted below plus the code that wrote them. Nothing was published and no existing record or setting was modified.
+
+ROOT CAUSES
+ 1. General discovery switched off by adding "xbox".
+    Log: 11:02:46 "Turned general (unverified) deal detection off ...", then 11:02:48 "Chat added to Search For: xbox".
+    Cause: two handlers in index.ts deliberately set generalDeal.enabled = false on EVERY add: search:addProducts (the Dashboard box, which wrote the 11:02:46
+    line) and the add_search_item chat tool. Both were written for an earlier "focus on what I asked for" request and contradict "coexist unless I disable
+    one". With general off, evaluateListing skips everything not on the Search For list as NOT_FOCUSED ("not one of your focused Search For items").
+    Second defect: runCycle read the setting ONCE when the cycle started, evaluateListing read it live. After the switch-off mid-cycle every remaining location
+    still browsed a full feed of 18 and then skipped nearly all of it instantly (Salem, Austin, Raleigh, ...): "found 18, evaluated 0".
+ 2. 18 found, 0-1 evaluated; the rest unaccounted for.
+    Cause: only part of the outcomes were ever shown. Listings already seen on an earlier pass (store.hasSeenCached) and listings with no price left
+    evaluateListing silently; listings the relevance filter excluded and listings cut off by the per-location limit were never mentioned. "Evaluated" counts
+    only listings that were opened. The Discovery summary line counted only saved dispositions, so Austin showed 10 of 18, Montpelier 16 of 18 (after the
+    9 evaluated were all "too old"), Augusta 0 of 18 and no skip lines at all (consistent with all 18 being duplicates; the log alone cannot prove it).
+    Also: pages that were not the requested place (cause 4) re-showed the same few Richmond-area listings under a new location name, which is exactly what
+    the silent "already seen" exit swallows ("$550, Woodbridge, VA" appears in the Montpelier and Salem passes).
+ 3. Research arriving minutes after the location was done; possible loss.
+    Log: 10:55:52 "Analyzing 6 photo(s)" for Xbox series S ... 10:57:28 "Cycle done" ... 10:58:30 "Couldn't reach WatchCount/eBay in time for Xbox series S" and
+    "Worth a look"; 11:01:33 a summary line "1 not enough evidence (AI_UNVERIFIED)" printed under a different location.
+    Cause A (by design): the photo + price research for a listing runs in a background queue of two workers; a market check may take up to 150 s, so results
+    land after the scanner moved on. Cause B (misattribution): the research's disposition was counted into whichever location was current when it finished,
+    so late results were reported under the wrong place. Cause C (research LOST): when a market check timed out, runMarketCheck deleted the Database entry it
+    had created for it while the check kept running "in the background to file its answer"; the late answer was filed into a deleted product and discarded.
+    Queue contents are not lost on a location change (the engine and its queue persist); only an app close loses queued jobs, which the next start already
+    marks INTERRUPTED.
+ 4. Wrong cities accepted (Augusta, ME read as Augusta, Georgia).
+    Log: "Chose a new location: Augusta, ME" then "Confirmed now browsing Augusta, Georgia"; "Switched to Salem, OR, but the page still reads Richmond, Virginia ...
+    searching there anyway"; "Search radius had drifted to 20 - changed it back to 100 miles".
+    Cause 1: the confirmation compared the CITY NAME only (arrivedLabel.includes("augusta")), so Georgia passed. Cause 2: on a real mismatch the scanner searched
+    the wrong place anyway. Cause 3 (why those places were used at all): location:setMode "country" restored the old guessed city-slug list marked
+    locationResolved: true ("nothing to resolve - a static list"), undoing the earlier fix that made nationwide mode drive Facebook's own Change-location
+    dialog. The slugs are not confirmed places (/marketplace/augusta opens Georgia; salem, montpelier stay on the account's default city). It also set the
+    radius to 100 instead of the nationwide 500. Cause 4: the "Restarting the scanner to apply your location settings" path stopped and started the engine
+    without ever resolving the new location, so a changed location was applied to the OLD browse list.
+ 5. Early exits that could hide legitimate discovery. Checked: too old (7 of 18 in places) and OFFICIAL_SHIPPING (8 of 18 at the first location) are intentional
+    filters and were behaving as designed; the price-range floor ("under xbox's $150 floor") is the range the user set; "eBay search is on, nothing to search
+    for" is correct. Previously-seen dedupe is correct but was invisible (fixed by the accounting). Research budgets did not stop anything in this log.
+    The "worth about $348" on the iPhone 15 Pro Max ($580 market estimate x 0.6) is the existing minor-condition value factor from the photo analysis, not a
+    matching error; left as is.
+ 6. Database creation -> research -> deal evaluation. The chain works (new items were added with photos, market check ran, the deal gate decided). The broken
+    link was cause 3C: a timed-out check dropped its own product and result.
+
+CHANGES
+ - index.ts: adding a Search For item (chat or Dashboard box) no longer touches general detection; only the explicit tool does, and its prompt/definition now say
+   adding a product is not a request to turn it off. search:addProducts and add_search_item otherwise unchanged.
+ - scrapeEngine.ts: general-browse decision reads the live setting at each location; Facebook's location label is checked by city AND state (locationCheck.ts)
+   and a definite mismatch skips that location (counted as not opened) instead of searching it; every pass logs a one-line account of all listings found
+   (passAccount.ts): opened, skipped before opening, already seen, no price, failed to open, not relevant, left for the next pass / interrupted; the "Done at"
+   line says how many listings are still in the research queue; a research result that finishes after its location was left is logged as a late result naming the
+   listing, the location it came from and how long ago, and is not counted into the current location.
+ - index.ts: location:setMode "country" leaves the location UNRESOLVED (radius 500) so the next start confirms each city through Facebook's dialog; the restart
+   after a location change now resolves the location first, like a manual Start.
+ - marketCheckSettle.ts + runMarketCheck: a timed-out check keeps its entry and files the late answer (prices: filled in; no prices or failure: removed, as an
+   on-time check would). The returned result keeps the product id.
+ Preserved: scam/shipping/age/price filters, product identity safeguards, Marketplace pacing (politeDelay unchanged; skipping a wrong location reduces visits),
+ existing records and the user's saved settings (the account that had general detection turned off still has it off until the user turns it back on in Config
+ or tells Clynx).
+
+TESTS (npm test: 61 files, 1788 checks pass; typecheck and build clean)
+ locationCheck.test.ts (22): the log's own cases (Augusta ME/GA, Montpelier and Salem against Richmond), same-name cities in different states, spelling variants,
+   lenient behavior for labels with no state, and all 48 nationwide stand-in locations consistent with themselves and different from a wrong state.
+ scanAccounting.test.ts (23): accounting always balances; the real evaluation names why each listing left the pass; general detection on evaluates an unrelated
+   listing next to a Search For item and nothing in index.ts turns it off on add; late results are attributed and not counted into the current location; a
+   timed-out check's entry is kept and filled in, or removed, as appropriate.
+ One existing test fails (startupErrors, "the original database is still there"): it fails the same way on the untouched branch and looks environmental.
+
+REMAINING LIMITATIONS
+ - Not run against live Facebook. Whether the nationwide lookup confirms all 48 cities, and how long it takes at start, is untested here (state mode already works this way).
+ - A location whose label cannot be compared (no state in the expected label, e.g. an opaque slug) still falls back to the city-name check and "search anyway".
+ - Background research still finishes minutes after its location; it is now visible and correctly attributed, not faster. Queued jobs are still lost if the app is closed.
+ - If every location of a cycle is skipped as the wrong place, the cycle counts as failed and backs off (existing behavior for unopenable locations).
+ - A running scanner needs the new installer. This is not published or built; Beta 9 is still a source draft.

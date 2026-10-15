@@ -159,6 +159,9 @@ export function isLikelyUnshippable(title: string): boolean {
 // this file (and elsewhere) keeps working unchanged.
 export { estimateListingAgeHours, isListingTooOld } from "./listingAge.js";
 import { estimateListingAgeHours, isListingTooOld } from "./listingAge.js";
+import { checkArrivedLocation, type LocationCheck } from "./locationCheck.js";
+import { PassAccount, type ListingOutcome } from "./passAccount.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 // Best-effort human-readable label for a browseUrl, so location-rotation
 // messages say "Phoenix, AZ" instead of a bare index number or an opaque
@@ -379,7 +382,19 @@ interface ListingEvalResult {
   // searchForItemNow use this to decide whether page.goBack() is actually
   // needed before moving to the next candidate.
   visitedDetailPage: boolean;
+  // Why a listing that was not counted left the pass (see passAccount.ts). Counted listings are "opened".
+  outcome?: ListingOutcome;
 }
+
+// Where and when a listing was found, carried through its background research so that a result arriving minutes later (after the scanner moved on to
+// other locations, or finished the cycle) is attributed to the place it came from instead of whichever location happens to be current.
+export interface ListingOrigin {
+  visit: number;
+  label: string;
+  title: string;
+  at: number;
+}
+export const listingOrigin = new AsyncLocalStorage<ListingOrigin>();
 
 const NOT_COUNTED: ListingEvalResult = {
   counted: false,
@@ -526,12 +541,27 @@ export class ScrapeEngine {
 
   /** Called when the scanner starts on a new location: the budgets for extra looks are per visit, and the last visit gets summed up. */
   beginLocationVisit(): void {
+    this.visitSeq++;
     this.logVisitSummary();
     this.speculativeLooksThisVisit = 0;
     this.marketLooksThisVisit = 0;
   }
 
+  private visitSeq = 0;
+  private visitLabel = "";
+
   private tally(d: { status: string; code: string }): void {
+    const origin = listingOrigin.getStore();
+    if (origin && origin.visit !== this.visitSeq) {
+      // The listing's research finished after the scanner left the location it was found at: it belongs to that location's summary, which was already
+      // printed, so say so here with the listing's own name instead of counting it into the location being visited now.
+      const minutes = Math.max(1, Math.round((Date.now() - origin.at) / 60_000));
+      this.log("info", `Late research result for "${origin.title}" (found at ${origin.label || "an earlier location"}, about ${minutes} min ago): ${d.status.replace(/_/g, " ")} (${d.code}).`);
+      recordEvent(`research_${d.status}`);
+      recordEvent(`research_code_${d.code}`);
+      recordEvent("research_late");
+      return;
+    }
     this.visitTally[d.status] = (this.visitTally[d.status] ?? 0) + 1;
     this.visitTally[`${d.status}/${d.code}`] = (this.visitTally[`${d.status}/${d.code}`] ?? 0) + 1;
     recordEvent(`research_${d.status}`);
@@ -1236,7 +1266,7 @@ export class ScrapeEngine {
     });
     const record = this.opts.store.getLastSavedListing();
     if (record) this.opts.onListing(record);
-    return NOT_COUNTED;
+    return { ...NOT_COUNTED, outcome: "skipped_before_opening" };
   }
 
   // Opens a listing's detail page. A method (not a bare call) so the evaluation routes can be exercised in tests without a browser.
@@ -1477,10 +1507,10 @@ export class ScrapeEngine {
     // plain DB lookup via the db_dedup_lookup/dedup_cache_check stages.
     if (this.opts.store.hasSeenCached(listing.id)) {
       recordEvent("duplicate", config.id);
-      return NOT_COUNTED;
+      return { ...NOT_COUNTED, outcome: "already_seen" };
     }
     recordEvent("unique", config.id);
-    if (listing.price === null) return NOT_COUNTED;
+    if (listing.price === null) return { ...NOT_COUNTED, outcome: "no_price" };
 
     // Per explicit instruction — instrumenting the pipeline to measure
     // where time actually goes: everything from here through the general-
@@ -1866,7 +1896,7 @@ export class ScrapeEngine {
       // spurious goBack when nothing needs undoing is harmless, but
       // skipping a genuinely-needed one would leave the page stranded off
       // the search results.
-      return { ...NOT_COUNTED, visitedDetailPage: true };
+      return { ...NOT_COUNTED, visitedDetailPage: true, outcome: "load_failed" };
     }
 
     // Fast-moving mail-order business — a listing sitting for over a day is
@@ -2124,8 +2154,9 @@ export class ScrapeEngine {
     // above) — the cast is only needed because TS doesn't carry that
     // narrowing through a closure captured for later/deferred invocation.
     const nonNullPricedListing = nonNullPriced(listing);
+    const origin: ListingOrigin = { visit: this.visitSeq, label: this.visitLabel, title: listing.title, at: Date.now() };
     const runPipeline = () =>
-      this.runPostScoringPipeline(
+      listingOrigin.run(origin, () => this.runPostScoringPipeline(
         nonNullPricedListing,
         detail,
         config,
@@ -2136,7 +2167,7 @@ export class ScrapeEngine {
         priceQualifiedWatches,
         discoveryMode,
         plan
-      );
+      ));
     if (plan.vision) {
       recordEvent("vision_enqueued");
       this.enqueueVisionJob(plan.priority, () =>
@@ -3100,6 +3131,7 @@ export class ScrapeEngine {
       const locationLabel = describeLocationUrl(url);
       this.imageMatchAttemptsThisLocation = 0;
       this.beginLocationVisit();
+      this.visitLabel = locationLabel;
       // Per explicit instruction — Dashboard's Live panel shows this
       // in-between moment explicitly ("Switching locations...") instead of
       // just going blank between one listing and the next.
@@ -3160,16 +3192,27 @@ export class ScrapeEngine {
         const expectedCityName = locationLabel.split(",")[0]?.trim().toLowerCase() || null;
         let arrivedLabel: string | null = null;
         let confirmed = false;
+        let placeCheck: LocationCheck = "unknown";
         try {
           for (let attempt = 0; attempt < 3 && !confirmed; attempt++) {
             await page.goto(url, { waitUntil: "domcontentloaded" });
             await page.waitForTimeout(1200);
             arrivedLabel = await readCurrentLocationLabel(page);
-            confirmed = !!arrivedLabel && (!expectedCityName || arrivedLabel.toLowerCase().includes(expectedCityName));
+            // City AND state: "Augusta, ME" is not "Augusta, Georgia" (see locationCheck.ts). A label that carries no state to compare
+            // (an opaque slug) is judged by its city name alone, as before.
+            placeCheck = checkArrivedLocation(locationLabel, arrivedLabel);
+            confirmed = placeCheck === "match" || (placeCheck === "unknown" && !!arrivedLabel && (!expectedCityName || arrivedLabel.toLowerCase().includes(expectedCityName)));
           }
           justConfirmedLocation = true;
           if (confirmed && arrivedLabel) {
             this.log("info", `Confirmed now browsing ${arrivedLabel}.`);
+          } else if (placeCheck === "mismatch" && arrivedLabel) {
+            // Searching a page that is somewhere else would file that place's listings under this location (and show the same few listings again
+            // at every "new" location). Skip it; it counts as a location that could not be opened.
+            this.visitsNotOpened++;
+            this.lastNotOpenedMessage = `Facebook showed "${arrivedLabel}" instead of ${locationLabel}`;
+            this.log("warn", `Wanted ${locationLabel}, but Facebook still shows "${arrivedLabel}" after retrying — skipping this location instead of searching the wrong place.`);
+            continue;
           } else if (arrivedLabel) {
             this.log(
               "warn",
@@ -3312,6 +3355,8 @@ export class ScrapeEngine {
           (l) => isRelevantToSearchItems(l.title, config.searchItems) || findGreenFlagCandidate(l.title, config.searchItems) !== null
         );
         let evaluatedForItem = 0;
+        const acct = new PassAccount(`Search for "${activeItem.item}" at ${locationLabel}`, searchResults.length);
+        acct.setCandidates(candidateResults.length);
         for (const listing of candidateResults) {
           if (this.stopRequested || this.priorityRequested) break;
           if (locationCount > 1 && evaluatedForItem >= perLocation) break;
@@ -3323,6 +3368,7 @@ export class ScrapeEngine {
             upcomingListings: candidateResults.slice(idx + 1, idx + 6).map(toPreview),
           });
           const result = await this.evaluateListing(page, listing, this.opts.getConfig());
+            acct.record(result.counted ? "opened" : (result.outcome ?? "other"));
           // Per explicit instruction, diagnosed live: "to maintain the
           // original search, it has to enter a product found under that
           // search and then go BACK to the previous page where the original
@@ -3362,7 +3408,9 @@ export class ScrapeEngine {
             }
           }
         }
+        acct.settle(this.stopRequested || this.priorityRequested);
         this.log("info", `Active search for "${activeItem.item}" done — ${evaluatedForItem} listings evaluated.`);
+        this.log("info", acct.describe());
       } else if (!generalSearchMode) {
         for (const item of searchableItems) {
           if (this.stopRequested || this.priorityRequested) break;
@@ -3400,6 +3448,8 @@ export class ScrapeEngine {
             (l) => isRelevantToSearchItems(l.title, config.searchItems) || findGreenFlagCandidate(l.title, config.searchItems) !== null
           );
           let evaluatedForItem = 0;
+          const acct = new PassAccount(`Search for "${item.item}" at ${locationLabel}`, searchResults.length);
+          acct.setCandidates(candidateResults.length);
           for (const listing of candidateResults) {
             if (this.stopRequested || this.priorityRequested) break;
             if (locationCount > 1 && evaluatedForItem >= perLocation) break;
@@ -3411,6 +3461,7 @@ export class ScrapeEngine {
               upcomingListings: candidateResults.slice(idx + 1, idx + 6).map(toPreview),
             });
             const result = await this.evaluateListing(page, listing, this.opts.getConfig());
+            acct.record(result.counted ? "opened" : (result.outcome ?? "other"));
             // See the same goBack() in the rotate-mode loop above — returns
             // to the search-results page (query + filters intact) before the
             // next candidate, instead of leaving the shared page stranded on
@@ -3426,7 +3477,9 @@ export class ScrapeEngine {
               else if (result.notable) batchSkips.push({ title: result.title, reason: result.reasoning });
             }
           }
+          acct.settle(this.stopRequested || this.priorityRequested);
           this.log("info", `Active search for "${item.item}" done — ${evaluatedForItem} listings evaluated.`);
+          this.log("info", acct.describe());
         }
       }
       // generalSearchMode (2+ Search For items, "Rotate search terms"
@@ -3460,7 +3513,9 @@ export class ScrapeEngine {
       // it was just unreachable). Without `|| generalSearchMode` here, that
       // combination fell straight to the "else if" skip-log branch further
       // down and evaluated zero listings, forever, at every location.
-      const shouldGeneralBrowse = config.generalDeal.enabled || searchableItems.length === 0 || generalSearchMode;
+      // Read fresh, not from the snapshot taken when the cycle started: evaluateListing already judges each listing against the live setting, so a
+      // stale 'on' here made every remaining location browse a full feed only to skip all of it once general detection was switched off mid-cycle.
+      const shouldGeneralBrowse = this.opts.getConfig().generalDeal.enabled || searchableItems.length === 0 || generalSearchMode;
 
       if (shouldGeneralBrowse) {
         try {
@@ -3500,6 +3555,8 @@ export class ScrapeEngine {
           }
 
           let generalEvaluated = 0;
+          const acct = new PassAccount(`General browse at ${locationLabel}`, listings.length);
+          acct.setCandidates(candidateListings.length);
           for (const listing of candidateListings) {
             if (this.stopRequested || this.priorityRequested) break;
             if (locationCount > 1 && generalEvaluated >= perLocation) break;
@@ -3511,6 +3568,7 @@ export class ScrapeEngine {
               upcomingListings: candidateListings.slice(idx + 1, idx + 6).map(toPreview),
             });
             const result = await this.evaluateListing(page, listing, this.opts.getConfig());
+            acct.record(result.counted ? "opened" : (result.outcome ?? "other"));
             if (result.counted) {
               generalEvaluated++;
               totalEvaluatedHere++;
@@ -3519,6 +3577,8 @@ export class ScrapeEngine {
               else if (result.notable) batchSkips.push({ title: result.title, reason: result.reasoning });
             }
           }
+          acct.settle(this.stopRequested || this.priorityRequested);
+          if (listings.length > 0) this.log("info", acct.describe());
         } catch (err) {
           this.log("error", `Browse failed for ${locationLabel}: ${(err as Error).message}`);
         }
@@ -3539,7 +3599,11 @@ export class ScrapeEngine {
       }
 
       if (locationCount > 1) {
-        this.log("info", `Done at ${locationLabel} (${totalEvaluatedHere} listings evaluated) — moving to the next.`);
+        const waiting = this.visionJobs.length + this.visionWorkersActive;
+        this.log(
+          "info",
+          `Done at ${locationLabel} (${totalEvaluatedHere} listings evaluated) — moving to the next.${waiting > 0 ? ` ${waiting} listing${waiting === 1 ? " is" : "s are"} still waiting on photo and price research, which finishes in the background (results are logged with this location's name).` : ""}`
+        );
       }
     }
 

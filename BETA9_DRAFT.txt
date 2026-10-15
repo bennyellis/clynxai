@@ -2,6 +2,7 @@ CLYNX BETA 9 - SOURCE DRAFT (IN PROGRESS, NOT BUILT, NOT SIGNED, NOT PUBLISHED)
 
 Version      0.3.0-beta.9 (beta channel), package.json updated; release notes in release-notes/0.3.0-beta.9.txt
 Contents     Everything in Beta 8, plus the fix for the Discovery chat researching the parent instead of the named variant
-             (see the FOLLOW-UP section of VARIANT_RECOGNITION_REPORT.txt). More changes to be added before release.
+             (see the FOLLOW-UP section of VARIANT_RECOGNITION_REPORT.txt), plus the Discovery fixes in DISCOVERY_INVESTIGATION_REPORT.txt.
+             More changes to be added before release.
 Installer    not built. Build from a clean commit with npm run dist:beta in an Administrator PowerShell (or with Developer Mode on).
 To release   register the draft, then website console > Releases > 0.3.0-beta.9 > Approve, then Publish (type the version).
