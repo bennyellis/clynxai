@@ -1,0 +1,8 @@
+CLYNX BETA 10 - SOURCE DRAFT (NOT PUBLISHED)
+
+Version      0.3.0-beta.10 (beta channel). Beta 9 (0.3.0-beta.9) was registered on the server earlier and withdrawn; a withdrawn version cannot be reused,
+             so this build ships as Beta 10. Release notes: release-notes/0.3.0-beta.10.txt
+Contents     Everything in Beta 8 and Beta 9 plus: variant verification with multi-engine search, structured-data page reading, browser fallback, official-name
+             scoring; comparable-sale identity validation; discovery fixes; beta tester plan. See the *_REPORT.txt files.
+Installer    built on the Windows PC with npm run dist:beta (dist\Clynx-Beta-Setup-0.3.0-beta.10.exe); SHA-256 to be recorded here.
+To release   Register-ClynxRelease.ps1 -Installer dist\Clynx-Beta-Setup-0.3.0-beta.10.exe -Version 0.3.0-beta.10 -ExpectSha256 $hash, then console > Releases > Approve > Publish.

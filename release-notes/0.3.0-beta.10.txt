@@ -1,0 +1,14 @@
+Clynx Beta 10 - asking for a specific edition now researches that edition
+* Fixed: asking Clynx in the Database or Discovery chat for a specific edition, color, capacity or bundle (for example "xbox series x galaxy") no longer researches the general product instead. Clynx now uses the full name you typed, checks it against manufacturer and retailer evidence, and files it as its own entry linked to the general one.
+* Clynx no longer asks whether to "keep it under the main entry" or whether a product is "official" before researching it.
+* A progress line shows while Clynx checks manufacturer and retailer sources.
+* Adding a product to Search For no longer turns general deal discovery off. Both run side by side unless you turn one off yourself.
+* Every location pass now accounts for every listing it found: opened, skipped before opening, already seen, no price, not relevant, or left for the next pass.
+* Marketplace location checks compare city and state (Augusta, Maine is no longer accepted as Augusta, Georgia). A page that shows a different place is skipped instead of searched, and nationwide mode confirms each city through Facebook before using it.
+* Changing your location setting while scanning now looks the new location up before restarting.
+* Photo and price research that finishes after the scanner has moved on is labelled with the place it came from, and a price check that times out no longer loses its answer.
+* Sold and asking prices are now only taken from results that are verified as the same product (model number, generation, tier, capacity, color, edition, and not an accessory, part or lot). An iPhone 14 in an iPhone 16 search no longer affects the price, and when nothing can be verified Clynx shows no price instead of another model's. Each price check logs how many results were found, accepted, unsure and rejected, and why.
+* Variant checks now read the web like a person would: they try several search engines, read manufacturer pages whose product names are hidden in scripts and structured data (opening a browser page when needed), try alternate edition names, and say plainly when a search was blocked or a link could not be read.
+* Beta testers can be given unlimited access (no plan limits) without being administrators or owners. The Account screen shows "Beta Tester — Unlimited access".
+* Includes everything in Beta 8 and the unpublished Beta 9: editions, colors and capacities are verified from evidence (never called fake just because a search came up empty), links you paste are read, special editions are priced only from sales of that edition, and Clynx only says something was saved when it was.
+* Your data, sign-in, Watches, Database and automatic updates are unchanged.
