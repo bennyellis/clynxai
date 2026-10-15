@@ -57,6 +57,14 @@ export function recoverNamedProduct(product: string, userMessage: string | undef
   return phrase;
 }
 
+function cleanOfficialName(name: string | undefined, claim: string): string | null {
+  if (!name) return null;
+  const cleaned = name.replace(/\s+/g, " ").replace(/^[\W_]+|[\W_]+$/g, "").trim();
+  if (cleaned.length < claim.length - 2 || cleaned.length > 90 || /[<>{}\[\]]/.test(cleaned)) return null;
+  const have = new Set(identityTokens(cleaned));
+  return identityTokens(claim).every((t) => have.has(t)) ? cleaned : null;
+}
+
 export async function runResearchProductTool(args: Record<string, unknown>, userMessage: string | undefined, deps: ResearchToolDeps): Promise<string> {
   let product = String(args.product ?? "").trim();
   if (!product) return "Failed: no product name given.";
@@ -84,6 +92,10 @@ export async function runResearchProductTool(args: Record<string, unknown>, user
   if (decision.kind === "create_variant") {
     const parentFull = store.getProductById(decision.parent.id);
     const candidateId = deps.newId();
+    // The evidence's own name for the product ("Xbox Series X 2TB Galaxy Black Special Edition" for "xbox series x galaxy") is what the entry is filed
+    // under when it names every word of the claim and is a clean, short title: it is the name sellers and sold listings use.
+    const official = cleanOfficialName(decision.verdict.officialName, product);
+    if (official) product = official;
     const id = store.addProductStub(candidateId, product);
     if (id !== candidateId) {
       // Already in the Database under this name: refresh that one, with the evidence.

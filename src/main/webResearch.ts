@@ -18,6 +18,9 @@ import { isLowAiMode } from "./aiMode.js";
 import { assessEvidence, describeVerdictForAi, verifyVariant, type VariantVerdict, type VerifyDeps } from "./variantEvidence.js";
 import { extractVariantAttributes } from "./variantIdentity.js";
 import { isPublicHttpUrl } from "./variantResearch.js";
+import { createEvidenceDeps, extractEvidenceText, searchWasUnavailable, type EvidenceDeps } from "./webEvidence.js";
+import { checkBrowsers } from "./browserCheck.js";
+import { getStealthChromium } from "./stealthBrowser.js";
 
 const SEARCH_TIMEOUT_MS = 15_000;
 const PAGE_FETCH_TIMEOUT_MS = 12_000;
@@ -83,25 +86,46 @@ function decodeDuckDuckGoUrl(href: string): string {
   }
 }
 
+// One shared evidence reader: its search backends and the memory of which one blocked us last. Every search in this file goes through it, so a bot check from one
+// search engine moves on to the next one instead of reading as "no results".
+let evidenceDeps: EvidenceDeps | null = null;
+function getEvidenceDeps(): EvidenceDeps {
+  evidenceDeps ??= createEvidenceDeps({ render: renderPageText });
+  return evidenceDeps;
+}
+
+/**
+ * A page that a plain request cannot read (refused, or an empty JavaScript shell) is opened in a separate, throw-away browser (never the Facebook window) and its
+ * rendered text taken. No AI is involved, so it costs no credits; it is only tried when the plain read showed nothing useful, at most twice per check.
+ */
+async function renderPageText(url: string): Promise<string | null> {
+  if (!isPublicHttpUrl(url)) return null;
+  let browser: import("playwright").Browser | null = null;
+  try {
+    const chromium = await getStealthChromium();
+    const found = checkBrowsers().found[0];
+    browser = await chromium.launch({ headless: true, ...(found ? { channel: found.channel } : {}) });
+    const context = await browser.newContext({ userAgent: USER_AGENT, viewport: { width: 1280, height: 900 }, locale: "en-US" });
+    const page = await context.newPage();
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25_000 });
+    await page.waitForTimeout(2500);
+    await page.waitForLoadState("networkidle", { timeout: 6000 }).catch(() => undefined);
+    const html = await page.content();
+    const visible = await page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
+    return `${extractEvidenceText(html)}\n${visible}`.slice(0, 60_000);
+  } catch {
+    return null;
+  } finally {
+    await browser?.close().catch(() => undefined);
+  }
+}
+
 async function searchWeb(query: string, maxResults: number): Promise<SearchResult[]> {
-  const res = await fetchWithTimeout(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, SEARCH_TIMEOUT_MS);
-  if (!res.ok) throw new Error(`Search request failed: ${res.status}`);
-  const html = await res.text();
-
-  const links: Array<{ url: string; title: string }> = [];
-  const linkRe = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
-  let m: RegExpExecArray | null;
-  while ((m = linkRe.exec(html)) && links.length < maxResults) {
-    links.push({ url: decodeDuckDuckGoUrl(m[1]), title: stripHtml(m[2]) });
-  }
-
-  const snippets: string[] = [];
-  const snippetRe = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
-  while ((m = snippetRe.exec(html)) && snippets.length < maxResults) {
-    snippets.push(stripHtml(m[1]));
-  }
-
-  return links.map((link, i) => ({ title: link.title, url: link.url, snippet: snippets[i] ?? "" }));
+  const deps = getEvidenceDeps();
+  const hits = await deps.search(query, maxResults);
+  // Every search engine refused or failed: that is an error, not "no results" (callers fall back to what they know, and say so).
+  if (hits.length === 0 && searchWasUnavailable(deps.trace())) throw new Error("the web search was blocked or unreachable");
+  return hits;
 }
 
 // Prefers the semantic <main>/<article> container when a page has one —
@@ -175,18 +199,9 @@ async function fetchPage(url: string, maxChars = MAX_CHARS_PER_PAGE): Promise<Fe
 
 const EVIDENCE_PAGE_CHARS = 40_000;
 
-/** The real search and page reader, in the shape the evidence check wants. Only public http(s) addresses are ever opened. */
-export function webVerifyDeps(): VerifyDeps {
-  return {
-    async search(query, maxResults) {
-      return searchWeb(query, maxResults);
-    },
-    async fetchText(url) {
-      if (!isPublicHttpUrl(url)) return null;
-      const page = await fetchPage(url, EVIDENCE_PAGE_CHARS);
-      return page.text;
-    },
-  };
+/** The real search and page reader, in the shape the evidence check wants (traces what it asks and what comes back). */
+export function webVerifyDeps(): EvidenceDeps {
+  return getEvidenceDeps();
 }
 
 /** Whether a product name claims something specific enough to be worth an evidence check on its own (an edition, a regional model, a capacity in a color). */
@@ -298,6 +313,10 @@ export async function lookUpWithDeps(query: string, deps: VerifyDeps, url: strin
     } catch (err) {
       searchFailed = (err as Error).message;
     }
+  }
+  const searchTrace = deps.trace?.();
+  if (q && results.length === 0 && searchTrace && searchTrace.searches.length > 0 && searchTrace.searches.every((x) => x.outcome === "blocked" || x.outcome === "error")) {
+    blocks.push(`The web search itself was blocked or failed (${searchTrace.searches.slice(0, 3).map((x) => `${x.backend}: ${x.detail ?? x.outcome}`).join("; ")}). Say the lookup failed and offer to retry; do NOT say the search found nothing.`);
   }
   const pages = await Promise.all(
     results.slice(0, 4).map(async (r) => {

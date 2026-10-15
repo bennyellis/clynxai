@@ -59,16 +59,35 @@ async function decideForParent(product: string, parent: TrackedProduct, deps: De
   return { kind: "not_recorded", parent, verdict, message: notRecordedMessage(product, parent, verdict) };
 }
 
+/** A short, factual account of what the evidence check actually did (not what it intended to do). */
+export function traceSummary(v: VariantVerdict): string {
+  const d = v.diagnostics;
+  if (!d) return v.searched.length ? `${v.searched.length} searches were tried.` : "";
+  const ok = d.searches.filter((x) => x.outcome === "ok").length;
+  const empty = d.searches.filter((x) => x.outcome === "empty").length;
+  const blocked = d.searches.filter((x) => x.outcome === "blocked").length;
+  const failed = d.searches.filter((x) => x.outcome === "error").length;
+  const read = d.pages.filter((p) => p.chars > 0).length;
+  const pageFails = d.pages.filter((p) => p.chars === 0).length;
+  const parts = [`${d.searches.length} search attempts (${ok} returned results, ${empty} returned nothing, ${blocked} were blocked, ${failed} failed)`, `${read} pages read${pageFails ? `, ${pageFails} could not be read` : ""}`];
+  return `What actually happened: ${parts.join("; ")}.`;
+}
+
 export function notRecordedMessage(product: string, parent: TrackedProduct, v: VariantVerdict): string {
-  const tried = v.searched.length ? ` I searched ${v.searched.length} ways (the exact title, the product line plus its distinctive words, the manufacturer's site, alternate spellings).` : "";
+  const facts: string[] = [traceSummary(v)];
+  if (v.searchUnavailable) facts.push("The web search itself was blocked or failed, so this is a failed lookup, not a finding: tell the user the lookup failed and offer to retry (do not say you searched and found nothing).");
+  if (v.searchLinks?.length) facts.push(`The link the user gave is a search-results page (query "${v.searchLinks[0].query}"), not a product page. You did NOT read it as a page; say that, and that its query was used as a search.`);
+  if (v.unreadableUrls?.length) facts.push(`Could not read: ${v.unreadableUrls.join(", ")}. Do NOT claim you opened or read ${v.unreadableUrls.length === 1 ? "it" : "them"}; ask for the product page's exact title or a screenshot.`);
+  const detail = facts.filter(Boolean).join(" ");
   if (v.status === "disproven") {
-    return `NOT SAVED. "${product}" was not added to the Database. ${v.basis} Tell the user that source says it is not an official product, name the source, and invite proof to the contrary (a product link, a photo of the box label). "${parent.name}" is unchanged.`;
+    return `NOT SAVED. "${product}" was not added to the Database. ${v.basis} Tell the user that source says it is not an official product, name the source, and invite proof to the contrary (a product link, a photo of the box label). "${parent.name}" is unchanged. ${detail}`.trim();
   }
-  return `NOT SAVED. I could not confirm "${product}" yet, so I did NOT add it to the Database and "${parent.name}" is unchanged.${tried} ${v.basis} This is "unverified", NOT "fake": do not tell the user it is fake, seller-invented or non-existent. Ask for a link to a page that lists it or a photo of the box/label (a link is read as soon as it is given), and offer to look again.`;
+  return `NOT SAVED. I could not confirm "${product}" yet, so I did NOT add it to the Database and "${parent.name}" is unchanged. ${v.basis} ${detail} This is "unverified", NOT "fake": do not tell the user it is fake, seller-invented or non-existent, and do not describe searches that did not happen. Ask for a link to the product page (a link is read as soon as it is given) or a photo of the box/label, and offer to look again.`.replace(/\s+/g, " ").trim();
 }
 
 export function createdVariantMessage(product: string, parent: TrackedProduct, v: VariantVerdict): string {
-  return `VERIFIED: ${v.status} (${v.basis}) Added "${product}" to the Database as its own entry under "${parent.name}" and started researching it. It is not saved until that research finishes: say it is being researched, not that it is saved. Its value comes only from sales of this exact version; if there are none yet it will show as not enough evidence, never the standard model's price.`;
+  const named = v.officialName && v.officialName.toLowerCase() !== product.toLowerCase() ? ` The source calls it "${v.officialName}".` : "";
+  return `VERIFIED: ${v.status} (${v.basis})${named} Added "${product}" to the Database as its own entry under "${parent.name}" and started researching it. It is not saved until that research finishes: say it is being researched, not that it is saved. Its value comes only from sales of this exact version; if there are none yet it will show as not enough evidence, never the standard model's price.`;
 }
 
 /** Addresses in the user's message that Clynx may read: http(s) only, and nothing that points back at this computer or a private network. */

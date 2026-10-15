@@ -207,7 +207,7 @@ function capacityAlternates(name: string): string[] {
  */
 export function buildSearchPlan(name: string, opts: { brandHints?: string[]; maxSteps?: number } = {}): SearchStep[] {
   const clean = name.trim().replace(/\s+/g, " ");
-  const maxSteps = opts.maxSteps ?? 7;
+  const maxSteps = opts.maxSteps ?? 8;
   const steps: SearchStep[] = [];
   const add = (query: string, purpose: SearchPurpose) => {
     const q = query.trim().replace(/\s+/g, " ");
@@ -223,11 +223,20 @@ export function buildSearchPlan(name: string, opts: { brandHints?: string[]; max
     .trim();
 
   add(`"${clean}"`, "exact");
-  if (!/\bofficial\b/i.test(clean)) add(`${clean} official`, "official");
-  if (parent.toLowerCase() !== clean.toLowerCase()) add(`${parent} ${attrWordsFull}`, "parent_attributes");
+  // The maker's own site first: it is the evidence that settles a claim, and the least likely to be a seller's wording.
   const first = identityTokens(parent).find((t) => t.length >= 3 && /^[a-z]+$/.test(t));
   const brands = [...new Set([...(first ? [first] : []), ...(opts.brandHints ?? []).map((b) => b.toLowerCase().replace(/[^a-z0-9]/g, "")).filter(Boolean)])].slice(0, 3);
   for (const b of brands) add(`${parent} ${attrWords || attrWordsFull} site:${b}.com`, "manufacturer_site");
+  if (!/\bofficial\b/i.test(clean)) add(`${clean} official`, "official");
+  if (parent.toLowerCase() !== clean.toLowerCase()) add(`${parent} ${attrWordsFull}`, "parent_attributes");
+  // Alternate names: sellers and users say "Galaxy Edition" where the maker says "Galaxy Black Special Edition", "Halo Infinite Edition" where it says "Halo
+  // Infinite Limited Edition". The edition word is tried with each common marker, and a themed name with no edition word at all gets one.
+  const EDITION_WORDS = ["Special Edition", "Limited Edition"];
+  const hasMarker = attrs.editionTerms.some((t) => ["special", "limited", "collector", "collectors", "anniversary", "exclusive", "signature", "deluxe", "commemorative"].includes(t));
+  if (!hasMarker) {
+    const stem = /\bedition\s*$/i.test(clean) ? clean.replace(/\s*edition\s*$/i, "") : clean;
+    for (const marker of EDITION_WORDS) add(`${stem} ${marker}`, "alternate_names");
+  }
   if (parent.toLowerCase() !== clean.toLowerCase() || attrWordsFull) add(`${parent} editions colors storage options`, "parent_variants");
   const alts = capacityAlternates(clean);
   if (alts.length > 0) {

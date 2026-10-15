@@ -1,0 +1,51 @@
+CLYNX BETA 9: VARIANT VERIFICATION, LIVE RETRIEVAL FAILURE
+==========================================================
+Nothing was published; no Database record was changed. Spending: no new AI calls; browser rendering uses no credits and is limited to 2 pages per check.
+
+WHAT I COULD AND COULD NOT OBSERVE
+ This session's network policy denies html.duckduckgo.com, bing.com, xbox.com and wikipedia (HTTP 403 on CONNECT), so I could NOT reproduce the live failure or
+ capture the real queries/responses. I did not substitute made-up results. What follows is split into CONFIRMED (from your screenshot and the code) and INFERRED
+ (how real sites behave; the new trace tool will show which one actually happened on your PC).
+
+CONFIRMED
+ 1. The screenshot answer claimed "I ran that search you pasted". The pasted link was a google.com/search page. The old code treated every public link as a page,
+    failed to read it, and recorded that only in an internal list; the text handed to Clynx never said so, so Clynx described a search it had not run.
+ 2. "I searched ... Microsoft pages and major retailers" came from the tool's own template wording, not from a record of what happened. There was no trace.
+ 3. The search plan never tried alternate names: "Galaxy Edition" was never searched as "Galaxy Special Edition / Limited Edition", nor "Halo Infinite Edition" as
+    "Halo Infinite Limited Edition".
+ 4. Page text extraction removed every <script> block and kept only the first 3000 characters of visible text (40k in the evidence path), so anything a page keeps in
+    structured data, meta tags or image labels was discarded.
+ 5. Matching accepted the claim's words ANYWHERE on a page (a console tile and a game tile far apart would have verified an edition that does not exist).
+INFERRED (checked by the new live trace)
+ 6. DuckDuckGo's HTML endpoint answers repeated automated requests with a bot check (HTTP 202 / "anomaly"). The old code parsed zero results and reported
+    "nothing found"; 7 queries fired back to back make that likely. 7. xbox.com product pages are script-built, so a plain request returns a shell.
+
+FIX (generic; no product, brand or edition is named anywhere)
+ webEvidence.ts (new): three search backends tried in turn (DuckDuckGo HTML, DuckDuckGo Lite, Bing) with real markup parsers; a bot check/refusal is recognized and
+   recorded as BLOCKED, a backend that blocked or failed is left alone for 10 / 1 minutes, searches are spaced; page text now includes the title, meta tags, JSON-LD,
+   JSON in scripts and image/aria labels; a page that a plain request cannot use is rendered once in a separate throw-away Chrome/Edge (never the Facebook window)
+   and its text read; every search and page read is traced (backend, outcome, HTTP status, characters, plain or browser).
+ searchLinks.ts: a pasted Google/Bing/eBay/Walmart results link is recognised as a search, not a page; its query is used as a search and the answer says plainly that
+   it was not read as a page. A link that cannot be read is listed as unreadable and Clynx is told not to claim it opened it.
+ variantEvidence.ts: matching requires the claim's words near each other (a console and a game on the same page do not make a product); the evidence's own name for
+   the product is captured ("Xbox Series X - 2TB Galaxy Black Special Edition" for "Galaxy Edition") and a verified variant is filed under that name; if every search
+   was blocked or failed the verdict says the lookup failed ("says nothing about whether the product exists"), never "nothing found".
+ variantIdentity.ts: alternate names (the edition word tried with Special / Limited, a themed name given one), maker's site searched first.
+ variantResearch.ts / chat prompts: the answer to Clynx now carries a factual summary of what happened (searches by outcome, pages read), the unreadable/search links and the
+   blocked-search instruction, replacing the template wording.
+ scripts/variant-live-check.cjs: runs the real verification against the live web and prints every search, page, classification and verdict. On your PC:
+     node scripts/variant-live-check.cjs                       (the two Xbox claims from the report plus "Galaxy")
+     node scripts/variant-live-check.cjs "Some Product" --url https://...     (any claim, optional link)
+   Run in this sandbox it correctly reports every backend unreachable ("search blocked/unavailable"), not "nothing found".
+
+TESTS (npm test: 63 files; typecheck clean)
+ variantLivePipeline.test.ts (32): the real pipeline over real HTTP and a real Chromium, with the public hosts routed to a local server that answers like the real ones:
+   a bot-checked DuckDuckGo HTML, a working Lite, a Bing result with its redirect address; a manufacturer page whose names exist only in JSON-LD; a page that is empty until
+   its script runs (not verified with a plain request, verified once rendered); a refused page; a console and a game merely near each other; a pasted Google link; every
+   backend blocked. "Galaxy Edition" verifies as "Xbox Series X 2TB Galaxy Black Special Edition" and "Halo Infinite Edition" as "... Halo Infinite Limited Edition".
+ variantChatFlow.test.ts updated: a verified variant is filed under the evidence's official name.
+
+REAL-WORLD VERIFICATION: NOT DONE. The two claims have not been verified against the live web by me. Run the script above on your PC (or allow the hosts in this
+ session's network settings and I will run it) to see the actual trace. Known limits: a site that blocks headless browsers will still defeat the render (the trace will
+ show it), search engines can change their markup, and a bot check that answers 200 with results-looking content is not detectable.
+ Needs a new installer.

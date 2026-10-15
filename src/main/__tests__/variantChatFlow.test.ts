@@ -177,13 +177,14 @@ run(async () => {
     script = (lastUser, toolResult) => (toolResult ? relay(toolResult) : { toolCall: { name: "research_product", args: { product: "Xbox Series X" } } });
     const before = w.store.getProductById(w.parentId)!;
     const { reply, toolResults } = await chatTurn(w, "xbox series x galaxy", SCREENSHOT_HISTORY);
-    check("the user's full wording reached the tool (the shortened argument was corrected)", w.started.length === 1 && w.started[0].name === "xbox series x galaxy", w.started);
+    check("the user's full wording reached the tool (the shortened argument was corrected) and was filed under the evidence's own name for it", w.started.length === 1 && /^Xbox Series X 2TB Galaxy Black Special Edition$/.test(w.started[0].name), w.started);
+    check("the verdict keeps what the user actually asked for", w.started[0].opts.verdict?.claim === "xbox series x galaxy" && /Galaxy Black Special Edition/.test(w.started[0].opts.verdict?.officialName ?? ""), w.started[0].opts.verdict);
     check("the evidence verifier ran (it searched, beyond the exact title)", w.verifierWeb.queries.length >= 1, w.verifierWeb.queries);
     check("the tool result says VERIFIED, not 'refreshing the parent'", /^VERIFIED/.test(toolResults[0]) && !/Already have a Database profile/.test(toolResults[0]), toolResults[0]);
     const index = w.store.listProductIndex();
     check("a new, separate entry exists", index.length === 2, index);
     const variant = w.store.getProductById(w.started[0].id)!;
-    check("it is the full name the user typed, not 'Xbox Series X'", variant.name === "xbox series x galaxy", variant.name);
+    check("it is the full official name (every word the user typed, plus what the manufacturer calls it), not 'Xbox Series X'", variant.name === "Xbox Series X 2TB Galaxy Black Special Edition", variant.name);
     check("it is linked to the parent, not merged into it", variant.parentProductId === w.parentId);
     check("its evidence was saved with it", variant.variantEvidence?.status === "verified" || variant.variantEvidence?.status === "supported", variant.variantEvidence);
     check("research started for the VARIANT, not the parent", w.started[0].id !== w.parentId && w.started[0].opts.verdict?.status !== undefined);
