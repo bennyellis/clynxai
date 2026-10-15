@@ -119,6 +119,9 @@ export interface PhotoAnalysisResult {
   // (Config.researchCondition); always [] otherwise, at zero extra prompt/
   // response cost when the feature is off.
   flaws: PhotoFlaw[];
+  // Beta 13: what the photos covered and whether the model looked and found nothing - so "no visible damage" (it looked) is not confused with "unknown" (it could not tell).
+  // Null unless condition detection was on.
+  conditionCoverage: { shown: string[]; noVisibleDamage: boolean } | null;
   error: string | null;
 }
 
@@ -136,6 +139,7 @@ function errorResult(error: string): PhotoAnalysisResult {
     matchedKnownProduct: null,
     titleMatchPhoto: null,
     flaws: [],
+    conditionCoverage: null,
     error,
   };
 }
@@ -384,7 +388,7 @@ ${
       : ""
   }${
     detectFlaws
-      ? `\nAlso specifically look for visible CONDITION FLAWS — a cracked/scratched screen, a missing button/plate/part, visible water or physical damage, "for parts"/"doesn't power on" indicators, anything that would matter to a buyer — whether or not the listing's own text mentions it. Sellers routinely under-describe this. For each genuine flaw you can actually make out, report which photo number it's in, a short plain description, and a tight boundingBox around JUST the flawed area (same fractional 0-1, top-left-origin convention as identifiedProducts' own boundingBox above). Only report something you can actually see — don't infer a flaw from the price or the listing being vague; absence of evidence is not evidence of damage. A perfectly normal-looking item should produce an empty flaws array, which is the common case.${buildFlawFeedbackExamplesBlock(flawFeedbackExamples)}\n`
+      ? `\nAlso look for visible CONDITION: damage a buyer would care about, whether or not the listing's own text mentions it (sellers routinely under-describe it). For each defect you can actually make out give the photo number, a short plain description, a tight boundingBox (same fractional 0-1, top-left-origin convention as identifiedProducts' own boundingBox above), a "class" from this list: cracked_screen, cracked_back_glass, damaged_frame, scratches, dents, broken_display, missing_parts, damaged_ports, bent_hardware, hinge_damage, corrosion, broken_housing, liquid_damage, other; a "severity" ("cosmetic" = looks bad but works; "functional" = affects use; "unknown"), and your confidence. RULES: report only what you can SEE. Never report that something does not power on, has no signal, is locked or otherwise needs testing - a photo cannot show that. A light scratch or scuff that is normal wear is "cosmetic" with low confidence. Absence of evidence is not evidence of damage: do not infer a defect from the price or from a vague listing. Then say which parts of the item the photos actually SHOW ("conditionCoverage.shown": e.g. screen, back, body, ports, keyboard) and set "noVisibleDamage" true ONLY if you looked at those parts and saw no damage; if the photos are too few, dark or blurry to tell, set it false. A perfectly normal-looking item has an empty flaws array.${buildFlawFeedbackExamplesBlock(flawFeedbackExamples)}\n`
       : ""
   }
 Be concrete and specific — list what you actually see, don't guess at things you can't make out. If a photo is too blurry/small to read something, say so rather than inventing it.
@@ -405,7 +409,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
   "matchedKnownProduct": string | null,  // ${referenceProducts.length ? "the exact name of a reference product above, ONLY if this listing's photos genuinely appear to show it — see above" : "null — no reference products were given to compare against"}
   "bestTitleMatchPhotoNumber": number | null,  // the ONE photo number (1 to ${images.length}) that most clearly represents what the listing's title is selling overall — see above.${hasVideo ? " Avoid a video frame/thumbnail if a genuine standalone photo is available." : ""} Null only if none of the photos usefully represent it at all.${
     detectFlaws
-      ? `\n  "flaws": [ { "photoNumber": number, "description": string, "boundingBox": { "x": number, "y": number, "width": number, "height": number }, "confidence": "low"|"medium"|"high" } ]  // see above — empty array if the photos show nothing wrong, which is expected most of the time`
+      ? `\n  "flaws": [ { "photoNumber": number, "description": string, "class": string, "severity": "cosmetic"|"functional"|"unknown", "boundingBox": { "x": number, "y": number, "width": number, "height": number }, "confidence": "low"|"medium"|"high" } ],  // see above - empty array if the photos show nothing wrong\n  "conditionCoverage": { "shown": string[], "noVisibleDamage": boolean }  // see above`
       : ""
   }
 }`;
@@ -511,9 +515,15 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
           if (!box) continue;
           const confidence: PhotoFlaw["confidence"] =
             entry?.confidence === "low" || entry?.confidence === "high" ? entry.confidence : "medium";
-          flaws.push({ photoNumber: num, description, boundingBox: box, confidence });
+          const cls = typeof entry?.class === "string" ? entry.class.trim().toLowerCase().slice(0, 40) : undefined;
+          const severity = entry?.severity === "cosmetic" || entry?.severity === "functional" ? entry.severity : entry?.severity === "unknown" ? "unknown" : undefined;
+          flaws.push({ photoNumber: num, description, boundingBox: box, confidence, ...(cls ? { class: cls } : {}), ...(severity ? { severity } : {}) });
         }
       }
+      const rawCoverage = detectFlaws && parsed.conditionCoverage && typeof parsed.conditionCoverage === "object" ? parsed.conditionCoverage : null;
+      const conditionCoverage: PhotoAnalysisResult["conditionCoverage"] = rawCoverage
+        ? { shown: Array.isArray(rawCoverage.shown) ? rawCoverage.shown.map((x: unknown) => String(x).toLowerCase().trim()).filter(Boolean).slice(0, 12) : [], noVisibleDamage: rawCoverage.noVisibleDamage === true && flaws.length === 0 }
+        : null;
 
       // Per explicit instruction — resolved the same way productPhotos
       // entries are, but uncropped (this is a whole-listing representative
@@ -543,6 +553,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
             : null,
         titleMatchPhoto,
         flaws,
+        conditionCoverage,
         error: null,
       };
     } catch {
@@ -561,6 +572,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         matchedKnownProduct: null,
         titleMatchPhoto: null,
         flaws: [],
+        conditionCoverage: null,
         error: null,
       };
     }

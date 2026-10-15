@@ -940,6 +940,9 @@ export interface PhotoFlaw {
   description: string;
   boundingBox: { x: number; y: number; width: number; height: number };
   confidence: "low" | "medium" | "high";
+  // Beta 13: what kind of defect and how much it matters (conditionEvidence.ts); absent on flaws saved by older builds.
+  class?: string;
+  severity?: "cosmetic" | "functional" | "unknown";
 }
 
 // One past flaw flag the user confirmed or denied (ListingCard's "?" badge,
@@ -1016,6 +1019,8 @@ export interface ListingRecord {
   // this listing was analyzed. ListingCard uses this to outline whichever
   // carousel photo matches the currently-displayed one in yellow.
   photoFlaws: PhotoFlaw[];
+  // Beta 13: structured condition evidence and what it would change (null when not assessed). Shape: ConditionAssessmentRecord.
+  conditionAssessment?: ConditionAssessmentRecord | null;
   // Per explicit instruction — Feed's "est. value" used to show the general
   // (unverified) pathway's own AI-guessed range unconditionally, which is
   // exactly a guess with no real data behind it. This is real data instead:
@@ -1448,4 +1453,20 @@ export interface LogLine {
   // changes, etc.) just omits it, same as today's unlabeled behavior.
   accountId?: string;
   accountLabel?: string;
+}
+
+/** What the structured condition pass concluded for a listing (saved as JSON with the listing; see conditionEvidence.ts / conditionAdjust.ts). */
+export interface ConditionAssessmentRecord {
+  mode: "shadow" | "enforce";
+  defects: Array<{ cls: string; area: string | null; severity: string; source: string; confidence: string; quote?: string }>;
+  flags: Array<{ flag: string; text: string }>;
+  statements: string[];
+  /** Clean value, the adjusted value range, the flat-multiplier value, and the effect on profit at the asking price. */
+  cleanValueUsd: number | null;
+  adjustedValueUsd: { low: number; likely: number; high: number } | null;
+  legacyValueUsd: number | null;
+  profitAtAskNewUsd: number | null;
+  profitAtAskLegacyUsd: number | null;
+  explanation: string[];
+  at: number;
 }

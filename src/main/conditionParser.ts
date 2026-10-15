@@ -53,14 +53,14 @@ const FREE_AFTER = /^\s*[- ]?free\b/i;
 // words that may sit between a negator and the damage word without ending the negation ("no cracks, scratches or damage")
 const LIST_WORDS = new Set(["or", "and", "nor", "any", "major", "minor", "visible", "significant", "serious", "major", "real", "signs", "sign", "of", "the", "a", "an", "scratches", "scratch", "scuffs", "scuff", "dents", "dent", "cracks", "crack", "damage", "damaged", "broken", "dead", "pixels", "pixel", "spots", "chips", "chip", "issues", "issue", "problems", "problem", "defects", "defect", "wear", "water", "stick", "drift", "power", "cracked", "to", "it", "is", "are", "was", "were", "has", "have", "there", "anything", "everything", "anywhere"]);
 // damage that is about something other than the item
-const ACCESSORY = /\b(?:tempered glass|screen protector|protector|screen guard|phone case|the case|carrying case|box|packaging)\b/i;
+export const ACCESSORY = /\b(?:tempered glass|screen protector|protector|screen guard|phone case|the case|carrying case|box|packaging)\b/i;
 
 const AS_IS = /\bas[- ]?is\b/i;
 const UNTESTED = /\b(?:untested|not tested|haven'?t tested|unable to test|can'?t test|unknown if|no returns?|sold as[- ]is)\b|\bunknown (?:condition|if)\b/i;
 const WORKS = /\b(?:works?(?: great| perfectly| fine| well| as (?:it )?should)?|working|tested|fully functional|everything works|function(?:s|al))\b/i;
 
 // A clause ends at sentence punctuation, a newline or a contrast word; a comma does not end it (lists), see LIST_WORDS.
-function clauses(text: string): string[] {
+export function clauses(text: string): string[] {
   return text
     .replace(/\s+/g, " ")
     .split(/[.;!?\n]+|\s(?:but|however|although|though|except|otherwise|yet)\s/i)
@@ -73,7 +73,7 @@ function words(s: string): string[] {
 }
 
 /** Is the damage word at `index` in `clause` negated? A negator earlier in the clause counts when only list-like words sit between it and the damage word. */
-function isNegated(clause: string, index: number, matchLen: number): boolean {
+export function isNegated(clause: string, index: number, matchLen: number): boolean {
   const after = clause.slice(index + matchLen);
   if (FREE_AFTER.test(after)) return true;
   const before = clause.slice(0, index);

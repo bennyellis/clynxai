@@ -688,6 +688,27 @@ function ListingCardImpl({
           </div>
         )}
 
+        {record.conditionAssessment && (record.conditionAssessment.defects.length > 0 || record.conditionAssessment.statements.length > 0) && (() => {
+          const c = record.conditionAssessment!;
+          const undisclosed = c.flags.some((f) => f.flag === "UNDISCLOSED_DAMAGE");
+          const compare = c.profitAtAskNewUsd !== null && c.profitAtAskLegacyUsd !== null && c.profitAtAskNewUsd !== c.profitAtAskLegacyUsd;
+          const lines = [
+            ...c.defects.map((d) => `${d.cls.replace(/_/g, " ")}${d.area ? ` (${d.area})` : ""} — ${d.source === "text+vision" ? "seller and photos agree" : d.source === "vision" ? "seen in the photos, not in the listing" : "from the listing text"}`),
+            ...c.flags.filter((f) => f.flag !== "UNDISCLOSED_DAMAGE").map((f) => f.text),
+            ...c.statements,
+            ...(compare ? [`${c.mode === "shadow" ? "Would change" : "Changed"} the profit at this price: $${c.profitAtAskNewUsd} by defect vs $${c.profitAtAskLegacyUsd} with the old flat factor.`] : []),
+            ...(c.explanation.length ? [c.explanation[c.explanation.length - 1]] : []),
+          ];
+          return (
+            <div data-testid="condition-note" title={lines.join("\n")} style={{ display: "flex", alignItems: "baseline", gap: 6, fontSize: 12.5, lineHeight: 1.35, minWidth: 0 }}>
+              <span className="pill" style={{ flexShrink: 0, color: undisclosed ? "var(--warn)" : "var(--text-muted)", borderColor: undisclosed ? "var(--warn)" : "var(--border-strong)", fontWeight: 600, fontSize: 11, padding: "2px 8px" }}>
+                {undisclosed ? "Undisclosed damage" : c.defects.length ? "Condition" : "Condition check"}
+              </span>
+              <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{lines[0]}</span>
+            </div>
+          );
+        })()}
+
         {researchNote && (
           <div
             data-testid="research-note"

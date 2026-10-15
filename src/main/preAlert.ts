@@ -10,7 +10,7 @@
 //
 // The look-up itself lives in index.ts (it needs the browser, the Database and eBay); this file is the decision.
 import { buildAlertSummary, composeGateAlert, composeWatchAlert, type AlertSummary, type SignalSource } from "./dealSummary.js";
-import { evidenceFromSignals, qualifyListing, toGateSnapshot, userEvidence, type GateExtras, type GateVerdict, type ValueEvidence } from "./dealGate.js";
+import { evidenceFromSignals, qualifyListing, toGateSnapshot, userEvidence, type GateExtras, type GateInput, type GateVerdict, type ValueEvidence } from "./dealGate.js";
 import { assessListingAge } from "./listingAge.js";
 import { codesMissingFrom } from "./identity/codes.js";
 import { isSuspiciousPrice } from "./placeholderPrice.js";
@@ -46,6 +46,8 @@ export interface QualifyArgs {
   hardCapExceeded?: boolean;
   // The product names the photo analysis gave this listing: independent evidence that a code in the title is a real marker.
   identityTexts?: string[];
+  // Beta 13: the defect-specific condition adjustment (conditionAdjust.ts), given the clean value; absent = the flat condition multiplier as before.
+  conditionAdjust?: GateInput["conditionAdjust"];
   log: (message: string) => void;
 }
 
@@ -106,6 +108,7 @@ function gateOnce(args: QualifyArgs, evidence: ValueEvidence | null, scored: Sco
     priceUsd: listing.price ?? 0,
     shippingUsd: listing.ebayShippingUsd ?? 0,
     conditionImpact: extraction.conditionImpact,
+    conditionAdjust: args.conditionAdjust ?? null,
     broken: !!extraction.brokenVariant,
     evidence,
     identityUnconfirmed: unconfirmed,

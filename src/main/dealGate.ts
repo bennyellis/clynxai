@@ -107,6 +107,9 @@ export interface GateInput {
   priceUsd: number;
   shippingUsd?: number;
   conditionImpact: "none" | "minor" | "major" | "unknown";
+  // Beta 13 (conditionAdjust.ts): the value of the item AS IT IS from the defects found, as a range, given the value of a clean one. When present it replaces the flat
+  // conditionImpact multiplier: "profitable now" must hold at the CONSERVATIVE end of the range, a negotiation is judged at the likely value.
+  conditionAdjust?: ((cleanValueUsd: number) => { valueUsd: { low: number; likely: number; high: number }; deductionUsd: number; reasons: Array<{ code: "CONDITION_ADJUSTED" | "UNDISCLOSED_DAMAGE" | "DAMAGE_UNCERTAIN" | "NO_VISIBLE_DAMAGE_DETECTED"; severity: "info" | "warn" | "good"; text: string }> } | null) | null;
   // A broken / for-parts copy priced from its own Database variant (no further condition discount).
   broken?: boolean;
   evidence: ValueEvidence | null;
@@ -146,7 +149,11 @@ export type GateReasonCode =
   | "NEEDS_DISCOUNT"
   | "UNREACHABLE"
   | "HIDDEN_GEM"
-  | "HIDDEN_GEM_UNVERIFIED";
+  | "HIDDEN_GEM_UNVERIFIED"
+  | "CONDITION_ADJUSTED"
+  | "UNDISCLOSED_DAMAGE"
+  | "DAMAGE_UNCERTAIN"
+  | "NO_VISIBLE_DAMAGE_DETECTED";
 
 export interface GateReason {
   code: GateReasonCode;
@@ -173,6 +180,9 @@ export interface GateFacts {
   targetPriceUsd: number | null;
   profitAtTargetUsd: number | null;
   extrasCountedUsd: number;
+  // Beta 13: what the defects found were worth against a clean one, and the range of the item's value (null when the flat multiplier was used).
+  conditionAdjustmentUsd?: number | null;
+  conditionRange?: { low: number; likely: number; high: number } | null;
 }
 
 export interface GateVerdict {
@@ -280,12 +290,18 @@ export function qualifyListing(input: GateInput): GateVerdict {
   }
 
   // ---- the arithmetic: the user's own margin and negotiation settings, on the lot's value
-  const factor = input.broken ? 1 : CONDITION_VALUE_FACTOR[input.conditionImpact] ?? 1;
-  const baseValue = input.evidence.valueUsd * factor;
+  const adj = !input.broken && input.conditionAdjust ? input.conditionAdjust(input.evidence.valueUsd) : null;
+  const factor = input.broken || adj ? 1 : CONDITION_VALUE_FACTOR[input.conditionImpact] ?? 1;
+  const baseValue = adj ? adj.valueUsd.likely : input.evidence.valueUsd * factor;
   const counted = Math.max(0, input.extras?.countedUsd ?? 0);
   const uncounted = Math.max(0, input.extras?.uncountedUsd ?? 0);
   const lot = baseValue + counted;
   const outcome = resaleOutcome(lot, input.priceUsd + shipping, settings.netPercent);
+  if (adj) {
+    facts.conditionAdjustmentUsd = Math.round(adj.deductionUsd);
+    facts.conditionRange = { low: Math.round(adj.valueUsd.low), likely: Math.round(adj.valueUsd.likely), high: Math.round(adj.valueUsd.high) };
+    for (const r of adj.reasons) reasons.push(r);
+  }
   facts.lotValueUsd = Math.round(lot);
   facts.netProceedsUsd = Math.round(outcome.keepUsd);
   facts.netPercent = settings.netPercent;
@@ -293,7 +309,9 @@ export function qualifyListing(input: GateInput): GateVerdict {
   facts.marginAtAskPercent = Math.round(outcome.marginPercent * 10) / 10;
   facts.extrasCountedUsd = Math.round(counted);
 
-  const profitableNow = outcome.profitUsd > 0 && outcome.marginPercent >= settings.minMarginPercent;
+  // With a condition range, "profitable now" has to hold at the conservative end; the likely value still decides whether a negotiation is within reach.
+  const conservative = adj ? resaleOutcome(adj.valueUsd.low + counted, input.priceUsd + shipping, settings.netPercent) : outcome;
+  const profitableNow = conservative.profitUsd > 0 && conservative.marginPercent >= settings.minMarginPercent;
   const reachable = withinNegotiationReach(lot, input.priceUsd, shipping, settings);
   let base: "profitable_now" | "negotiation" | "pass" = profitableNow ? "profitable_now" : reachable ? "negotiation" : "pass";
 

@@ -223,6 +223,11 @@ export class Store {
     return p;
   }
 
+  /** Keeps the structured condition assessment with the listing (what was found, from where, what it would change). */
+  saveConditionAssessment(listingId: string, assessment: unknown): void {
+    this.db.prepare("UPDATE listings SET condition_json = ? WHERE id = ?").run(JSON.stringify(assessment), listingId);
+  }
+
   /** The open database, for libraryOps.ts (its operations are SQL over several tables inside one transaction). Nothing else should use it. */
   get database(): DatabaseSync {
     return this.db;
@@ -499,6 +504,8 @@ export class Store {
       // back as []) unless Config.researchCondition was on when this
       // listing was last analyzed.
       ["photo_flaws", "TEXT"],
+      // Beta 13: the structured condition assessment (conditionEvidence / conditionAdjust) as JSON; null for listings assessed before it existed.
+      ["condition_json", "TEXT"],
       // Database discovery: where this listing stands (not researched / not enough evidence / rejected / confirmed unprofitable /
       // researched), a short code for why, and the reason in words. See research.ts.
       ["research_status", "TEXT"],
@@ -3319,6 +3326,7 @@ function rowToRecord(row: any): ListingRecord {
     photoAnalysis: row.photo_analysis ?? null,
     photoAnalysisCheckedAt: row.photo_analysis_checked_at ?? null,
     photoFlaws: row.photo_flaws ? JSON.parse(row.photo_flaws) : [],
+    conditionAssessment: row.condition_json ? (safeJson(row.condition_json) as ListingRecord["conditionAssessment"]) : null,
     // Filled in by the Store methods below (enrichWithMatchedProductPricing)
     // — rowToRecord itself has no access to the products table.
     matchedProductAvgSoldPriceUsd: null,
@@ -3658,4 +3666,12 @@ function rowToWatchMatch(row: any): WatchMatch {
     notified: !!row.wm_notified,
     notifiedAt: row.wm_notified_at ?? null,
   };
+}
+
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }

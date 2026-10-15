@@ -24,7 +24,7 @@ import type { GateExtras } from "./dealGate.js";
 import { isSuspiciousPrice } from "./placeholderPrice.js";
 import { looksBroken } from "./brokenVariant.js";
 import { watchAsSearchItems, matchWatchTerm, passesWatchPriceGate, deriveWatchReferencePrice, evaluateWatchConditions } from "./watchMatching.js";
-import { resaleOutcome, resaleSettingsFrom } from "./resaleMath.js";
+import { CONDITION_VALUE_FACTOR, resaleOutcome, resaleSettingsFrom } from "./resaleMath.js";
 import { extrasPricedSeparately, isHiddenGemCandidate, repriceWithExtras } from "./profitGate.js";
 import { assessListingAge, decideAgeGate } from "./listingAge.js";
 import { gateExtrasFromLump, gateExtrasFromValuation, looksLikeBundle, type BundleValuation } from "./bundleBreakdown.js";
@@ -173,6 +173,10 @@ import { apiActivity } from "./apiActivity.js";
 import { judgeCandidateByText } from "./photoIdentity.js";
 import { fileImage } from "./fileImage.js";
 import { selectReferenceImages } from "./referenceSelection.js";
+import { defectsFromText, defectsFromVision, mergeCondition } from "./conditionEvidence.js";
+import { adjustForCondition } from "./conditionAdjust.js";
+import type { GateInput } from "./dealGate.js";
+import type { ConditionAssessmentRecord } from "./types.js";
 import { beta13Flags } from "./beta13.js";
 import { REEVAL_MAX_PER_VISIT, currentAgeText, reevaluationReason, requalifyEligible, scoredFromRecord, type ReevalReason } from "./relisting.js";
 import { checkArrivedLocation, type LocationCheck } from "./locationCheck.js";
@@ -1241,7 +1245,7 @@ export class ScrapeEngine {
       referenceProducts,
       claimedItemReferenceImages,
       hasVideo,
-      detectFlaws: config.researchCondition,
+      detectFlaws: config.researchCondition || beta13Flags(config as never).conditionEvidence !== "off",
       // Read fresh per listing, same posture as watchFor above — not
       // cached, so a just-submitted confirm/deny is reflected on the very
       // next listing evaluated, not just after a restart.
@@ -2997,8 +3001,44 @@ export class ScrapeEngine {
         this.log("warn", `Could not check the dismissal of "${listing.title}": ${(err as Error).message}`, listing.url);
       }
     }
+    // Beta 13: structured condition (text + photos, one defect counted once) and what it would change. "shadow" records it next to the flat-multiplier verdict; "enforce"
+    // lets the gate use the defect-specific value range instead of the flat multiplier (except where this module and the old parser disagree about there being damage at all).
+    const conditionMode = beta13Flags(config as never).conditionEvidence;
+    let conditionSeed: { merged: ReturnType<typeof mergeCondition>; compute: (clean: number) => ReturnType<typeof adjustForCondition>; useNew: boolean } | null = null;
+    if (conditionMode !== "off" && !scored.extraction.brokenVariant) {
+      const photoCount = photoResult && !photoResult.error ? Math.min(detail.imageUrls.length, 8) : 0;
+      const merged = mergeCondition(
+        defectsFromText(conditionTextOf({ ...detail, title: listing.title })),
+        photoResult && !photoResult.error ? defectsFromVision(photoResult.flaws as never) : [],
+        photoResult?.conditionCoverage ? { shown: photoResult.conditionCoverage.shown, noVisibleDamage: photoResult.conditionCoverage.noVisibleDamage } : null,
+        photoCount
+      );
+      const legacy = scored.extraction.conditionImpact;
+      const productName = scored.extraction.matchedItem ?? listing.title;
+      conditionSeed = {
+        merged,
+        compute: (clean) => adjustForCondition(clean, merged.defects, { productName, photoCount, legacyFactor: CONDITION_VALUE_FACTOR[legacy] ?? 1 }),
+        // when the old parser saw damage this one has no word for (e.g. "as is, untested"), the old factor stays in charge
+        useNew: merged.defects.length > 0 || legacy === "none" || legacy === "unknown",
+      };
+    }
+    const conditionAdjust: GateInput["conditionAdjust"] =
+      conditionMode === "enforce" && conditionSeed?.useNew
+        ? (clean) => {
+            const a = conditionSeed!.compute(clean);
+            const reasons: NonNullable<ReturnType<NonNullable<GateInput["conditionAdjust"]>>>["reasons"] = [];
+            if (a.deductionUsd > 0) reasons.push({ code: "CONDITION_ADJUSTED", severity: "info", text: `Condition: about -$${a.deductionUsd} from a clean one (value $${a.valueUsd.low}-$${a.valueUsd.high}). ${a.explanation.slice(0, 3).join("; ")}` });
+            for (const f of conditionSeed!.merged.flags) {
+              if (f.flag === "UNDISCLOSED_DAMAGE") reasons.push({ code: "UNDISCLOSED_DAMAGE", severity: "warn", text: f.text });
+              else if (f.flag === "DAMAGE_UNCERTAIN") reasons.push({ code: "DAMAGE_UNCERTAIN", severity: "info", text: f.text });
+              else if (f.flag === "NO_VISIBLE_DAMAGE_DETECTED") reasons.push({ code: "NO_VISIBLE_DAMAGE_DETECTED", severity: "info", text: f.text });
+            }
+            return { valueUsd: a.valueUsd, deductionUsd: a.deductionUsd, reasons };
+          }
+        : null;
     if (!checkedDismissal && (scored.isDeal || gateExtras !== null || priceQualifiedWatches.length > 0)) {
       qualification = await qualifyScoredListing({
+        conditionAdjust,
         scored,
         source: this.opts.store,
         settings: resaleSettingsFrom(config),
@@ -3015,6 +3055,41 @@ export class ScrapeEngine {
       this.opts.store.saveScored(scored, sellerRisk);
       const finalRecord = this.opts.store.getLastSavedListing();
       if (finalRecord) this.opts.onListing(finalRecord);
+    }
+    if (conditionSeed && (conditionSeed.merged.defects.length > 0 || conditionSeed.merged.statements.length > 0)) {
+      try {
+        const facts = qualification?.verdict.facts;
+        const clean = facts?.valueUsd ?? scored.referencePriceUsd ?? null;
+        const adjusted = clean !== null && clean > 0 ? conditionSeed.compute(clean) : null;
+        const ask = listing.price !== null ? listing.price + (scored.listing.ebayShippingUsd ?? 0) : null;
+        const net = resaleSettingsFrom(config).netPercent;
+        const legacyValue = clean !== null ? clean * (CONDITION_VALUE_FACTOR[scored.extraction.conditionImpact] ?? 1) : null;
+        const record: ConditionAssessmentRecord = {
+          mode: conditionMode === "enforce" ? "enforce" : "shadow",
+          defects: conditionSeed.merged.defects.map((d) => ({ cls: d.cls, area: d.area, severity: d.severity, source: d.source, confidence: d.confidence, quote: d.quote })),
+          flags: conditionSeed.merged.flags.map((f) => ({ flag: f.flag, text: f.text })),
+          statements: conditionSeed.merged.statements,
+          cleanValueUsd: clean !== null ? Math.round(clean) : null,
+          adjustedValueUsd: adjusted ? adjusted.valueUsd : null,
+          legacyValueUsd: legacyValue !== null ? Math.round(legacyValue) : null,
+          profitAtAskNewUsd: adjusted && ask !== null ? Math.round(resaleOutcome(adjusted.valueUsd.likely, ask, net).profitUsd) : null,
+          profitAtAskLegacyUsd: legacyValue !== null && ask !== null ? Math.round(resaleOutcome(legacyValue, ask, net).profitUsd) : null,
+          explanation: adjusted?.explanation ?? [],
+          at: Date.now(),
+        };
+        this.opts.store.saveConditionAssessment(listing.id, record);
+        noteDecision({
+          kind: "condition_check",
+          subject: listing.title,
+          verdict: record.flags[0]?.flag === "UNDISCLOSED_DAMAGE" ? "undisclosed damage" : record.defects.length ? `${record.defects.length} defect${record.defects.length === 1 ? "" : "s"} found` : "no visible damage detected",
+          thought: `${conditionMode === "enforce" ? "Used for the verdict" : "Shadow only (the old flat factor decided)"}. ${record.defects.map((d) => `${d.cls}${d.area ? ` (${d.area})` : ""} from ${d.source}`).join("; ") || record.statements.join(" ")}${record.profitAtAskNewUsd !== null && record.profitAtAskLegacyUsd !== null ? ` Profit at the asking price: $${record.profitAtAskNewUsd} by defect, $${record.profitAtAskLegacyUsd} by the flat factor.` : ""}`,
+          imageDataUri: null,
+        });
+        const updatedForCondition = this.opts.store.getById(listing.id);
+        if (updatedForCondition) this.opts.onListing(updatedForCondition);
+      } catch (err) {
+        this.log("warn", `Could not record the condition assessment for "${listing.title}": ${(err as Error).message}`, listing.url);
+      }
     }
 
     // The SECOND, deferred Watch evaluation point (some listings only become deal-shaped after vision), now against the FINAL verdict.
