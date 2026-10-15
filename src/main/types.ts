@@ -1080,6 +1080,10 @@ export interface MyStoreReference {
 }
 
 export interface ProductProfile {
+  // Beta 13: where the person put it ("My folders" tree), and whether they named it. null = auto-organized (category / family). folderPath is "A > B" for display.
+  folderId?: string | null;
+  folderPath?: string | null;
+  nameLocked?: boolean;
   id: string;
   name: string;
   aiSummary: string;

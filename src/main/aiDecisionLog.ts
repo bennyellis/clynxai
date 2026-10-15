@@ -5,11 +5,11 @@ import { apiActivity, type AiDecision } from "./apiActivity.js";
 const THUMB_PX = 120;
 
 /** A ~120 px JPEG data: URI of an image (a data: URI in), or null when it cannot be made. Small enough to keep dozens in memory. */
-export async function makeThumb(dataUri: string | null | undefined): Promise<string | null> {
+export async function makeThumb(dataUri: string | null | undefined, px: number = THUMB_PX): Promise<string | null> {
   const m = /^data:image\/[a-z+.-]+;base64,(.+)$/i.exec(String(dataUri ?? ""));
   if (!m) return null;
   try {
-    const out = await sharp(Buffer.from(m[1], "base64"), { failOn: "none" }).rotate().resize(THUMB_PX, THUMB_PX, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 55 }).toBuffer();
+    const out = await sharp(Buffer.from(m[1], "base64"), { failOn: "none" }).rotate().resize(px, px, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: px > THUMB_PX ? 72 : 55 }).toBuffer();
     return `data:image/jpeg;base64,${out.toString("base64")}`;
   } catch {
     return null;

@@ -4,6 +4,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { DiscoveryEntry } from "../main/discovery.js";
 import type { ApplyResult, AuditEvent, DecideResult, ReviewSnapshot } from "../main/identityReview.js";
 import type { OnboardingState } from "../main/types.js";
+import type { LibraryOp, OpResult } from "../main/libraryOps.js";
 import type { Account, ActiveProductResearch, BackupSummary, BetaInfo, BillingActionResult, BillingPlanChoice, BillingStatus, BlacklistedImage, BlacklistTerm, CloudStatus, Config, FeedbackVerdict, ListingRecord, LogLine, ProductImage, ProductProfile, ScrapeStatus, Watch, WatchMatch, WatchPlatform } from "../main/types.js";
 import type { ChatMessage, ChatContext, ChatAttachment } from "../main/chat.js";
 import type { MetricsSnapshot } from "../main/metrics.js";
@@ -212,6 +213,17 @@ const api = {
   },
   refreshProduct: (id: string): Promise<ProductProfile | null> => ipcRenderer.invoke("products:refresh", { id }),
   deleteProduct: (id: string): Promise<void> => ipcRenderer.invoke("products:delete", { id }),
+  // Beta 13 Library operations (libraryOps.ts): one backend for the screen and the chat.
+  libraryOp: (op: LibraryOp, confirm?: string): Promise<OpResult> => ipcRenderer.invoke("library:op", { op, confirm }),
+  libraryFolders: (): Promise<Array<{ id: string; parentId: string | null; name: string; position: number; kind: string }>> => ipcRenderer.invoke("library:folders"),
+  libraryHistory: (): Promise<Array<{ id: string; at: number; actor: string; op: string; undone: boolean }>> => ipcRenderer.invoke("library:history"),
+  libraryTrash: (): Promise<{ products: Array<{ id: string; name: string; deletedAt: number }>; images: Array<{ id: string; productId: string; productName: string; sourceTitle: string | null; deletedAt: number }>; folders: Array<{ id: string; name: string; deletedAt: number }> }> => ipcRenderer.invoke("library:trash"),
+  libraryReview: (): Promise<Array<{ id: string; kind: string; subjectId: string; reasons: string[]; evidence: Record<string, unknown>; createdAt: number; image: string | null; productName: string | null; suggestedName: string | null }>> => ipcRenderer.invoke("library:review"),
+  onLibraryChanged: (cb: (what: { folders: boolean; review: boolean }) => void) => {
+    const listener = (_e: unknown, what: { folders: boolean; review: boolean }) => cb(what);
+    ipcRenderer.on("library:changed", listener);
+    return () => ipcRenderer.removeListener("library:changed", listener);
+  },
   clearAllProducts: (): Promise<void> => ipcRenderer.invoke("products:clearAll"),
   countProductsMissingPhotos: (): Promise<number> => ipcRenderer.invoke("products:countMissingPhotos"),
   backfillProductPhotos: (): Promise<number> => ipcRenderer.invoke("products:backfillPhotos"),

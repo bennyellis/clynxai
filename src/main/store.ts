@@ -14,6 +14,7 @@ import { timedSync, recordEvent } from "./metrics.js";
 import type { BlacklistedImage, BlacklistTerm, FeedbackExample, FeedbackVerdict, FlawFeedbackExample, GateFactsSnapshot, GateReasonRecord, ListingRecord, MyStoreReference, PhotoFlaw, ProductImage, ProductProfile, ScoredListing, SellerRiskResult, Watch, WatchMatch, WatchPlatform, WatchSearchLink, WatchTerm } from "./types.js";
 import { REFERENCE_STATUSES } from "./types.js";
 import { resolveProduct, type ResolveResult } from "./productResolver.js";
+import { judgeCandidateByText, titleFromLabel } from "./photoIdentity.js";
 import { brokenVariantName, isBrokenVariantName } from "./brokenVariant.js";
 import { assessListingAge } from "./listingAge.js";
 import { codesMissingFrom } from "./identity/codes.js";
@@ -192,6 +193,39 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_listing_condition_listing ON listing_condition(listing_id);
       CREATE INDEX IF NOT EXISTS idx_product_images_status ON product_images(product_id, status);
     `);
+  }
+
+  // --- "My folders": the person's own tree (library_folders). A product with a folder_id is shown there instead of in its auto-organized place.
+  private folderCache: Map<string, { name: string; parentId: string | null }> | null = null;
+  invalidateFolders(): void {
+    this.folderCache = null;
+  }
+  listFolders(): Array<{ id: string; parentId: string | null; name: string; position: number; kind: string }> {
+    return (this.db.prepare("SELECT id, parent_id, name, position, kind FROM library_folders WHERE deleted_at IS NULL ORDER BY position, name_key").all() as any[]).map((r) => ({ id: r.id, parentId: r.parent_id ?? null, name: r.name, position: r.position, kind: r.kind }));
+  }
+  /** "Parent > Child" for a live folder, or null when it does not exist (deleted) - the product then falls back to its auto-organized place. */
+  folderPath(id: string): string | null {
+    if (!this.folderCache) {
+      this.folderCache = new Map(this.listFolders().map((f) => [f.id, { name: f.name, parentId: f.parentId }]));
+    }
+    const parts: string[] = [];
+    let cur: string | null = id;
+    for (let depth = 0; cur && depth < 12; depth++) {
+      const f = this.folderCache.get(cur);
+      if (!f) return null;
+      parts.unshift(f.name);
+      cur = f.parentId;
+    }
+    return parts.length ? parts.join(" > ") : null;
+  }
+  private withFolder(p: ProductProfile): ProductProfile {
+    if (p.folderId) p.folderPath = this.folderPath(p.folderId);
+    return p;
+  }
+
+  /** The open database, for libraryOps.ts (its operations are SQL over several tables inside one transaction). Nothing else should use it. */
+  get database(): DatabaseSync {
+    return this.db;
   }
 
   /** Runs `fn` as one write transaction (BEGIN IMMEDIATE ... COMMIT; ROLLBACK when it throws). Not re-entrant: callers inside a transaction call the plain methods. */
@@ -1339,16 +1373,27 @@ export class Store {
   // others (reference photos, listings, Watches, specific models) is repointed to it. Returns removedId -> keptId
   // so callers can repoint anything stored outside the database (the Search For list in config). Cheap when there
   // are no duplicates: one query over names.
-  mergeDuplicateProducts(): Map<string, string> {
-    const merged = new Map<string, string>();
+  /** Entries that reduce to the same words (nothing is changed): the groups mergeDuplicateProducts WOULD fold together. */
+  findDuplicateGroups(): Array<{ key: string; ids: string[]; names: string[] }> {
     const names = this.db.prepare("SELECT id, name FROM products WHERE deleted_at IS NULL").all() as Array<{ id: string; name: string }>;
-    const groups = new Map<string, string[]>();
+    const groups = new Map<string, Array<{ id: string; name: string }>>();
     for (const row of names) {
       const key = this.productDuplicateKey(row.name);
       if (!key) continue;
       const list = groups.get(key);
-      if (list) list.push(row.id);
-      else groups.set(key, [row.id]);
+      if (list) list.push(row);
+      else groups.set(key, [row]);
+    }
+    return [...groups].filter(([, rows]) => rows.length > 1).map(([key, rows]) => ({ key, ids: rows.map((r) => r.id), names: rows.map((r) => r.name) }));
+  }
+
+  // Beta 13: this is no longer called on its own (the Library only PROPOSES merges, see findDuplicateGroups); it runs for the groups a person approved: pass their ids.
+  mergeDuplicateProducts(onlyIds?: string[]): Map<string, string> {
+    const merged = new Map<string, string>();
+    const groups = new Map<string, string[]>();
+    for (const g of this.findDuplicateGroups()) {
+      if (onlyIds && !g.ids.some((id) => onlyIds.includes(id))) continue;
+      groups.set(g.key, g.ids);
     }
     for (const ids of groups.values()) {
       if (ids.length < 2) continue;
@@ -1765,7 +1810,7 @@ export class Store {
 
   listProducts(): ProductProfile[] {
     const rows = this.db.prepare("SELECT * FROM products WHERE deleted_at IS NULL ORDER BY created_at DESC").all() as any[];
-    return rows.map(rowToProduct);
+    return rows.map((r) => this.withFolder(rowToProduct(r)));
   }
 
   // A light view of the Database for lookups that only need to know which products exist: id, name and family, newest first. It
@@ -1783,14 +1828,14 @@ export class Store {
 
   getProductById(id: string): ProductProfile | null {
     const row = this.db.prepare("SELECT * FROM products WHERE id = ?").get(id) as any;
-    return row ? rowToProduct(row) : null;
+    return row ? this.withFolder(rowToProduct(row)) : null;
   }
 
   // Case-insensitive exact-ish match used to link a Search For item's name
   // to a product profile for extra scoring context.
   getProductByName(name: string): ProductProfile | null {
     const row = this.db.prepare("SELECT * FROM products WHERE LOWER(name) = LOWER(?) AND deleted_at IS NULL").get(name) as any;
-    return row ? rowToProduct(row) : null;
+    return row ? this.withFolder(rowToProduct(row)) : null;
   }
 
   // Exact match first, then a fuzzy fallback (see isSimilarProductName) —
@@ -1950,11 +1995,25 @@ export class Store {
     return (this.db.prepare("SELECT * FROM products WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC").all() as any[]).map(rowToProduct);
   }
 
-  /** Permanently removes what has been in the Trash longer than `olderThanMs` (the Library does this itself; nothing else ever purges). */
+  /** Permanently removes what has been in the Trash longer than `olderThanMs` (products, their photos, loose photos, folders). Only the Library calls this; nothing else purges. */
   purgeTrash(olderThanMs: number): number {
-    const ids = (this.db.prepare("SELECT id FROM products WHERE deleted_at IS NOT NULL AND deleted_at < ?").all(Date.now() - olderThanMs) as Array<{ id: string }>).map((r) => r.id);
+    const cutoff = Date.now() - olderThanMs;
+    const ids = (this.db.prepare("SELECT id FROM products WHERE deleted_at IS NOT NULL AND deleted_at < ?").all(cutoff) as Array<{ id: string }>).map((r) => r.id);
     for (const id of ids) this.deleteProduct(id);
+    this.db.prepare("DELETE FROM product_images WHERE deleted_at IS NOT NULL AND deleted_at < ?").run(cutoff);
+    this.db.prepare("UPDATE products SET folder_id = NULL WHERE folder_id IN (SELECT id FROM library_folders WHERE deleted_at IS NOT NULL AND deleted_at < ?)").run(cutoff);
+    this.db.prepare("DELETE FROM library_folders WHERE deleted_at IS NOT NULL AND deleted_at < ? AND id NOT IN (SELECT parent_id FROM library_folders WHERE parent_id IS NOT NULL AND (deleted_at IS NULL OR deleted_at >= ?))").run(cutoff, cutoff);
+    this.invalidateFolders();
     return ids.length;
+  }
+
+  /** What is in the Trash: products, loose photos and folders, newest first. */
+  listTrash(): { products: Array<{ id: string; name: string; deletedAt: number }>; images: Array<{ id: string; productId: string; productName: string; sourceTitle: string | null; deletedAt: number }>; folders: Array<{ id: string; name: string; deletedAt: number }> } {
+    return {
+      products: (this.db.prepare("SELECT id, name, deleted_at FROM products WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC").all() as any[]).map((r) => ({ id: r.id, name: r.name, deletedAt: r.deleted_at })),
+      images: (this.db.prepare("SELECT i.id, i.product_id, p.name, i.source_title, i.deleted_at FROM product_images i JOIN products p ON p.id = i.product_id WHERE i.deleted_at IS NOT NULL AND p.deleted_at IS NULL ORDER BY i.deleted_at DESC LIMIT 200").all() as any[]).map((r) => ({ id: r.id, productId: r.product_id, productName: r.name, sourceTitle: r.source_title ?? null, deletedAt: r.deleted_at })),
+      folders: (this.db.prepare("SELECT id, name, deleted_at FROM library_folders WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC").all() as any[]).map((r) => ({ id: r.id, name: r.name, deletedAt: r.deleted_at })),
+    };
   }
 
   // Per explicit instruction — the Database's own "Clear all" button,
@@ -2042,6 +2101,40 @@ export class Store {
       .prepare("SELECT source_title, status FROM product_images WHERE product_id = ? AND deleted_at IS NULL AND kind = 'normal' AND source_title IS NOT NULL AND status IN ('trusted','user','legacy')")
       .all(productId) as Array<{ source_title: string }>;
     return rows.map((r) => r.source_title);
+  }
+
+  /**
+   * The one-time suspect pass (and the re-check after a merge): a photo filed before Beta 13 whose OWN source title contradicts the entry it is in is set aside (status
+   * needs_review: not used as a reference, still visible, nothing deleted) with a review item. `all` also re-judges photos that already have a verdict (after a merge).
+   * Processes at most `limit` photos per call; returns how many it looked at (0 = nothing left).
+   */
+  markSuspectImages(opts: { limit?: number; productId?: string; all?: boolean } = {}): { looked: number; flagged: number } {
+    const limit = opts.limit ?? 200;
+    const where = opts.all ? "status IN ('legacy','trusted','unverified')" : "status = 'legacy' AND verdict_json IS NULL";
+    const rows = this.db
+      .prepare(`SELECT i.id, i.product_id, i.source_title, p.name FROM product_images i JOIN products p ON p.id = i.product_id WHERE ${where} AND i.kind = 'normal' AND i.source_title IS NOT NULL AND i.deleted_at IS NULL${opts.productId ? " AND i.product_id = ?" : ""} LIMIT ?`.replace(/\bstatus\b/g, "i.status").replace(/verdict_json/g, "i.verdict_json"))
+      .all(...(opts.productId ? [opts.productId, limit] : [limit])) as Array<{ id: string; product_id: string; source_title: string; name: string }>;
+    let flagged = 0;
+    for (const r of rows) {
+      const title = titleFromLabel(r.source_title) ?? r.source_title;
+      const v = judgeCandidateByText(r.name, title);
+      if (v.status === "mismatch") {
+        this.db.prepare("UPDATE product_images SET status = 'needs_review', verdict_json = ? WHERE id = ?").run(JSON.stringify({ outcome: "quarantined", reasons: v.reasons, proposer: "suspect-pass" }), r.id);
+        this.addReviewItem({ kind: "image", subjectId: r.id, reasons: v.reasons, evidence: { productId: r.product_id, productName: r.name, sourceTitle: r.source_title, proposer: "suspect-pass" } });
+        flagged++;
+      } else if (!opts.all) {
+        this.db.prepare("UPDATE product_images SET verdict_json = ? WHERE id = ?").run(JSON.stringify({ outcome: "legacy-checked", status: v.status }), r.id);
+      }
+    }
+    return { looked: rows.length, flagged };
+  }
+
+  /** Has the one-time suspect pass finished (schema flag b13-suspect-pass)? */
+  suspectPassDone(): boolean {
+    return !!this.db.prepare("SELECT 1 FROM schema_flags WHERE name = 'b13-suspect-pass'").get();
+  }
+  finishSuspectPass(): void {
+    this.db.prepare("INSERT OR IGNORE INTO schema_flags (name) VALUES ('b13-suspect-pass')").run();
   }
 
   // --- Review queue: things a person should look at (a picture whose evidence disagrees, a name made from a picture alone). Suggestions only; nothing here changes the Library.
@@ -3391,6 +3484,8 @@ function rowToProduct(row: any): ProductProfile {
     family: row.family ?? null,
     familyLogoUrl: row.family_logo_url ?? null,
     imageUrl: row.image_url ?? null,
+    folderId: row.folder_id ?? null,
+    nameLocked: !!row.name_locked,
     resalePriceUsd: row.resale_price_usd ?? null,
     resaleTimeToSell: row.resale_time_to_sell ?? null,
     lookoutNotes: row.lookout_notes ?? "",

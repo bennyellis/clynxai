@@ -64,8 +64,9 @@ import { IdentityReview } from "./identityReview.js";
 import { fetchActiveAsks } from "./ebayActive.js";
 import { resolveIdentityTarget } from "./productIdentity.js";
 import { beta13Flags } from "./beta13.js";
-import { noteDecision } from "./aiDecisionLog.js";
+import { makeThumb, noteDecision } from "./aiDecisionLog.js";
 import { fileImage, setFilingRecorder, type FileImageEvidence } from "./fileImage.js";
+import { LibraryOps, TRASH_RETENTION_MS, type LibraryOp } from "./libraryOps.js";
 import { buyerTotalUsd, estimateMarketValue } from "./marketValue.js";
 import { compMatchesSpecs, modelLettersConflict, titleLooksLikeProduct } from "./compFilter.js";
 import { focalProductName } from "./dealSummary.js";
@@ -2979,24 +2980,72 @@ async function sweepBlankProducts(): Promise<void> {
 // Whether a Watch's check is running right now (the sidebar's Watch eye is awake while it is, asleep otherwise).
 let watchSearching = false;
 
-function mergeDuplicateProductEntries(): void {
-  try {
-    const merged = store.mergeDuplicateProducts();
-    if (merged.size === 0) return;
-    let configChanged = false;
-    for (const item of config.searchItems) {
-      const keep = item.linkedProductId ? merged.get(item.linkedProductId) : undefined;
-      if (keep) {
-        item.linkedProductId = keep;
-        configChanged = true;
-      }
-    }
-    if (configChanged) saveConfig(CONFIG_PATH, config);
-    console.log(`[database] merged ${merged.size} duplicate product entr${merged.size === 1 ? "y" : "ies"}`);
-    for (const keptId of new Set(merged.values())) sendToRenderer("products:updated", store.getProductById(keptId));
-  } catch (err) {
-    console.error(`[database] duplicate merge failed: ${(err as Error).message}`);
+// Beta 13: ONE operations service for the Library, shared by the screen (IPC library:op) and the chat tool. Follows the open Database when the user switches.
+let libraryOpsFor: { store: Store; ops: LibraryOps } | null = null;
+function libraryOps(): LibraryOps {
+  if (!libraryOpsFor || libraryOpsFor.store !== store) {
+    libraryOpsFor = {
+      store,
+      ops: new LibraryOps(store, (what) => {
+        for (const id of what.productIds) {
+          const p = store.getProductById(id);
+          if (p) sendToRenderer("products:updated", p);
+        }
+        sendToRenderer("library:changed", { folders: what.folders, review: what.review });
+      }),
+    };
   }
+  return libraryOpsFor.ops;
+}
+
+function mergeDuplicateProductEntries(): void {
+  // Beta 13: duplicates are PROPOSED (a "merge" item in Needs review), never folded together on their own: two entries with the same words are sometimes two products,
+  // and a merge moves whole photo galleries. Approving one runs store.mergeDuplicateProducts for that group and re-checks the photos it moved.
+  try {
+    for (const g of store.findDuplicateGroups()) {
+      store.addReviewItem({ kind: "merge", subjectId: g.key, reasons: [`${g.ids.length} entries reduce to the same words: ${g.names.map((n) => `"${n}"`).join(", ")}`], evidence: { ids: g.ids, names: g.names } });
+    }
+  } catch (err) {
+    console.error(`[database] duplicate check failed: ${(err as Error).message}`);
+  }
+}
+
+// Beta 13: the one-time, non-destructive suspect pass over existing photos (store.markSuspectImages): a photo whose own source title contradicts the entry it is filed
+// under is set aside for review (not deleted). A verified backup is taken first; the pass runs in small steps a little after start so it never blocks the app.
+function scheduleSuspectPass(): void {
+  const target = store;
+  // the Trash empties itself after 30 days (and nothing else ever purges)
+  setTimeout(() => {
+    try {
+      if (store === target) target.purgeTrash(TRASH_RETENTION_MS);
+    } catch (err) {
+      console.error(`[database] trash purge failed: ${(err as Error).message}`);
+    }
+  }, 60_000);
+  if (!target || target.suspectPassDone()) return;
+  const step = () => {
+    if (store !== target) return;
+    try {
+      const r = target.markSuspectImages({ limit: 100 });
+      if (r.looked === 0) {
+        target.finishSuspectPass();
+        sendToRenderer("library:changed", { folders: false, review: true });
+        console.log("[database] suspect-photo pass finished");
+        return;
+      }
+      setTimeout(step, 50);
+    } catch (err) {
+      console.error(`[database] suspect-photo pass stopped: ${(err as Error).message}`);
+    }
+  };
+  setTimeout(async () => {
+    try {
+      await runDatabaseBackup(true);
+    } catch {
+      /* the backup is a courtesy: the pass changes only a status column and is reversible */
+    }
+    step();
+  }, 25_000);
 }
 
 // Called after any accounts CRUD (add/remove) — creates a ScrapeEngine for
@@ -3186,6 +3235,7 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   const dbOpen = openWithRecovery(DB_PATH, () => new Store(DB_PATH, { identityFoundation: config.identityFoundation?.schema === true }));
   store = dbOpen.store;
   applyIdentitySafeguard();
+  scheduleSuspectPass();
   if (dbOpen.recovered) {
     const kept = dbOpen.recovered.damagedCopy ? ` The old database was kept as ${path.basename(dbOpen.recovered.damagedCopy)} in your Clynx data folder.` : "";
     notices.set({
@@ -4557,7 +4607,42 @@ app.whenReady().then(() => {
     return store.getProductById(args.id);
   });
 
-  ipcMain.handle("products:delete", (_e, args: { id: string }) => store.deleteProduct(args.id));
+  // The Library's delete goes to the Trash (restorable for 30 days); see libraryOps.ts.
+  ipcMain.handle("products:delete", (_e, args: { id: string }) => {
+    libraryOps().run({ op: "trashProduct", id: args.id }, { actor: "ui" });
+  });
+  ipcMain.handle("library:op", (_e, args: { op: LibraryOp; confirm?: string }) => {
+    const result = libraryOps().run(args.op, { actor: "ui", confirm: args.confirm });
+    // an entry made from a photo gets its own research (summary, prices) like any new entry
+    if (result.ok && result.data?.productId) {
+      const created = store.getProductById(result.data.productId);
+      if (created) runProductLookup(created.id, created.name, { skipSiblingDiscovery: true, forcedFamily: created.family ?? undefined, source: "you" });
+    }
+    return result;
+  });
+  ipcMain.handle("library:folders", () => store.listFolders());
+  ipcMain.handle("library:history", () => libraryOps().recent(30));
+  ipcMain.handle("library:trash", () => store.listTrash());
+  ipcMain.handle("library:review", async () => {
+    // Needs review: pictures set aside, names made from a picture alone, entries that look like duplicates. Pictures are shrunk for the list.
+    const items = store.listReviewItems("open").slice(0, 60);
+    const out = [];
+    for (const item of items) {
+      let image: string | null = null;
+      let productName: string | null = null;
+      let suggestedName: string | null = null;
+      if (item.kind === "image") {
+        const img = store.getProductImage(item.subjectId);
+        if (!img) { store.resolveReviewItem(item.id, "rejected", "system"); continue; }
+        image = await makeThumb(img.imageData, 320);
+        productName = store.getProductById(img.productId)?.name ?? null;
+        const sid = typeof item.evidence.suggestedProductId === "string" ? item.evidence.suggestedProductId : null;
+        suggestedName = sid ? (store.getProductById(sid)?.name ?? null) : null;
+      }
+      out.push({ ...item, image, productName, suggestedName });
+    }
+    return out;
+  });
   ipcMain.handle("products:clearAll", () => store.clearAllProducts());
   ipcMain.handle("products:countMissingPhotos", () => productsNeedingPhotos().length);
   ipcMain.handle("products:backfillPhotos", () => runPhotoBackfill());
@@ -4662,6 +4747,8 @@ app.whenReady().then(() => {
   // since this is triggered from ProductImageGallery, a separate component
   // one level below the product list that owns the state to update.
   ipcMain.handle("products:setThumbnailFromImage", (_e, args: { id: string; imageDataUri: string }) => {
+    // the renderer hands over the picture; only a real image of sane size becomes a thumbnail (it used to take any string)
+    if (typeof args.imageDataUri !== "string" || !/^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(args.imageDataUri) || args.imageDataUri.length > 11_500_000) return store.getProductById(args.id);
     store.editProductProfile(args.id, { imageUrl: args.imageDataUri });
     const updated = store.getProductById(args.id);
     if (updated) sendToRenderer("products:updated", updated);
@@ -4679,7 +4766,9 @@ app.whenReady().then(() => {
     ensurePhotoDifferenceAnalysis(args.productId);
     return added;
   });
-  ipcMain.handle("products:deleteImage", (_e, args: { imageId: string }) => store.deleteProductImage(args.imageId));
+  ipcMain.handle("products:deleteImage", (_e, args: { imageId: string }) => {
+    libraryOps().run({ op: "removeImage", imageId: args.imageId }, { actor: "ui" });
+  });
 
   // The Database grid's per-tile search button — deliberately reuses
   // add_search_item's own logic (via executeChatTool) rather than
