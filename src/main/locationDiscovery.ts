@@ -48,8 +48,7 @@ Each entry formatted as "City, ${state}" using the state's full name spelled out
         // this, same lesson as everywhere else this app calls OpenAI.
         reasoning_effort: "minimal",
       },
-      controller.signal
-    );
+      controller.signal, "location lookup");
     if (!res.ok) throw new Error(`OpenAI API error ${res.status}: ${await res.text()}`);
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const content = data.choices?.[0]?.message?.content ?? "";

@@ -818,8 +818,7 @@ async function streamOnce(
         // case now omits both fields instead of sending tool_choice: "none".
         ...(tools && tools.length ? { tools, tool_choice: "auto" } : {}),
       },
-      controller.signal
-    );
+      controller.signal, "chat");
 
     if (!res.ok || !res.body) {
       const body = await res.text().catch(() => "");
@@ -1165,8 +1164,7 @@ async function streamOnceJson(messages: unknown[]): Promise<string> {
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
       },
-      controller.signal
-    );
+      controller.signal, "chat");
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error(`OpenAI API error ${res.status}: ${body}`);

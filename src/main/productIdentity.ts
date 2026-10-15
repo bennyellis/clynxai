@@ -6,6 +6,7 @@
 // filed under an existing entry and it carries details the entry's name doesn't, an AI check compares it to the
 // entry (and to any specific models already filed under it) and says which one it really is. Confident matches
 // proceed exactly as before; a listing that is a different specific model gets its own entry under the generic one.
+import { noteDecision } from "./aiDecisionLog.js";
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 import type { ProductProfile } from "./types.js";
 import { colorsIn, isColorWord } from "./colors.js";
@@ -161,8 +162,7 @@ Never guess a brand or model you can't support from the title, description or ph
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
       },
-      controller.signal
-    );
+      controller.signal, "product identity");
     if (!res.ok) return null;
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const text = data.choices?.[0]?.message?.content ?? "";
@@ -170,6 +170,14 @@ Never guess a brand or model you can't support from the title, description or ph
     const decision = parsed.decision === "match" || parsed.decision === "new" || parsed.decision === "generic" ? parsed.decision : null;
     if (!decision) return null;
     const confidence: IdentityConfidence = parsed.confidence === "high" || parsed.confidence === "medium" ? parsed.confidence : "low";
+    noteDecision({
+      kind: "product_identity",
+      subject: evidence.title,
+      verdict: `${decision} (${confidence})`,
+      thought: `${typeof parsed.reason === "string" ? parsed.reason : ""}${typeof parsed.specificName === "string" && parsed.specificName.trim() ? ` Specific model: ${parsed.specificName.trim()}.` : ""}`,
+      imageDataUri: evidence.imageDataUri,
+      model: OPENAI_MODEL,
+    });
     return {
       decision,
       matchId: typeof parsed.matchId === "string" ? parsed.matchId : null,

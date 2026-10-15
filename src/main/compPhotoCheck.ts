@@ -44,8 +44,7 @@ Respond with ONLY a JSON object: { "different": number[] } using the listing num
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
       },
-      controller.signal
-    );
+      controller.signal, "comparable photo check");
     if (!res.ok) return new Set();
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const parsed = JSON.parse(data.choices?.[0]?.message?.content ?? "{}");

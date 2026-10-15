@@ -1,3 +1,4 @@
+import { noteDecision } from "./aiDecisionLog.js";
 import type { EngineConfig, ExtractionResult, FeedbackExample, ListingDetail, SearchItem, ScoredListing } from "./types.js";
 import { CLYNX_VOICE } from "./voice.js";
 import { looksBroken } from "./brokenVariant.js";
@@ -467,8 +468,7 @@ export async function callAI(prompt: string): Promise<string> {
         // (empty content, finish_reason "length") without this.
         reasoning_effort: "minimal",
       },
-      controller.signal
-    );
+      controller.signal, "listing judgement (text)");
   } catch (err) {
     if ((err as Error).name === "AbortError") {
       throw new Error(`OpenAI request timed out after ${OPENAI_TIMEOUT_MS / 1000}s`);
@@ -575,6 +575,13 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         if (!(err instanceof SyntaxError) || attempt >= 1) throw err;
       }
     }
+    noteDecision({
+      kind: "listing_judgement",
+      subject: `${listing.title}${listing.price !== null ? ` — $${listing.price}` : ""}`,
+      verdict: `${parsed.isPotentialDeal ? "possible deal" : "not a deal"} (${parsed.confidence ?? "low"} confidence)`,
+      thought: `${parsed.reasoning ?? ""}${parsed.estimatedValueRangeUsd ? ` Its own estimate of the value: $${parsed.estimatedValueRangeUsd}.` : ""}${parsed.category ? ` Category: ${parsed.category}.` : ""}`,
+      model: OPENAI_MODEL,
+    });
     return {
       isPotentialDeal: !!parsed.isPotentialDeal,
       category: parsed.category ?? "",

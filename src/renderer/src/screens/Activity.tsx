@@ -1,3 +1,4 @@
+import { AiActivityPanel } from "../components/AiActivityPanel";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatAttachment, ChatMessage, EventStats, LogLine, MetricsSnapshot, ProductProfile, ScrapeStatus, StageStats } from "../lib/api.js";
 import { api } from "../lib/api.js";
@@ -260,6 +261,12 @@ export function Activity({
   // Which view is showing: the operational Activity Feed, the conversation with Clynx, or both interleaved (how this screen always worked).
   // The choice is remembered across launches; switching to Chat because you sent a message or asked about an event is not.
   const [view, setViewState] = useState<ActivityView>(() => parseActivityView(readSaved(ACTIVITY_VIEW_KEY)));
+  // Beta 12: the screen has two sections: the log + conversation ("Activity") and "AI Activity" (API use, decisions, images and thoughts).
+  const [section, setSectionState] = useState<"log" | "ai">(() => (readSaved("clynx.activity.section") === "ai" ? "ai" : "log"));
+  function chooseSection(next: "log" | "ai") {
+    setSectionState(next);
+    try { window.localStorage.setItem("clynx.activity.section", next); } catch { /* a remembered choice is a convenience */ }
+  }
   const [level, setLevelState] = useState<LevelFilter>(() => parseLevelFilter(readSaved(ACTIVITY_LEVEL_KEY)));
   function chooseView(next: ActivityView) {
     setViewState(next);
@@ -396,6 +403,18 @@ export function Activity({
         </p>
       </div>
 
+      <div role="group" aria-label="Activity section" style={{ display: "flex", gap: 6 }}>
+        {([["log", "Activity"], ["ai", "AI Activity"]] as Array<["log" | "ai", string]>).map(([id, label]) => (
+          <button key={id} className="icon ghost" aria-pressed={section === id} onClick={() => chooseSection(id)}
+            style={{ padding: "6px 16px", fontSize: 14, border: `1px solid ${section === id ? "var(--accent-1)" : "var(--border)"}`, color: section === id ? "var(--text)" : "var(--text-muted)", background: section === id ? "var(--bg-card-hover)" : "transparent" }}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {section === "ai" && <AiActivityPanel />}
+
+      <div style={{ display: section === "ai" ? "none" : "contents" }}>
       <MetricsPanel />
 
       <div className="card" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, padding: 0, overflow: "hidden" }}>
@@ -627,6 +646,7 @@ export function Activity({
             </button>
           </div>
         </form>
+      </div>
       </div>
     </div>
   );

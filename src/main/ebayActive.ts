@@ -1,5 +1,6 @@
 // What sellers are asking on eBay right now for a product, used beside the sold comps (see marketValue.ts).
 // Uses the same Browse API the eBay scanner already has credentials for; nothing here needs WatchCount.
+import { apiActivity } from "./apiActivity.js";
 import { hasEbayCredentials, searchEbayItems } from "./ebayClient.js";
 import { titleLooksLikeBrokenProduct } from "./brokenVariant.js";
 import type { PhotoCheck } from "./compPhotoCheck.js";
@@ -64,7 +65,10 @@ export async function fetchActiveAsks(
   // The Marketplace listing the product came from (states the capacity / color the name may leave open).
   sourceTitle: string | null = null
 ): Promise<ActiveAsks> {
-  if (!hasEbayCredentials()) return NO_ASKS;
+  if (!hasEbayCredentials()) {
+    apiActivity.record({ provider: "ebay", kind: "browse_search", outcome: "skipped_disabled", route: "none", error: "no eBay keys on this computer and not using Clynx Cloud's eBay: asking prices were not looked up" });
+    return NO_ASKS;
+  }
   if (broken) return fetchBrokenAsks(query, productName, familyHint, requiredTerms);
   const validation = emptySummary();
   try {
@@ -103,6 +107,7 @@ export async function fetchActiveAsks(
       .map((i) => ({ url: (i.imageUrl as string).replace(/\/s-l\d+\.(jpg|jpeg|png|webp)/i, "/s-l800.$1"), label: `eBay listing: ${i.title.slice(0, 90)}` }));
     return { photoRejected, medianUsd: median(prices), sampleSize: prices.length, photos, validation };
   } catch (err) {
+    // (the failed request itself is recorded with its status by ebayClient / openai, so AI Activity already shows it)
     console.error(`[ebayActive] active listings lookup failed for "${query}": ${(err as Error).message}`);
     return NO_ASKS;
   }

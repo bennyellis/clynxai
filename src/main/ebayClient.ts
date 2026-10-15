@@ -1,3 +1,5 @@
+import { apiActivity } from "./apiActivity.js";
+
 // eBay Browse API — a thin, direct REST client, no SDK. Application-level
 // OAuth (client credentials grant) only: this app never needs a specific
 // eBay user's own login/consent, just public read access to search current
@@ -46,9 +48,16 @@ let cachedToken: { value: string; expiresAt: number } | null = null;
 
 async function getAccessToken(): Promise<string> {
   const now = Date.now();
-  if (cachedToken && cachedToken.expiresAt > now + 60_000) return cachedToken.value;
+  if (cachedToken && cachedToken.expiresAt > now + 60_000) {
+    apiActivity.record({ provider: "ebay", kind: "oauth_token", outcome: "cached", route: "ebay_direct" }, { quiet: true });
+    return cachedToken.value;
+  }
   const creds = credentials();
-  if (!creds) throw new Error("eBay scanning needs EBAY_CLIENT_ID/EBAY_CLIENT_SECRET set in .env — see .env.example.");
+  if (!creds) {
+    apiActivity.record({ provider: "ebay", kind: "oauth_token", outcome: "skipped_disabled", route: "none", error: "no eBay keys (EBAY_CLIENT_ID / EBAY_CLIENT_SECRET) on this computer" });
+    throw new Error("eBay scanning needs EBAY_CLIENT_ID/EBAY_CLIENT_SECRET set in .env — see .env.example.");
+  }
+  const tokenStarted = Date.now();
   const basic = Buffer.from(`${creds.clientId}:${creds.clientSecret}`).toString("base64");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), EBAY_TIMEOUT_MS);
@@ -59,17 +68,43 @@ async function getAccessToken(): Promise<string> {
       body: `grant_type=client_credentials&scope=${encodeURIComponent(EBAY_SCOPE)}`,
       signal: controller.signal,
     });
-    if (!res.ok) throw new Error(`eBay OAuth token request failed: ${res.status} ${await res.text()}`);
+    if (!res.ok) {
+      const body = await res.text();
+      apiActivity.record({ provider: "ebay", kind: "oauth_token", outcome: "live_failed", route: "ebay_direct", status: res.status, ms: Date.now() - tokenStarted, error: `eBay OAuth token request failed: HTTP ${res.status} ${body}` });
+      throw new Error(`eBay OAuth token request failed: ${res.status} ${body}`);
+    }
     const data = (await res.json()) as { access_token: string; expires_in: number };
     cachedToken = { value: data.access_token, expiresAt: now + data.expires_in * 1000 };
+    apiActivity.record({ provider: "ebay", kind: "oauth_token", outcome: "live_ok", route: "ebay_direct", status: res.status, ms: Date.now() - tokenStarted });
     return cachedToken.value;
+  } catch (err) {
+    if ((err as Error).name === "AbortError") apiActivity.record({ provider: "ebay", kind: "oauth_token", outcome: "live_failed", route: "ebay_direct", ms: Date.now() - tokenStarted, error: "the eBay token request timed out" });
+    throw err;
   } finally {
     clearTimeout(timeout);
   }
 }
 
-async function ebayGet<T>(path: string, params: Record<string, string>, baseUrl: string = EBAY_BROWSE_URL): Promise<T> {
-  if (transport?.enabled()) return transport.get<T>(path, params, baseUrl);
+function ebayKind(path: string, baseUrl: string): string {
+  if (baseUrl === EBAY_TAXONOMY_URL) return "taxonomy_category";
+  if (path.startsWith("/item_summary/search")) return "browse_search";
+  if (path.startsWith("/item/")) return "browse_item";
+  return "browse_other";
+}
+
+async function ebayGet<T>(path: string, params: Record<string, string>, baseUrl: string = EBAY_BROWSE_URL, count?: (data: T) => number): Promise<T> {
+  const kind = ebayKind(path, baseUrl);
+  const started = Date.now();
+  if (transport?.enabled()) {
+    try {
+      const data = await transport.get<T>(path, params, baseUrl);
+      apiActivity.record({ provider: "ebay", kind, outcome: "live_ok", route: "clynx_cloud", ms: Date.now() - started, results: count ? count(data) : null });
+      return data;
+    } catch (err) {
+      apiActivity.record({ provider: "ebay", kind, outcome: "live_failed", route: "clynx_cloud", ms: Date.now() - started, error: (err as Error).message });
+      throw err;
+    }
+  }
   const token = await getAccessToken();
   const url = new URL(`${baseUrl}${path}`);
   for (const [key, value] of Object.entries(params)) {
@@ -88,8 +123,20 @@ async function ebayGet<T>(path: string, params: Record<string, string>, baseUrl:
       },
       signal: controller.signal,
     });
-    if (!res.ok) throw new Error(`eBay API error ${res.status}: ${await res.text()}`);
-    return (await res.json()) as T;
+    if (!res.ok) {
+      const body = await res.text();
+      // 401 / 403: a token eBay no longer accepts is dropped so the next call mints a new one; 429 is eBay's rate limit (surfaced, never hidden).
+      if (res.status === 401) cachedToken = null;
+      apiActivity.record({ provider: "ebay", kind, outcome: "live_failed", route: "ebay_direct", status: res.status, ms: Date.now() - started, error: `eBay API error ${res.status}: ${body}` });
+      throw new Error(`eBay API error ${res.status}: ${body}`);
+    }
+    const data = (await res.json()) as T;
+    apiActivity.record({ provider: "ebay", kind, outcome: "live_ok", route: "ebay_direct", status: res.status, ms: Date.now() - started, results: count ? count(data) : null });
+    return data;
+  } catch (err) {
+    if ((err as Error).name === "AbortError") apiActivity.record({ provider: "ebay", kind, outcome: "live_failed", route: "ebay_direct", ms: Date.now() - started, error: "the eBay request timed out" });
+    else if (!/^eBay API error/.test((err as Error).message)) apiActivity.record({ provider: "ebay", kind, outcome: "live_failed", route: "ebay_direct", ms: Date.now() - started, error: (err as Error).message });
+    throw err;
   } finally {
     clearTimeout(timeout);
   }
@@ -180,23 +227,33 @@ export async function searchEbayItems(
     const max = opts.maxPriceUsd != null ? Math.ceil(opts.maxPriceUsd) : "";
     filters.push(`price:[${min}..${max}]`, "priceCurrency:USD");
   }
-  const data = await ebayGet<{ itemSummaries?: any[] }>("/item_summary/search", {
-    q: query,
-    filter: filters.join(","),
-    limit: String(Math.min(Math.max(opts.limit ?? 25, 1), 200)),
-    fieldgroups: "EXTENDED",
-  });
+  const data = await ebayGet<{ itemSummaries?: any[] }>(
+    "/item_summary/search",
+    {
+      q: query,
+      filter: filters.join(","),
+      limit: String(Math.min(Math.max(opts.limit ?? 25, 1), 200)),
+      fieldgroups: "EXTENDED",
+    },
+    EBAY_BROWSE_URL,
+    (d) => d.itemSummaries?.length ?? 0
+  );
   return (data.itemSummaries ?? []).map(mapRawItem);
 }
 
 // One seller's own active Buy-It-Now listings that match a keyword search. eBay silently ignores the seller filter when the
 // username doesn't exist (and returns everyone's listings), so callers must check each item's sellerUsername.
 export async function searchEbaySellerItems(seller: string, query: string, limit = 50): Promise<EbayRawItem[]> {
-  const data = await ebayGet<{ itemSummaries?: any[] }>("/item_summary/search", {
-    q: query,
-    filter: `sellers:{${seller}},buyingOptions:{FIXED_PRICE}`,
-    limit: String(Math.min(Math.max(limit, 1), 200)),
-  });
+  const data = await ebayGet<{ itemSummaries?: any[] }>(
+    "/item_summary/search",
+    {
+      q: query,
+      filter: `sellers:{${seller}},buyingOptions:{FIXED_PRICE}`,
+      limit: String(Math.min(Math.max(limit, 1), 200)),
+    },
+    EBAY_BROWSE_URL,
+    (d) => d.itemSummaries?.length ?? 0
+  );
   return (data.itemSummaries ?? []).map(mapRawItem);
 }
 

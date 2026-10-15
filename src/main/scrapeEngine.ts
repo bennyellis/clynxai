@@ -1,3 +1,4 @@
+import { noteDecision } from "./aiDecisionLog.js";
 import { powerSaveBlocker } from "electron";
 import { isLowAiMode } from "./aiMode.js";
 import type { BrowserContext, Page } from "playwright";
@@ -29,7 +30,7 @@ import { assessListingAge, decideAgeGate } from "./listingAge.js";
 import { gateExtrasFromLump, gateExtrasFromValuation, looksLikeBundle, type BundleValuation } from "./bundleBreakdown.js";
 import { analyzeListingPhotos, classifyThumbnailImage, matchesReferenceProduct, type PhotoAnalysisResult } from "./vision.js";
 import { resolveIdentityTarget } from "./productIdentity.js";
-import { hasOpenAIAccess } from "./openai.js";
+import { OPENAI_MODEL, hasOpenAIAccess } from "./openai.js";
 import { cleanFilingName, describeDisposition, discoverySettings, disposition, MIN_MARKET_LOOK_PRICE_USD, planPhotoLook, shouldValidateDismissal, type DiscoverySettings, type LookPlan } from "./research.js";
 import { downloadImageAsDataUri, shrinkImageDataUri } from "./webResearch.js";
 import { DEFAULT_COUNTRY_CITIES } from "./config.js";
@@ -168,6 +169,7 @@ export { estimateListingAgeHours, isListingTooOld } from "./listingAge.js";
 import { estimateListingAgeHours, isListingTooOld } from "./listingAge.js";
 import { conditionTextOf } from "./listingText.js";
 import { feedCandidates } from "./feedCandidates.js";
+import { apiActivity } from "./apiActivity.js";
 import { listingMayFeedProduct } from "./photoIdentity.js";
 import { REEVAL_MAX_PER_VISIT, currentAgeText, reevaluationReason, requalifyEligible, scoredFromRecord, type ReevalReason } from "./relisting.js";
 import { checkArrivedLocation, type LocationCheck } from "./locationCheck.js";
@@ -1057,9 +1059,17 @@ export class ScrapeEngine {
   // discoverLocations/searchForItemNow, this needs no priorityRequested/
   // withPage coordination at all; it just needs the context to exist.
   async fetchEbayComps(query: string): Promise<EbayComp[]> {
+    const started = Date.now();
     const page = await this.openNewTab();
     try {
-      return await searchSoldComps(page, query);
+      const comps = await searchSoldComps(page, query);
+      // Sold prices come from WatchCount (read in a browser tab), NOT from the eBay API: record it as its own provider. Zero results is a normal answer but is shown as such
+      // (WatchCount's anonymous daily cap and an unreadable page both look like "0 results").
+      apiActivity.record({ provider: "watchcount", kind: "sold_comps", outcome: "live_ok", route: "browser", ms: Date.now() - started, results: comps.length });
+      return comps;
+    } catch (err) {
+      apiActivity.record({ provider: "watchcount", kind: "sold_comps", outcome: "live_failed", route: "browser", ms: Date.now() - started, error: (err as Error).message });
+      throw err;
     } finally {
       await page.close().catch(() => {});
     }
@@ -1387,6 +1397,14 @@ export class ScrapeEngine {
       speculativeLeftVisit: budget.speculativeLooksPerVisit - this.speculativeLooksThisVisit,
       speculativeLeftPass: budget.speculativeLooksPerPass - this.speculativeLooksThisPass,
     });
+    // AI Activity: say when a photo look (a paid AI call) was NOT made, and which kind of "not" it was.
+    if (!plan.vision && plan.skip) {
+      const c = plan.skip.code;
+      const outcome = c === "LOOK_BUDGET" ? "skipped_budget" : c === "LOW_PRICE" ? "skipped_unneeded" : "skipped_disabled";
+      apiActivity.record({ provider: "openai", kind: "photo analysis (listing)", outcome, route: "none", error: plan.skip.reason }, { quiet: true });
+    } else if (!plan.vision && isLowAiMode()) {
+      apiActivity.record({ provider: "openai", kind: "photo analysis (listing)", outcome: "skipped_unneeded", route: "none", error: "Save-credits mode: the text read settled this listing" }, { quiet: true });
+    }
     if (plan.vision && plan.speculative) {
       this.speculativeLooksThisVisit++;
       this.speculativeLooksThisPass++;
@@ -2365,6 +2383,17 @@ export class ScrapeEngine {
         )
       );
       recordEvent("vision_completed");
+      if (photoResult) {
+        const named = photoResult.identifiedProducts.length ? `Named: ${photoResult.identifiedProducts.slice(0, 4).join("; ")}.` : "Named nothing specific.";
+        noteDecision({
+          kind: "photo_analysis",
+          subject: `${listing.title} — $${listing.price}`,
+          verdict: photoResult.error ? "failed" : photoResult.matchesClaim === false ? "photos do not match the title" : photoResult.identifiedProducts.length ? "identified" : "unclear",
+          thought: [photoResult.error ? `The look failed: ${photoResult.error}` : null, photoResult.summary, named, photoResult.matchesClaim === false ? `Mismatch: ${photoResult.mismatchReason ?? "different from the title"}.` : null, photoResult.expertTake].filter(Boolean).join(" "),
+          imageDataUri: photoResult.titleMatchPhoto ?? Object.values(photoResult.productPhotos ?? {})[0] ?? null,
+          model: OPENAI_MODEL,
+        });
+      }
     }
 
     // Per explicit instruction — "if the ai comes across a listing with a

@@ -3,6 +3,7 @@
 // (see openai.ts). gpt-5-mini is natively multimodal, so this needs no
 // separate provider/key the way Gemini did before switching everything to
 // OpenAI.
+import { noteDecision } from "./aiDecisionLog.js";
 import { visionKindHint } from "./photoIdentity.js";
 import sharp from "sharp";
 import { CLYNX_VOICE } from "./voice.js";
@@ -441,8 +442,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         // (Gemini) implementation had to do.
         response_format: { type: "json_object" },
       },
-      controller.signal
-    );
+      controller.signal, "photo analysis (listing)");
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       return errorResult(`OpenAI API error ${res.status}: ${body.slice(0, 300)}`);
@@ -661,8 +661,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
       },
-      controller.signal
-    );
+      controller.signal, "photo check (ineligible category)");
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       return imageEligibilityError(`OpenAI API error ${res.status}: ${body.slice(0, 300)}`);
@@ -767,8 +766,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
       },
-      controller.signal
-    );
+      controller.signal, "photo check (reference match)");
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       return referenceImageMatchError(`OpenAI API error ${res.status}: ${body.slice(0, 300)}`);
@@ -778,6 +776,14 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
     if (!text.trim()) return referenceImageMatchError("OpenAI returned an empty response.");
     try {
       const parsed = JSON.parse(text);
+      noteDecision({
+        kind: "reference_match",
+        subject: itemName,
+        verdict: parsed.matches ? "looks like it" : "does not look like it",
+        thought: typeof parsed.reason === "string" ? parsed.reason : "",
+        imageDataUri: thumbnailDataUri,
+        model: OPENAI_MODEL,
+      });
       return {
         matches: !!parsed.matches,
         reason: typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : null,
@@ -861,8 +867,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
       },
-      controller.signal
-    );
+      controller.signal, "photo comparison (gallery)");
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       return { summary: null, error: `OpenAI API error ${res.status}: ${body.slice(0, 300)}` };
@@ -966,8 +971,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
       },
-      controller.signal
-    );
+      controller.signal, "photo audit (gallery)");
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       return { findings: [], error: `OpenAI API error ${res.status}: ${body.slice(0, 300)}` };
@@ -1046,8 +1050,7 @@ Respond with ONLY a JSON object, no other text: { "answer": string }`;
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
       },
-      controller.signal
-    );
+      controller.signal, "image question");
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       return { answer: null, error: `OpenAI API error ${res.status}: ${body.slice(0, 300)}` };
@@ -1154,8 +1157,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
       },
-      controller.signal
-    );
+      controller.signal, "photo check (candidate)");
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       return { matches: false, reason: null, error: `OpenAI API error ${res.status}: ${body.slice(0, 300)}` };
@@ -1165,6 +1167,14 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
     if (!text.trim()) return { matches: false, reason: null, error: "OpenAI returned an empty response." };
     try {
       const parsed = JSON.parse(text);
+      noteDecision({
+        kind: kind === "reference" ? "reference_photo_check" : "thumbnail_check",
+        subject: subjectName,
+        verdict: parsed.matches ? "match" : "not a match",
+        thought: typeof parsed.reason === "string" ? parsed.reason : "",
+        imageDataUri,
+        model: OPENAI_MODEL,
+      });
       return { matches: !!parsed.matches, reason: typeof parsed.reason === "string" ? parsed.reason.trim() || null : null, error: null };
     } catch {
       return { matches: false, reason: null, error: "Couldn't read Clynx's response." };
@@ -1252,8 +1262,7 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
       },
-      controller.signal
-    );
+      controller.signal, "photo feedback");
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       return { actualSubject: null, note: null, error: `OpenAI API error ${res.status}: ${body.slice(0, 300)}` };

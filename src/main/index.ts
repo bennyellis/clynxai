@@ -10,8 +10,8 @@ import { colorsConflict, colorsIn } from "./colors.js";
 import { ScrapeEngine } from "./scrapeEngine.js";
 import { WatchScheduler } from "./watchScheduler.js";
 import { EbayEngine } from "./ebayEngine.js";
-import { hasEbayCredentials, setEbayTransport } from "./ebayClient.js";
-import { hasOpenAIAccess, initOpenAIProxy, setApiSource } from "./openai.js";
+import { hasEbayCredentials, searchEbayItems, setEbayTransport } from "./ebayClient.js";
+import { OPENAI_MODEL, callOpenAI, hasOpenAIAccess, initOpenAIProxy, setApiSource } from "./openai.js";
 import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
 import { writeFileAtomic, writeFileAtomicWithBackup } from "./safeFs.js";
 import { normalizeServerUrl, resolveSavedServerUrl, testServer } from "./serverAddress.js";
@@ -46,6 +46,8 @@ import { verifyVariant, reconcileVerdict, type VariantVerdict } from "./variantE
 import { createVerdictMemory, makeClaimVerifier, publicHttpUrls } from "./variantResearch.js";
 import { runResearchProductTool } from "./researchTool.js";
 import { settleLateMarketCheck } from "./marketCheckSettle.js";
+import { apiActivity } from "./apiActivity.js";
+import { runApiSelfTest, type SelfTestDeps } from "./apiSelfTest.js";
 import { describeSummary, emptySummary, listingContradictsEntry } from "./compIdentity.js";
 import { distinguishingTokens } from "./variantIdentity.js";
 import {
@@ -1688,6 +1690,10 @@ async function researchEbayComps(
   const askLine = describeSummary("Asking results", active.validation ?? emptySummary());
   recordLog({ ts: Date.now(), level: "info", message: `Comparable check for "${fallbackName}": ${soldLine} ${askLine}` });
   discovery.note(id, "step", `${soldLine} ${askLine}`);
+  // AI Activity: how many results each provider returned and how many the identity check accepted / rejected / could not tell.
+  for (const [provider, v] of [["watchcount", analysis.validation], ["ebay", active.validation]] as const) {
+    if (v) apiActivity.identity(provider, { retrieved: v.retrieved, accepted: v.exact + v.compatible, rejected: v.rejected, uncertain: v.uncertain });
+  }
   const retrievedTotal = (analysis.validation?.retrieved ?? 0) + (active.validation?.retrieved ?? 0);
   const acceptedTotal = (analysis.validation ? analysis.validation.exact + analysis.validation.compatible : 0) + (active.validation ? active.validation.exact + active.validation.compatible : 0);
   if (retrievedTotal > 0 && acceptedTotal === 0) {
@@ -1758,6 +1764,7 @@ async function checkMarketBeforeAlert(listing: { title: string; matchedItem: str
   const exact = !!signals && isExactProduct(signals.name, listing.matchedItem, listing.title, signals.unconfirmedCodes ?? []);
   const recentlyChecked = (checkedAt: number | null | undefined) => !!checkedAt && Date.now() - checkedAt < MARKET_RECENT_MS;
   if (signals && exact && recentlyChecked(signals.checkedAt)) {
+    apiActivity.record({ provider: "watchcount", kind: "market_check", outcome: "local_db", route: "none", error: `"${signals.name}" was checked recently: the Database answered, no new lookup` });
     return {
       productId: signals.id,
       productName: signals.name,
@@ -1766,7 +1773,10 @@ async function checkMarketBeforeAlert(listing: { title: string; matchedItem: str
       note: `"${signals.name}" was checked on WatchCount and eBay recently: using what the Database has.`,
     };
   }
-  if (!config.watchCountEnabled) return null; // turned off in Config: the Database's own numbers decide
+  if (!config.watchCountEnabled) {
+    apiActivity.record({ provider: "watchcount", kind: "market_check", outcome: "skipped_disabled", route: "none", error: "WatchCount is turned off in Config: the Database's own numbers decide" });
+    return null; // turned off in Config: the Database's own numbers decide
+  }
   // A listing more specific than the entry it matched is priced under a name of its own, so the general entry's value is not overwritten
   // with the specific product's comps.
   const moreSpecific = signals && !exact && listing.purpose !== "bundle" ? specificResearchName(signals.name, signals.codeAssessment, listing.title) : null;
@@ -1785,7 +1795,10 @@ async function checkMarketBeforeAlert(listing: { title: string; matchedItem: str
     lateCheckWaiters.set(key, waiting);
   }
   const running = marketChecksInFlight.get(key);
-  if (running) return running;
+  if (running) {
+    apiActivity.record({ provider: "watchcount", kind: "market_check", outcome: "cached", route: "none", error: `a check for "${name}" was already running: sharing its answer` });
+    return running;
+  }
   const job = runMarketCheck(name, listing.title, signals && exact ? signals.id : null, listing.purpose, key).finally(() => marketChecksInFlight.delete(key));
   marketChecksInFlight.set(key, job);
   return job;
@@ -3643,6 +3656,26 @@ app.whenReady().then(() => {
     return { ok: true };
   });
   ipcMain.handle("env:hasEbayCredentials", () => hasEbayCredentials());
+  // Beta 12 — AI Activity (Activity screen): what the paid and market services were asked to do, and the decisions the AI made. Never a key or a token.
+  ipcMain.handle("api:activity", () => {
+    const src = effectiveApiSource();
+    const aiRoute = src === "shared" ? "Clynx Cloud's shared AI. Tokens are used on Clynx Cloud's OpenAI project, so they will NOT appear on an OpenAI account of your own." : "A key saved on this computer. Usage appears in the OpenAI project that key belongs to.";
+    const ebayRoute = src === "shared" && cloudClient.isAuthenticated() ? "Clynx Cloud's eBay access (searches are made by the server, not this computer)" : hasEbayCredentials() ? "eBay keys saved on this computer" : "none (no eBay keys on this computer and not using Clynx Cloud's eBay)";
+    apiActivity.setSource({ ai: aiRoute, ebay: ebayRoute, note: `Save OpenAI credits mode: ${config.lowAiMode ? "ON (many photo looks and AI judgements are skipped on purpose)" : "off"}. WatchCount (sold prices): ${config.watchCountEnabled ? "on" : "off"}. OpenAI key on this computer: ${process.env.OPENAI_API_KEY?.trim() ? "present" : "none"}. eBay keys on this computer: ${process.env.EBAY_CLIENT_ID?.trim() && process.env.EBAY_CLIENT_SECRET?.trim() ? "present" : "none"}.` });
+    return apiActivity.snapshot();
+  });
+  // A small, bounded real check through the same code paths the app uses (one tiny AI request, one 20-result eBay search, one WatchCount reachability request).
+  ipcMain.handle("api:selfTest", () =>
+    runApiSelfTest({
+      callOpenAI: callOpenAI as SelfTestDeps["callOpenAI"],
+      model: OPENAI_MODEL,
+      hasOpenAIAccess,
+      openAIRoute: () => (effectiveApiSource() === "shared" ? (cloudClient.isAuthenticated() ? "clynx_cloud" : "none") : process.env.OPENAI_API_KEY?.trim() ? "own_key" : "none"),
+      hasEbayCredentials,
+      searchEbayItems,
+      fetch,
+    })
+  );
 
   // Per explicit instruction — multiple Facebook accounts: every engine
   // control now takes {accountId} and dispatches to that ONE account's own

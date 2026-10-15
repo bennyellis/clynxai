@@ -105,8 +105,7 @@ Respond with ONLY a JSON object: { "items": [ { "name": string, "quantity": numb
     const res = await callOpenAI(
       "chat",
       { model: OPENAI_MODEL, messages: [{ role: "user", content: prompt }], max_completion_tokens: 700, reasoning_effort: "minimal", response_format: { type: "json_object" } },
-      controller.signal
-    );
+      controller.signal, "bundle valuation");
     if (!res.ok) return null;
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const text = data.choices?.[0]?.message?.content ?? "";

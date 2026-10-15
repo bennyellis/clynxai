@@ -86,8 +86,7 @@ export async function expandSearchKeywords(name: string): Promise<string[]> {
           // still weren't enough headroom for some real inputs.
           reasoning_effort: "minimal",
         },
-        controller.signal
-      );
+        controller.signal, "product research");
     } finally {
       clearTimeout(timeout);
     }

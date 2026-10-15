@@ -9,6 +9,7 @@
 // no browser — this never touches the shared Facebook Playwright page, so
 // it can't collide with the scanner the way page-sharing bugs have before.
 
+import { noteDecision } from "./aiDecisionLog.js";
 import sharp from "sharp";
 import { verifyThumbnailCandidate } from "./vision.js";
 import { fileableWithoutPicture, judgeCandidateByText, titleFromLabel } from "./photoIdentity.js";
@@ -803,8 +804,7 @@ export async function generateCategoryImage(category: string): Promise<string | 
           size: "1024x1024",
           n: 1,
         },
-        controller.signal
-      );
+        controller.signal, "web research");
       if (!res.ok) throw new Error(`OpenAI image API error ${res.status}: ${await res.text()}`);
       const data = (await res.json()) as { data?: Array<{ b64_json?: string }> };
       const b64 = data.data?.[0]?.b64_json;
@@ -1158,6 +1158,7 @@ export async function findReferencePhotos(
         const identity = judgeCandidateByText(productName, candidate.text ?? titleFromLabel(candidate.label));
         if (identity.status === "mismatch") {
           rejectedByIdentity++;
+          noteDecision({ kind: "reference_photo_check", subject: candidate.text ?? candidate.label, verdict: "rejected from its title (no AI used)", thought: `For "${productName}": ${identity.reasons.join("; ")}` });
           continue;
         }
         const download = await downloadImageBuffer(candidate.url);

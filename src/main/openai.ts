@@ -1,4 +1,5 @@
 import type { CloudClient } from "./cloudClient.js";
+import { apiActivity, purposeFromStack, type Route } from "./apiActivity.js";
 
 // Single paid provider for everything this app's AI touches — chat/tool-
 // calling, scoring, narration, product research, and vision/photo
@@ -109,12 +110,17 @@ export const PLAN_LIMIT_MESSAGE = "Today's AI allowance for your Clynx plan is u
 // below resolves whichever one is current itself, at the moment it's
 // actually needed.
 export function ensureOpenAIAccess(): void {
-  if (Date.now() < planLimitUntil) throw new Error(PLAN_LIMIT_MESSAGE);
+  // Beta 12: a refusal here is a request that never left, so the AI-activity record says why (a limit, or no key / sign-in) instead of showing nothing.
+  const refuse = (outcome: "skipped_budget" | "skipped_disabled", message: string): never => {
+    apiActivity.record({ provider: "openai", kind: "(request not made)", outcome, route: "none", error: message });
+    throw new Error(message);
+  };
+  if (Date.now() < planLimitUntil) refuse("skipped_budget", PLAN_LIMIT_MESSAGE);
   if (openAICreditsExhausted()) {
-    throw new Error("OpenAI credits are used up — add credits at platform.openai.com/settings/organization/billing (Clynx checks again every few minutes).");
+    refuse("skipped_budget", "OpenAI credits are used up — add credits at platform.openai.com/settings/organization/billing (Clynx checks again every few minutes).");
   }
   if (!hasOpenAIAccess()) {
-    throw new Error("No OpenAI access configured — set an API key in Config, or log into Clynx Cloud.");
+    refuse("skipped_disabled", "No OpenAI access configured — set an API key in Config, or log into Clynx Cloud.");
   }
 }
 
@@ -131,7 +137,57 @@ export function ensureOpenAIAccess(): void {
 // (so !res.ok / res.json() / a streamed res.body all keep working
 // unmodified at every call site), or throws with a clear message when
 // neither path is available.
-export async function callOpenAI(kind: "chat" | "images", body: unknown, signal?: AbortSignal): Promise<Response> {
+export async function callOpenAI(kind: "chat" | "images", body: unknown, signal?: AbortSignal, purposeLabel?: string): Promise<Response> {
+  const started = Date.now();
+  // What the request is for: named by each call site (the production build is one bundle, so a call stack cannot say).
+  const purpose = purposeLabel ?? purposeFromStack(new Error().stack);
+  const model = typeof (body as { model?: unknown } | null)?.model === "string" ? ((body as { model: string }).model) : null;
+  const streaming = (body as { stream?: unknown } | null)?.stream === true;
+  const route: Route = localApiKey() ? "own_key" : cloudClientRef ? "clynx_cloud" : "none";
+  let res: Response;
+  try {
+    res = await callOpenAIRaw(kind, body, signal);
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    // A request that never left: no key / no sign-in (disabled), or an allowance / credit limit already known (budget). Anything else is a real failure.
+    const outcome = /No OpenAI access|OPENAI_API_KEY is not set|no cloud session/i.test(message) ? "skipped_disabled" : /credits are used up|allowance|plan|limit|temporarily unavailable|paused/i.test(message) ? "skipped_budget" : "live_failed";
+    apiActivity.record({ provider: "openai", kind: purpose, outcome, route, model, ms: Date.now() - started, error: (err as Error)?.name === "AbortError" ? "the request timed out or was cancelled" : message });
+    throw err;
+  }
+  const ms = Date.now() - started;
+  if (!res.ok) {
+    const text = await res.clone().text().catch(() => "");
+    let detail = text;
+    try {
+      const j = JSON.parse(text) as { error?: { message?: string; code?: string } | string };
+      detail = typeof j.error === "string" ? j.error : [j.error?.code, j.error?.message].filter(Boolean).join(": ") || text;
+    } catch {
+      /* not JSON */
+    }
+    apiActivity.record({ provider: "openai", kind: purpose, outcome: "live_failed", route, model, status: res.status, ms, error: `HTTP ${res.status}${detail ? `: ${detail}` : ""}` });
+    return res;
+  }
+  if (streaming || kind === "images") {
+    // A streamed answer reports no token counts unless asked to (and Clynx Cloud may strip that), and an image answer is megabytes of base64: neither is read here.
+    apiActivity.record({ provider: "openai", kind: purpose, outcome: "live_ok", route, model, status: res.status, ms, tokens: null, tokensNotReported: true });
+    return res;
+  }
+  // The answer's own usage block, read from a copy so the caller's response is untouched; recorded when it arrives.
+  void res
+    .clone()
+    .json()
+    .then((j: { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; input_tokens?: number; output_tokens?: number } }) => {
+      const u = j?.usage;
+      const input = u?.prompt_tokens ?? u?.input_tokens ?? null;
+      const output = u?.completion_tokens ?? u?.output_tokens ?? null;
+      const total = u?.total_tokens ?? (input !== null && output !== null ? input + output : null);
+      apiActivity.record({ provider: "openai", kind: purpose, outcome: "live_ok", route, model, status: res.status, ms, tokens: u ? { input, output, total } : null, tokensNotReported: !u });
+    })
+    .catch(() => apiActivity.record({ provider: "openai", kind: purpose, outcome: "live_ok", route, model, status: res.status, ms, tokens: null, tokensNotReported: true, error: "the answer could not be read for usage" }));
+  return res;
+}
+
+async function callOpenAIRaw(kind: "chat" | "images", body: unknown, signal?: AbortSignal): Promise<Response> {
   if (!localApiKey() && Date.now() < planLimitUntil) throw new Error(PLAN_LIMIT_MESSAGE);
   if (Date.now() < creditsExhaustedUntil) {
     throw new Error("OpenAI credits are used up — add credits at platform.openai.com/settings/organization/billing.");

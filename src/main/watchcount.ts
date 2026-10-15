@@ -1,3 +1,4 @@
+import { noteDecision } from "./aiDecisionLog.js";
 import type { Page } from "playwright";
 import type { PhotoCheck } from "./compPhotoCheck.js";
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
@@ -207,8 +208,7 @@ Respond with ONLY a JSON object, no other text: { "query": string }`;
         reasoning_effort: "minimal",
         response_format: { type: "json_object" },
       },
-      controller.signal
-    );
+      controller.signal, "market search query");
     if (!res.ok) return fallbackName;
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const text = data.choices?.[0]?.message?.content ?? "";
@@ -277,13 +277,23 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
         // reasoning tokens without this, same lesson as everywhere else this app calls OpenAI.
         reasoning_effort: "minimal",
       },
-      controller.signal
-    );
+      controller.signal, "comparable check");
     if (!res.ok) throw new Error(`OpenAI API error ${res.status}: ${await res.text()}`);
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const content = data.choices?.[0]?.message?.content ?? "";
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : content);
+    if (Array.isArray(parsed.matchingIndices)) {
+      const kept = parsed.matchingIndices.filter((i: unknown): i is number => typeof i === "number" && i >= 0 && i < titles.length);
+      const dropped = titles.filter((_, i) => !kept.includes(i)).slice(0, 3);
+      noteDecision({
+        kind: "comparable_check",
+        subject: productName ?? query,
+        verdict: `kept ${kept.length} of ${titles.length}`,
+        thought: dropped.length ? `Left out, for example: ${dropped.map((t) => `"${t.slice(0, 70)}"`).join("; ")}.` : "Every listing was the same product.",
+        model: OPENAI_MODEL,
+      });
+    }
     return Array.isArray(parsed.matchingIndices)
       ? parsed.matchingIndices.filter((i: unknown): i is number => typeof i === "number" && i >= 0 && i < titles.length)
       : [];
