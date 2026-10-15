@@ -49,3 +49,15 @@ REAL-WORLD VERIFICATION: NOT DONE. The two claims have not been verified against
  session's network settings and I will run it) to see the actual trace. Known limits: a site that blocks headless browsers will still defeat the render (the trace will
  show it), search engines can change their markup, and a bot check that answers 200 with results-looking content is not detectable.
  Needs a new installer.
+
+BETA TESTER ACCESS (separate change, same commit series)
+ Goal: beta testers get unlimited access without being administrators or owners.
+ Implementation: a new "tester" plan (cloud/src/entitlements/plans.ts). Every plan limit is lifted (watches, devices, search items, daily AI request and image quota);
+   the role stays an ordinary user: no administrator or Owner rights, no website console. A subscription can never lower it (it ranks above Pro).
+ Safety limits kept: the shared-service spending cap, concurrency and rate limits still apply to testers, at the Owner's level (controls.ts), so "unlimited" never
+   means unlimited spending on the shared AI key.
+ How to grant: on the server, command line only (like "npm run admin"): npm run tester -- add <email> | remove <email> | list. The person must have registered
+   first. Refuses administrators and the Owner. Audited in admin_audit. Neither a tester nor an administrator can grant it from the app or website.
+ Desktop: Account screen shows "Beta Tester - Unlimited access"; the app accepts the new plan value from the server.
+ Tests: cloud/test/testerPlan.test.ts (6, pass, no database needed); server typecheck clean. The database-backed cloud suites were not run (no Postgres/Redis in this session).
+ Deployment: the server must be updated (it must know the "tester" plan) before the command is used; the desktop change ships in the Beta 9 installer.
