@@ -1,0 +1,85 @@
+CLYNX BETA 12 - OPENAI / EBAY / MARKET-RESEARCH INTEGRATION AUDIT
+==================================================================
+Branch master-wveebf. Version 0.3.0-beta.12 (unchanged). Nothing published, registered or deployed.
+
+READ THIS FIRST - WHAT WAS AND WAS NOT VERIFIED
+ LIVE VERIFICATION DID NOT HAPPEN. The audit environment has no OpenAI key, no eBay keys, no Clynx Cloud session and no outbound network to OpenAI / eBay / WatchCount (the diagnostic below was run here and failed
+ visibly on all three, as it should). So: no real request was made, no token was consumed, and no API cost was incurred. Everything marked CONFIRMED below is from reading the code (including the cloud
+ server code in this repository) or from tests with a FAKED network (they prove the client code, the accounting and the hand-off, not that the live services work). Release readiness for the live
+ services needs the checks in section 7 run on the owner's Windows PC.
+
+1. WHY THE OWNER MAY SEE NO TOKENS / NO EBAY SEARCHES (root causes, with evidence level)
+ OpenAI
+  [CONFIRMED mechanism] AI can be served by CLYNX CLOUD'S SHARED KEY. index.ts effectiveApiSource(): a signed-in account uses "shared" by default (keys on the computer are not used unless the person chooses
+     "my own keys"). In that mode callOpenAI sends the request to Clynx Cloud (/ai/chat/completions); the server holds the company OpenAI key in its vault and records usage in ITS ai_usage table (cloud/src/ai/routes.ts).
+     The tokens are therefore spent on the COMPANY's OpenAI project. An OpenAI dashboard belonging to the owner's own key/project shows nothing. Which mode the owner is in is NOT CONFIRMED (the owner's databases show
+     two cloud-account folders plus local-beta); the new AI Activity screen now states the route in words.
+  [CONFIRMED] Many decisions need no AI by design: Search For matches (deterministic maths), titles that name a Database product with an eBay value (free lookup), and, in the default "Save OpenAI credits" mode, photo looks
+     for listings the text read did not flag (research.planPhotoLook; budgets 3 per visit / 30 per pass). The new screen counts these as "answered from the Database" / "skipped: not needed" / "skipped: allowance".
+  [CONFIRMED] Streamed chat answers and image requests report NO token counts, so usage for chat cannot be shown even when it happens; it is shown as "tokens not reported" (never invented). Non-streamed requests use the answer's own usage block.
+  [CONFIRMED] Failures used to leave little trace: a refused or failed call surfaced only as a console line or a "Clynx couldn't read its own analysis" reason. They are now recorded with status and reason.
+  [POSSIBLE, unverified] the owner checking a different OpenAI project/account; usage-dashboard delay; AI features off because credits/plan limit were hit earlier (the app pauses AI for 10-15 minutes after insufficient_quota / plan limit).
+  From the owner's real database (329 listings): only listings with no Search For match and no Database value reach the text AI (14 AI_ESTIMATE + 6 AI_UNVERIFIED + some Search-For-priced ones): a few dozen small requests, i.e. low token use is plausible even when everything works.
+ eBay
+  [CONFIRMED] There are THREE different market sources, and only one is the eBay API:
+     1. WatchCount (sold prices): read in a Playwright browser tab (watchcount.ts searchSoldComps). It is NOT an API and shows up nowhere in eBay's developer dashboard. Anonymous lookups are capped by WatchCount (20/day per the code comments).
+     2. eBay Browse API (ACTIVE ASKING prices, never sold prices): ebayClient.ts, application OAuth. It runs ONLY when eBay keys exist on this computer (.env EBAY_CLIENT_ID / EBAY_CLIENT_SECRET) or Clynx Cloud's eBay access is used
+        (shared mode: searches are made by the server). With neither, fetchActiveAsks silently returned "no asking data" (now recorded as "skipped: turned off or no access").
+     3. The local Database's cached values (recent checks within 3 days answer without any lookup).
+  [CONFIRMED] eBay errors used to be swallowed: fetchActiveAsks caught every error and wrote only to the console. They are now recorded with HTTP status (401 keys, 403 permission, 429 rate limit, timeouts).
+  [NOT CONFIRMED] whether the owner has eBay keys or is in shared mode; the screen now says.
+
+2. EVERY API PATH (trigger -> service -> enabled by -> auth -> cache/budget -> failure handling)
+ OpenAI (single choke point: openai.callOpenAI; 19 call sites, each now labelled with its purpose):
+  chat / Dashboard assistant (chat.ts, streamed) - user messages and narration - on if any access - key or Clynx Cloud session - none - error shown in chat.
+  listing judgement, text (scorer.extractGeneralDeal) - every opened listing that has no Search For match and no Database value - always - same - none; one retry on unreadable JSON - failure => "judge unavailable", listing kept as insufficient evidence (not rejected).
+  photo analysis (vision.analyzeListingPhotos) - listings the plan selects (flagged, green flag, Watch, hidden gem, or a speculative look within the budget; all listings when Save-credits is off) - needs photos on + AI available - 2 workers, 150 s check cap - failure => PHOTO_ANALYSIS_FAILED (insufficient evidence).
+  photo checks (reference candidates / thumbnails / ineligible category / reference match / gallery audit & comparison / feedback): Database research, scanner image matching - Save-credits mode uses free text-only paths - fail CLOSED for product photos since Beta 12.
+  product identity (productIdentity), bundle valuation, comparable photo check, product research (products.ts), location lookup, web research: background research - Save-credits/limits can skip.
+  market query + comparable check (watchcount.deriveWatchCountQuery / judgeSameProduct): each market research pass - low-AI mode uses plain text checks instead.
+  image generation (category thumbnails): Library - shared service only.
+ eBay / market:
+  WatchCount sold comps: researchEbayComps -> scrapeEngine.fetchEbayComps (browser) - config.watchCountEnabled - WatchCount login optional - 3-day Database reuse, in-flight sharing - 150 s market-check timeout, late answers are filed and (Beta 12) re-judge the listing.
+  eBay Browse asking prices: fetchActiveAsks, reference-photo candidates, eBay scanner engine - hasEbayCredentials (own keys or Clynx Cloud) - token cached ~2 h, dropped on 401 - errors: now recorded; valuation continues with sold comps alone.
+  Deal Quality Gate / valuation / profit: pure arithmetic on what the above returned (no API); asking-only evidence is "weak" by rule.
+  Cloud: the server proxies /ai/* and /ebay/* with the company's credentials, rate limits, plan limits and spend caps (cloud/src/ai/routes.ts, cloud/src/ebay).
+
+3. WHAT WAS BUILT (AI Activity, Activity screen)
+  src/main/apiActivity.ts (bounded registry: counters; last 100 events, 30 failures, 40 decisions; scrubbing of keys / bearer tokens / access tokens; token + estimated-cost accounting).
+  openai.ts: every request recorded (live ok/failed, status, latency, model, route own key vs Clynx Cloud, usage tokens from the answer, "tokens not reported" for streams), requests that never left recorded as skipped (limit vs no key).
+  ebayClient.ts: OAuth mint / cached reuse / 401 token drop, every Browse call with status, latency and result count, direct vs Clynx Cloud route. ebayActive.ts: "no keys" skip recorded. scrapeEngine: WatchCount sold lookups (results, failures), photo-look skips with their reason.
+  index.ts: market-check local-Database answers, shared in-flight answers, WatchCount-off skips, identity-check counts (retrieved / accepted / rejected / unsure) per provider; IPC api:activity and api:selfTest.
+  Decisions with images and thoughts: aiDecisionLog.ts (120 px thumbnails) + hooks on photo analysis, text judgement, reference/thumbnail checks, comparable checks, product identity, and the deterministic "rejected from its title (no AI used)".
+  UI: Activity now has "Activity | AI Activity". AI Activity shows the route (own key vs Clynx Cloud shared), provider cards, "Run API check", and Decisions / Requests / Problems tabs. Nothing is added to the chat.
+  Run API check / scripts\api-diagnose.cjs: src/main/apiSelfTest.ts: one tiny AI request, one 20-result eBay search ("Xbox Series X": retrieved / accepted / rejected / unsure, median ASKING price), one WatchCount reachability request. Failures are returned, never hidden; exit code 1.
+
+4. TESTS (all with a FAKED network unless stated; none is live)
+  apiActivity.test.ts (78 checks): registry bounds and scrubbing; OpenAI success with usage, no usage block, stream, malformed body, 401, 429, 503, timeout, network error, quota exhaustion then skipped-budget, ensureOpenAIAccess refusals; eBay token mint / cache / 401 drop and re-mint / 429 / empty / token refusal /
+  no secrets in the snapshot; the hand-off eBay -> identity (Series S, game, controller, parts, 2TB Galaxy rejected) -> asking-price median -> Deal Quality Gate (thresholds unchanged: $300 = Worth a look because asking-only evidence is weak, $200 = deal at low confidence, $400 = not a deal) -> failed research gives no value
+  and a recorded 500; the text judge -> decision with its reasoning and 960 tokens recorded; image decisions (thumbnails <= 120 px; the Guardians rejection visible); the API check (pass, every failure type, timeout, empty, malformed, no keys); the view helpers.
+  Earlier Beta 12 tests (late research re-judges the originating listing, thresholds, identity, variants) are unchanged and pass.
+  Suite: 75 files; all pass except startupErrors.test.ts (environmental, fails on the untouched branch). Typecheck clean; production build OK.
+
+5. PROVIDER STATUS
+  | Service | Configured | Live request successful | Pipeline verified | Remaining issues |
+  | OpenAI | NOT KNOWN here (no key/session in this environment); route is shown in the app | NO (not attempted: no credentials/network). The diagnostic ran and reported FAILED / "no OpenAI access" | Offline only: request -> usage -> decision -> listing flag, with a faked network | Confirm the route (own key vs Clynx Cloud) and run the live check on the PC; streamed chat tokens cannot be counted |
+  | eBay (Browse, asking prices) | NOT KNOWN here | NO (not attempted). Diagnostic: "NOT CHECKED, no eBay keys" | Offline: search -> identity -> median asking -> gate | Needs production keys or Clynx Cloud; asking prices are not sold prices by design |
+  | WatchCount (sold prices) | Config toggle (default on); browser-read | NO (diagnostic: not reachable from here; reachability only on the PC) | Offline: results and failures recorded; late result re-judges the listing | Anonymous daily cap; an empty result looks like 0 results (now visible); not tested against the live site |
+
+6. API COSTS INCURRED: none (no live request was possible). Estimated cost of the live check on the PC: a few dozen tokens of gpt-5-mini plus one eBay search: a fraction of a cent.
+
+7. WHAT TO RUN ON THE WINDOWS PC (exact; PowerShell, one line at a time)
+  git pull origin master-wveebf
+  npm ci
+  node scripts\api-diagnose.cjs
+     (checks THIS computer's own keys, reading %APPDATA%\Clynx\.env without printing it. If Clynx uses Clynx Cloud's shared AI/eBay, that command cannot test the server's keys.)
+  Then in the app (the check that matters for a signed-in account): Activity > AI Activity > "Run API check", and read the first two lines ("AI goes through" / "eBay goes through"). After a normal scan, open the Decisions and Requests tabs.
+  To see shared-mode usage: the Clynx Cloud console / server ai_usage table (per-user rows with tokens and estimated cost), not the owner's personal OpenAI dashboard.
+
+8. REMAINING LIMITATIONS
+  - Streamed chat answers report no tokens (the cloud proxy may also strip usage options), so chat spend is counted as requests, not tokens.
+  - Counts are per session (in memory, bounded); they reset when Clynx restarts.
+  - Estimated cost uses a built-in gpt-5-mini list price and ignores caching discounts; unknown models show no estimate.
+  - WatchCount is read through the browser, so its failures appear as a failed/empty lookup, not an HTTP status.
+  - The AI Activity screen was built and type-checked, but I could not look at it running.
+  - Nothing here changed cloud configuration, billing limits, Database records or credentials.
