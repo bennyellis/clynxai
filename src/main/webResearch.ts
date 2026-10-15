@@ -15,11 +15,15 @@ import { OPENAI_IMAGE_MODEL, callOpenAI } from "./openai.js";
 import { hasEbayCredentials, searchEbayItems } from "./ebayClient.js";
 import { titleLooksLikeProduct } from "./compFilter.js";
 import { isLowAiMode } from "./aiMode.js";
+import { gatherEvidence, describeEvidence, evidenceLedger, type EvidenceSource, type SearchDeps, type VariantEvidence } from "./variantEvidence.js";
+import { inferDistinguishingTokens, requiredVariantTokens } from "./variants.js";
 
 const SEARCH_TIMEOUT_MS = 15_000;
 const PAGE_FETCH_TIMEOUT_MS = 12_000;
 const DEFAULT_MAX_RESULTS = 5;
 const MAX_CHARS_PER_PAGE = 3000;
+// Evidence is judged on far more of the page than the excerpt that is handed to the AI (a manufacturer page can name an edition well below the fold).
+const MAX_EVIDENCE_CHARS_PER_PAGE = 40_000;
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
@@ -38,6 +42,8 @@ export interface WebResearchResult {
   // just a representative reference photo for the Database card, not
   // something scoring relies on.
   imageUrl: string | null;
+  // Set when the product (or its parent) carries distinguishing words that were checked against what the searches found.
+  evidence: VariantEvidence | null;
 }
 
 async function fetchWithTimeout(url: string, ms: number): Promise<Response> {
@@ -147,23 +153,77 @@ function looksLikeLogoAsset(url: string): boolean {
 
 interface FetchedPage {
   text: string | null;
+  // far more of the page than `text`, for judging evidence; null when the page could not be read
+  fullText: string | null;
   imageUrl: string | null;
 }
 
 async function fetchPage(url: string): Promise<FetchedPage> {
   try {
     const res = await fetchWithTimeout(url, PAGE_FETCH_TIMEOUT_MS);
-    if (!res.ok) return { text: null, imageUrl: null };
+    if (!res.ok) return { text: null, fullText: null, imageUrl: null };
     const contentType = res.headers.get("content-type") ?? "";
-    if (!contentType.includes("text/html")) return { text: null, imageUrl: null };
+    if (!contentType.includes("text/html")) return { text: null, fullText: null, imageUrl: null };
     const html = await res.text();
+    // The semantic <main> block keeps nav boilerplate out of the excerpt, but a product page's edition list can sit outside it, so the evidence text is the whole page.
+    const fullText = stripHtml(html).slice(0, MAX_EVIDENCE_CHARS_PER_PAGE);
     return {
       text: stripHtml(extractMainContent(html)).slice(0, MAX_CHARS_PER_PAGE),
+      fullText,
       imageUrl: extractOgImage(html),
     };
   } catch {
-    return { text: null, imageUrl: null };
+    return { text: null, fullText: null, imageUrl: null };
   }
+}
+
+/** A short excerpt of a long page that still contains the words being checked: the start of the page, then the stretch around the first hit. */
+function focusExcerpt(text: string, words: string[], max: number): string {
+  if (text.length <= max) return text;
+  const lower = text.toLowerCase();
+  const hits = words.map((w) => lower.indexOf(w.toLowerCase())).filter((i) => i >= 0);
+  if (hits.length === 0) return text.slice(0, max);
+  const head = Math.floor(max / 3);
+  const at = Math.min(...hits);
+  if (at < head) return text.slice(0, max);
+  return `${text.slice(0, head)} ... ${text.slice(Math.max(head, at - 300), Math.max(head, at - 300) + (max - head - 5))}`;
+}
+
+const webDeps: SearchDeps = {
+  search: (query, max) => searchWeb(query, max),
+  fetchPage: async (url) => (await fetchPage(url)).fullText,
+};
+
+function toEvidenceSources(list: Array<{ title: string; url: string; excerpt: string }>): EvidenceSource[] {
+  return list.map((s) => ({ title: s.title, url: s.url, excerpt: s.excerpt }));
+}
+
+export interface ProductResearchOptions {
+  // The Database entry this product is a variant of, when known: its distinguishing words are what the searches must find.
+  parentName?: string | null;
+  brandHints?: string[];
+  // The user typed this name or gave a link: a lead that must never be dismissed because a search came back empty.
+  userReported?: boolean;
+  // Evidence already gathered for this exact name (see verifyVariantOnWeb), so it is not searched for twice.
+  preflight?: { sources: EvidenceSource[]; evidence: VariantEvidence } | null;
+}
+
+/** The words a product's evidence must find: its distinguishing words against its parent, or (for a name the user supplied alone) the ones its own wording carries. */
+export function wordsToVerify(name: string, opts: ProductResearchOptions): string[] {
+  if (opts.parentName) return requiredVariantTokens(name, opts.parentName);
+  return opts.userReported ? inferDistinguishingTokens(name) : [];
+}
+
+/**
+ * Looks for evidence that a variant is real BEFORE anything is filed for it: manufacturer first, then the parent product, the distinguishing
+ * words and alternate wordings (see variantEvidence.ts). Never throws; a total failure to search comes back as "unknown" (not found), never as a denial.
+ */
+export async function verifyVariantOnWeb(name: string, opts: ProductResearchOptions): Promise<{ sources: EvidenceSource[]; evidence: VariantEvidence } | null> {
+  const required = wordsToVerify(name, opts);
+  if (required.length === 0) return null;
+  const gathered = await gatherEvidence({ name, parentName: opts.parentName, brandHints: opts.brandHints, userReported: opts.userReported, required }, webDeps);
+  evidenceLedger.record(name, gathered.evidence);
+  return { sources: gathered.sources, evidence: gathered.evidence };
 }
 
 // Gathers real web content about a product: search result snippets, plus
@@ -174,57 +234,114 @@ async function fetchPage(url: string): Promise<FetchedPage> {
 // doesn't fail the whole search; only a failure of the search itself
 // (network down, DuckDuckGo unreachable) throws, letting the caller fall
 // back to training-knowledge-only research instead.
-export async function researchProductOnWeb(productName: string, maxResults = DEFAULT_MAX_RESULTS): Promise<WebResearchResult> {
+//
+// An exact-title search is only the first try. When the product has distinguishing words (a capacity, colour, edition, a name its parent
+// lacks) or the first search found nothing, the plan in variantEvidence.ts keeps going: the manufacturer's own site, the parent product, the
+// distinguishing words alone, alternate wordings. The result says whether the variant is verified, unverified, unknown or disproven.
+export async function researchProductOnWeb(productName: string, maxResults = DEFAULT_MAX_RESULTS, opts: ProductResearchOptions = {}): Promise<WebResearchResult> {
   const query = `${productName} specs variants common problems`;
   const results = await searchWeb(query, maxResults);
 
   const pages = await Promise.all(
     results.map(async (r) => {
       const page = await fetchPage(r.url);
-      const excerpt = page.text && page.text.length > r.snippet.length ? page.text : r.snippet;
-      return { title: r.title, url: r.url, excerpt, imageUrl: page.imageUrl };
+      const full = page.fullText && page.fullText.length > r.snippet.length ? page.fullText : r.snippet;
+      return { title: r.title, url: r.url, full, excerpt: page.text && page.text.length > r.snippet.length ? page.text : r.snippet, imageUrl: page.imageUrl };
     })
   );
 
+  const required = wordsToVerify(productName, opts);
+  const first = pages.filter((p) => p.full.trim().length > 0);
+  let sources = first.map(({ title, url, excerpt }) => ({ title, url, excerpt }));
+  let evidence: VariantEvidence | null = null;
+  const preflight = opts.preflight ?? null;
+  // Nothing found at all always widens (an exact-title miss is not the end of the research); evidence is only judged for names with words to verify.
+  if (preflight) {
+    const seen = new Set(sources.map((s) => s.url));
+    sources = [...preflight.sources.filter((s) => !seen.has(s.url)).map((s) => ({ title: s.title, url: s.url, excerpt: focusExcerpt(s.excerpt, required, MAX_CHARS_PER_PAGE) })), ...sources].slice(0, 8);
+    evidence = preflight.evidence;
+  } else if (required.length > 0 || sources.length === 0) {
+    const gathered = await gatherEvidence(
+      { name: productName, parentName: opts.parentName, brandHints: opts.brandHints, userReported: opts.userReported, required, extraSources: toEvidenceSources(first.map((p) => ({ title: p.title, url: p.url, excerpt: p.full }))) },
+      webDeps
+    );
+    // hand the AI focused excerpts (the stretch that names the variant), not 40,000 characters per page
+    sources = gathered.sources
+      .slice()
+      .sort((a, b) => Number(gathered.evidence.sources.find((x) => x.url === b.url)?.namesVariant ?? false) - Number(gathered.evidence.sources.find((x) => x.url === a.url)?.namesVariant ?? false))
+      .slice(0, 8)
+      .map((s) => ({ title: s.title, url: s.url, excerpt: focusExcerpt(s.excerpt, required, MAX_CHARS_PER_PAGE) }));
+    if (required.length > 0) evidence = gathered.evidence;
+  }
+
   return {
     query,
-    sources: pages.filter((s) => s.excerpt.trim().length > 0).map(({ title, url, excerpt }) => ({ title, url, excerpt })),
+    sources: sources.filter((s) => s.excerpt.trim().length > 0),
     imageUrl: pages.find((p) => p.imageUrl && !looksLikeLogoAsset(p.imageUrl))?.imageUrl ?? null,
+    evidence,
   };
 }
+
+const URL_IN_TEXT = /https?:\/\/[^\s<>"')]+/gi;
 
 /**
  * Clynx looking something up the way a person would: a web search, a skim of the top few pages, and the readable text handed back
  * for Clynx to digest and explain in its own words in the chat. Nothing is saved anywhere (that is research_product's job).
  * Never throws: a failure comes back as text Clynx can say out loud.
+ *
+ * One query that returns nothing is not a finding. The search widens (manufacturer site, shorter and alternate wordings) and the
+ * reply says how many searches were tried and, for a name with distinguishing words, whether it is verified, unverified or simply
+ * not found. A link in the query is read directly as a lead the user supplied.
  */
 export async function lookUpOnWeb(query: string): Promise<string> {
-  const q = query.trim().slice(0, 200);
-  if (!q) return "Failed: no search query given.";
+  const raw = query.trim().slice(0, 400);
+  if (!raw) return "Failed: no search query given.";
   try {
-    const results = await searchWeb(q, 5);
-    if (results.length === 0) return `I searched the web for "${q}" but nothing useful came back.`;
-    const pages = await Promise.all(
-      results.slice(0, 4).map(async (r) => {
-        const page = await fetchPage(r.url);
-        const text = page.text && page.text.length > r.snippet.length ? page.text : r.snippet;
-        let host = r.url;
-        try {
-          host = new URL(r.url).hostname.replace(/^www\./, "");
-        } catch {
-          // keep the raw url as the label
-        }
-        return { title: r.title, host, text: text.trim().slice(0, 1800) };
-      })
+    const links = [...raw.matchAll(URL_IN_TEXT)].map((m) => m[0]);
+    const q = raw.replace(URL_IN_TEXT, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+    const linked: EvidenceSource[] = [];
+    for (const url of links.slice(0, 2)) {
+      const page = await fetchPage(url);
+      linked.push({ title: `Link you gave me (${hostLabelOf(url)})`, url, excerpt: page.fullText ?? "" });
+    }
+    const required = inferDistinguishingTokens(q);
+    const gathered = await gatherEvidence(
+      { name: q || raw, required, userReported: links.length > 0, extraSources: linked.filter((l) => l.excerpt) , maxQueries: required.length > 0 ? 5 : 3 },
+      webDeps
     );
-    const usable = pages.filter((p) => p.text.length > 0);
-    if (usable.length === 0) return `I searched the web for "${q}" but couldn't read any of the pages.`;
+    const unreadable = linked.filter((l) => !l.excerpt);
+    if (gathered.sources.length === 0) {
+      const tried = gathered.queriesTried.length;
+      return (
+        `I ran ${tried} search${tried === 1 ? "" : "es"} for "${q || raw}" (${gathered.queriesTried.map((x) => `"${x}"`).join("; ")}) and nothing readable came back. ` +
+        `That means I have not found it, not that it does not exist: say so plainly and suggest what would help (the manufacturer's page, a box or label photo, the SKU).` +
+        (unreadable.length ? ` I also could not read the link${unreadable.length === 1 ? "" : "s"} you gave (${unreadable.map((u) => hostLabelOf(u.url)).join(", ")}), which is common with retailer pages.` : "")
+      );
+    }
+    if (required.length > 0) evidenceLedger.record(q || raw, gathered.evidence);
+    const order = new Map(gathered.evidence.sources.map((s, i) => [s.url, i]));
+    const usable = gathered.sources
+      .slice()
+      .sort((a, b) => (order.get(a.url) ?? 99) - (order.get(b.url) ?? 99))
+      .slice(0, 5)
+      .map((s) => ({ title: s.title, host: hostLabelOf(s.url), kind: gathered.evidence.sources.find((x) => x.url === s.url)?.kind ?? "other", text: focusExcerpt(s.excerpt, required, 1800).trim() }))
+      .filter((p) => p.text.length > 0);
+    const header = required.length > 0 ? `${describeEvidence(gathered.evidence)}\n\n` : `Searches tried (${gathered.queriesTried.length}): ${gathered.queriesTried.map((x) => `"${x}"`).join("; ")}\n\n`;
+    const unread = unreadable.length ? `Note: I could not read ${unreadable.map((u) => hostLabelOf(u.url)).join(", ")} (the link you gave); that is a limit of reading the page, not evidence about the product.\n\n` : "";
     return (
-      `Web results for "${q}". Read them and answer in your own words (don't paste them, and don't present anything here as certain if the sources disagree or look thin):\n\n` +
-      usable.map((p, i) => `[${i + 1}] ${p.title} (${p.host})\n${p.text}`).join("\n\n")
+      `Web results for "${q || raw}". Read them and answer in your own words (don't paste them, and don't present anything here as certain if the sources disagree or look thin). A source marked manufacturer outranks a seller or marketplace listing.\n\n${header}${unread}` +
+      usable.map((p, i) => `[${i + 1}] ${p.title} (${p.host}, ${p.kind})\n${p.text}`).join("\n\n")
     );
   } catch (err) {
     return `Failed: couldn't reach the web right now (${(err as Error).message}).`;
+  }
+}
+
+function hostLabelOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
   }
 }
 

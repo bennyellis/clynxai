@@ -55,7 +55,9 @@ export async function fetchActiveAsks(
   photoCheck?: PhotoCheck | null,
   broken = false,
   // The product's Database family ("PlayStation > Consoles"): for a console, only listings filed under a console category count.
-  familyHint: string | null = null
+  familyHint: string | null = null,
+  // Extra gate on a listing's title (the variant check: see variants.ts variantTitleGate). Not applied to broken-copy research.
+  titleGate: ((title: string) => boolean) | null = null
 ): Promise<ActiveAsks> {
   if (!hasEbayCredentials()) return NO_ASKS;
   if (broken) return fetchBrokenAsks(query, productName, familyHint);
@@ -64,7 +66,7 @@ export async function fetchActiveAsks(
     const reference = specReference(query, productName);
     // Parts-only / not-working listings say nothing about what a working one is worth.
     const candidates = items.filter(
-      (i) => i.priceCurrency === "USD" && i.priceValue !== null && Number.isFinite(Number(i.priceValue)) && !/parts|not working/i.test(i.condition ?? "") && compMatchesSpecs(reference, i.title)
+      (i) => i.priceCurrency === "USD" && i.priceValue !== null && Number.isFinite(Number(i.priceValue)) && !/parts|not working/i.test(i.condition ?? "") && compMatchesSpecs(reference, i.title) && (!titleGate || titleGate(i.title))
     );
     if (candidates.length === 0) return NO_ASKS;
 

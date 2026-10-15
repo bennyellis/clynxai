@@ -40,7 +40,10 @@ import {
 } from "./chat.js";
 import { randomUUID } from "node:crypto";
 import { lookupProduct, expandSearchKeywords } from "./products.js";
-import { downloadImageAsDataUri, shrinkImageDataUri, findBrandLogoImage, findGroupImage, findPoorConditionProductImage, findReferencePhotos, findFreeReferencePhotos, buildImageCollage, generateCategoryImage, lookUpOnWeb } from "./webResearch.js";
+import { variantRelation, requiredVariantTokens, variantTitleGate, ensureQueryHasTokens, variantValuationEvidence } from "./variants.js";
+import { describeResearchOutcome, mayFileVariant } from "./variantEvidence.js";
+import type { ProductResearchOptions } from "./webResearch.js";
+import { downloadImageAsDataUri, shrinkImageDataUri, findBrandLogoImage, findGroupImage, findPoorConditionProductImage, findReferencePhotos, findFreeReferencePhotos, buildImageCollage, generateCategoryImage, lookUpOnWeb, verifyVariantOnWeb } from "./webResearch.js";
 import {
   answerImageQuestion,
   reconsiderImageFeedback,
@@ -965,29 +968,40 @@ async function executeChatTool(
     // findMatchingProduct) should refresh/reinforce that one entry, not
     // spawn a near-duplicate under the new phrasing.
     const existing = store.findMatchingProduct(product);
-    if (existing) {
+    // A request that names a specific edition / capacity / bundle / generation the matched entry lacks is a VARIANT of it, not the same product:
+    // researching it into the parent's entry would overwrite the parent's write-up with the variant's and reuse the parent's price comps (the
+    // "I already checked eBay for this one" reuse seen live). It gets its own entry, linked to the parent.
+    const asVariant = !!existing && variantRelation(product, existing.name) === "variant";
+    if (existing && !asVariant) {
       store.setProductLoading(existing.id, true);
       sendToRenderer("products:updated", store.getProductById(existing.id));
       // Bug fix (verified live): this used to re-research existing.name —
       // the entry's own, more GENERIC stored name — discarding whatever
-      // more specific wording the user actually typed. Asking to research
-      // "New Nintendo 3DS XL - Galaxy Edition" against an existing generic
-      // "Nintendo 3DS XL" entry silently re-ran a plain "Nintendo 3DS XL"
-      // search, so the AI never even saw "Galaxy Edition" and obviously
-      // couldn't say anything about it. findMatchingProduct is deliberately
-      // permissive (see isSimilarProductName) so a more specific variant
-      // still folds into the SAME family entry rather than spawning a
-      // near-duplicate — but folding into the same entry should never mean
-      // throwing away the extra specificity the user asked about; `product`
-      // (the user's actual query) is what has to actually get researched,
+      // more specific wording the user actually typed. `product` (the
+      // user's actual query) is what has to actually get researched,
       // existing.id is just where the result gets saved.
-      runProductLookup(existing.id, product, { source: "you" });
-      return `Already have a Database profile for "${existing.name}" — refreshing it with a fresh web search for "${product}" now, check the Database tab in a moment.`;
+      const state = await runResearchBounded(existing.id, product, { source: "you" });
+      return describeResearchOutcome({ requested: product, saved: store.getProductById(existing.id), state });
+    }
+    if (existing && asVariant) {
+      const variantOf = { parentId: existing.id, parentName: existing.name };
+      // Evidence first, filing second: a variant nothing supports is not turned into a Database record.
+      const preflight = await verifyVariantOnWeb(product, { parentName: existing.name, userReported: true });
+      if (preflight && !mayFileVariant(preflight.evidence)) {
+        return describeResearchOutcome({ requested: product, saved: null, state: "discarded", evidence: preflight.evidence, parentName: existing.name });
+      }
+      const known = store.getProductByName(product);
+      const id = known?.id ?? store.addProductStub(randomUUID(), product);
+      if (!known) store.setProductParent(id, existing.id);
+      store.setProductLoading(id, true);
+      sendToRenderer("products:updated", store.getProductById(id));
+      const state = await runResearchBounded(id, product, { source: "you", userReported: true, variantOf, preflight, forcedFamily: existing.family ?? undefined });
+      return describeResearchOutcome({ requested: product, saved: store.getProductById(id), state, evidence: preflight?.evidence ?? null, parentName: existing.name });
     }
     const id = store.addProductStub(randomUUID(), product);
     sendToRenderer("products:updated", store.getProductById(id));
-    runProductLookup(id, product, { source: "you" });
-    return `Added "${product}" to the Database and researching it now — variant/identifying details will show up on the Database tab in a moment.`;
+    const state = await runResearchBounded(id, product, { source: "you" });
+    return describeResearchOutcome({ requested: product, saved: store.getProductById(id), state });
   }
 
   if (call.name === "add_product_watch_note") {
@@ -1654,8 +1668,18 @@ async function researchEbayComps(
   }
   // A "(For Parts / Broken)" variant is researched on its own terms: sold comps and asking prices of BROKEN copies of the base product.
   if (isBrokenVariantName(fallbackName)) return researchBrokenVariantComps(id, fallbackName);
-  const query = await deriveWatchCountQuery(fallbackName, sourceTitle, imageDataUri, sourceTitle ? store.credibleCodes(id, fallbackName, sourceTitle) : []);
-  const comps = await timed("ebay_lookup", () => getPrimaryEngine().fetchEbayComps(query));
+  // Parent and variants are valued apart (variants.ts): a variant's comps must carry its own distinguishing words, and a parent's must not be
+  // its tracked variants' sales. Never a silent substitute: a variant without enough matching comps gets "insufficient evidence", not a number.
+  const selfProduct = store.getProductById(id);
+  const parentProduct = selfProduct?.parentProductId ? store.getProductById(selfProduct.parentProductId) : null;
+  const childNames = store.listProductChildren(id).map((c) => c.name).filter((n) => !isBrokenVariantName(n));
+  const variantWords = requiredVariantTokens(fallbackName, parentProduct?.name ?? null);
+  const titleGate = variantTitleGate(fallbackName, parentProduct?.name ?? null, childNames);
+  const gated = variantWords.length > 0 || childNames.length > 0;
+  const query = ensureQueryHasTokens(await deriveWatchCountQuery(fallbackName, sourceTitle, imageDataUri, sourceTitle ? store.credibleCodes(id, fallbackName, sourceTitle) : []), variantWords);
+  const rawComps = await timed("ebay_lookup", () => getPrimaryEngine().fetchEbayComps(query));
+  const comps = gated ? rawComps.filter((c) => titleGate(c.title)) : rawComps;
+  const setAsideAsOtherVersion = rawComps.length - comps.length;
   // The product's own name backs up the search query for hard facts like capacity (see compFilter.ts).
   // Cross-check every result's photo against this product's reference photos (not the ones that came from eBay: those would
   // only vouch for themselves), falling back to its thumbnail. No photo to compare with = text checks only.
@@ -1670,7 +1694,15 @@ async function researchEbayComps(
   const analysis = await analyzeEbayComps(query, comps, fallbackName, photoCheck);
   // What sellers are asking for the same thing right now: sold comps stay the main evidence, asking prices fill in
   // when there are few of them (see marketValue.ts). Never fails the research: no data just means sold comps alone.
-  const active = await fetchActiveAsks(query, fallbackName, analysis.dominantCondition, photoCheck, false, store.getProductById(id)?.family ?? null);
+  const active = await fetchActiveAsks(query, fallbackName, analysis.dominantCondition, photoCheck, false, store.getProductById(id)?.family ?? null, gated ? titleGate : null);
+  const evidenceToValue = variantValuationEvidence(fallbackName, parentProduct?.name ?? null, analysis.sampleSize, active.sampleSize, setAsideAsOtherVersion);
+  if (!evidenceToValue.enough) {
+    // Record that the lookup ran and found nothing usable for THIS version, with no price: the Database shows it as not enough evidence.
+    store.updateProductEbayComps(id, { avgSoldPriceUsd: null, avgRunTimeDays: null, avgShippingUsd: null, sampleSize: analysis.sampleSize, activeMedianUsd: null, activeSampleSize: active.sampleSize, estimatedValueUsd: null, estimateBasis: null, identity: "unresolved" });
+    discovery.note(id, "warn", evidenceToValue.reason);
+    getPrimaryEngine().markEbayCompsResearched(id);
+    return { ...analysis, avgSoldPriceUsd: null, identityNote: evidenceToValue.reason, photoRejected: analysis.photoRejected + active.photoRejected, activeMedianUsd: null, activeSampleSize: active.sampleSize, estimatedValueUsd: null };
+  }
   // Both sides are what a buyer pays IN TOTAL (sold: item + shipping paid; asking: item + the seller's shipping charge).
   const estimate = estimateMarketValue(
     { mean: buyerTotalUsd(analysis.avgSoldPriceUsd, analysis.avgShippingUsd), n: analysis.sampleSize },
@@ -2161,6 +2193,25 @@ function personIsUsingClynx(): boolean {
     return false;
   }
 }
+// How long a chat tool call waits for a research run before reporting it as still running (so the chat never says "saved" for data that is not).
+const RESEARCH_TOOL_WAIT_MS = 120_000;
+async function runResearchBounded(id: string, name: string, opts: Parameters<typeof runProductLookupInner>[2]): Promise<"finished" | "still-running"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      runProductLookup(id, name, opts).then(
+        () => "finished" as const,
+        () => "finished" as const // runProductLookupInner records its own failure in the entry; describeResearchOutcome reads it from there
+      ),
+      new Promise<"still-running">((resolve) => {
+        timer = setTimeout(() => resolve("still-running"), RESEARCH_TOOL_WAIT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function runProductLookup(...args: Parameters<typeof runProductLookupInner>): Promise<void> {
   researchActive++;
   try {
@@ -2191,7 +2242,16 @@ async function runProductLookupInner(
   // param. Only set by call sites that genuinely have a live, current
   // listing in scope; everything else keeps today's behavior.
   // source: why this product is being looked into (shown on its Discovery entry).
-  opts: { skipSiblingDiscovery?: boolean; forcedFamily?: string; triggeringListing?: { title: string; imageDataUri?: string | null }; source?: DiscoverySource } = {}
+  // userReported / variantOf / preflight: this product is a named VARIANT of another (see variants.ts); its evidence was gathered first.
+  opts: {
+    skipSiblingDiscovery?: boolean;
+    forcedFamily?: string;
+    triggeringListing?: { title: string; imageDataUri?: string | null };
+    source?: DiscoverySource;
+    userReported?: boolean;
+    variantOf?: { parentId: string; parentName: string };
+    preflight?: ProductResearchOptions["preflight"];
+  } = {}
 ): Promise<void> {
   // A user-picked thumbnail (see products:pickThumbnail) is deliberate —
   // research finding (or not finding) a photo of its own should never
@@ -2226,7 +2286,7 @@ async function runProductLookupInner(
   if (opts.triggeringListing?.title) discovery.note(id, "step", `The listing that caught my eye: "${opts.triggeringListing.title}".`);
   let researchFailed = false;
   try {
-    const result = await lookupProduct(name);
+    const result = await lookupProduct(name, { parentName: opts.variantOf?.parentName ?? null, userReported: opts.userReported, preflight: opts.preflight ?? null });
     // Reaction is available as soon as the main research call resolves —
     // broadcast it right away rather than waiting for the remaining steps
     // below (eBay comps, sibling discovery) to also finish, so the
@@ -2316,7 +2376,8 @@ async function runProductLookupInner(
     }
 
     store.updateProductProfile(id, {
-      ...result,
+      aiSummary: result.aiSummary,
+      category: result.category,
       family: resolvedFamily,
       familyLogoUrl,
       imageUrl,
@@ -2529,11 +2590,20 @@ async function discoverAndCreateProductVariants(productName: string, category: s
     // names, so a genuine variant here is never mistaken for a duplicate of
     // the base product that triggered this.
     if (store.findMatchingProduct(title)) return;
+    // A variant the model named from memory is a candidate, not a fact: it is only filed once real sources support it (variantEvidence.ts), and
+    // then as its own product linked to the one that led to it. Nothing is created for one that cannot be found.
+    const variantOf = parentId ? { parentId, parentName: productName } : undefined;
+    const preflight = variantOf ? await verifyVariantOnWeb(title, { parentName: productName }) : null;
+    if (preflight && !mayFileVariant(preflight.evidence)) {
+      if (parentId) discovery.note(parentId, "step", `I couldn't find real sources for "${title}" (${preflight.evidence.status}), so I didn't add it.`);
+      return;
+    }
     const candidateId = randomUUID();
     const id = store.addProductStub(candidateId, title);
     if (id !== candidateId) return; // already in the Database under this name
+    if (parentId) store.setProductParent(id, parentId);
     sendToRenderer("products:updated", store.getProductById(id));
-    await runProductLookup(id, title, { skipSiblingDiscovery: true, forcedFamily: familyPath ?? undefined, source: "related" });
+    await runProductLookup(id, title, { skipSiblingDiscovery: true, forcedFamily: familyPath ?? undefined, source: "related", variantOf, preflight });
   });
 }
 

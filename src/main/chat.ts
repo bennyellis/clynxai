@@ -3,6 +3,7 @@ import { CLYNX_PERSONA, whereYouAre } from "./clynxPersona.js";
 import { CLYNX_VOICE } from "./voice.js";
 import { isLowAiMode } from "./aiMode.js";
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
+import { describeEvidence, evidenceLedger, type VariantEvidence } from "./variantEvidence.js";
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -203,7 +204,7 @@ const TOOLS = [
           product: {
             type: "string",
             description:
-              "The general, canonical product name ONLY, e.g. 'Xbox Series X', 'iPhone', 'Nintendo Switch'. Never append a parenthetical qualifier or a variant/bundle/accessory list — NOT \"Xbox Series X (console, all variants/bundles/accessories)\". A broad family name is fine and expected when that's what the user asked about — this is the Database entry's title, not a place to hedge about which SKU it covers.",
+              "The canonical product name, e.g. 'Xbox Series X', 'iPhone', 'Nintendo Switch'. Never append a parenthetical qualifier or a vague variant/bundle/accessory list — NOT \"Xbox Series X (console, all variants/bundles/accessories)\". A broad family name is fine and expected when that's what the user asked about. When the user names one specific edition / capacity / colour / generation / bundle / region, pass that exact full name instead (e.g. 'Xbox Series X 2TB Galaxy Black Special Edition'): it is kept as its own product under its parent.",
           },
         },
         required: ["product"],
@@ -636,7 +637,7 @@ ${whereYouAre("database")} This chat has its own conversation and its own tools,
 
 Your tools:
 - web_research — look something up on the web yourself, like a person with a search engine, and explain what you found in your own words. Use it for questions and opinions ("is the Series S worth flipping?", "what breaks on these?"); it doesn't save anything.
-- research_product — build (or refresh) an in-depth product profile from a real live web search for specs/variants/common issues (not just your own training knowledge), saved to the Database so it's there for next time. Call this whenever the user asks you to learn about/research/build a profile for a product. A broad, family-level request ("research iPhones", "look into Nintendo Switch") is completely normal — call this once with the general family name and let the writeup itself cover the real variants (storage sizes, generations, OLED vs base, etc.); don't refuse it or demand they narrow it down to one exact SKU first. Only ask a clarifying question if the request could genuinely mean different, unrelated products. Pass ONLY the general, canonical product name as the product argument — e.g. "Xbox Series X", "iPhone", "Nintendo Switch" — never a parenthetical qualifier or variant/bundle/accessory list tacked onto it (NOT "Xbox Series X (console, all variants/bundles/accessories)"); that kind of detail belongs in the writeup itself, not the title.
+- research_product — build (or refresh) an in-depth product profile from a real live web search for specs/variants/common issues (not just your own training knowledge), saved to the Database so it's there for next time. Call this whenever the user asks you to learn about/research/build a profile for a product. A broad, family-level request ("research iPhones", "look into Nintendo Switch") is completely normal — call this once with the general family name and let the writeup itself cover the real variants (storage sizes, generations, OLED vs base, etc.); don't refuse it or demand they narrow it down to one exact SKU first. Only ask a clarifying question if the request could genuinely mean different, unrelated products. Pass the product's canonical name as the product argument — e.g. "Xbox Series X", "iPhone", "Nintendo Switch" — never a parenthetical qualifier or a vague "all variants/bundles/accessories" list tacked onto it (NOT "Xbox Series X (console, all variants/bundles/accessories)"). BUT when the user names ONE specific version — an edition, storage size, colour, generation, bundle or region ("Xbox Series X 2TB Galaxy Black Special Edition", "iPhone 15 Pro 256GB") — pass that exact name: it is researched as its own product linked to its parent, with its own evidence and its own price comps, and is never folded into the generic entry.
 - add_blacklist_term / remove_blacklist_term — manage the scanning blacklist: any listing whose title matches a blacklisted term gets skipped automatically before it's ever opened, with no credits spent on it. Only for things categorically unrelated to reselling (real estate, rentals, job postings, services, event tickets), not just uninteresting resalable items. Call add_blacklist_term whenever the user says to blacklist/ignore/stop showing something like that.
 
 ${focusSection}Existing products in the Database:
@@ -845,11 +846,13 @@ export async function streamChat(
   watches: Watch[] = []
 ): Promise<string> {
   const systemPrompt =
-    context === "dashboard" || context === "global"
+    (context === "dashboard" || context === "global"
       ? buildDashboardSystemPrompt(config, recentLogs, recentListings, blacklistTerms, products.length, watches, context === "global")
       : context === "product" && currentProduct
         ? buildProductSystemPrompt(currentProduct)
-        : buildDatabaseSystemPrompt(products, blacklistTerms, currentProduct);
+        : buildDatabaseSystemPrompt(products, blacklistTerms, currentProduct)) +
+    // what real searches already established earlier in this conversation, so a later turn does not contradict it without new evidence
+    evidenceLedger.render();
   const tools = toolsForContext(context);
   const userContent: unknown = attachments.length
     ? [
@@ -914,7 +917,8 @@ export async function streamChat(
       try {
         const args = tc.args ? JSON.parse(tc.args) : {};
         toolResult = await executeTool({ name: tc.name as ToolCall["name"], args });
-        if (tc.name === "research_product" && !toolResult.startsWith("Failed:")) {
+        // only a result that says it SAVED counts: still running, failed and not-saved results must not trigger the "have you sold one" follow-up
+        if (tc.name === "research_product" && toolResult.startsWith("Saved")) {
           researchedProduct = true;
         }
       } catch (err) {
@@ -1175,17 +1179,25 @@ export interface WebSource {
 // Falls back to generateProductSummary above if the web search itself
 // turned up nothing usable (network trouble, no results), so research
 // still produces something rather than failing outright.
-export async function generateProductSummaryFromWeb(productName: string, sources: WebSource[]): Promise<ProductSummaryResult> {
-  if (!sources.length) return generateProductSummary(productName);
+export async function generateProductSummaryFromWeb(productName: string, sources: WebSource[], evidence: VariantEvidence | null = null): Promise<ProductSummaryResult> {
+  if (!sources.length && !evidence) return generateProductSummary(productName);
 
-  const sourceBlock = sources.map((s, i) => `[Source ${i + 1}: ${s.title} — ${s.url}]\n${s.excerpt}`).join("\n\n---\n\n");
+  const sourceBlock = sources.length ? sources.map((s, i) => `[Source ${i + 1}: ${s.title} — ${s.url}]\n${s.excerpt}`).join("\n\n---\n\n") : "(no readable pages were found)";
+  // A variant is only described as real to the degree the searches support it: never as fake merely because an exact-title search came back empty.
+  const evidenceBlock = evidence
+    ? `\n\nWhether "${productName}" itself (as opposed to the product line it belongs to) is a confirmed product:\n${describeEvidence(evidence)}\nFollow that status in the profile: ${
+        evidence.status === "verified"
+          ? "describe it as the real product it is, and what separates it from the standard version (capacity, colour, edition, contents)."
+          : "do NOT present it as a confirmed official product, and do NOT call it fake or say it does not exist. Describe what IS known (the product line, its confirmed versions), say plainly that this exact version is " + (evidence.status === "disproven" ? "contradicted by the manufacturer" : evidence.status === "unverified" ? "unconfirmed" : "not found yet") + ", and say what proof would settle it."
+      }`
+    : "";
 
   const prompt = `You just ran a real web search and gathered the content below about this product: "${productName}". Using ONLY this real content (not prior assumptions), write a concise, in-depth, useful reference profile for reselling it.
 
-${sourceBlock}
+${sourceBlock}${evidenceBlock}
 
 This is working knowledge for spotting a genuine deal, not a general trivia writeup — every bullet should tie back to what actually changes what a buyer should pay. Cover:
-- Which specific variants/colors/storage sizes/editions of this product typically sell for MORE or LESS than others, and why (rarity, discontinued status, higher demand for a specific color/config, a special edition, etc.) — per explicit instruction, this is the single most important thing to get right: name the ACTUAL variant and the ACTUAL price direction, don't just note that variants exist. (Verified miss: a black vs. white Xbox Series S — the black one commands a real premium — went completely unrecognized because this used to only describe how to tell variants apart, never which one is worth more.)
+- Which specific variants/colors/storage sizes/editions of this product typically sell for MORE or LESS than others, and why (rarity, discontinued status, higher demand for a specific color/config, a special edition, etc.) — per explicit instruction, this is the single most important thing to get right: name the ACTUAL variant and the ACTUAL price direction, don't just note that variants exist. Variants are things like official editions, storage capacities, colours, configurations, generations, retail bundles and regional versions, in ANY product category. Keep each variant distinct: never describe a special edition with the standard model's numbers, and never merge two versions into one. (Verified miss: a black vs. white Xbox Series S — the black one commands a real premium — went completely unrecognized because this used to only describe how to tell variants apart, never which one is worth more.)
 - How to tell those variants apart from a listing's title or photo alone (ports, logos, exact wording, visible markings) — this only matters BECAUSE of the price differences above; skip cosmetic detail that doesn't actually change value.
 - Commonly bundled accessories/extras, and which ones meaningfully ADD to resale value (roughly how much, if the sources say) versus which ones are simply expected and don't move the needle.
 - Known condition issues, failure points, or common counterfeits/scams — but ONLY framed as what they mean for what a buyer should pay or watch out for, not general product trivia.
@@ -1270,7 +1282,7 @@ export async function discoverProductVariants(params: {
   const { productName, category, alreadyTracked, count } = params;
   const prompt = `A reseller's product Database just researched "${productName}" (category "${category}").
 
-Does this SPECIFIC product commonly come in distinct NAMED variants/trims/models — different tiers, sizes, or configurations that a real listing would specifically call out by name, and that genuinely differ in typical resale price or specs? Examples of the kind of thing this means: "iPhone 13" also has Mini/Plus/Pro/Pro Max; "Toyota Camry" also has LE/SE/XLE/XSE trims; "PlayStation 5" also has a Slim and a Pro. Most products do NOT have this — a generic, one-configuration item should get an empty list, not an invented one.
+Does this SPECIFIC product commonly come in distinct NAMED variants — official editions (special / limited / collector's), storage capacities, colours, trims and tiers, configurations, generations, retail bundles or regional versions — that a real listing would call out by name and that genuinely differ in typical resale price or specs? Examples of the kind of thing this means: "iPhone 13" also has Mini/Plus/Pro/Pro Max and several storage sizes; "Toyota Camry" also has LE/SE/XLE/XSE trims; "PlayStation 5" also has a Slim and a Pro; a console may have a larger-storage special edition. Most products do NOT have this — a generic, one-configuration item should get an empty list, not an invented one. Only name variants you are confident a manufacturer or major retailer actually offered; each one you name is then checked against real web sources and dropped if they do not support it.
 
 If it DOES, name up to ${count} of its most well-known OTHER variants (never "${productName}" itself), each as its own full, specific product name exactly as a seller would list it (e.g. "iPhone 13 Pro Max", "Toyota Camry XLE" — not just "Pro Max" or "XLE" alone). Do NOT include any of these — they're already tracked: ${
     alreadyTracked.length ? alreadyTracked.map((n) => `"${n}"`).join(", ") : "(none yet)"

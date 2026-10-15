@@ -1,5 +1,6 @@
 import { generateProductSummary, generateProductSummaryFromWeb } from "./chat.js";
-import { researchProductOnWeb, findProductImage } from "./webResearch.js";
+import { researchProductOnWeb, findProductImage, wordsToVerify, type ProductResearchOptions } from "./webResearch.js";
+import { assessVariantEvidence, evidenceHeadline, type VariantEvidence } from "./variantEvidence.js";
 import { OPENAI_MODEL, callOpenAI } from "./openai.js";
 import { VARIANT_QUALIFIER_WORDS } from "./scorer.js";
 
@@ -119,6 +120,9 @@ export interface ProductLookupResult {
   imageUrl: string | null;
   // Per explicit instruction — see chat.ts's ProductSummaryResult.reaction.
   reaction: string;
+  // Whether a variant's distinguishing words were found by real searches (verified / unverified / unknown / disproven). Null for a product with
+  // no distinguishing words to check.
+  evidence: VariantEvidence | null;
 }
 
 // findProductImage now handles everything itself: downloading candidate
@@ -147,17 +151,23 @@ async function resolveImage(candidateUrl: string | null, name: string): Promise<
 // not just a nice-to-have, so this makes a real effort to never leave one
 // empty rather than accepting whatever the text-oriented search happened
 // to find along the way.
-export async function lookupProduct(name: string): Promise<ProductLookupResult> {
+export async function lookupProduct(name: string, opts: ProductResearchOptions = {}): Promise<ProductLookupResult> {
   try {
-    const research = await researchProductOnWeb(name);
-    const { summary, category, family, isBrandFamily, reaction } = await generateProductSummaryFromWeb(name, research.sources);
+    const research = await researchProductOnWeb(name, undefined, opts);
+    const { summary, category, family, isBrandFamily, reaction } = await generateProductSummaryFromWeb(name, research.sources, research.evidence);
     const imageUrl = await resolveImage(research.imageUrl, name);
-    return { aiSummary: summary, category, family, isBrandFamily, imageUrl, reaction };
+    // The status heads the write-up so it travels with the record: an unconfirmed variant is never filed looking official.
+    const aiSummary = research.evidence ? `${evidenceHeadline(research.evidence)}\n\n${summary}` : summary;
+    return { aiSummary, category, family, isBrandFamily, imageUrl, reaction, evidence: research.evidence };
   } catch (err) {
     try {
+      // Training knowledge alone cannot confirm a variant: when the name carries distinguishing words, say so instead of writing it up as fact.
+      const required = wordsToVerify(name, opts);
+      const evidence = opts.preflight?.evidence ?? (required.length > 0 ? assessVariantEvidence({ name, parentName: opts.parentName, sources: [], userReported: opts.userReported, required }) : null);
       const { summary, category, family, isBrandFamily, reaction } = await generateProductSummary(name);
       const imageUrl = await resolveImage(null, name);
-      return { aiSummary: summary, category, family, isBrandFamily, imageUrl, reaction };
+      const aiSummary = evidence ? `${evidenceHeadline(evidence)} (The web search failed, so this write-up is from general knowledge only.)\n\n${summary}` : summary;
+      return { aiSummary, category, family, isBrandFamily, imageUrl, reaction, evidence };
     } catch {
       return {
         aiSummary: `(Research failed: ${(err as Error).message})`,
@@ -166,6 +176,7 @@ export async function lookupProduct(name: string): Promise<ProductLookupResult> 
         isBrandFamily: false,
         imageUrl: null,
         reaction: "Hit a snag researching this one — couldn't pull anything useful.",
+        evidence: null,
       };
     }
   }
