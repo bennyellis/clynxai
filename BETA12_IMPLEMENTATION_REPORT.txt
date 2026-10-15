@@ -1,0 +1,117 @@
+CLYNX BETA 12 (0.3.0-beta.12) - IMPLEMENTATION, VALIDATION AND BUILD REPORT
+============================================================================
+Branch master-wveebf. Final commit c58b7a1717549b9ae5be45e516c7d79f11124ccb (pushed; the remote branch points at the same commit).
+Previous: Beta 11 = 6ef4ad1 (untouched), audit = 9e0190d / 2b492a8. Nothing was published, registered, deployed or activated. Existing Database records, settings and photos were not modified.
+
+HOW TO READ THIS
+ Unit / integration tests run offline with fakes (a fake store, a fake network, a real SQLite file where noted). Historical replay used the ONE real page text I have (the owner's $200 Xbox,
+ pasted during the audit); the owner's database is not in this environment, so the full replay (scripts\discovery-audit.cjs) must be run on the owner's PC. NO live validation (real Facebook,
+ OpenAI, WatchCount, eBay, or the running app UI) took place. Where this report says "not verified", that is the reason.
+
+1. FEATURE COMPLETION
+
+CHANGE 6 - Discovery deal-detection correctness (highest priority): IMPLEMENTED, tested offline
+ Root causes addressed (from the audit, confirmed on the owner's data: 329 listings, 61 of 265 opened pages carried a condition discount from OTHER sellers' cards):
+  6.1 Listing-specific extraction. New src/main/listingText.ts cuts the page where the listing's own text ends ("Send seller a message" / "Related searches" / "Today's picks"; found on 264 of
+      265 real pages). scraper.fetchListingDetail now takes the description, shipping / eBay checks, seller block and age from the listing's own text, records provenance (cut or not, marker, chars)
+      and the declared condition. With no marker (a layout change) the description is only the top of the page and condition conclusions are drawn from the title + declared condition alone
+      (no high-confidence negative conclusion from text that may not be the seller's). Photos already excluded related-listing images.
+  6.2 Condition language. New src/main/conditionParser.ts replaces the keyword list: negation ("no/not/without/never/nothing/zero/-free") with list scope, accessory-scoped damage ("tempered glass"),
+      self-negated phrases ("not working", "does not power on"), "dead pixels" vs "dead", "no power cord" vs "no power", "as is" alone = uncertain, "as is, untested" = minor, "battery needs replacing" = minor.
+      scorer.detectConditionImpact delegates to it. Deductions (x0.6 / x0.25) are applied only where the evidence justifies them.
+  6.3 General discovery vs Search For. New feedCandidates.ts: with 2+ Search For items and Rotate off, general detection ON keeps the whole feed (Search For look-alikes first); OFF behaves exactly as
+      before. The reported "reset on launch" is DELIBERATE, documented behavior from an earlier owner instruction (config.ts ~408-430: Search For list, custom instructions and the general toggle start
+      fresh each launch) and heals the earlier Beta 9 bug that left general detection off; I did NOT change it (changing it would reverse that instruction and would keep a stuck "off" forever).
+      The new per-entry variants setting persists through Recent searches. Owner decision needed if Search For entries should persist across restarts.
+  6.4 Bounded re-evaluation. relisting.reevaluationReason + Store side table listing_reeval (INSERT OR REPLACE-safe, created on open for old databases). A seen listing is opened again only for: price down
+      >=5% and >=$5, saved with no outcome, evidence missing (interrupted / failed / allowance spent), or general detection now on (NOT_FOCUSED); cooldown 30 min, max 2 per listing, max 3 per location visit,
+      never an alerted/deal/too-old/scam/shipping/eBay/unshippable listing, never past the freshness window. Updates the SAME record (first-seen and notified preserved).
+  6.5 Late settlement. marketCheckSettle.onValue + index.ts waiter map: a late market check re-judges the listings that asked for it (ScrapeEngine.requalifyListing: saved record -> Deal Quality Gate,
+      no page visit; alert once via isListingNotified; stale / age-unknown / ineligible are skipped). requalifyPending() also runs at the start of every pass for saved "worth a look" listings still inside the window.
+  6.6 Unknown products. A "not a deal" from the text AI alone about a specific product (not vague, >= $75, not off-topic) is checked against real prices inside the EXISTING market-look allowance
+      (2 per visit / 12 per pass, shared with photo-first finds); the gate then decides on those numbers only. No numbers found: the listing stays provisional ("Provisionally judged ... no market numbers
+      behind it", still not a verified anything). Nothing is labeled a verified deal without evidence.
+  6.7 Freshness. Verified the age parser on 14 real phrases (correct; the 127 TOO_OLD rejections were genuinely old listings). The 24-hour default is unchanged and still the user's setting. NOT implemented:
+      skipping old listings before opening (the card carries no age; a Facebook date-listed URL parameter on the general feed would need a live test). The audit tool now prints the TOO_OLD age histogram.
+  6.8 Seller risk. Decision unchanged (still rejected, never alerted, defaults untouched). New: the reason now says when, on the Database's numbers, the listing would otherwise clear the margin.
+  6.9 Counters. New listingLifecycle.ts + Store.lifecycleCounts + IPC listings:lifecycle; Dashboard shows "Listings fully evaluated" with the full breakdown (saved, opened, skipped before opening, ruled out by a rule,
+      uncertain, deferred, failed, pending). Every saved listing is in exactly one stage; on the owner's 329 the stages sum to 329 and only 57 are "fully evaluated".
+  6.10 Financial correctness. Thresholds, fees, margins, negotiation reach and evidence rules were NOT changed (verified in the audit: arithmetic is as documented). The gate was not relaxed; new paths go
+      through it. Variants are priced from their own entries (see Change 4).
+ Non-round-price rule, scam-bot, placeholder-price, hard price cap, freshness window, Facebook-shipping / eBay filters, seller-risk defaults: unchanged and re-tested.
+
+CHANGE 3 - Reference-photo identity protection: IMPLEMENTED, tested offline
+  One gate: src/main/photoIdentity.ts (+ leaf productKind.ts) built on the comparable-sale model, returning match / mismatch / insufficient. Deterministic rejection of games, software, discs, platform-badge
+  titles ("Guardians of the Galaxy ... (Xbox Series X)"), accessories, other models / generations / tiers / editions / colors / capacities. compIdentity gained a MEDIA reason (comps and "listing contradicts
+  entry" use the same model) and the "Special Edition" recall gap for edition products was fixed (variantIdentity). webResearch: every candidate carries its title; mismatches are rejected before any download or
+  AI call; the picture check (vision prompt now rejects games/software that share a word, with a product-kind hint) is required for titleless candidates and FAILS CLOSED; Save-credits mode files an image only when its title
+  confirms the product; product thumbnails fail closed too (logos / folder images keep the old leniency). scrapeEngine no longer lends a game / accessory listing's photo to a console entry.
+  Existing photos are untouched; scripts\photo-audit.cjs (read-only) lists suspected mismatches from saved titles. The confirmed Guardians of the Galaxy mismatch is rejected (test). NOT verified: which path stored
+  the owner's actual image (needs that photo's sourceTitle); real-model behavior of the new vision prompt.
+
+CHANGE 4 - Search for variants: IMPLEMENTED, tested offline
+  SearchItem.acceptVariants / RecentSearch.acceptVariants (default off; old entries unchanged), Dashboard checkbox on add, a per-entry switch ("exact" / "+variants") via IPC filters:setSearchItemVariants,
+  chat tool parameter, recent-search dedupe includes the flag. variantFamily.ts decides after retrieval: family words present, Plus/Pro/Max/editions/colors/capacities accepted, different model, accessory, part
+  or platform-named game rejected. The Facebook keyword (getSearchQuery) is byte-identical with or without the flag and nothing in scraper.ts / searchMarketplace reads the flag (tests). Variant-only matches are
+  never priced from the entry's value or typed reference price; they use a Database entry that IS the variant, else the unpriced-find path validated against their own market numbers (the market check now
+  names the variant, not the base). The iPhone 15 table from the brief passes in both modes. Side effect (intended, per the brief's table): with the setting OFF, a listing that is about an accessory
+  ("iPhone 15 case", "charger cable") or a game naming the platform is now also rejected (before, only "case only"-style phrases were).
+
+CHANGE 1 - Discovery chat: IMPLEMENTED (helper-built), unit tests of the pure logic only; UI NOT run
+  Oldest-first, composer at the bottom, stick-to-bottom within 80 px with a "Latest" button, role=log / aria-live, separate "Chat with Clynx" and "Automation" panels (side by side from 760 px, tabs with unread dots
+  below), independent scrolling, state kept across tab switches, test ids kept (take-scroll now on the Automation scroller; chat uses chat-scroll).
+CHANGE 5 - Activity: IMPLEMENTED (helper-built), unit tests of the pure logic only; UI NOT run
+  All / Activity Feed / Chat with Clynx control (persisted), event level filter, "Ask Clynx" on events (prefills, never sends), same stick-to-bottom hook. Log storage untouched.
+CHANGE 2 - Navigation memory: IMPLEMENTED (helper-built), unit tests of the pure reducer only; UI NOT run
+  Database remembers tab / product / search / category / folder / sort / Library scroll (localStorage clynx.nav.*, validated on restore, deleted product or folder falls back to home); last sidebar screen remembered;
+  second click on the active sidebar icon = home (dirty-Config guard kept); Library tab re-click resets Library to root. goToProduct / requestedProductId / onNavigate unchanged.
+  Library is a Database tab, not its own sidebar icon, so brief scenarios C/D map to "Library tab" (restore) and "re-click Library tab" (reset).
+
+2. DISCOVERY BENCHMARK
+ Measured here:
+  - Real page replay (the owner's $200 Xbox, Search For "Xbox Series X" with a $501 reference): Beta 11 reading (whole page) = condition "major", NOT a deal; Beta 12 reading (own text) = condition "none", DEAL.
+    (test: discoveryBeta12 "the real Xbox page"). Note that listing's seller joined Facebook in 2025 and it is far from the owner's location: a human should check the seller; the gate is not a fraud check.
+  - Cost of the new parsing: ~40 microseconds per listing (cut + parse) vs ~1 microsecond for the old keyword scan on a 2 KB page; negligible beside multi-second page loads.
+  - Extra paid work is bounded and uses existing allowances: dismissal checks <= 2 per location visit (shared market-look allowance, asserted in test), re-looks <= 3 per visit, <= 2 per listing; re-qualification and
+    pass-start re-checks make no network, AI or page calls.
+ NOT measured (needs the owner's database): how many of the 5 audit-identified recoverable listings now qualify, false positives introduced, research completion rate, average processing time. Run:
+    node scripts\discovery-audit.cjs "C:\Users\biggt\AppData\Roaming\Clynx\data\users\1951a4a6-0b08-4c5b-a2c6-b900ac8843d5\scout.db"
+ It now also prints the "Beta 12 reading" line (listings that were not deals but qualify on the saved numbers once read correctly, with examples) and the too-old histogram. These are replays of saved text, not
+ re-scans: they show what the new reading would decide, not live behavior.
+ Why Clynx found so few deals (from the audit, unchanged): 39% of saved listings (48% of opened pages) were too old; 35 were skipped unopened by the since-fixed NOT_FOCUSED bug; 55 unprofitable on real numbers;
+ 33 genuine shipping/eBay rejections; 23% of opened pages had a wrong damage discount (fixed here); the AI-estimate dismissals looked plausible on a manual read. Realistic recoverable count: roughly 5-12 listings.
+
+3. SAFETY AND COMPATIBILITY
+ - Existing Database records: not modified. Schema change: one new side table (listing_reeval), created with CREATE TABLE IF NOT EXISTS; a database from before Beta 12 opens and keeps every row (tested on a real file with the
+   table dropped). No destructive migration.
+ - Reference images: untouched; photo-audit.cjs only reads a copy and reports.
+ - Search For settings: unchanged defaults; acceptVariants optional, absent = off; recent searches saved before Beta 12 keep working.
+ - Scam / shipping / eBay / freshness / seller-risk / placeholder / hard-cap rules: unchanged and covered by tests. Financial thresholds unchanged.
+ - No unintended Marketplace query expansion (tests assert the keyword and that the scraper never reads the setting).
+ - Rollback: Beta 11 installer is unchanged; the previous release is untouched on the server.
+
+4. GIT VERIFICATION
+ Branch master-wveebf, HEAD c58b7a1717549b9ae5be45e516c7d79f11124ccb, pushed; origin/master-wveebf = same hash; remote package.json version 0.3.0-beta.12.
+ Beta 12 commits: 2984bac (checkpoint 1: Discovery + UI), 58f3ad5 (checkpoint 2: photo identity + variants), c58b7a1 (version, notes, Dashboard counts, store tests, tools).
+ Changed since Beta 11: 50 files, +4625/-323. New source: conditionParser.ts, listingText.ts, feedCandidates.ts, relisting.ts, listingLifecycle.ts, photoIdentity.ts, productKind.ts, variantFamily.ts,
+ renderer lib stickToBottom.ts / discoveryStream.ts / activityView.ts / navState.ts; edited scrapeEngine, scraper, scorer, store, research, preAlert, marketCheckSettle, webResearch, vision, compIdentity,
+ variantIdentity, index, preload, types, recentSearches, chat, App, Sidebar, Dashboard, Database, DiscoveryTab, Activity, global.css. New tools: scripts/photo-audit.cjs; scripts/discovery-audit.cjs extended.
+ New tests: listingText (56 checks), discoveryBeta12 (68), photoIdentity (53), referencePhotoIdentity (10), searchVariants (54), storeBeta12 (11), navState (55), discoveryStream (35), activityView (25).
+
+5. BUILD STATUS
+ - npm run typecheck: clean. npm run build: OK.
+ - npm test: 73 files; 72 pass, 1 fails = startupErrors.test.ts "the original database is still there" (the same environmental failure present on the untouched Beta 11 / Beta 8 branches). 2,371 checks passed, 1 failed (that one).
+ - Windows installer: NOT produced here. `npm run dist:beta` on this Linux sandbox packaged dist\win-unpacked but failed at the Windows signing/resource step (needs Wine / a Windows host). Build the installer on your Windows PC
+   (elevated PowerShell): git pull, npm ci, npm test, npm run dist:beta, then hash / register as DRAFT exactly as for Beta 11. Version, release notes (release-notes\0.3.0-beta.12.txt) are committed. package-lock.json still
+   records an old top-level version (0.2.0) as in earlier betas; it was not changed.
+ - Signing / release draft: not done (no credentials here; not authorized to register or publish).
+
+6. REMAINING RISKS AND NEXT STEPS
+ Not verified live: the three interface changes (layout at the 760 px breakpoint, scroll stickiness, keyboard / screen-reader behavior, scroll restoration, Ask Clynx buttons), real vision-model behavior with the new
+ prompts, the market-check path for dismissals and late re-qualification against real WatchCount/eBay, and everything on the owner's real data.
+ Risks: (a) more listings now reach the market check (bounded, but it spends the existing allowance and some WatchCount/eBay calls); (b) the picture check failing closed means fewer photos during an OpenAI outage
+ (blank entries are retried by the existing sweep); (c) title-only acceptance in Save-credits mode is stricter, so fewer free photos; (d) the unknown/uncertain Facebook layout: if markers vanish, descriptions fall back to the
+ top of the page and conditions are read from the title only; (e) the 5 older rows with no stored outcome will be looked at once more, possibly alerting on a stale listing only if it is still inside the freshness window.
+ Open owner decisions: should Search For entries persist across restarts (currently session-only by earlier instruction); should the general feed use a Facebook "listed in the last day" parameter (needs a live test).
+ Next steps: pull, run npm ci / npm test / npm run dist:beta on Windows, run scripts\discovery-audit.cjs and scripts\photo-audit.cjs on your database, install the draft, and check: Discovery chat order, Activity views,
+ Database/Library return-to-place and double-click-home, adding a Search For item with and without variants, and one real pass with the Activity log open.
