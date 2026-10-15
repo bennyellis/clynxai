@@ -308,3 +308,21 @@ WHAT WAS NOT DONE / NOT PROVEN
    listings) is HYPOTHESIS everywhere it appears.
  - The 300+ listing breakdown and the missed-opportunity count need your database (command in section G).
  - Renderer behavior (scroll jump, double-click) was read, not run.
+
+=====================================================================================================================================================
+ADDENDUM - MEASURED ON THE OWNER'S REAL DATABASE (329 listings, scripts/discovery-audit.cjs run on a copy; run by the owner, output pasted into the session)
+=====================================================================================================================================================
+ Accounting: 329 listings = 265 opened + 64 never opened; 2 deals (1 recorded as DEAL, 1 in the older rows).
+   127 TOO_OLD (39%, 48% of opened pages) | 55 UNPROFITABLE_AT_PRICE | 35 NOT_FOCUSED (never opened; the Beta 9 bug, fixed since) | 32 no outcome stored (older rows)
+   26 OFFICIAL_SHIPPING | 14 AI_ESTIMATE | 14 UNSHIPPABLE | 7 MENTIONS_EBAY | 6 AI_UNVERIFIED | 5 SELLER_RISK | 4 UNDER_MIN_PRICE | 1 each INTERRUPTED, DEAL, WEAK_EVIDENCE, PHOTOS_MISMATCH.
+ CONFIRMED DEFECT (new, measured): the scanner stores and reads the WHOLE page text, including Facebook's "Related searches" and "Today's picks" (other sellers' cards).
+   Real example: an "Xbox series X" listing was discounted to 25% value ("MAJOR") because a different seller's card said "Sony PlayStation 5 as is for parts".
+   Boundary: the listing's own text ends at "Send seller a message" / "Related searches" / "Today's picks" (marker found on 264 of 265 pages).
+   Impact: 61 of 265 opened pages (23%) had a condition discount that came ONLY from other cards; 5 of them qualify on Database numbers once the discount is removed.
+   Same polluted text also feeds: looksBroken, bundle/extras detection, scam-bot check, the 2000 characters sent to the AI judge (scraper.ts fetchListingDetail: description = bodyText.slice(0,4000)).
+ CLEARED hypotheses: OFFICIAL_SHIPPING rejections are genuine (1 of 26 came from other cards); MENTIONS_EBAY are genuine (0 of 7). Leave those filters as they are.
+ Reading of the 329: the low deal count is mainly a funnel/freshness problem (too-old pages opened, 35 unfocused skips since fixed) plus the page-text defect; the realistic recoverable
+   count is roughly 5-12 listings, not ~300. Unknown-product AI dismissals (AI_ESTIMATE, 14) looked plausible on a manual read of titles/prices (general knowledge, not data).
+ Open: why 127 old listings reach the detail page (is the age readable on the card or search filter?) and why 5 listings from 2026-10-14 ~23:00 have no stored outcome.
+ Beta 12 Discovery order now: (1) own-text-only extraction, (2) negation-aware condition check, (3) skip old listings before opening if the card/feed allows, (4) re-evaluate on price change /
+   late evidence, (5) clear counters. The earlier items D1, D4, D5 in the report stay as secondary.
