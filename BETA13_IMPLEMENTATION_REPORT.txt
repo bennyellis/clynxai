@@ -1,0 +1,86 @@
+CLYNX BETA 13 - IMPLEMENTATION REPORT
+Branch master-wveebf. Version 0.3.0-beta.13 (package.json and package-lock.json version lines only). NOTHING was published, registered, tagged or deployed. No Windows packaging was run. No owner database was touched; no API key was read or printed.
+
+1. WHAT "VERIFIED" MEANS HERE
+VERIFIED = covered by a test or fixture that ran in this Linux sandbox (npm test, tsc typecheck, electron-vite build).
+NEEDS OWNER LIVE VALIDATION = depends on the real vision model, real eBay/Facebook data, Windows, or the Clynx Cloud route. None of those exist in the sandbox.
+Final state: typecheck passes; electron-vite build passes; npm test = 82 of 83 files pass. The one failure, startupErrors.test.ts, is the known Linux-only case (also failing before Beta 13).
+
+2. COMMITS (all on master-wveebf)
+  99ff08f / c2b2a45 / 02d5e2e / 7356080  audit report, live-evidence appendix, read-only probes (no behaviour change)
+  bc06bc3  build prompt
+  2c0e846  WP0/WP1  feature flags, additive schema, delete-order fix, Trash, protected photos under the cap
+  ddd1331  WP2      identity attributes, gallery-consistency rule, accessory/console fixes, best-match resolver
+  0f02a2d  WP3      single picture writer (fileImage), identity gate, review queue, 13 call sites routed
+  0ae5666  WP4/WP5  Library operations service, review queue, suspect pass, IPC (backend)
+  d4a0f0e  WP4-6 UI My folders, Needs review, Trash, Organize card, photo actions; reference selection
+  b900aec  WP7      condition evidence, adjustment, gate support, shadow assessment
+  49f372b  WP8/WP9  chat: choices, attachments, status + Stop, short replies
+  (final)  WP10     release notes, this report, version bump
+
+3. STATUS PER AUDIT FINDING
+ID-01 FIXED (verified). Every writer goes through fileImage/decideFiling. A repo-wide test fails if any file other than store.ts and fileImage.ts calls addProductImage( . Tests: fileImagePaths, storeBeta13.
+ID-02 FIXED (verified). Gallery audit and feedback no longer move or delete; they set needs_review/quarantined and add a review item. Names derived only from a picture, and AI "create" names the listing title does not corroborate, go to review. Tests: fileImagePaths, libraryOps.
+ID-03 SHADOW by default (flag resolver). resolveProduct ranks every candidate and resolves only for a unique best; the old first-match remains the live behaviour until the owner sets resolver:"enforce". Shadow logs where the two disagree. Test: productResolver. The "Xbox Series S (White)" -> Series S case is verified in the fixture.
+ID-04 FIXED (verified at text level). Optical drive, GPU board design, region, carrier lock, SKU/model code are attributes; compIdentity has reason codes DRIVE, BOARD_DESIGN, BOARD_DESIGN_NOT_STATED, REGION, LOCK, SKU; galleryConflict keeps a gallery consistent. Drive rejection is limited to lines that really ship in both forms (PS5, Series X, Xbox One S, PS4). Tests: identityModel, compIdentity (extended), photoIdentity.
+ID-05 NOT CHANGED, as instructed. identitySafeguard stays "off".
+ID-06 PARTIAL. The gate treats an unverified picture as unverified (never trusted) and Save-credits rules are inside decideFiling; the AI judge (resolveIdentityTarget) itself still fails open as before.
+ID-07 NOT DONE. The planned identityVision.ts (structured per-category discriminator checklist for the picture check) was not built. Pictures are judged by the existing yes/no check in findReferencePhotos. That is why an image with no title can only reach "unverified"/"needs review" rather than "trusted" unless the existing check says yes AND nothing contradicts it. This is the largest known gap.
+ID-08 FIXED (verified). Images carry status, source kind, source URL, content hash and the verdict that placed them.
+RI-01 FIXED. selectReferenceImages: trust, then variety, never "newest". Test: referenceSelection.
+RI-02 FIXED. Content hash stored; duplicates are not filed twice.
+RI-03 FIXED. The cap prunes the lowest-value photo first and never user/primary/thumbnail photos.
+RI-04 FIXED. Thumbnail changes are validated; collages are not stored as thumbnails.
+RI-05 NOT DONE (lookoutNotes from photo differences unchanged).
+RI-06 FIXED. Gallery audit is suggest-only.
+RI-07 FIXED (source_kind column).
+LB-01 FIXED. Real folders (library_folders, products.folder_id) shown as "My folders"; automatic categories remain. Folders are local-only, not cloud-synced. Multi-select UI NOT built; the chat and the Organize card move products one or a named set at a time. The navigation memory reaches folders through the My folders category; folder ids are not stored separately.
+LB-02 FIXED (verified). deleteProduct removes photos first in a transaction; the UI/chat delete is a soft delete to Trash (30-day purge, restore). Test: storeBeta13.
+LB-03 FIXED. No destructive appearance moves.
+LB-04 FIXED. Duplicate merging only proposes (review items); the merge operation itself checks galleryConflict and needs confirmation.
+LB-05 FIXED by the above (the chain is cut at its sources).
+CV-01 SHADOW (flag conditionEvidence default "shadow"). Assessment is computed from text and, when vision flaws are enabled, the photos; saved per listing; shown as a chip on the listing card; logged as a condition_check decision. It does not change prices/alerts until "enforce". Gate support (range, conservative "profitable now") is implemented and tested.
+CV-02 FIXED in shadow. Defect classes with severity and repair cost or share, a low/likely/high range and a 75% cap replace the three flat multipliers when enforced. Tables are assumptions, editable, and need validation.
+CV-03 PARTIAL. Constants unified for the new path; comparable sales are NOT matched by defect.
+CV-04 FIXED. Vision condition prompt returns class, severity and coverage. Tests: visionPromptContract, conditionEvidence.
+CV-05 FIXED. The five text-vs-photo cases produce flags UNDISCLOSED_DAMAGE, SELLER_REPORT_NOT_VISIBLE, DAMAGE_UNCERTAIN, NO_VISIBLE_DAMAGE_DETECTED (never "mint verified").
+UX-01 FIXED. Stop (ai:chatCancel), real status events with elapsed time ticked by the screen, typed choice buttons (ask_choice, max 6 options), in all four chats. Correction to the audit wording: ai:searchUpdate was described as "pollution"; it actually carries legitimate deferred follow-up messages and is kept. Status is a separate, ephemeral channel never written into the conversation.
+UX-02 FIXED (arithmetic verified), NOT live-verified. Up to 4 photos, resized to 1568 px JPEG, budgeted at 6M characters in the window and re-checked at 9M in the main process (by bytes, not name).
+UX-03 FIXED. History keeps a note of what was attached so follow-ups still make sense.
+UX-04 FIXED. 1-3 sentence style placed last in the system prompt, token cap 450 (900 when the person asks for detail), openers trimmed. No number or warning is trimmed. The audit's chat-audit length metrics were not re-run (needs the live model).
+
+4. TESTS ADDED
+  storeBeta13, productResolver, identityModel, fileImagePaths, libraryOps, referenceSelection, conditionEvidence, dealGateCondition, chatSupport (+ extensions of compIdentity/photoIdentity/chatBehavior fakes).
+Not written: a main-side chat-engine test with a stubbed model for status ordering and cancel; those paths are covered only by typecheck and the pure helpers.
+
+5. FLAGS AND ROLLBACK (config.json "beta13")
+  identityGate "enforce"   resolver "shadow"   conditionEvidence "shadow"
+  libraryTree, chatStatus, chatChoices, chatAttachments, replyStyle  all true
+Set any to "off"/false to revert that behaviour. libraryTree is defined but the tree is not gated by it in this build (documented gap). Schema changes are additive; a verified backup is taken before the first migration and before the one-time suspect pass. Downgrading to Beta 12 works, but products in the Trash (soft deleted) stay hidden there; restore them first if you plan to downgrade.
+
+6. ACCEPTANCE CRITERIA
+  Series X photo never trusted in Series S, any path ........ PASS in fixtures (all writers gated); live pictures UNVERIFIED (L4)
+  Cases/accessories blocked, real bundles pass .............. PASS (fixtures)
+  Series X configurations distinct; MSI designs apart ....... PASS (text level)
+  "Xbox Series S (White)" -> Series S ....................... PASS in shadow; live only with resolver:"enforce"
+  Nothing auto-deleted/merged/renamed ....................... PASS
+  deleteProduct with photos; Trash restores; research does not move a placed product ... PASS
+  Library ops in UI and chat with undo/confirmation ......... PASS (backend tests); UI not exercised in a real window (L10)
+  Condition shadow behaviour ................................ PASS (fixtures); accuracy UNVERIFIED (L8)
+  All four chats: attachments/status/Stop/choices ........... PASS to typecheck/build; not exercised in a window
+  tests/typecheck/build ..................................... PASS (except Linux-only startupErrors)
+
+7. NEEDS OWNER LIVE VALIDATION
+  L1 About shows 0.3.0-beta.13 after install; the backup file exists next to scout.db.
+  L2 Open Needs review: the nine contradicting Series X photos from copy-A should be listed (the suspect pass marks, never moves). Re-run node scripts\beta13-audit.cjs library-db-audit on a fresh copy.
+  L3 Delete a throw-away product that has photos; it goes to Trash and Restore brings it back.
+  L4 Vision accuracy: ~60 labelled pictures (Series X black / Robot White All-Digital / Galaxy, Series S, Switch, MSI designs). Build identityVision.ts first if accuracy is not acceptable.
+  L5 Shared-cloud mode: send 4 phone photos in a chat; expect success (Beta 12 would 413).
+  L6 Whether the model accepts verbosity:"low" (not used in this build).
+  L7 Real tool durations vs the status labels.
+  L8 Condition: 20 listings with known condition; compare shadow adjustments; then consider enforce.
+  L9 WatchCount sold lookups and AI Activity (carried over from Beta 12).
+  L10 Windows: npm test, npm run dist:beta, install, upgrade from a Beta 12 database copy, run a scan, try each chat (attach, Stop, choice buttons), create/rename/move a folder, undo.
+
+8. KNOWN GAPS
+  identityVision.ts structured picture check (ID-07); multi-select in the Library; folder ids in navigation memory; libraryTree flag unused; RI-05; comps not defect-matched (CV-03); AI judge fail-open (ID-06); the A/B text-menu wording in the persona (clynxPersona.ts line 26 forbids menus; ask_choice is available to the model but not yet preset for every flow).
