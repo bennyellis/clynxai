@@ -25,6 +25,7 @@ import { colorsIn } from "./colors.js";
 import { hardwareTail, mediaSignal, stripDescriptors } from "./productKind.js";
 import { editionConflict, extractVariantAttributes, identityTokens } from "./variantIdentity.js";
 import { attributeFindings } from "./identityModel.js";
+import { knowledgeFindings, knowledgeProvider } from "./knowledgeRegistry.js";
 
 export type CompVerdict = "exact" | "compatible" | "uncertain" | "rejected";
 
@@ -52,7 +53,8 @@ export type CompReason =
   | "BOARD_DESIGN_NOT_STATED"
   | "REGION"
   | "LOCK"
-  | "SKU";
+  | "SKU"
+  | "MODEL_VARIANT";
 
 export interface CompJudgement {
   verdict: CompVerdict;
@@ -268,6 +270,15 @@ export function classifyComparable(identity: CompIdentityInput, title: string): 
     const j = judgeAgainst(ref, title, identity.requiredTerms ?? [], !!identity.broken);
     result = { verdict: worse(result.verdict, j.verdict), reasons: [...result.reasons, ...j.reasons.filter((r) => !result.reasons.some((x) => x.code === r.code && x.text === r.text))] };
   }
+  // What Clynx learned from the web about this product line (a different model that looks the same, e.g. "Quest 3S" for a "Quest 3"): it can only make a title worse.
+  const kp = knowledgeProvider();
+  if (kp && kp.mode() !== "off") {
+    const found = knowledgeFindings(identity.name, title, kp.lookup(identity.name));
+    if (found.length) {
+      if (kp.mode() === "enforce") result = { verdict: worse(result.verdict, "rejected"), reasons: [...result.reasons, ...found] };
+      else kp.shadow?.({ name: identity.name, title, findings: found });
+    }
+  }
   // an "exact" that only the (looser) query confirmed, with the name stating more, is still exact: every reference passed
   return result;
 }
@@ -326,7 +337,7 @@ export function listingContradictsEntry(entryName: string, listingTitle: string)
   if (j.verdict !== "rejected") return null;
   // Identity attributes, and a title that says outright it is something FOR the product. A listing that merely mentions extras ("with 2 controllers") is a
   // bundle of the product, whose value the bundle logic prices from the product's own value, so it is not a contradiction here.
-  const hard = j.reasons.find((r) => ["MODEL_NUMBER", "MODEL_LETTER", "GENERATION", "TIER", "CAPACITY", "EDITION", "MEDIA"].includes(r.code) || (r.code === "ACCESSORY" && /says it is for the product/.test(r.text)));
+  const hard = j.reasons.find((r) => ["MODEL_NUMBER", "MODEL_LETTER", "GENERATION", "TIER", "CAPACITY", "EDITION", "MEDIA", "MODEL_VARIANT"].includes(r.code) || (r.code === "ACCESSORY" && /says it is for the product/.test(r.text)));
   return hard ? `${hard.code.toLowerCase().replace(/_/g, " ")}: ${hard.text}` : null;
 }
 

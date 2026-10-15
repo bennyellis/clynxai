@@ -21,7 +21,8 @@ import { assessEvidence, describeVerdictForAi, verifyVariant, type VariantVerdic
 import { extractVariantAttributes } from "./variantIdentity.js";
 import { isPublicHttpUrl } from "./variantResearch.js";
 import { queryFromSearchUrl } from "./searchLinks.js";
-import { createEvidenceDeps, extractEvidenceText, searchWasUnavailable, type EvidenceDeps } from "./webEvidence.js";
+import { DEFAULT_BACKENDS, createEvidenceDeps, extractEvidenceText, searchWasUnavailable, type EvidenceDeps } from "./webEvidence.js";
+import { apiBackends } from "./searchApis.js";
 import { checkBrowsers } from "./browserCheck.js";
 import { getStealthChromium } from "./stealthBrowser.js";
 
@@ -93,7 +94,8 @@ function decodeDuckDuckGoUrl(href: string): string {
 // search engine moves on to the next one instead of reading as "no results".
 let evidenceDeps: EvidenceDeps | null = null;
 function getEvidenceDeps(): EvidenceDeps {
-  evidenceDeps ??= createEvidenceDeps({ render: renderPageText });
+  // Official search APIs first when the owner configured a key (see searchApis.ts), then the keyless engines.
+  evidenceDeps ??= createEvidenceDeps({ render: renderPageText, backends: [...apiBackends(), ...DEFAULT_BACKENDS()] });
   return evidenceDeps;
 }
 

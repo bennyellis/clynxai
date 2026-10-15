@@ -27,7 +27,7 @@ function reasonsOf(j: CompJudgement): string[] {
 }
 
 // Reasons that mean "this is a different thing", as opposed to "the title just doesn't say".
-const HARD = new Set(["MODEL_NUMBER", "MODEL_LETTER", "GENERATION", "TIER", "CAPACITY", "COLOR", "EDITION", "ACCESSORY", "LOT_OR_BUNDLE", "NOT_WORKING", "MEDIA", "DRIVE", "BOARD_DESIGN", "REGION", "LOCK", "SKU"]);
+const HARD = new Set(["MODEL_NUMBER", "MODEL_LETTER", "GENERATION", "TIER", "CAPACITY", "COLOR", "EDITION", "ACCESSORY", "LOT_OR_BUNDLE", "NOT_WORKING", "MEDIA", "DRIVE", "BOARD_DESIGN", "REGION", "LOCK", "SKU", "MODEL_VARIANT"]);
 
 /**
  * The verdict from TEXT alone: the product's name against the words that came with the image (an eBay listing's title, a Wikipedia article's title).

@@ -37,6 +37,7 @@ export interface ToolCall {
     | "add_reference_photos"
     | "find_products"
     | "web_research"
+    | "research_variants"
     | "add_product_watch_note"
     | "add_blacklist_term"
     | "remove_blacklist_term"
@@ -110,15 +111,15 @@ const DASHBOARD_TOOL_NAMES = new Set<ToolCall["name"]>([
   "ask_choice",
 ]);
 
-const DATABASE_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "add_blacklist_term", "remove_blacklist_term", "ask_choice", "library_op", "library_list"]);
+const DATABASE_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "research_variants", "add_blacklist_term", "remove_blacklist_term", "ask_choice", "library_op", "library_list"]);
 
-const PRODUCT_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "add_product_watch_note", "ask_choice", "library_op", "library_list"]);
+const PRODUCT_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "research_variants", "add_product_watch_note", "ask_choice", "library_op", "library_list"]);
 
 // Per explicit instruction — everything Dashboard can do, plus
 // research_product (Database's own product-research tool). Deliberately
 // NOT add_product_watch_note — that tool only makes sense already scoped
 // to one specific product's own page, which this bar never is.
-const GLOBAL_TOOL_NAMES = new Set<ToolCall["name"]>([...DASHBOARD_TOOL_NAMES, "research_product", "add_reference_photos", "find_products", "library_op", "library_list"]);
+const GLOBAL_TOOL_NAMES = new Set<ToolCall["name"]>([...DASHBOARD_TOOL_NAMES, "research_product", "add_reference_photos", "find_products", "research_variants", "library_op", "library_list"]);
 
 export function allowedToolNames(context: ChatContext): Set<ToolCall["name"]> {
   if (context === "dashboard") return DASHBOARD_TOOL_NAMES;
@@ -308,6 +309,22 @@ const TOOLS = [
           searchPhrase: { type: "string", description: "Extra words to search images for, only if the user gave them (for example the query inside a Google Images link they pasted)." },
           url: { type: "string", description: "A search-results link the user pasted (Google Images, Bing...): its search words are used as the image search." },
         },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "research_variants",
+      description:
+        "Work out how the versions of a product line differ by searching the web the way a person would: which storage sizes it really comes in and which look-alike models are a DIFFERENT product (e.g. Meta Quest 3 vs Quest 3S, 128GB vs 512GB). The answer is remembered, so later price checks and photo filing use it. Use it when you or the user are unsure whether two listings or Database entries are the same product, or when a product has several sizes or editions. It saves nothing to the product's profile; research_product does that.",
+      parameters: {
+        type: "object",
+        properties: {
+          product: { type: "string", description: "The product line, e.g. 'Meta Quest 3 128GB'." },
+          refresh: { type: "boolean", description: "True to look again even if it was researched recently." },
+        },
+        required: ["product"],
       },
     },
   },

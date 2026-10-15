@@ -30,6 +30,7 @@ import { assessListingAge, decideAgeGate } from "./listingAge.js";
 import { gateExtrasFromLump, gateExtrasFromValuation, looksLikeBundle, type BundleValuation } from "./bundleBreakdown.js";
 import { analyzeListingPhotos, classifyThumbnailImage, matchesReferenceProduct, type PhotoAnalysisResult } from "./vision.js";
 import { resolveIdentityTarget } from "./productIdentity.js";
+import { classifyComparable } from "./compIdentity.js";
 import { OPENAI_MODEL, hasOpenAIAccess } from "./openai.js";
 import { cleanFilingName, describeDisposition, discoverySettings, disposition, MIN_MARKET_LOOK_PRICE_USD, planPhotoLook, shouldValidateDismissal, type DiscoverySettings, type LookPlan } from "./research.js";
 import { downloadImageAsDataUri, shrinkImageDataUri } from "./webResearch.js";
@@ -341,6 +342,8 @@ export interface ScrapeEngineOptions {
   // index.ts can set it as a trusted ("kept") thumbnail the background web
   // research is never allowed to overwrite; null means no listing photo was
   // available, so the normal generic web-image search is the only source.
+  // Beta 14: a check was not sure which product/version a listing is. Lets Clynx research the product on the web in the background (never waits, never throws).
+  onIdentityDoubt?: (name: string, signals: import("./productKnowledge.js").DoubtSignals) => void;
   onNewProductFound: (
     name: string,
     imageDataUri: string | null,
@@ -2868,6 +2871,14 @@ export class ScrapeEngine {
           description: detail.description,
           imageDataUri: subjectImageDataUri,
         });
+        if (this.opts.onIdentityDoubt) {
+          try {
+            const codes = classifyComparable({ name: existingProduct.name }, listing.title).reasons.map((r) => r.code);
+            this.opts.onIdentityDoubt(existingProduct.name, { identityConfidence: verdict?.confidence ?? null, reasonCodes: codes });
+          } catch {
+            /* research is optional */
+          }
+        }
         if (action.kind === "create" && config.autoResearchListings) {
           // Beta 13: the AI's new name must be confirmed by the listing's own words; a name made from the picture alone goes to review instead of becoming a product.
           const corroborated = judgeCandidateByText(action.name, listing.title);

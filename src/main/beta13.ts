@@ -9,6 +9,8 @@ export interface Beta13Flags {
   resolver: Beta13Mode;
   /** Structured condition evidence and the defect-specific value adjustment. */
   conditionEvidence: Beta13Mode;
+  /** Clynx researching products it is unsure about on the web (Google/Brave API or the free engines) and using what it learned. "shadow" = research and record, change no decision. */
+  webKnowledge: Beta13Mode;
   libraryTree: boolean;
   chatStatus: boolean;
   chatChoices: boolean;
@@ -20,6 +22,7 @@ export const BETA13_DEFAULTS: Beta13Flags = {
   identityGate: "enforce",
   resolver: "shadow",
   conditionEvidence: "shadow",
+  webKnowledge: "shadow",
   libraryTree: true,
   chatStatus: true,
   chatChoices: true,
@@ -36,6 +39,7 @@ export function beta13Flags(config: { beta13?: Partial<Record<keyof Beta13Flags,
     identityGate: mode(raw.identityGate, BETA13_DEFAULTS.identityGate),
     resolver: mode(raw.resolver, BETA13_DEFAULTS.resolver),
     conditionEvidence: mode(raw.conditionEvidence, BETA13_DEFAULTS.conditionEvidence),
+    webKnowledge: mode(raw.webKnowledge, BETA13_DEFAULTS.webKnowledge),
     libraryTree: flag(raw.libraryTree, BETA13_DEFAULTS.libraryTree),
     chatStatus: flag(raw.chatStatus, BETA13_DEFAULTS.chatStatus),
     chatChoices: flag(raw.chatChoices, BETA13_DEFAULTS.chatChoices),

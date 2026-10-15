@@ -67,6 +67,10 @@ import { resolveIdentityTarget } from "./productIdentity.js";
 import { beta13Flags } from "./beta13.js";
 import { makeThumb, noteDecision } from "./aiDecisionLog.js";
 import { fileImage, setFilingRecorder, type FileImageEvidence } from "./fileImage.js";
+import { createKnowledgeService, type KnowledgeService } from "./knowledgeService.js";
+import { openAiKnowledgeAi } from "./knowledgeAi.js";
+import { describeKnowledge } from "./productKnowledge.js";
+import { familyKey } from "./knowledgeRegistry.js";
 import { selectReferenceImages } from "./referenceSelection.js";
 import { confirmChoice, sanitizeAttachments, validateChoice, type ChatChoice } from "./chatSupport.js";
 import { LibraryOps, TRASH_RETENTION_MS, folderPathList as folderPathsOf, type LibraryOp } from "./libraryOps.js";
@@ -1034,6 +1038,17 @@ async function executeChatTool(
     const url = publicHttpUrls(String(call.args.url ?? "") || query, 1)[0] ?? null;
     if (!query && !url) return "Failed: no search query given.";
     return await lookUpOnWeb(query, url);
+  }
+
+  // Clynx learning how the versions of a product line differ (storage sizes, look-alike models), remembered for later comparisons.
+  if (call.name === "research_variants") {
+    const name = String(call.args.product ?? "").trim();
+    if (!name) return "Failed: no product named.";
+    if (beta13Flags(config).webKnowledge === "off") return "Failed: product research on the web is switched off (config.json beta13.webKnowledge).";
+    const outcome = await getKnowledgeService().research(name, call.args.refresh === true);
+    if (!outcome.ok) return `Could not research it: ${outcome.reason}.`;
+    const k = outcome.knowledge;
+    return `${describeKnowledge(k)}${k.summary ? ` ${k.summary}` : ""} Sources: ${k.sources.slice(0, 3).map((s) => s.url).join(", ")}.${"cached" in outcome ? " (already known from an earlier look)" : ""}`;
   }
 
   if (call.name === "add_reference_photos") return await runAddReferencePhotosTool(call.args, call.userMessage, currentProductId);
@@ -2255,8 +2270,30 @@ function reviewService(): IdentityReview {
   return identityReview;
 }
 
+// Beta 14: Clynx researching products it is unsure about on the web (Google/Brave API when configured, the free engines otherwise). See knowledgeService.ts.
+let knowledgeService: KnowledgeService | null = null;
+function getKnowledgeService(): KnowledgeService {
+  knowledgeService ??= createKnowledgeService({
+    store: {
+      getKnowledge: (k) => store.getKnowledge(k),
+      saveKnowledge: (k) => store.saveKnowledge(k),
+      listSiblingNames: (name) => store.listProductIndex().filter((p) => familyKey(p.name) === familyKey(name)).map((p) => p.name),
+    },
+    mode: () => beta13Flags(config).webKnowledge,
+    web: () => webVerifyDeps(),
+    ai: () => (hasOpenAIAccess() ? openAiKnowledgeAi() : undefined),
+    log: (message, productName) => {
+      const line: LogLine = { ts: Date.now(), level: "info", message, productName };
+      recordLog(line);
+      sendToRenderer("engine:log", line);
+    },
+  });
+  return knowledgeService;
+}
+
 function applyIdentitySafeguard(): void {
   setFilingRecorder((d) => noteDecision(d));
+  getKnowledgeService().install();
   const mode = config.identitySafeguard?.mode === "shadow" || config.identitySafeguard?.mode === "enforce" ? config.identitySafeguard.mode : "off";
   store.setIdentitySafeguard(mode, mode === "off" ? null : createSafeguardLogger(path.join(app.getPath("userData"), "logs")));
   if (mode !== "off") console.log(`[identity] safeguard mode: ${mode}`);
@@ -2733,6 +2770,7 @@ function createEngineForAccount(accountId: string): ScrapeEngine {
   }
 
   const eng = new ScrapeEngine({
+    onIdentityDoubt: (name, signals) => getKnowledgeService().consider(name, signals),
     checkMarket: checkMarketBeforeAlert,
     ensureBrokenVariant,
     valueBundle: valueListingBundle,

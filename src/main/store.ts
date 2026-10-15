@@ -22,6 +22,7 @@ import { assessCodes, CodeIndex, NO_CODES, type CodeAssessment, type EvidenceDoc
 import { IdentityFoundation } from "./identity/foundationStore.js";
 import { IdentitySafeguard, type SafeguardMode } from "./identity/safeguardRuntime.js";
 import type { ReviewInput } from "./identity/reviewFindings.js";
+import type { ProductKnowledge } from "./knowledgeRegistry.js";
 import { applyPlan, undoBatch, type Outcome, type PlanItem } from "./identity/correctionJournal.js";
 
 // What a product is worth on eBay, as the total the BUYER pays (the sold item price plus the shipping they paid): the estimate when
@@ -192,7 +193,24 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_listing_condition_listing ON listing_condition(listing_id);
       CREATE INDEX IF NOT EXISTS idx_product_images_status ON product_images(product_id, status);
+      CREATE TABLE IF NOT EXISTS product_knowledge (
+        key TEXT PRIMARY KEY,
+        json TEXT NOT NULL,
+        researched_at INTEGER NOT NULL
+      );
     `);
+  }
+
+  /** What Clynx learned from the web about a product line (storage options, look-alike models). Additive; see productKnowledge.ts. */
+  getKnowledge(key: string): ProductKnowledge | null {
+    const row = this.db.prepare("SELECT json FROM product_knowledge WHERE key = ?").get(key) as { json: string } | undefined;
+    return row ? ((safeJson(row.json) as ProductKnowledge | null) ?? null) : null;
+  }
+  saveKnowledge(k: ProductKnowledge): void {
+    this.db.prepare("INSERT INTO product_knowledge (key, json, researched_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET json = excluded.json, researched_at = excluded.researched_at").run(k.key, JSON.stringify(k), k.researchedAt);
+  }
+  listKnowledge(): ProductKnowledge[] {
+    return (this.db.prepare("SELECT json FROM product_knowledge ORDER BY researched_at DESC").all() as Array<{ json: string }>).map((r) => safeJson(r.json) as ProductKnowledge | null).filter((k): k is ProductKnowledge => !!k);
   }
 
   // --- "My folders": the person's own tree (library_folders). A product with a folder_id is shown there instead of in its auto-organized place.

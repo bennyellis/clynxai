@@ -25,8 +25,10 @@ export interface SearchHit {
 export interface SearchBackend {
   name: string;
   /** The request for a query: a GET address, or a POST with a form body. */
-  request(query: string): { url: string; method?: "GET" | "POST"; body?: string };
+  request(query: string): { url: string; method?: "GET" | "POST"; body?: string; headers?: Record<string, string> };
   parse(body: string): SearchHit[];
+  /** A reason this backend must not be used right now (a spent daily allowance), or null; checked before any request. */
+  skip?(): string | null;
   /** True when the answer is a bot check / refusal rather than results. */
   isBlocked(status: number, body: string): boolean;
 }
@@ -232,6 +234,11 @@ async function timedFetch(f: typeof fetch, url: string, init: RequestInit, ms: n
   }
 }
 
+/** A search API's key travels in its address; nothing that is traced, logged or shown may carry it. */
+export function redactSecrets(text: string): string {
+  return text.replace(/([?&](?:key|cx|api_key|token|subscription-token)=)[^&\s)"']+/gi, "$1***");
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps {
@@ -256,12 +263,17 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
         trace.searches.push({ query, backend: backend.name, outcome: "blocked", results: 0, detail: "skipped: blocked a moment ago" });
         continue;
       }
+      const skipReason = backend.skip?.();
+      if (skipReason) {
+        trace.searches.push({ query, backend: backend.name, outcome: "blocked", results: 0, detail: `skipped: ${skipReason}` });
+        continue;
+      }
       const req = backend.request(query);
       try {
         const res = await timedFetch(
           f,
           req.url,
-          { method: req.method ?? "GET", headers: { ...BROWSER_HEADERS, ...(req.method === "POST" ? { "Content-Type": "application/x-www-form-urlencoded" } : {}) }, body: req.body },
+          { method: req.method ?? "GET", headers: { ...BROWSER_HEADERS, ...(req.method === "POST" ? { "Content-Type": "application/x-www-form-urlencoded" } : {}), ...(req.headers ?? {}) }, body: req.body },
           timeout
         );
         const body = await res.text();
@@ -277,7 +289,7 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
         // A backend that cannot be reached at all is left alone for a minute, so a down network is one failure per backend, not dozens.
         blockedUntil.set(backend.name, now() + Math.min(blockedFor, 60_000));
         const cause = (err as { cause?: { code?: string; message?: string } }).cause;
-        trace.searches.push({ query, backend: backend.name, outcome: "error", results: 0, detail: `${(err as Error).message}${cause?.code || cause?.message ? ` (${cause.code ?? cause.message})` : ""}` });
+        trace.searches.push({ query, backend: backend.name, outcome: "error", results: 0, detail: redactSecrets(`${(err as Error).message}${cause?.code || cause?.message ? ` (${cause.code ?? cause.message})` : ""}`) });
       }
     }
     return [];
