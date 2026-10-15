@@ -1210,6 +1210,10 @@ export interface ProductProfile {
   // A specific model filed under a more generic Database entry (e.g. "EVGA GeForce RTX 3060 Ti XC" under
   // "NVIDIA GeForce RTX 3060 Ti"). null for an ordinary top-level entry.
   parentProductId: string | null;
+  // What the evidence check found about this being a real variant of its parent (verified / supported / unverified / disproven, with the sources),
+  // and the variant claims checked against THIS product that were not confirmed enough to become entries. Local-only. null / empty until checked.
+  variantEvidence: import("./variantEvidence.js").VariantVerdict | null;
+  variantClaims: import("./variantEvidence.js").VariantVerdict[];
   loading: boolean;
   createdAt: number;
   // Clynx Cloud Phase 6 — bumped on every mutating product write (see

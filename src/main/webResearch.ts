@@ -15,6 +15,9 @@ import { OPENAI_IMAGE_MODEL, callOpenAI } from "./openai.js";
 import { hasEbayCredentials, searchEbayItems } from "./ebayClient.js";
 import { titleLooksLikeProduct } from "./compFilter.js";
 import { isLowAiMode } from "./aiMode.js";
+import { assessEvidence, describeVerdictForAi, verifyVariant, type VariantVerdict, type VerifyDeps } from "./variantEvidence.js";
+import { extractVariantAttributes } from "./variantIdentity.js";
+import { isPublicHttpUrl } from "./variantResearch.js";
 
 const SEARCH_TIMEOUT_MS = 15_000;
 const PAGE_FETCH_TIMEOUT_MS = 12_000;
@@ -38,6 +41,8 @@ export interface WebResearchResult {
   // just a representative reference photo for the Database card, not
   // something scoring relies on.
   imageUrl: string | null;
+  // What the evidence check concluded when the name claims a specific edition/configuration (see variantEvidence.ts); null for a plain product name.
+  evidence: VariantVerdict | null;
 }
 
 async function fetchWithTimeout(url: string, ms: number): Promise<Response> {
@@ -150,20 +155,44 @@ interface FetchedPage {
   imageUrl: string | null;
 }
 
-async function fetchPage(url: string): Promise<FetchedPage> {
+async function fetchPage(url: string, maxChars = MAX_CHARS_PER_PAGE): Promise<FetchedPage> {
   try {
     const res = await fetchWithTimeout(url, PAGE_FETCH_TIMEOUT_MS);
     if (!res.ok) return { text: null, imageUrl: null };
     const contentType = res.headers.get("content-type") ?? "";
     if (!contentType.includes("text/html")) return { text: null, imageUrl: null };
     const html = await res.text();
+    // A product page buries its name below pages of navigation: the readable text is searched whole (the main content when the page has one),
+    // not just its first few thousand characters, when the caller is looking for a specific name.
     return {
-      text: stripHtml(extractMainContent(html)).slice(0, MAX_CHARS_PER_PAGE),
+      text: stripHtml(extractMainContent(html)).slice(0, maxChars),
       imageUrl: extractOgImage(html),
     };
   } catch {
     return { text: null, imageUrl: null };
   }
+}
+
+const EVIDENCE_PAGE_CHARS = 40_000;
+
+/** The real search and page reader, in the shape the evidence check wants. Only public http(s) addresses are ever opened. */
+export function webVerifyDeps(): VerifyDeps {
+  return {
+    async search(query, maxResults) {
+      return searchWeb(query, maxResults);
+    },
+    async fetchText(url) {
+      if (!isPublicHttpUrl(url)) return null;
+      const page = await fetchPage(url, EVIDENCE_PAGE_CHARS);
+      return page.text;
+    },
+  };
+}
+
+/** Whether a product name claims something specific enough to be worth an evidence check on its own (an edition, a regional model, a capacity in a color). */
+export function claimsSpecificVariant(name: string): boolean {
+  const a = extractVariantAttributes(name);
+  return a.editionTerms.length > 0 || a.regions.length > 0 || (a.capacities.length > 0 && a.colors.length > 0);
 }
 
 // Gathers real web content about a product: search result snippets, plus
@@ -174,9 +203,27 @@ async function fetchPage(url: string): Promise<FetchedPage> {
 // doesn't fail the whole search; only a failure of the search itself
 // (network down, DuckDuckGo unreachable) throws, letting the caller fall
 // back to training-knowledge-only research instead.
-export async function researchProductOnWeb(productName: string, maxResults = DEFAULT_MAX_RESULTS): Promise<WebResearchResult> {
+export async function researchProductOnWeb(
+  productName: string,
+  maxResults = DEFAULT_MAX_RESULTS,
+  opts: { verdict?: VariantVerdict | null; brandHints?: string[]; deps?: VerifyDeps } = {}
+): Promise<WebResearchResult> {
+  const deps = opts.deps ?? webVerifyDeps();
+  // A name that claims a specific edition or configuration is checked against evidence first-hand: the exact title, the product line plus its
+  // distinctive words, the manufacturer's site, alternate spellings (see variantEvidence.ts). A caller that already did the check passes its verdict in.
+  let evidence: VariantVerdict | null = opts.verdict ?? null;
+  if (!evidence && claimsSpecificVariant(productName)) {
+    evidence = await verifyVariant(productName, deps, { brandHints: opts.brandHints, maxSteps: 5 }).catch(() => null);
+  }
+
   const query = `${productName} specs variants common problems`;
-  const results = await searchWeb(query, maxResults);
+  let results: SearchResult[] = [];
+  try {
+    results = await searchWeb(query, maxResults);
+  } catch (err) {
+    // The general search being down only matters when there is nothing else to write from.
+    if (!evidence || evidence.sources.length === 0) throw err;
+  }
 
   const pages = await Promise.all(
     results.map(async (r) => {
@@ -186,10 +233,23 @@ export async function researchProductOnWeb(productName: string, maxResults = DEF
     })
   );
 
+  const sources = pages.filter((s) => s.excerpt.trim().length > 0).map(({ title, url, excerpt }) => ({ title, url, excerpt }));
+  // The pages that settled the evidence check come first (the manufacturer's before a retailer's before the rest) and are not read twice.
+  if (evidence) {
+    const rank = { manufacturer: 0, retailer: 1, reference: 2, other: 3, marketplace: 4 } as const;
+    const proof = evidence.sources
+      .filter((s) => s.fullMatch && s.excerpt && !sources.some((x) => x.url === s.url))
+      .sort((a, b) => rank[a.sourceClass] - rank[b.sourceClass])
+      .slice(0, 3)
+      .map((s) => ({ title: s.title, url: s.url, excerpt: (s.excerpt ?? "").slice(0, MAX_CHARS_PER_PAGE) }));
+    sources.unshift(...proof);
+  }
+
   return {
     query,
-    sources: pages.filter((s) => s.excerpt.trim().length > 0).map(({ title, url, excerpt }) => ({ title, url, excerpt })),
+    sources,
     imageUrl: pages.find((p) => p.imageUrl && !looksLikeLogoAsset(p.imageUrl))?.imageUrl ?? null,
+    evidence,
   };
 }
 
@@ -198,33 +258,87 @@ export async function researchProductOnWeb(productName: string, maxResults = DEF
  * for Clynx to digest and explain in its own words in the chat. Nothing is saved anywhere (that is research_product's job).
  * Never throws: a failure comes back as text Clynx can say out loud.
  */
-export async function lookUpOnWeb(query: string): Promise<string> {
+export async function lookUpOnWeb(query: string, url?: string | null): Promise<string> {
+  return lookUpWithDeps(query, webVerifyDeps(), url ?? null);
+}
+
+/**
+ * The look-up itself, with the search and page reader passed in. Beyond the plain results it:
+ *  - reads an address the user gave (only public http(s) pages), and says plainly when it could not;
+ *  - when the query is a specific edition or configuration and the plain search did not settle it, goes on to the wider evidence search before
+ *    anyone concludes anything, and says whether the result is VERIFIED, SUPPORTED, UNVERIFIED or DISPROVEN. An empty search is never "fake".
+ */
+export async function lookUpWithDeps(query: string, deps: VerifyDeps, url: string | null = null): Promise<string> {
   const q = query.trim().slice(0, 200);
-  if (!q) return "Failed: no search query given.";
-  try {
-    const results = await searchWeb(q, 5);
-    if (results.length === 0) return `I searched the web for "${q}" but nothing useful came back.`;
-    const pages = await Promise.all(
-      results.slice(0, 4).map(async (r) => {
-        const page = await fetchPage(r.url);
-        const text = page.text && page.text.length > r.snippet.length ? page.text : r.snippet;
-        let host = r.url;
-        try {
-          host = new URL(r.url).hostname.replace(/^www\./, "");
-        } catch {
-          // keep the raw url as the label
-        }
-        return { title: r.title, host, text: text.trim().slice(0, 1800) };
-      })
-    );
-    const usable = pages.filter((p) => p.text.length > 0);
-    if (usable.length === 0) return `I searched the web for "${q}" but couldn't read any of the pages.`;
-    return (
+  if (!q && !url) return "Failed: no search query given.";
+  const blocks: string[] = [];
+  const evidenceInputs: Array<{ title: string; url: string; excerpt: string }> = [];
+  const userUrls: string[] = [];
+
+  if (url) {
+    if (!isPublicHttpUrl(url)) {
+      blocks.push(`The address given (${url}) is not a public web page, so I did not open it.`);
+    } else {
+      const text = await deps.fetchText(url).catch(() => null);
+      if (text) {
+        userUrls.push(url);
+        evidenceInputs.push({ title: url, url, excerpt: text });
+        blocks.push(`The page the user linked (${hostOfUrl(url)}):\n${text.slice(0, 2500)}`);
+      } else {
+        blocks.push(`I could not read the page the user linked (${hostOfUrl(url)}); it may block automated readers. That is not evidence either way about the product. Do NOT claim you opened or checked it. Say you could not read it and ask for a screenshot or the exact title and box label.`);
+      }
+    }
+  }
+
+  let results: Array<{ title: string; url: string; snippet: string }> = [];
+  let searchFailed: string | null = null;
+  if (q) {
+    try {
+      results = await deps.search(q, 5);
+    } catch (err) {
+      searchFailed = (err as Error).message;
+    }
+  }
+  const pages = await Promise.all(
+    results.slice(0, 4).map(async (r) => {
+      const text = await deps.fetchText(r.url).catch(() => null);
+      const body = text && text.length > r.snippet.length ? text : r.snippet;
+      evidenceInputs.push({ title: r.title, url: r.url, excerpt: body });
+      return { title: r.title, host: hostOfUrl(r.url), text: body.trim().slice(0, 1800) };
+    })
+  );
+  const usable = pages.filter((p) => p.text.length > 0);
+  if (usable.length > 0) {
+    blocks.push(
       `Web results for "${q}". Read them and answer in your own words (don't paste them, and don't present anything here as certain if the sources disagree or look thin):\n\n` +
-      usable.map((p, i) => `[${i + 1}] ${p.title} (${p.host})\n${p.text}`).join("\n\n")
+        usable.map((p, i) => `[${i + 1}] ${p.title} (${p.host})\n${p.text}`).join("\n\n")
     );
-  } catch (err) {
-    return `Failed: couldn't reach the web right now (${(err as Error).message}).`;
+  } else if (q) {
+    blocks.push(
+      searchFailed
+        ? `Failed: couldn't reach the web right now (${searchFailed}).`
+        : `The exact search for "${q}" came back with nothing readable. That says nothing about whether the product exists.`
+    );
+  }
+
+  // A specific edition or configuration: keep going past the exact title before anyone concludes anything.
+  if (q && (claimsSpecificVariant(q) || userUrls.length > 0 || usable.length === 0)) {
+    const first = assessEvidence(q, evidenceInputs);
+    const verdict = first.status === "verified" || first.status === "disproven" ? first : await verifyVariant(q, deps, { userUrls, maxSteps: 5 }).catch(() => first);
+    blocks.push(describeVerdictForAi(verdict));
+    for (const s of verdict.sources.filter((x) => x.fullMatch && x.excerpt && !usable.some((u) => u.host === x.host)).slice(0, 2)) {
+      blocks.push(`Evidence page (${s.host}, ${s.sourceClass}):\n${(s.excerpt ?? "").slice(0, 1200)}`);
+    }
+  }
+  if (searchFailed && blocks.length === 0) return `Failed: couldn't reach the web right now (${searchFailed}).`;
+  return blocks.join("\n\n");
+}
+
+function hostOfUrl(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
   }
 }
 

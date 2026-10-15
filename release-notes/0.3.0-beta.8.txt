@@ -1,0 +1,9 @@
+Clynx Beta 8 - editions, colors and capacities are recognized, and nothing is called fake because a search came up empty
+* Clynx no longer decides a product doesn't exist because an exact-title search found nothing. It now searches the product line plus the distinctive words, the manufacturer's own site, the line's list of editions and options, and alternate spellings, and puts manufacturer pages ahead of retailers and seller listings.
+* Every edition, color, capacity, bundle or regional model is now answered as one of four things: verified, supported, not verified yet, or disputed by a named source. "Not verified yet" is never worded as fake, custom or seller-invented.
+* Links you paste in chat are actually read. If a page can't be read, Clynx says so instead of pretending it opened it.
+* A more specific version of a product you already track (for example a special edition of a console) now gets its own Database entry, linked to the general one, instead of rewriting the general entry. A version that can't be confirmed yet is not added as a product; Clynx tells you what it found and keeps the note on the general entry.
+* A special edition is priced only from sales of that edition. If there are none, its value shows as not known yet instead of borrowing the standard model's price.
+* Clynx remembers what it found earlier in the conversation and in the Database, and only changes its mind when it has new evidence.
+* Clynx only says something was saved to the Database when it actually was; research that is still running is described as running.
+* Your data, sign-in, Watches, Database and automatic updates are unchanged. Existing products keep everything they had.

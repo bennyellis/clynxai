@@ -4,6 +4,7 @@ import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 import { compMatchesSpecs, sanitizeSearchQuery, specReference, titleLooksLikeProduct } from "./compFilter.js";
 import { titleLooksLikeBrokenProduct } from "./brokenVariant.js";
 import { isLowAiMode } from "./aiMode.js";
+import { editionConflict } from "./variantIdentity.js";
 import { trimmedMean } from "./marketValue.js";
 import { splitByPriceSeparators } from "./identity/populations.js";
 
@@ -297,12 +298,21 @@ Respond with ONLY a JSON object, no other text, in this exact shape:
 // 1TB and 2TB cards because only a fast AI judged this). Then the AI judges brand/edition/bundle. Averages are
 // plain arithmetic over what survives (an outlier-trimmed mean, so one mislabelled listing can't drag it).
 // `productName` is the Database entry's own name, only used to recover a capacity the search query dropped.
-export async function analyzeEbayComps(query: string, comps: EbayComp[], productName: string = query, photoCheck?: PhotoCheck | null, broken = false): Promise<CompAnalysis> {
+export async function analyzeEbayComps(
+  query: string,
+  comps: EbayComp[],
+  productName: string = query,
+  photoCheck?: PhotoCheck | null,
+  broken = false,
+  // The words that separate this product from the general one it is a version of ("galaxy" for a special edition console): a sale whose
+  // title doesn't carry them is the standard model's sale, not this product's (see variantIdentity.ts's editionConflict).
+  requiredTerms: string[] = []
+): Promise<CompAnalysis> {
   if (comps.length === 0) return EMPTY_ANALYSIS;
 
   const reference = specReference(query, productName);
   // Copies sold "for parts or not working" are not what a working one sells for (the broken research handles those on its own).
-  const specMatched = comps.filter((c) => compMatchesSpecs(reference, c.title) && (broken || !/parts|not working/i.test(c.condition ?? "")));
+  const specMatched = comps.filter((c) => compMatchesSpecs(reference, c.title) && !editionConflict(`${query} ${productName}`, c.title, requiredTerms) && (broken || !/parts|not working/i.test(c.condition ?? "")));
   if (specMatched.length === 0) return { ...EMPTY_ANALYSIS, rejectedCount: comps.length };
 
   // Broken / for-parts research (a "(For Parts / Broken)" Database variant) keeps ONLY comps that are broken copies of the product,

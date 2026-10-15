@@ -3,6 +3,7 @@ import { CLYNX_PERSONA, whereYouAre } from "./clynxPersona.js";
 import { CLYNX_VOICE } from "./voice.js";
 import { isLowAiMode } from "./aiMode.js";
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
+import { describeVerdictForAi, type VariantVerdict } from "./variantEvidence.js";
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -184,7 +185,11 @@ const TOOLS = [
           query: {
             type: "string",
             description:
-              "What to search for, worded like a search-engine query, e.g. 'Xbox Series S common problems buying used', 'PS5 Slim disc vs digital resale value', 'iPhone 13 battery health what to check before buying'.",
+              "What to search for, worded like a search-engine query, e.g. 'Xbox Series S common problems buying used', 'PS5 Slim disc vs digital resale value', 'iPhone 13 battery health what to check before buying'. For a specific edition, color, capacity or bundle, give the full product name as the user said it: the tool goes on to search the product line, the manufacturer's site and alternate spellings by itself, and reports VERIFIED / SUPPORTED / UNVERIFIED / DISPROVEN. Never treat an empty exact-title search as proof a product does not exist.",
+          },
+          url: {
+            type: "string",
+            description: "A web page the user gave you (a product or retailer link): it is opened and read first. Always pass a link the user pasted instead of saying you cannot open it.",
           },
         },
         required: ["query"],
@@ -203,7 +208,11 @@ const TOOLS = [
           product: {
             type: "string",
             description:
-              "The general, canonical product name ONLY, e.g. 'Xbox Series X', 'iPhone', 'Nintendo Switch'. Never append a parenthetical qualifier or a variant/bundle/accessory list — NOT \"Xbox Series X (console, all variants/bundles/accessories)\". A broad family name is fine and expected when that's what the user asked about — this is the Database entry's title, not a place to hedge about which SKU it covers.",
+              "The product name, e.g. 'Xbox Series X', 'iPhone', 'Nintendo Switch'. For ONE specific edition, color, capacity or bundle the user named, give its full name exactly as they said it ('Xbox Series X 2TB Galaxy Black Special Edition'): it is checked against manufacturer and retailer evidence first and filed as its own entry linked to the general product, never merged into it. Never append a parenthetical qualifier or a variant/bundle/accessory list — NOT \"Xbox Series X (console, all variants/bundles/accessories)\". A broad family name is fine and expected when that's what the user asked about — this is the Database entry's title, not a place to hedge about which SKU it covers.",
+          },
+          url: {
+            type: "string",
+            description: "A web page the user gave about this product (a manufacturer or retailer link): it is read as evidence. Pass any link the user pasted.",
           },
         },
         required: ["product"],
@@ -614,7 +623,9 @@ function buildDatabaseSystemPrompt(products: ProductProfile[], blacklistTerms: B
           // more of it as worth extra attention if the conversation turns
           // to it.
           const priority = p.prioritized ? " ★ prioritized by the user — noteworthy, worth extra attention" : "";
-          return `- ${p.name}${p.loading ? " (researching now)" : ""}${resale}${priority}`;
+          const status = p.variantEvidence ? ` [variant ${p.variantEvidence.status}${p.parentProductId ? `, a version of "${products.find((x) => x.id === p.parentProductId)?.name ?? "another entry"}"` : ""}]` : p.parentProductId ? ` [a version of "${products.find((x) => x.id === p.parentProductId)?.name ?? "another entry"}"]` : "";
+          const claims = p.variantClaims.length ? ` [claims checked, not added: ${p.variantClaims.slice(0, 3).map((c) => `"${c.claim}" ${c.status}`).join("; ")}]` : "";
+          return `- ${p.name}${p.loading ? " (researching now)" : ""}${status}${claims}${resale}${priority}`;
         })
         .join("\n")
     : "(none yet)";
@@ -674,7 +685,13 @@ function productFactLines(product: ProductProfile): string {
         }${product.ebayAvgRunTimeDays !== null ? `; sells in about ${product.ebayAvgRunTimeDays < 1 ? "under a day" : `${product.ebayAvgRunTimeDays.toFixed(1)} days`}` : ""}.`
       : "No eBay value researched for it yet.";
   const store = product.myStore ? `The user's own eBay store (${product.myStore.seller}) lists it for about ${money(product.myStore.medianUsd)}.` : "";
+  const evidence = product.variantEvidence ? `Variant evidence on file (earlier research; keep consistent with it unless new evidence): ${product.variantEvidence.status.toUpperCase()}, ${product.variantEvidence.basis}` : "";
+  const claims = product.variantClaims.length
+    ? `Variant claims checked earlier that were NOT added as products:\n${product.variantClaims.map((c) => `- "${c.claim}": ${c.status.toUpperCase()}. ${c.basis}`).join("\n")}`
+    : "";
   return `Current research summary: ${product.aiSummary || "(none yet)"}
+${evidence}
+${claims}
 Watch-for notes already logged: ${product.lookoutNotes || "(none yet)"}
 ${ebayValue}
 ${store}
@@ -1148,7 +1165,13 @@ function parseProductSummary(text: string): ProductSummaryResult {
   }
 }
 
-export async function generateProductSummary(productName: string): Promise<ProductSummaryResult> {
+/** What the writeup may and may not say about a specific edition / configuration, given what the evidence check found. */
+export function variantEvidenceInstructions(verdict: VariantVerdict): string {
+  return `${describeVerdictForAi(verdict)}
+Start the summary with one plain line, "Variant status: ${verdict.status}" followed by where the evidence came from (or that none was found). Never describe an unverified product as fake, custom or seller-invented. Keep this product's facts (capacity, color, edition, what is included) separate from the standard model's: do not give the standard model's price or specs as this product's. If the sources do not state something about this exact version, say it is not confirmed.`;
+}
+
+export async function generateProductSummary(productName: string, verdict: VariantVerdict | null = null): Promise<ProductSummaryResult> {
   const prompt = `Give a concise, useful reference profile for reselling this product, based on your general knowledge: "${productName}"
 
 This is working knowledge for spotting a genuine deal, not a general trivia writeup — every bullet should tie back to what actually changes what a buyer should pay. Cover:
@@ -1157,7 +1180,7 @@ This is working knowledge for spotting a genuine deal, not a general trivia writ
 - Commonly bundled accessories/extras, and which ones meaningfully ADD to resale value (roughly how much, if you can estimate) versus which ones are simply expected and don't move the needle.
 - Known condition issues, failure points, or common counterfeits/scams — but ONLY framed as what they mean for what a buyer should pay or watch out for, not general product trivia.
 
-Be direct and specific to this exact product, not generic filler. Do NOT state a specific current price as fact — you don't have live pricing data, so leave absolute pricing out entirely; relative comparisons between variants (more/less than each other) are fine and encouraged. If you're not confident about something, say so briefly rather than making it up.${categoryAndFamilyInstructions()}`;
+Be direct and specific to this exact product, not generic filler. Do NOT state a specific current price as fact — you don't have live pricing data, so leave absolute pricing out entirely; relative comparisons between variants (more/less than each other) are fine and encouraged. If you're not confident about something, say so briefly rather than making it up. Not recognizing a product name is not evidence it does not exist: editions, colors and capacities you have not heard of are common, so never call a product fake or non-existent from your own memory.${verdict ? `\n\n${variantEvidenceInstructions(verdict)}` : ""}${categoryAndFamilyInstructions()}`;
 
   const result = await streamOnceJson([{ role: "user", content: prompt }]);
   return parseProductSummary(result);
@@ -1175,14 +1198,15 @@ export interface WebSource {
 // Falls back to generateProductSummary above if the web search itself
 // turned up nothing usable (network trouble, no results), so research
 // still produces something rather than failing outright.
-export async function generateProductSummaryFromWeb(productName: string, sources: WebSource[]): Promise<ProductSummaryResult> {
-  if (!sources.length) return generateProductSummary(productName);
+export async function generateProductSummaryFromWeb(productName: string, sources: WebSource[], verdict: VariantVerdict | null = null): Promise<ProductSummaryResult> {
+  if (!sources.length) return generateProductSummary(productName, verdict);
 
   const sourceBlock = sources.map((s, i) => `[Source ${i + 1}: ${s.title} — ${s.url}]\n${s.excerpt}`).join("\n\n---\n\n");
+  const evidenceBlock = verdict ? `\n\n${variantEvidenceInstructions(verdict)}` : "";
 
   const prompt = `You just ran a real web search and gathered the content below about this product: "${productName}". Using ONLY this real content (not prior assumptions), write a concise, in-depth, useful reference profile for reselling it.
 
-${sourceBlock}
+${sourceBlock}${evidenceBlock}
 
 This is working knowledge for spotting a genuine deal, not a general trivia writeup — every bullet should tie back to what actually changes what a buyer should pay. Cover:
 - Which specific variants/colors/storage sizes/editions of this product typically sell for MORE or LESS than others, and why (rarity, discontinued status, higher demand for a specific color/config, a special edition, etc.) — per explicit instruction, this is the single most important thing to get right: name the ACTUAL variant and the ACTUAL price direction, don't just note that variants exist. (Verified miss: a black vs. white Xbox Series S — the black one commands a real premium — went completely unrecognized because this used to only describe how to tell variants apart, never which one is worth more.)

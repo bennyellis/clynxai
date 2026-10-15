@@ -2783,6 +2783,31 @@ function ProductDetailPage({
             </div>
           )}
 
+          {(product.variantEvidence || product.variantClaims.length > 0) && (
+            <div style={{ padding: "12px 18px", borderBottom: "1px solid var(--border)", fontSize: 12.5, color: "var(--text-muted)", display: "flex", flexDirection: "column", gap: 6 }}>
+              {product.variantEvidence && (
+                <div>
+                  <strong style={{ color: product.variantEvidence.status === "verified" || product.variantEvidence.status === "supported" ? "var(--good, var(--text))" : "var(--warn)" }}>
+                    {{ verified: "Verified", supported: "Supported", unverified: "Not verified yet", disproven: "Disputed" }[product.variantEvidence.status]}
+                  </strong>
+                  {": "}
+                  {product.variantEvidence.basis}
+                  {product.parentProductId ? " Its value comes only from sales of this exact version." : ""}
+                </div>
+              )}
+              {product.variantClaims.length > 0 && (
+                <div>
+                  <div style={{ fontWeight: 600, color: "var(--text)" }}>Checked but not added as products</div>
+                  {product.variantClaims.map((c) => (
+                    <div key={c.claim}>
+                      "{c.claim}": {{ verified: "verified", supported: "supported", unverified: "not verified (nothing found yet, which does not mean it does not exist)", disproven: "disputed" }[c.status]}. {c.basis}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {specificModels.length > 0 && (
             <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>
               <div style={{ fontWeight: 600, fontSize: 14, color: "var(--text)", marginBottom: 8 }}>🔬 Specific models ({specificModels.length})</div>

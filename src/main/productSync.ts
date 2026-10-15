@@ -75,6 +75,8 @@ function cloudProductToLocal(cp: CloudProduct): ProductProfile {
     ebayCompsIdentity: null,
     myStore: null,
     parentProductId: null,
+    variantEvidence: null,
+    variantClaims: [],
     loading: false,
     createdAt: cp.createdAt,
     updatedAt: cp.updatedAt,

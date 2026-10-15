@@ -2,6 +2,7 @@ import { generateProductSummary, generateProductSummaryFromWeb } from "./chat.js
 import { researchProductOnWeb, findProductImage } from "./webResearch.js";
 import { OPENAI_MODEL, callOpenAI } from "./openai.js";
 import { VARIANT_QUALIFIER_WORDS } from "./scorer.js";
+import type { VariantVerdict } from "./variantEvidence.js";
 
 const KEYWORD_EXPANSION_TIMEOUT_MS = 15_000;
 
@@ -119,6 +120,8 @@ export interface ProductLookupResult {
   imageUrl: string | null;
   // Per explicit instruction — see chat.ts's ProductSummaryResult.reaction.
   reaction: string;
+  // What the evidence check found when the name claims a specific edition/configuration (null for a plain product name): see variantEvidence.ts.
+  evidence: VariantVerdict | null;
 }
 
 // findProductImage now handles everything itself: downloading candidate
@@ -147,17 +150,17 @@ async function resolveImage(candidateUrl: string | null, name: string): Promise<
 // not just a nice-to-have, so this makes a real effort to never leave one
 // empty rather than accepting whatever the text-oriented search happened
 // to find along the way.
-export async function lookupProduct(name: string): Promise<ProductLookupResult> {
+export async function lookupProduct(name: string, opts: { verdict?: VariantVerdict | null; brandHints?: string[] } = {}): Promise<ProductLookupResult> {
   try {
-    const research = await researchProductOnWeb(name);
-    const { summary, category, family, isBrandFamily, reaction } = await generateProductSummaryFromWeb(name, research.sources);
+    const research = await researchProductOnWeb(name, undefined, { verdict: opts.verdict ?? null, brandHints: opts.brandHints });
+    const { summary, category, family, isBrandFamily, reaction } = await generateProductSummaryFromWeb(name, research.sources, research.evidence);
     const imageUrl = await resolveImage(research.imageUrl, name);
-    return { aiSummary: summary, category, family, isBrandFamily, imageUrl, reaction };
+    return { aiSummary: summary, category, family, isBrandFamily, imageUrl, reaction, evidence: research.evidence };
   } catch (err) {
     try {
-      const { summary, category, family, isBrandFamily, reaction } = await generateProductSummary(name);
+      const { summary, category, family, isBrandFamily, reaction } = await generateProductSummary(name, opts.verdict ?? null);
       const imageUrl = await resolveImage(null, name);
-      return { aiSummary: summary, category, family, isBrandFamily, imageUrl, reaction };
+      return { aiSummary: summary, category, family, isBrandFamily, imageUrl, reaction, evidence: opts.verdict ?? null };
     } catch {
       return {
         aiSummary: `(Research failed: ${(err as Error).message})`,
@@ -166,6 +169,7 @@ export async function lookupProduct(name: string): Promise<ProductLookupResult> 
         isBrandFamily: false,
         imageUrl: null,
         reaction: "Hit a snag researching this one — couldn't pull anything useful.",
+        evidence: opts.verdict ?? null,
       };
     }
   }

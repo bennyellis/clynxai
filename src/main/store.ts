@@ -1,6 +1,8 @@
 import { DatabaseSync, backup as sqliteBackup } from "node:sqlite";
 import { colorsConflict, colorsIn, isColorWord, sameColors } from "./colors.js";
 import { compMatchesSpecs, hasSingleModelLetter, modelLettersConflict } from "./compFilter.js";
+import { extractVariantAttributes } from "./variantIdentity.js";
+import type { VariantVerdict } from "./variantEvidence.js";
 import type { ProductSignals } from "./dealSummary.js";
 import path from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
@@ -500,6 +502,11 @@ export class Store {
       ["ebay_comps_identity", "TEXT"],
       ["parent_product_id", "TEXT"],
       ["my_store_ref", "TEXT"],
+      // What the evidence check concluded about this product being a real variant (see variantEvidence.ts), and the variant claims checked
+      // against it that were NOT recorded as products. Local-only, like the columns above.
+      ["variant_status", "TEXT"],
+      ["variant_evidence", "TEXT"],
+      ["variant_claims", "TEXT"],
     ]) {
       if (!productCols.includes(column)) this.db.exec(`ALTER TABLE products ADD COLUMN ${column} ${type}`);
     }
@@ -1392,6 +1399,27 @@ export class Store {
   // "RTX 3060 Ti" entry). Local-only: it isn't part of the cloud product sync, which leaves the column alone.
   setProductParent(id: string, parentId: string | null): void {
     this.db.prepare("UPDATE products SET parent_product_id = ?, updated_at = ? WHERE id = ?").run(parentId, Date.now(), id);
+  }
+
+  /**
+   * Keeps the evidence verdict on a product (what the evidence check found about this being a real variant). Never overwrites a stronger earlier
+   * verdict with a weaker one without the caller reconciling them first (see variantEvidence.ts's reconcileVerdict). Returns whether it was written.
+   */
+  setProductVariantEvidence(id: string, verdict: VariantVerdict | null): boolean {
+    const res = this.db
+      .prepare("UPDATE products SET variant_status = ?, variant_evidence = ?, updated_at = ? WHERE id = ?")
+      .run(verdict ? verdict.status : null, verdict ? JSON.stringify(compactVerdict(verdict)) : null, Date.now(), id);
+    return Number(res.changes) > 0;
+  }
+
+  /** A variant claim checked against this product that was not confirmed enough to become an entry: kept (newest first, 10 at most) so the next question starts from it. */
+  recordVariantClaim(parentId: string, verdict: VariantVerdict): boolean {
+    const row = this.db.prepare("SELECT variant_claims FROM products WHERE id = ?").get(parentId) as { variant_claims?: string | null } | undefined;
+    if (!row) return false;
+    const kept = parseVerdictList(row.variant_claims).filter((v) => v.claim.toLowerCase() !== verdict.claim.toLowerCase());
+    const next = [compactVerdict(verdict), ...kept].slice(0, 10);
+    this.db.prepare("UPDATE products SET variant_claims = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(next), Date.now(), parentId);
+    return true;
   }
 
   listProductChildren(parentId: string): ProductProfile[] {
@@ -3029,7 +3057,13 @@ export function isSimilarProductName(a: string, b: string): boolean {
   if (variantsA.size !== variantsB.size || [...variantsA].some((v) => !variantsB.has(v))) return false;
 
   const extra = [...larger].filter((t) => !smaller.has(t));
-  return !extra.some((t) => /^\d+(gb|tb|mb)$/i.test(t));
+  if (extra.some((t) => /^\d+(gb|tb|mb)$/i.test(t))) return false;
+  // A special/limited/themed edition is a product of its own (own sales, own price), not the standard entry with a few more words in the
+  // title: "Xbox Series X Special Edition" and "Xbox Series X" do not share an entry or a value. Both names must say the same edition words.
+  const editionA = extractVariantAttributes(a).editionTerms;
+  const editionB = extractVariantAttributes(b).editionTerms;
+  if (editionA.length !== editionB.length || editionA.some((t) => !editionB.includes(t))) return false;
+  return true;
 }
 
 function colorlessProductTokens(name: string): Set<string> {
@@ -3066,10 +3100,39 @@ function rowToProduct(row: any): ProductProfile {
     ebayCompsIdentity: row.ebay_comps_identity === "exact" || row.ebay_comps_identity === "approximate" || row.ebay_comps_identity === "unresolved" ? row.ebay_comps_identity : null,
     myStore: parseMyStore(row.my_store_ref),
     parentProductId: row.parent_product_id ?? null,
+    variantEvidence: parseVerdict(row.variant_evidence),
+    variantClaims: parseVerdictList(row.variant_claims),
     loading: !!row.loading,
     createdAt: row.created_at,
     updatedAt: row.updated_at ?? row.created_at,
   };
+}
+
+const VERDICT_STATUSES = new Set(["verified", "supported", "unverified", "disproven"]);
+
+function parseVerdict(raw: unknown): VariantVerdict | null {
+  if (typeof raw !== "string" || !raw) return null;
+  try {
+    const v = JSON.parse(raw) as VariantVerdict;
+    return v && typeof v.claim === "string" && VERDICT_STATUSES.has(v.status) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseVerdictList(raw: unknown): VariantVerdict[] {
+  if (typeof raw !== "string" || !raw) return [];
+  try {
+    const list = JSON.parse(raw);
+    return Array.isArray(list) ? list.filter((v): v is VariantVerdict => !!v && typeof v.claim === "string" && VERDICT_STATUSES.has(v.status)) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Small enough to keep with a product: no page text, a handful of sources. */
+export function compactVerdict(v: VariantVerdict): VariantVerdict {
+  return { ...v, sources: v.sources.filter((s) => s.fullMatch || s.matched.length > 0).slice(0, 6).map((s) => ({ ...s, excerpt: undefined })) };
 }
 
 function parseMyStore(raw: unknown): MyStoreReference | null {

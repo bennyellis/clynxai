@@ -1,0 +1,78 @@
+CLYNX BETA 8: UNIVERSAL PRODUCT VARIANT RECOGNITION
+===================================================
+Trigger: the transcript where Clynx told the user "Xbox Series X 2TB Galaxy Black Special Edition" was probably seller-invented, even after being given the
+product's full name and a retailer link. Nothing here is specific to Xbox or Galaxy Black.
+
+ROOT CAUSES (in the code, in the order they hurt)
+ 1. One fixed search. Research ran a single query "<name> specs variants common problems" (webResearch.ts) and the chat's web_research ran whatever one
+    query the model typed. An exact-title search that returns nothing ended the investigation, and nothing told the model that means nothing.
+ 2. No evidence model. There was no difference between "nothing found", "only sellers use the name" and "a source says it is not official". The model
+    filled the gap from its own memory ("Microsoft did not ship a 2TB...", "almost certainly seller-invented").
+ 3. Links were never read. No tool accepted a URL; the model said it "opened the Walmart URL" with nothing behind the claim.
+ 4. Variants were folded into the parent. research_product sent any request that fuzzy-matched an existing entry (isSimilarProductName let theme and
+    edition words through) to that entry: its profile was rewritten about the variant, and its standard-model sold prices ($523) were shown for it.
+ 5. Comps ignored editions. compMatchesSpecs only compared digits, capacities, tier words and colors, so a standard console's sale could pass for a
+    special edition's when the AI judge was off or wrong.
+ 6. No memory of findings. Each turn re-researched from scratch and could contradict the last one; nothing was stored.
+ 7. "Saved" claims. research_product fires the research in the background and returned before anything was written; nothing told the model that.
+    A fresh stub was also created for any name, confirmed or not.
+
+CHANGES
+ variantIdentity.ts (new, pure)   Reads a name for capacity, color, edition words (including a themed word before "edition"), region, bundle and
+     accessory; finds the parent a name is a more specific version of (never an accessory for a device, never a different tier such as Pro/Max, never a
+     contradicted color or capacity); builds the search plan (exact title, "official", parent + distinctive words, manufacturer site search, the line's
+     editions page, alternate spellings of capacities); editionConflict() for sold comps. No product or edition is listed anywhere.
+ variantEvidence.ts (new)         Classifies sources (manufacturer / retailer / reference / marketplace / other), matches every identifying word of a
+     claim against what a source actually says (single-letter model words only count next to their word, so a Series S page does not verify a Series X),
+     and returns one of four verdicts: VERIFIED (manufacturer, or two independent non-marketplace sources), SUPPORTED (one retailer or reference source),
+     UNVERIFIED (nothing, only seller listings, or only part of the name), DISPROVEN (an authoritative source next to the product's own words says it is
+     not official / never made, and no authoritative source lists it). An empty search can only ever be UNVERIFIED. reconcileVerdict() keeps earlier
+     findings: a thinner later look never downgrades them, a lone denial never flips a verified product.
+ variantResearch.ts (new)         decideResearchTarget(): refresh the same product / create a confirmed variant linked to its parent / create an
+     ordinary product / record nothing for an unconfirmed claim. makeClaimVerifier(): reuses what was found earlier in the session or saved in the
+     Database, re-looks only when time has passed or the user brings a link. publicHttpUrls(): links Clynx may read (http/https only, nothing pointing at
+     this computer or a private network).
+ webResearch.ts / products.ts     Product research on a name that claims an edition runs the evidence check and puts the manufacturer's pages first in the
+     writeup's sources. lookUpOnWeb reads a user's link first, goes beyond the exact title for specific names, and reports VERIFIED / SUPPORTED /
+     UNVERIFIED / DISPROVEN in words the model must use; an unreadable page is reported as unreadable.
+ chat.ts / clynxPersona.ts        web_research and research_product take a url. Standing rules for every chat: not recognizing a product is not
+     evidence; unverified is not fake; never claim to have opened a page without its text; parents and variants have separate values; stay consistent with
+     saved evidence; only say "saved" when a tool result says so. Summary prompts get the evidence status and may not call an unverified product fake.
+ index.ts                          research_product now runs decideResearchTarget. A confirmed variant becomes its own entry with parentProductId set and
+     its evidence saved; an unconfirmed one is NOT added (the answer starts "NOT SAVED") and the claim is kept on the parent. Messages say research is
+     running and is saved when it finishes. A variant's comps and asking prices require the words that separate it from its parent.
+ store.ts / types.ts              Local-only columns variant_status, variant_evidence, variant_claims (added the same way as the existing local-only columns,
+     existing rows untouched). isSimilarProductName no longer folds a special/limited/themed edition into the standard entry.
+ watchcount.ts / ebayActive.ts    Sold comps and asking prices drop a different edition's listings (editionConflict). No matching sales = no value.
+ Database.tsx                     A product page shows its evidence status and the claims checked but not added.
+ Beta 8                           package.json 0.3.0-beta.8, release-notes/0.3.0-beta.8.txt, BETA8_DRAFT.txt.
+
+TESTS (npm test: 58 files, 1695 checks; typecheck clean; build ok)
+ New: variantEvidence.test.ts (71), variantResearch.test.ts (54), variantComps.test.ts (45), all offline with a fake search/page reader.
+ Cases: Xbox Series X 2TB Galaxy Black Special Edition (exact title empty, found through the manufacturer-site search; verified from a linked page alone;
+ the same page not verifying a different edition); legitimate variants (iPhone 15 Pro color/capacity, Switch OLED Zelda Edition, Galaxy S24 Ultra, Dyson
+ V8, PS5 Slim Spider-Man bundle); seller-invented name (only marketplace listings: unverified, not filed); nonexistent name (empty search: unverified,
+ never disproven; a source that says it is not official: disproven; manufacturer listing overrides a denial); accessory (a controller is not a console
+ variant); bundle (keeps its link to the console); different tier (Pro Max is a new product); Series S vs Series X; a retailer link (supported, never
+ "verified"); an unreadable link (admitted, not "fake"); links to localhost / private networks / file: refused; reuse of earlier findings, link triggers a
+ new look, thinner look never downgrades; comps (standard sales never price a special edition, no sales = no value, the standard product is not priced
+ from the special edition's sales); persistence (evidence and claims saved, page text not stored, survive reopening, existing profiles intact).
+ One existing test fails: startupErrors.test.ts "the original database is still there". It fails identically before these changes (checked on the
+ untouched branch); it looks environmental (this session runs as root) and was not touched.
+
+REMAINING LIMITATIONS
+ - Not run against the live web. The search is DuckDuckGo's HTML page and many product pages (xbox.com, walmart.com) render with JavaScript or block bots,
+   so the page text Clynx can read may lack the name; the evidence then comes from search snippets or stays unverified. First real use should be watched.
+ - Source classes rest on lists (retailers, reference sites, marketplaces, and a small table mapping product lines such as iPhone/Xbox/Galaxy to their
+   maker's site). A manufacturer not in the table is recognized when its site name is a word of the product name or the caller passes a brand hint; an
+   unknown one is "other", which can support but never verify on its own.
+ - "Disproven" depends on wording patterns near the product's own words. It is deliberately hard to reach.
+ - A themed word with no edition marker ("Galaxy" alone) is only treated as distinguishing when a parent entry exists to compare with.
+ - research_product still starts research in the background; the answer is honest that it is not saved yet, but it does not wait for the write.
+   A research failure still stores the existing "(Research failed...)" text on the entry, as before.
+ - A variant check can take several searches (up to 7 plus page reads) before the answer, roughly 10 to 40 seconds.
+ - Scanner-created products from listing titles are not gated (existing records and the scanner's behavior are preserved); an edition-worded title now
+   gets an evidence check during its research and its status is shown, but the entry is still created.
+ - isSimilarProductName is stricter: a listing titled "... Special Edition" no longer fuzzy-matches the standard entry (intended), so a few loosely
+   worded listings that used to attach to the standard product will not.
+ - No Windows installer was built or signed, nothing was published, and no production data was touched.

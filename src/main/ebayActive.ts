@@ -6,6 +6,7 @@ import type { PhotoCheck } from "./compPhotoCheck.js";
 import { compMatchesSpecs, specReference } from "./compFilter.js";
 import { median } from "./marketValue.js";
 import { judgeSameProduct } from "./watchcount.js";
+import { editionConflict } from "./variantIdentity.js";
 
 export interface ActiveAsks {
   // Listings dropped because their photo showed a different product than the product's reference photos.
@@ -55,16 +56,18 @@ export async function fetchActiveAsks(
   photoCheck?: PhotoCheck | null,
   broken = false,
   // The product's Database family ("PlayStation > Consoles"): for a console, only listings filed under a console category count.
-  familyHint: string | null = null
+  familyHint: string | null = null,
+  // See watchcount.ts's analyzeEbayComps: the words that separate this product from its general parent.
+  requiredTerms: string[] = []
 ): Promise<ActiveAsks> {
   if (!hasEbayCredentials()) return NO_ASKS;
-  if (broken) return fetchBrokenAsks(query, productName, familyHint);
+  if (broken) return fetchBrokenAsks(query, productName, familyHint, requiredTerms);
   try {
     const items = onlyRightCategory(await searchEbayItems(query, { limit: ACTIVE_LISTINGS_TO_FETCH }), familyHint);
     const reference = specReference(query, productName);
     // Parts-only / not-working listings say nothing about what a working one is worth.
     const candidates = items.filter(
-      (i) => i.priceCurrency === "USD" && i.priceValue !== null && Number.isFinite(Number(i.priceValue)) && !/parts|not working/i.test(i.condition ?? "") && compMatchesSpecs(reference, i.title)
+      (i) => i.priceCurrency === "USD" && i.priceValue !== null && Number.isFinite(Number(i.priceValue)) && !/parts|not working/i.test(i.condition ?? "") && compMatchesSpecs(reference, i.title) && !editionConflict(`${query} ${productName}`, i.title, requiredTerms)
     );
     if (candidates.length === 0) return NO_ASKS;
 
@@ -100,12 +103,12 @@ export async function fetchActiveAsks(
  * What sellers ask for BROKEN / for-parts copies of the product (query = its base name): eBay's own "For parts or not working"
  * condition, whose titles are then checked to be this product and not a loose part. Plain text checks, no AI.
  */
-async function fetchBrokenAsks(query: string, productName: string, familyHint: string | null): Promise<ActiveAsks> {
+async function fetchBrokenAsks(query: string, productName: string, familyHint: string | null, requiredTerms: string[] = []): Promise<ActiveAsks> {
   try {
     const items = onlyRightCategory(await searchEbayItems(query, { limit: ACTIVE_LISTINGS_TO_FETCH, conditionIds: ["7000"] }), familyHint);
     const reference = specReference(query, productName);
     const kept = items.filter(
-      (i) => i.priceCurrency === "USD" && i.priceValue !== null && Number.isFinite(Number(i.priceValue)) && titleLooksLikeBrokenProduct(query, i.title, true) && compMatchesSpecs(reference, i.title)
+      (i) => i.priceCurrency === "USD" && i.priceValue !== null && Number.isFinite(Number(i.priceValue)) && titleLooksLikeBrokenProduct(query, i.title, true) && compMatchesSpecs(reference, i.title) && !editionConflict(`${query} ${productName}`, i.title, requiredTerms)
     );
     const all = kept.map(askedTotalUsd);
     // A loose part or accessory listed in the same condition (a $40 power supply) is far under the consoles: drop what is under

@@ -40,7 +40,10 @@ import {
 } from "./chat.js";
 import { randomUUID } from "node:crypto";
 import { lookupProduct, expandSearchKeywords } from "./products.js";
-import { downloadImageAsDataUri, shrinkImageDataUri, findBrandLogoImage, findGroupImage, findPoorConditionProductImage, findReferencePhotos, findFreeReferencePhotos, buildImageCollage, generateCategoryImage, lookUpOnWeb } from "./webResearch.js";
+import { downloadImageAsDataUri, shrinkImageDataUri, findBrandLogoImage, findGroupImage, findPoorConditionProductImage, findReferencePhotos, findFreeReferencePhotos, buildImageCollage, generateCategoryImage, lookUpOnWeb, webVerifyDeps } from "./webResearch.js";
+import { verifyVariant, reconcileVerdict, type VariantVerdict } from "./variantEvidence.js";
+import { createdVariantMessage, createVerdictMemory, decideResearchTarget, makeClaimVerifier, publicHttpUrls } from "./variantResearch.js";
+import { distinguishingTokens } from "./variantIdentity.js";
 import {
   answerImageQuestion,
   reconsiderImageFeedback,
@@ -953,41 +956,66 @@ async function executeChatTool(
   // Clynx looking something up the way a person would (a web search it reads and explains in chat): nothing is saved or changed.
   if (call.name === "web_research") {
     const query = String(call.args.query ?? "").trim();
-    if (!query) return "Failed: no search query given.";
-    return await lookUpOnWeb(query);
+    const url = publicHttpUrls(String(call.args.url ?? "") || query, 1)[0] ?? null;
+    if (!query && !url) return "Failed: no search query given.";
+    return await lookUpOnWeb(query, url);
   }
 
   if (call.name === "research_product") {
     const product = String(call.args.product ?? "").trim();
     if (!product) return "Failed: no product name given.";
-    // Fuzzy, not just exact — asking to research "PS5 Slim" when the
-    // Database already has "PlayStation 5 Slim" (see store.ts's
-    // findMatchingProduct) should refresh/reinforce that one entry, not
-    // spawn a near-duplicate under the new phrasing.
-    const existing = store.findMatchingProduct(product);
-    if (existing) {
-      store.setProductLoading(existing.id, true);
-      sendToRenderer("products:updated", store.getProductById(existing.id));
-      // Bug fix (verified live): this used to re-research existing.name —
-      // the entry's own, more GENERIC stored name — discarding whatever
-      // more specific wording the user actually typed. Asking to research
-      // "New Nintendo 3DS XL - Galaxy Edition" against an existing generic
-      // "Nintendo 3DS XL" entry silently re-ran a plain "Nintendo 3DS XL"
-      // search, so the AI never even saw "Galaxy Edition" and obviously
-      // couldn't say anything about it. findMatchingProduct is deliberately
-      // permissive (see isSimilarProductName) so a more specific variant
-      // still folds into the SAME family entry rather than spawning a
-      // near-duplicate — but folding into the same entry should never mean
-      // throwing away the extra specificity the user asked about; `product`
-      // (the user's actual query) is what has to actually get researched,
-      // existing.id is just where the result gets saved.
-      runProductLookup(existing.id, product, { source: "you" });
-      return `Already have a Database profile for "${existing.name}" — refreshing it with a fresh web search for "${product}" now, check the Database tab in a moment.`;
+    const userUrls = publicHttpUrls(`${String(call.args.url ?? "")} ${product}`);
+    // A more specific version of a product already on file (an edition, a capacity, a color, a bundle, a regional model) is a separate product:
+    // it is checked against evidence first, and only then recorded as its own entry linked to the general one. The old behavior folded it into the
+    // general entry (rewriting that profile, showing the standard model's prices for it) and filed names nobody had confirmed.
+    const decision = await decideResearchTarget(product, {
+      findMatching: (name) => store.findMatchingProduct(name),
+      listTracked: () => store.listProductIndex(),
+      verify: (name, parent) => verifyClaim(name, parent, userUrls),
+    });
+
+    if (decision.kind === "not_recorded") {
+      // Nothing becomes a product. What was found is kept on the general entry so the next question starts from it.
+      store.recordVariantClaim(decision.parent.id, decision.verdict);
+      sendToRenderer("products:updated", store.getProductById(decision.parent.id));
+      return decision.message;
     }
+
+    if (decision.kind === "create_variant") {
+      const parentFull = store.getProductById(decision.parent.id);
+      const candidateId = randomUUID();
+      const id = store.addProductStub(candidateId, product);
+      if (id !== candidateId) {
+        // Already in the Database under this name: refresh that one, with the evidence.
+        store.setProductLoading(id, true);
+        store.setProductVariantEvidence(id, reconcileVerdict(store.getProductById(id)?.variantEvidence ?? null, decision.verdict));
+        sendToRenderer("products:updated", store.getProductById(id));
+        runProductLookup(id, product, { source: "you", verdict: decision.verdict, skipSiblingDiscovery: true });
+        return `Already have "${product}" in the Database; refreshing it now with the evidence (${decision.verdict.status}: ${decision.verdict.basis}). It is saved when that finishes.`;
+      }
+      store.setProductParent(id, decision.parent.id);
+      store.setProductVariantEvidence(id, decision.verdict);
+      sendToRenderer("products:updated", store.getProductById(id));
+      runProductLookup(id, product, { source: "you", verdict: decision.verdict, skipSiblingDiscovery: true, forcedFamily: parentFull?.family ?? undefined });
+      return createdVariantMessage(product, decision.parent, decision.verdict);
+    }
+
+    if (decision.kind === "refresh_existing") {
+      const existing = store.getProductById(decision.existing.id);
+      if (existing) {
+        store.setProductLoading(existing.id, true);
+        sendToRenderer("products:updated", store.getProductById(existing.id));
+        // The user's own wording is what gets researched, not the entry's more generic stored name (a verified past bug: the AI never saw
+        // "Galaxy Edition" because the entry's plain name was searched instead).
+        runProductLookup(existing.id, product, { source: "you" });
+        return `Already have a Database profile for "${existing.name}"; refreshing it with a fresh web search for "${product}" now. It is saved when the research finishes (the Discovery tab shows progress), so don't say it is saved yet.`;
+      }
+    }
+
     const id = store.addProductStub(randomUUID(), product);
     sendToRenderer("products:updated", store.getProductById(id));
     runProductLookup(id, product, { source: "you" });
-    return `Added "${product}" to the Database and researching it now — variant/identifying details will show up on the Database tab in a moment.`;
+    return `Started researching "${product}" and added it to the Database as a new entry. It is saved when the research finishes (the Discovery tab shows progress), so don't say it is saved yet.`;
   }
 
   if (call.name === "add_product_watch_note") {
@@ -1667,10 +1695,15 @@ async function researchEbayComps(
   const thumb = store.getProductById(id)?.imageUrl;
   if (referencePhotos.length === 0 && thumb && thumb.startsWith("data:image")) referencePhotos.push(thumb);
   const photoCheck = makePhotoCheck(fallbackName, referencePhotos);
-  const analysis = await analyzeEbayComps(query, comps, fallbackName, photoCheck);
+  // A version of a general product (a special edition, a theme, a bundle) is valued only from sales of that version: the words that separate it
+  // from its parent must be in a sale's title, or the sale is the standard model's and is left out (no sales left = not enough evidence).
+  const self = store.getProductById(id);
+  const parentEntry = self?.parentProductId ? store.getProductById(self.parentProductId) : null;
+  const requiredTerms = parentEntry ? distinguishingTokens(fallbackName, parentEntry.name).other.filter((t) => !/^\d+$/.test(t)) : [];
+  const analysis = await analyzeEbayComps(query, comps, fallbackName, photoCheck, false, requiredTerms);
   // What sellers are asking for the same thing right now: sold comps stay the main evidence, asking prices fill in
   // when there are few of them (see marketValue.ts). Never fails the research: no data just means sold comps alone.
-  const active = await fetchActiveAsks(query, fallbackName, analysis.dominantCondition, photoCheck, false, store.getProductById(id)?.family ?? null);
+  const active = await fetchActiveAsks(query, fallbackName, analysis.dominantCondition, photoCheck, false, store.getProductById(id)?.family ?? null, requiredTerms);
   // Both sides are what a buyer pays IN TOTAL (sold: item + shipping paid; asking: item + the seller's shipping charge).
   const estimate = estimateMarketValue(
     { mean: buyerTotalUsd(analysis.avgSoldPriceUsd, analysis.avgShippingUsd), n: analysis.sampleSize },
@@ -2161,6 +2194,24 @@ function personIsUsingClynx(): boolean {
     return false;
   }
 }
+// What the evidence check has already concluded this session, so a later question about the same product reuses it instead of contradicting or
+// repeating it (the Database keeps the same verdicts across sessions: see Store.setProductVariantEvidence / recordVariantClaim).
+const variantVerdictMemory = createVerdictMemory();
+const verifyClaim = makeClaimVerifier({
+  memory: variantVerdictMemory,
+  persisted: (claim, parent) => {
+    const entry = store.getProductByName(claim);
+    if (entry?.variantEvidence) return entry.variantEvidence;
+    const lower = claim.toLowerCase();
+    return store.getProductById(parent.id)?.variantClaims.find((c) => c.claim.toLowerCase() === lower) ?? null;
+  },
+  check: (claim, parent, userUrls) => {
+    const family = store.getProductById(parent.id)?.family ?? null;
+    const brandHints = [family?.split(">")[0].trim() ?? ""].filter(Boolean);
+    return verifyVariant(claim, webVerifyDeps(), { brandHints, userUrls, maxSteps: 7 });
+  },
+});
+
 async function runProductLookup(...args: Parameters<typeof runProductLookupInner>): Promise<void> {
   researchActive++;
   try {
@@ -2191,7 +2242,7 @@ async function runProductLookupInner(
   // param. Only set by call sites that genuinely have a live, current
   // listing in scope; everything else keeps today's behavior.
   // source: why this product is being looked into (shown on its Discovery entry).
-  opts: { skipSiblingDiscovery?: boolean; forcedFamily?: string; triggeringListing?: { title: string; imageDataUri?: string | null }; source?: DiscoverySource } = {}
+  opts: { skipSiblingDiscovery?: boolean; forcedFamily?: string; triggeringListing?: { title: string; imageDataUri?: string | null }; source?: DiscoverySource; verdict?: VariantVerdict | null } = {}
 ): Promise<void> {
   // A user-picked thumbnail (see products:pickThumbnail) is deliberate —
   // research finding (or not finding) a photo of its own should never
@@ -2226,7 +2277,7 @@ async function runProductLookupInner(
   if (opts.triggeringListing?.title) discovery.note(id, "step", `The listing that caught my eye: "${opts.triggeringListing.title}".`);
   let researchFailed = false;
   try {
-    const result = await lookupProduct(name);
+    const result = await lookupProduct(name, { verdict: opts.verdict ?? before?.variantEvidence ?? null });
     // Reaction is available as soon as the main research call resolves —
     // broadcast it right away rather than waiting for the remaining steps
     // below (eBay comps, sibling discovery) to also finish, so the
@@ -2316,11 +2367,19 @@ async function runProductLookupInner(
     }
 
     store.updateProductProfile(id, {
-      ...result,
+      aiSummary: result.aiSummary,
+      category: result.category,
       family: resolvedFamily,
       familyLogoUrl,
       imageUrl,
     });
+    // What the evidence check found about a specific edition/configuration is kept with the product (never replacing a stronger earlier finding
+    // with a weaker one), and said on the Discovery feed in plain words.
+    if (result.evidence) {
+      const kept = reconcileVerdict(store.getProductById(id)?.variantEvidence ?? null, result.evidence);
+      store.setProductVariantEvidence(id, kept);
+      discovery.note(id, "step", `Evidence check: ${kept.status}. ${kept.basis}`);
+    }
 
     // Stock photos + a reference gallery (see fillReferencePhotos). A brand-
     // new product (no family yet) gets its stock photo as the thumbnail; an

@@ -1,0 +1,10 @@
+CLYNX BETA 8 - SOURCE DRAFT (NOT BUILT, NOT SIGNED, NOT PUBLISHED)
+
+Version      0.3.0-beta.8 (beta channel), package.json updated; release notes in release-notes/0.3.0-beta.8.txt
+Contents     Universal product variant recognition (see VARIANT_RECOGNITION_REPORT.txt). Includes everything in Beta 7.
+Installer    not built. The signed installer, its SHA-256 and the server draft registration still have to be produced on the Windows build machine
+             (npm run dist:beta, then the usual draft/sign steps). Nothing was published and no production data was touched.
+
+Tests        see VARIANT_RECOGNITION_REPORT.txt for the exact results of the desktop suite and the typechecks.
+
+To release: build and sign the installer, register it as a draft, then website console > Releases > 0.3.0-beta.8 > Approve, then Publish (type the version).
