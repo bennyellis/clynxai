@@ -168,6 +168,7 @@ export { estimateListingAgeHours, isListingTooOld } from "./listingAge.js";
 import { estimateListingAgeHours, isListingTooOld } from "./listingAge.js";
 import { conditionTextOf } from "./listingText.js";
 import { feedCandidates } from "./feedCandidates.js";
+import { listingMayFeedProduct } from "./photoIdentity.js";
 import { REEVAL_MAX_PER_VISIT, currentAgeText, reevaluationReason, requalifyEligible, scoredFromRecord, type ReevalReason } from "./relisting.js";
 import { checkArrivedLocation, type LocationCheck } from "./locationCheck.js";
 import { PassAccount, type ListingOutcome } from "./passAccount.js";
@@ -2863,7 +2864,10 @@ export class ScrapeEngine {
           const updatedProduct = this.opts.store.appendProductObservation(target, subject, noteParts.join(" — "));
           if (updatedProduct) this.opts.onProductUpdated(updatedProduct);
         }
-        if (subjectImageDataUri && photoAllowed) {
+        // Beta 12: a listing whose own title says it is a game, an accessory or another model never lends its photo to this entry (photoIdentity.ts).
+        if (subjectImageDataUri && photoAllowed && !listingMayFeedProduct(target.name, listing.title)) {
+          this.log("info", `Kept the photo of "${listing.title}" out of "${target.name}": the listing's title says it is a different kind of thing.`, undefined, target.name);
+        } else if (subjectImageDataUri && photoAllowed) {
           this.opts.store.addProductImage(target.id, subjectImageDataUri, listing.title);
           this.opts.onReferencePhotoAdded?.(target.id);
         }

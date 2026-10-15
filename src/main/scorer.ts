@@ -1,6 +1,8 @@
 import type { EngineConfig, ExtractionResult, FeedbackExample, ListingDetail, SearchItem, ScoredListing } from "./types.js";
 import { CLYNX_VOICE } from "./voice.js";
 import { looksBroken } from "./brokenVariant.js";
+import { accessorySignal, mediaSignal } from "./productKind.js";
+import { variantFamilyDecision } from "./variantFamily.js";
 import { conditionTextOf } from "./listingText.js";
 import { detectConditionImpactText, type ConditionImpact } from "./conditionParser.js";
 import { withinNegotiationReach } from "./profitGate.js";
@@ -166,8 +168,34 @@ function isAccessoryOnlyMismatch(lowerTitle: string, itemTerms: string[], allowB
 export const VARIANT_QUALIFIER_WORDS = ["pro", "max", "plus", "mini", "lite", "se", "xl", "oled", "air"];
 
 function hasUnrequestedVariant(lowerTitle: string, itemTerms: string[]): boolean {
+  return unrequestedVariantWords(lowerTitle, itemTerms).length > 0;
+}
+
+function unrequestedVariantWords(lowerTitle: string, itemTerms: string[]): string[] {
   const itemWords = new Set(itemTerms.flatMap((t) => t.toLowerCase().split(/\s+/)));
-  return VARIANT_QUALIFIER_WORDS.some((q) => !itemWords.has(q) && new RegExp(`\\b${q}\\b`).test(lowerTitle));
+  return VARIANT_QUALIFIER_WORDS.filter((q) => !itemWords.has(q) && new RegExp(`\\b${q}\\b`).test(lowerTitle));
+}
+
+// Beta 12 — "Search for variants": for an entry that accepts its product family's variants, the plain "unrequested variant word" veto is replaced by the family decision
+// (variantFamily.ts): Plus / Pro / Max / editions are welcome, a different model, an accessory or a game that names the platform is not.
+function rejectedByVariantRules(ref: SearchItem, lowerTitle: string, terms: string[]): boolean {
+  // Whatever the setting, a game or software that merely names the platform, or a listing that is ABOUT an accessory (a case, a charger cable), is not the product itself.
+  const own = terms.join(" ").toLowerCase();
+  const media = mediaSignal(lowerTitle);
+  if (media && !mediaSignal(ref.item)) return true;
+  const acc = accessorySignal(lowerTitle);
+  if (acc && !accessorySignal(ref.item) && !own.includes(acc.toLowerCase())) return true;
+  if (!ref.acceptVariants) return hasUnrequestedVariant(lowerTitle, terms);
+  return !variantFamilyDecision(ref.item, terms, lowerTitle, unrequestedVariantWords(lowerTitle, terms)).accept;
+}
+
+/** True when this listing is accepted for the entry only as a VARIANT of it (so it must be priced as its own product, never from the entry's value). */
+export function isVariantOfEntry(ref: SearchItem, title: string): boolean {
+  if (!ref.acceptVariants) return false;
+  const lower = title.toLowerCase();
+  const terms = getSearchTerms(ref);
+  const d = variantFamilyDecision(ref.item, terms, lower, unrequestedVariantWords(lower, terms));
+  return d.accept && d.isVariant;
 }
 
 // Deterministic keyword match against your Search For list. Deliberately
@@ -197,7 +225,7 @@ export function matchSearchItem(title: string, searchItems: SearchItem[]): Searc
   for (const ref of searchItems) {
     const terms = getSearchTerms(ref);
     if (isAccessoryOnlyMismatch(lower, terms, !!ref.includeBroken)) continue;
-    if (hasUnrequestedVariant(lower, terms)) continue;
+    if (rejectedByVariantRules(ref, lower, terms)) continue;
     for (const kw of terms) {
       if (titleContainsAllWords(lower, kw) && !modelLettersConflict(kw, lower) && kw.length > bestLen) {
         best = ref;
@@ -222,7 +250,7 @@ export function isRelevantToSearchItems(title: string, searchItems: SearchItem[]
   const lower = title.toLowerCase();
   return searchItems.some((ref) => {
     const terms = getSearchTerms(ref);
-    if (hasUnrequestedVariant(lower, terms)) return false;
+    if (rejectedByVariantRules(ref, lower, terms)) return false;
     return terms.some((kw) => titleContainsAllWords(lower, kw) && !modelLettersConflict(kw, lower));
   });
 }
@@ -670,12 +698,17 @@ export async function scoreListing(
     // With "include broken" on, a broken / for-parts listing is worth what broken ones of it sell for (the Database variant),
     // not a quarter of the working price.
     const broken = candidate.includeBroken && looksBroken(conditionTextOf(listing)) ? (brokenValueFor?.(candidate.item) ?? null) : null;
-    const databaseValueUsd = broken ? broken.value : (valueFor?.(candidate.item, listing.title) ?? null);
+    // Beta 12: a listing accepted only as a VARIANT of the entry (iPhone 15 Pro Max under an "iPhone 15" search) is never priced from the entry's value or the reference price typed for
+    // it: only from a Database product that IS that variant. With none, it is judged like an unpriced find and validated against its own market numbers.
+    const variantOnly = isVariantOfEntry(candidate, listing.title);
+    const databaseValueUsd = broken ? broken.value : variantOnly ? (valueForTitle?.(listing.title)?.value ?? null) : (valueFor?.(candidate.item, listing.title) ?? null);
+    const pricedEntry: SearchItem = variantOnly ? { ...candidate, typicalResaleUsd: 0 } : candidate;
+    if (variantOnly) extraction.reasoning = `Accepted as a variant of your "${candidate.item}" search; it is valued on its own sales, never on the base model's price.`;
     if (broken) {
       extraction.brokenVariant = broken.name;
       extraction.reasoning = `Matches your "${candidate.item}" search as a broken / for-parts copy, so it is priced from the Database's "${broken.name}" variant (what broken ones sell for) instead of the working product.`;
     }
-    if (candidate.typicalResaleUsd <= 0 && !(databaseValueUsd !== null && databaseValueUsd > 0)) {
+    if (pricedEntry.typicalResaleUsd <= 0 && !(databaseValueUsd !== null && databaseValueUsd > 0)) {
       const general = await extractGeneralDeal(listing, config.customInstructions, feedbackExamples);
       const confidenceOk = CONFIDENCE_RANK[general.confidence] >= CONFIDENCE_RANK[config.generalDeal.minConfidence];
       // Per explicit instruction — a flagged condition no longer vetoes this
@@ -693,7 +726,9 @@ export async function scoreListing(
           extractedAttributes: general.category,
           conditionImpact: effectiveConditionImpact,
           confidence: general.confidence,
-          reasoning: `Matches your "${candidate.item}" search — no reference price set yet, so judged on Clynx's own read of the price: ${general.reasoning}`,
+          reasoning: variantOnly
+            ? `Accepted as a variant of your "${candidate.item}" search; it is valued on its own sales, never on the base model's price. No price of its own yet, so judged on Clynx's own read of the price: ${general.reasoning}`
+            : `Matches your "${candidate.item}" search — no reference price set yet, so judged on Clynx's own read of the price: ${general.reasoning}`,
           ...(general.unavailable ? { judgeUnavailable: true } : {}),
         },
         referencePriceUsd: null,
@@ -707,7 +742,7 @@ export async function scoreListing(
 
     const settings = resaleSettingsFrom(config);
     const shippingUsd = listing.ebayShippingUsd ?? 0;
-    const pricing = evaluateSearchItemPricing(candidate, listing.price, broken ? "none" : conditionImpact, candidate.maxPriceUsd, {
+    const pricing = evaluateSearchItemPricing(pricedEntry, listing.price, broken ? "none" : conditionImpact, candidate.maxPriceUsd, {
       valueUsd: databaseValueUsd,
       shippingUsd,
       settings,

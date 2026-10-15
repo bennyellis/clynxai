@@ -805,6 +805,8 @@ function FiltersCard() {
   // "Include broken / for-parts listings" for the product being added (no extra searches: it only decides whether a broken
   // listing that turns up in the normal search is taken seriously and priced as a broken copy).
   const [includeBrokenDraft, setIncludeBrokenDraft] = useState(false);
+  // "Search for variants" for the product being added: accept the product family's own variants among the listings Facebook returns (no extra searches).
+  const [acceptVariantsDraft, setAcceptVariantsDraft] = useState(false);
   // Per explicit instruction — "Search For = search for this now, Watch =
   // continue looking for this over time... provide an action such as
   // Watch so the user can turn something they're currently searching for
@@ -857,7 +859,8 @@ function FiltersCard() {
     linkedProductId: string | null,
     minPriceUsd: number | null,
     maxPriceUsd: number | null,
-    includeBroken = false
+    includeBroken = false,
+    acceptVariants = false
   ) {
     if (!name || adding) return;
     setAdding(true);
@@ -868,7 +871,7 @@ function FiltersCard() {
       // account's scanner or runs an immediate search itself (see index.ts's
       // add_search_item) — Start Scanning is the only thing that does that
       // now, same as any other change to what you're looking for.
-      await api.searchForProducts([name], linkedProductId, minPriceUsd, maxPriceUsd, includeBroken);
+      await api.searchForProducts([name], linkedProductId, minPriceUsd, maxPriceUsd, includeBroken, acceptVariants);
     } finally {
       setAdding(false);
     }
@@ -887,6 +890,7 @@ function FiltersCard() {
       setPriceMinDraft("");
       setPriceMaxDraft("");
       setIncludeBrokenDraft(false);
+      setAcceptVariantsDraft(false);
       setPendingPrice({ name, linkedProductId: match?.id ?? null });
     } finally {
       setAdding(false);
@@ -897,14 +901,14 @@ function FiltersCard() {
     if (!pendingPrice) return;
     const { name, linkedProductId } = pendingPrice;
     setPendingPrice(null);
-    addToSearchList(name, linkedProductId, parsePriceDraft(priceMinDraft), parsePriceDraft(priceMaxDraft), includeBrokenDraft);
+    addToSearchList(name, linkedProductId, parsePriceDraft(priceMinDraft), parsePriceDraft(priceMaxDraft), includeBrokenDraft, acceptVariantsDraft);
   }
 
   function skipPendingPrice() {
     if (!pendingPrice) return;
     const { name, linkedProductId } = pendingPrice;
     setPendingPrice(null);
-    addToSearchList(name, linkedProductId, null, null, includeBrokenDraft);
+    addToSearchList(name, linkedProductId, null, null, includeBrokenDraft, acceptVariantsDraft);
   }
 
   if (!config) return null;
@@ -970,6 +974,19 @@ function FiltersCard() {
                 )}
                 <button
                   className="icon ghost"
+                  title={
+                    s.acceptVariants
+                      ? `Variants of "${s.item}" are accepted (for example Plus / Pro / editions) among the listings Facebook returns. Click to accept only "${s.item}" itself.`
+                      : `Only "${s.item}" itself is accepted. Click to also accept its variants (for example Plus / Pro / editions) among the listings Facebook returns. No extra searches are made.`
+                  }
+                  aria-pressed={!!s.acceptVariants}
+                  onClick={() => void api.setSearchItemVariants({ item: s.item, acceptVariants: !s.acceptVariants })}
+                  style={{ padding: "0 5px", fontSize: 12, lineHeight: 1.4, color: s.acceptVariants ? "var(--accent)" : "var(--text-dim)", fontWeight: s.acceptVariants ? 700 : 500 }}
+                >
+                  {s.acceptVariants ? "+variants" : "exact"}
+                </button>
+                <button
+                  className="icon ghost"
                   title={`Turn "${s.item}" into a persistent Watch`}
                   onClick={() => setWatchPromoteTarget(s)}
                   style={{ padding: "0 4px", fontSize: 13, lineHeight: 1, color: "var(--text-dim)" }}
@@ -1013,7 +1030,7 @@ function FiltersCard() {
             <span style={{ fontSize: 12.5, color: "var(--text-dim)", fontWeight: 600 }}>Recent searches</span>
             {recentChips.map((r) => (
               <span
-                key={`${r.item}|${r.minPriceUsd ?? ""}|${r.maxPriceUsd ?? ""}|${r.includeBroken ? "b" : ""}`}
+                key={`${r.item}|${r.minPriceUsd ?? ""}|${r.maxPriceUsd ?? ""}|${r.includeBroken ? "b" : ""}|${r.acceptVariants ? "v" : ""}`}
                 className="pill"
                 style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 4px 3px 4px", fontSize: 13 }}
               >
@@ -1021,7 +1038,7 @@ function FiltersCard() {
                   className="icon ghost"
                   title={`Add "${r.item}"${formatPriceRangeLabel(r.minPriceUsd, r.maxPriceUsd) ? ` (${formatPriceRangeLabel(r.minPriceUsd, r.maxPriceUsd)})` : ""} to the Search For list again`}
                   disabled={adding}
-                  onClick={() => addToSearchList(r.item, r.linkedProductId ?? null, r.minPriceUsd, r.maxPriceUsd, !!r.includeBroken)}
+                  onClick={() => addToSearchList(r.item, r.linkedProductId ?? null, r.minPriceUsd, r.maxPriceUsd, !!r.includeBroken, !!r.acceptVariants)}
                   style={{ padding: "2px 8px", fontSize: 13, display: "inline-flex", gap: 6, alignItems: "baseline" }}
                 >
                   <span>{r.item}</span>
@@ -1029,11 +1046,12 @@ function FiltersCard() {
                     <span style={{ color: "var(--text-dim)", fontWeight: 600, fontSize: 12 }}>{formatPriceRangeLabel(r.minPriceUsd, r.maxPriceUsd)}</span>
                   )}
                   {r.includeBroken && <span title="Includes broken / for-parts listings">🔧</span>}
+                  {r.acceptVariants && <span title="Accepts the product's variants">+variants</span>}
                 </button>
                 <button
                   className="icon ghost"
                   title={`Forget "${r.item}"`}
-                  onClick={() => void api.removeRecentSearch({ item: r.item, minPriceUsd: r.minPriceUsd, maxPriceUsd: r.maxPriceUsd, includeBroken: !!r.includeBroken })}
+                  onClick={() => void api.removeRecentSearch({ item: r.item, minPriceUsd: r.minPriceUsd, maxPriceUsd: r.maxPriceUsd, includeBroken: !!r.includeBroken, acceptVariants: !!r.acceptVariants })}
                   style={{ padding: "0 4px", fontSize: 12, lineHeight: 1, color: "var(--text-dim)" }}
                 >
                   ×
@@ -1096,6 +1114,19 @@ function FiltersCard() {
               <span style={{ display: "block", fontSize: 12.5, color: "var(--text-dim)", marginTop: 2 }}>
                 Broken ones often resell for far more than they cost. Clynx doesn't search for anything extra: if a broken listing shows up in the normal
                 search it gets priced as a broken copy, using its own "(For Parts / Broken)" variant in the Database.
+              </span>
+            </span>
+          </label>
+          <label
+            style={{ display: "flex", alignItems: "flex-start", gap: 10, fontSize: 14.5, color: "var(--text)", cursor: "pointer", textTransform: "none", letterSpacing: 0, fontWeight: 500 }}
+          >
+            <input type="checkbox" checked={acceptVariantsDraft} onChange={(e) => setAcceptVariantsDraft(e.target.checked)} style={{ marginTop: 3 }} />
+            <span>
+              Search for variants
+              <span style={{ display: "block", fontSize: 12.5, color: "var(--text-dim)", marginTop: 2 }}>
+                Off: only this exact product. On: also accept its variants (for example iPhone 15 Plus / Pro / Pro Max) among the listings Facebook already returns for
+                "{pendingPrice?.name}". Clynx makes no extra searches, and each variant is priced from its own sales, never from the base model's. Cases, parts, games
+                and other models are still skipped.
               </span>
             </span>
           </label>

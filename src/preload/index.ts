@@ -38,7 +38,8 @@ const api = {
     patch: Partial<Pick<Config, "maxListingAgeHours" | "rotateSearchItems" | "rotateSearchItemsCount">>
   ): Promise<void> => ipcRenderer.invoke("filters:update", patch),
   removeSearchItem: (item: string): Promise<void> => ipcRenderer.invoke("filters:removeSearchItem", { item }),
-  removeRecentSearch: (search: { item: string; minPriceUsd: number | null; maxPriceUsd: number | null; includeBroken?: boolean }): Promise<void> => ipcRenderer.invoke("searches:removeRecent", search),
+  setSearchItemVariants: (args: { item: string; acceptVariants: boolean }): Promise<void> => ipcRenderer.invoke("filters:setSearchItemVariants", args),
+  removeRecentSearch: (search: { item: string; minPriceUsd: number | null; maxPriceUsd: number | null; includeBroken?: boolean; acceptVariants?: boolean }): Promise<void> => ipcRenderer.invoke("searches:removeRecent", search),
 
   hasOpenAIKey: (): Promise<boolean> => ipcRenderer.invoke("env:hasOpenAIKey"),
   saveOpenAIKey: (key: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("env:saveOpenAIKey", key),
@@ -265,7 +266,8 @@ const api = {
     linkedProductId?: string | null,
     minPriceUsd?: number | null,
     maxPriceUsd?: number | null,
-    includeBroken?: boolean
+    includeBroken?: boolean,
+    acceptVariants?: boolean
   ): Promise<{ ok: boolean; message: string }> =>
     ipcRenderer.invoke("search:addProducts", {
       items,
@@ -273,6 +275,7 @@ const api = {
       minPriceUsd: minPriceUsd ?? null,
       maxPriceUsd: maxPriceUsd ?? null,
       includeBroken: includeBroken === true,
+      acceptVariants: acceptVariants === true,
     }),
   // Per explicit instruction — "Watch: keep an eye out for this over time
   // and alert me when it appears," persistent across restarts (unlike

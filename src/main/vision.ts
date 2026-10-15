@@ -3,6 +3,7 @@
 // (see openai.ts). gpt-5-mini is natively multimodal, so this needs no
 // separate provider/key the way Gemini did before switching everything to
 // OpenAI.
+import { visionKindHint } from "./photoIdentity.js";
 import sharp from "sharp";
 import { CLYNX_VOICE } from "./voice.js";
 import { colorsIn } from "./colors.js";
@@ -1090,7 +1091,7 @@ const THUMBNAIL_VERIFICATION_PROMPTS: Record<ThumbnailVerificationKind, (subject
   // the scanner later compares real Facebook/eBay listings against, so a
   // photo of the WRONG model/variant is worse than no photo at all.
   reference: (subject) =>
-    `You're checking a candidate REFERENCE PHOTO for the exact product "${subject}". It will be used to recognize this product in marketplace listings, so it must show that exact product — the correct model, generation and variant (reject a sibling model, an older/newer generation, a different size or edition, or a bundle where this product isn't the clear main subject). Accept a clean product shot, packaging/box art or cover art for it, or a real-world photo of it from any angle. Reject: a brand/company logo, a screenshot of gameplay or a webpage, a wallpaper or fan art, a collage of several different products, an accessory/part/case for it rather than the product itself, an image that is mostly text/ads/banners, and anything blurry or too small to identify.`,
+    `You're checking a candidate REFERENCE PHOTO for the exact product "${subject}". It will be used to recognize this product in marketplace listings, so it must show that exact product — the correct model, generation and variant (reject a sibling model, an older/newer generation, a different size or edition, or a bundle where this product isn't the clear main subject). Accept a clean product shot, the product's own packaging/box art, or a real-world photo of it from any angle. Reject: a brand/company logo, a screenshot of gameplay or a webpage, a wallpaper or fan art, a collage of several different products, an accessory/part/case for it rather than the product itself, the box, cover or disc of a video game or other software that merely names the platform or shares a word with the product name, an image that is mostly text/ads/banners, and anything blurry or too small to identify.`,
   group: (subject) =>
     `You're checking a candidate thumbnail meant to represent a general collection/category: "${subject}" — it should reasonably represent that whole grouping (not one unrelated single item, and not a brand logo/wordmark).`,
 };
@@ -1120,7 +1121,9 @@ export async function verifyThumbnailCandidate(
     return { matches: false, reason: null, error: (err as Error).message };
   }
 
-  const prompt = `${THUMBNAIL_VERIFICATION_PROMPTS[kind](subjectName)}
+  // Beta 12: tell the model what KIND of thing the product is (a console is not a game that shares a word with it); see photoIdentity.visionKindHint.
+  const kindHint = kind === "product" || kind === "reference" ? visionKindHint(subjectName) : "";
+  const prompt = `${THUMBNAIL_VERIFICATION_PROMPTS[kind](subjectName)}${kindHint}
 
 Look at the image and decide whether it actually matches what's described above.
 

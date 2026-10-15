@@ -46,7 +46,7 @@ import { verifyVariant, reconcileVerdict, type VariantVerdict } from "./variantE
 import { createVerdictMemory, makeClaimVerifier, publicHttpUrls } from "./variantResearch.js";
 import { runResearchProductTool } from "./researchTool.js";
 import { settleLateMarketCheck } from "./marketCheckSettle.js";
-import { describeSummary, emptySummary } from "./compIdentity.js";
+import { describeSummary, emptySummary, listingContradictsEntry } from "./compIdentity.js";
 import { distinguishingTokens } from "./variantIdentity.js";
 import {
   answerImageQuestion,
@@ -895,11 +895,12 @@ async function executeChatTool(
     const minPriceUsd = typeof call.args.minPriceUsd === "number" ? call.args.minPriceUsd : null;
     const maxPriceUsd = typeof call.args.maxPriceUsd === "number" ? call.args.maxPriceUsd : null;
     const includeBroken = call.args.includeBroken === true;
-    const newItem = { item, matchKeywords, typicalResaleUsd, linkedProductId, minPriceUsd, maxPriceUsd, ...(includeBroken ? { includeBroken: true } : {}) };
+    const acceptVariants = call.args.acceptVariants === true;
+    const newItem = { item, matchKeywords, typicalResaleUsd, linkedProductId, minPriceUsd, maxPriceUsd, ...(includeBroken ? { includeBroken: true } : {}), ...(acceptVariants ? { acceptVariants: true } : {}) };
     config = {
       ...config,
       searchItems: [...config.searchItems, newItem],
-      recentSearches: pushRecentSearch(config.recentSearches, { item, minPriceUsd, maxPriceUsd, linkedProductId, includeBroken }),
+      recentSearches: pushRecentSearch(config.recentSearches, { item, minPriceUsd, maxPriceUsd, linkedProductId, includeBroken, acceptVariants }),
     };
     // Adding a product to Search For never turns general (unverified) deal detection off. The two coexist: the dedicated search runs first
     // at each location and the general browse still runs after it. General detection is only turned off when the user explicitly says so
@@ -1769,10 +1770,13 @@ async function checkMarketBeforeAlert(listing: { title: string; matchedItem: str
   // A listing more specific than the entry it matched is priced under a name of its own, so the general entry's value is not overwritten
   // with the specific product's comps.
   const moreSpecific = signals && !exact && listing.purpose !== "bundle" ? specificResearchName(signals.name, signals.codeAssessment, listing.title) : null;
+  // Beta 12: a listing that is a different / more specific product than the entry it matched (an iPhone 15 Pro Max under an "iPhone 15" search, accepted as a variant) is checked under a
+  // name of its own, never under the entry's: the entry's market numbers are not this product's.
+  const titleIsOtherProduct = !!listing.matchedItem && !exact && !!listingContradictsEntry(listing.matchedItem, listing.title);
   const name =
     signals && exact
       ? signals.name
-      : moreSpecific || listing.matchedItem?.trim() || focalProductName({ signalName: null, matchedItem: null, category: null, title: listing.title });
+      : moreSpecific || (titleIsOtherProduct ? "" : listing.matchedItem?.trim()) || focalProductName({ signalName: null, matchedItem: null, category: null, title: listing.title });
   if (!name) return null;
   const key = name.toLowerCase();
   if (listing.listingId) {
@@ -3519,10 +3523,34 @@ app.whenReady().then(() => {
     }
   );
   // Forget one of the "Recent searches" (Dashboard > Add product).
-  ipcMain.handle("searches:removeRecent", (_e, args: { item: string; minPriceUsd: number | null; maxPriceUsd: number | null; includeBroken?: boolean }) => {
+  ipcMain.handle("searches:removeRecent", (_e, args: { item: string; minPriceUsd: number | null; maxPriceUsd: number | null; includeBroken?: boolean; acceptVariants?: boolean }) => {
     config = { ...config, recentSearches: removeRecentSearch(config.recentSearches, args) };
     saveConfig(CONFIG_PATH, config);
     sendToRenderer("config:updated", config);
+  });
+  // Beta 12: flip "Search for variants" on a Search For entry already on the list. It changes which returned listings are accepted, never what is searched, so no
+  // scanner restart or extra search is needed; the recent-searches entry is updated so the choice is remembered next launch.
+  ipcMain.handle("filters:setSearchItemVariants", (_e, args: { item: string; acceptVariants: boolean }) => {
+    const target = config.searchItems.find((s) => s.item === args.item);
+    if (!target) return;
+    const acceptVariants = args.acceptVariants === true;
+    config = {
+      ...config,
+      searchItems: config.searchItems.map((s) => (s.item === args.item ? { ...s, acceptVariants } : s)),
+      recentSearches: pushRecentSearch(removeRecentSearch(config.recentSearches, { item: target.item, minPriceUsd: target.minPriceUsd, maxPriceUsd: target.maxPriceUsd, includeBroken: !!target.includeBroken, acceptVariants: !acceptVariants }), {
+        item: target.item,
+        minPriceUsd: target.minPriceUsd,
+        maxPriceUsd: target.maxPriceUsd,
+        linkedProductId: target.linkedProductId ?? null,
+        includeBroken: !!target.includeBroken,
+        acceptVariants,
+      }),
+    };
+    saveConfig(CONFIG_PATH, config);
+    sendToRenderer("config:updated", config);
+    const line: LogLine = { ts: Date.now(), level: "info", message: `${acceptVariants ? "Now also accepting variants of" : "Now accepting only"} "${args.item}" (listings Facebook already returns; no extra searches).` };
+    recordLog(line);
+    sendToRenderer("engine:log", line);
   });
   ipcMain.handle("filters:removeSearchItem", (_e, args: { item: string }) => {
     config = { ...config, searchItems: config.searchItems.filter((s) => s.item !== args.item) };
@@ -4703,7 +4731,7 @@ app.whenReady().then(() => {
     "search:addProducts",
     async (
       _e,
-      args: { items: string[]; linkedProductId?: string | null; minPriceUsd?: number | null; maxPriceUsd?: number | null; includeBroken?: boolean }
+      args: { items: string[]; linkedProductId?: string | null; minPriceUsd?: number | null; maxPriceUsd?: number | null; includeBroken?: boolean; acceptVariants?: boolean }
     ): Promise<{ ok: boolean; message: string }> => {
       const seen = new Set<string>();
       const names = args.items.filter((name) => {
@@ -4749,6 +4777,7 @@ app.whenReady().then(() => {
               minPriceUsd: args.minPriceUsd ?? null,
               maxPriceUsd: args.maxPriceUsd ?? null,
               includeBroken: args.includeBroken === true,
+              acceptVariants: args.acceptVariants === true,
             },
           },
           "dashboard"

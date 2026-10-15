@@ -262,6 +262,7 @@ export function editionConflict(reference: string, title: string, required: stri
   const titleTokens = new Set(identityTokens(title));
   const wanted = new Set<string>([...refAttrs.editionTerms, ...required.map((r) => r.toLowerCase())]);
   for (const t of wanted) if (!titleTokens.has(t)) return true;
-  if (EDITION_PHRASE.test(normalizeName(title)) && refAttrs.editionTerms.length === 0 && !EDITION_PHRASE.test(normalizeName(reference))) return true;
+  // (a product whose own name says "Edition" - "Galaxy Black Edition" - IS an edition product: "Special Edition" in a title is then the same kind of thing, not a conflict by itself)
+  if (EDITION_PHRASE.test(normalizeName(title)) && refAttrs.editionTerms.length === 0 && !EDITION_PHRASE.test(normalizeName(reference)) && !/\bedition\b/.test(normalizeName(reference))) return true;
   return false;
 }

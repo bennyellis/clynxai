@@ -22,6 +22,7 @@ import {
   tokens,
 } from "./compFilter.js";
 import { colorsIn } from "./colors.js";
+import { mediaSignal } from "./productKind.js";
 import { editionConflict, extractVariantAttributes, identityTokens } from "./variantIdentity.js";
 
 export type CompVerdict = "exact" | "compatible" | "uncertain" | "rejected";
@@ -35,6 +36,7 @@ export type CompReason =
   | "COLOR"
   | "EDITION"
   | "ACCESSORY"
+  | "MEDIA"
   | "LOT_OR_BUNDLE"
   | "NOT_WORKING"
   | "MODEL_NOT_STATED"
@@ -119,6 +121,9 @@ function judgeAgainst(reference: string, title: string, requiredTerms: string[],
       break;
     }
   }
+  // A game, disc or other software that merely names the platform or shares a word ("Guardians of the Galaxy (Xbox Series X)") is not the console named "... Galaxy ...".
+  const mediaInTitle = mediaSignal(title);
+  if (mediaInTitle && !mediaSignal(reference)) mark("rejected", "MEDIA", `the title reads as a game or software for a platform ("${mediaInTitle}"), not the product`);
   if (COMPATIBLE_WITH.test(title) && !COMPATIBLE_WITH.test(reference)) mark("rejected", "ACCESSORY", `the title says it is for the product ("${COMPATIBLE_WITH.exec(title)?.[0]}")`);
   if (LOT.test(title) && !LOT.test(reference) && !reasons.some((r) => r.code === "LOT_OR_BUNDLE")) mark("rejected", "LOT_OR_BUNDLE", `the title is a lot, a multi-pack or a bundle`);
 
@@ -309,7 +314,7 @@ export function listingContradictsEntry(entryName: string, listingTitle: string)
   if (j.verdict !== "rejected") return null;
   // Identity attributes, and a title that says outright it is something FOR the product. A listing that merely mentions extras ("with 2 controllers") is a
   // bundle of the product, whose value the bundle logic prices from the product's own value, so it is not a contradiction here.
-  const hard = j.reasons.find((r) => ["MODEL_NUMBER", "MODEL_LETTER", "GENERATION", "TIER", "CAPACITY", "EDITION"].includes(r.code) || (r.code === "ACCESSORY" && /says it is for the product/.test(r.text)));
+  const hard = j.reasons.find((r) => ["MODEL_NUMBER", "MODEL_LETTER", "GENERATION", "TIER", "CAPACITY", "EDITION", "MEDIA"].includes(r.code) || (r.code === "ACCESSORY" && /says it is for the product/.test(r.text)));
   return hard ? `${hard.code.toLowerCase().replace(/_/g, " ")}: ${hard.text}` : null;
 }
 

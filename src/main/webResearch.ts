@@ -11,6 +11,7 @@
 
 import sharp from "sharp";
 import { verifyThumbnailCandidate } from "./vision.js";
+import { fileableWithoutPicture, judgeCandidateByText, titleFromLabel } from "./photoIdentity.js";
 import { OPENAI_IMAGE_MODEL, callOpenAI } from "./openai.js";
 import { hasEbayCredentials, searchEbayItems } from "./ebayClient.js";
 import { titleLooksLikeProduct } from "./compFilter.js";
@@ -375,19 +376,25 @@ function hostOfUrl(url: string): string {
 // null for anything obscure enough not to have its own article — that's
 // expected, not an error, and the DuckDuckGo-based fallback below picks up
 // from there.
-async function findImageViaWikipedia(productName: string): Promise<string | null> {
+async function findWikipediaPage(productName: string): Promise<{ url: string; title: string } | null> {
   try {
     const res = await fetchWithTimeout(
       `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(productName.trim().replace(/\s+/g, "_"))}`,
       PAGE_FETCH_TIMEOUT_MS
     );
     if (!res.ok) return null;
-    const data = (await res.json()) as { thumbnail?: { source?: string }; originalimage?: { source?: string } };
+    const data = (await res.json()) as { title?: string; type?: string; description?: string; thumbnail?: { source?: string }; originalimage?: { source?: string } };
     const url = data.thumbnail?.source ?? data.originalimage?.source ?? null;
-    return url && !looksLikeLogoAsset(url) ? url : null;
+    if (!url || looksLikeLogoAsset(url) || data.type === "disambiguation") return null;
+    // The article's own title (and one-line description) is the evidence of what the picture shows: a redirect can land on a game, a film or a different product.
+    return { url, title: [data.title, data.description].filter(Boolean).join(" - ") };
   } catch {
     return null;
   }
+}
+
+async function findImageViaWikipedia(productName: string): Promise<string | null> {
+  return (await findWikipediaPage(productName))?.url ?? null;
 }
 
 // OpenAI's vision endpoint only accepts png/jpeg/gif/webp — verified live
@@ -441,7 +448,9 @@ async function findAndVerifyImage(candidateUrls: string[], subjectName: string, 
     if (!dataUri) continue;
     const visionInput = await rasterizeForVision(dataUri);
     const check = await verifyThumbnailCandidate(visionInput, subjectName, kind);
-    if (check.error || check.matches) return dataUri;
+    // A picture of a PRODUCT is filed only on a yes: a verifier outage must not let a game box or a stranger's photo become a product's thumbnail (Beta 12). A logo or a folder image
+    // may still be accepted when the check itself could not run.
+    if (check.matches || (check.error && kind !== "product")) return dataUri;
   }
   return null;
 }
@@ -957,19 +966,22 @@ export interface ReferencePhoto {
 export interface ReferenceCandidate {
   url: string;
   label: string;
+  // Words that came with the image and say what it shows (an eBay listing's title, a Wikipedia article's title): the evidence photoIdentity.ts judges. Absent for an
+  // image search result, which carries none.
+  text?: string | null;
 }
 
 async function gatherReferenceCandidates(productName: string, extra: { queries?: string[]; realWorld?: boolean } = {}): Promise<ReferenceCandidate[]> {
   const candidates: ReferenceCandidate[] = [];
   const seen = new Set<string>();
-  const add = (url: string, label: string) => {
+  const add = (url: string, label: string, text?: string | null) => {
     if (seen.has(url)) return;
     seen.add(url);
-    candidates.push({ url, label });
+    candidates.push({ url, label, text: text ?? null });
   };
 
-  const wiki = await findImageViaWikipedia(productName);
-  if (wiki) add(wiki, "Stock photo — Wikipedia");
+  const wiki = await findWikipediaPage(productName);
+  if (wiki) add(wiki.url, "Stock photo — Wikipedia", wiki.title);
 
   // Two phrasings: the bare name, then "product photo" appended, which
   // steers Bing toward clean retail shots (and away from wallpapers and
@@ -1004,7 +1016,8 @@ async function gatherReferenceCandidates(productName: string, extra: { queries?:
         if (!item.imageUrl) continue;
         // Search results carry a 225px thumbnail; the same path at s-l1600
         // is the full-size original.
-        add(item.imageUrl.replace(/s-l\d+(\.\w+)$/i, "s-l1600$1"), `eBay listing photo — ${item.title.slice(0, 80)}`);
+        // Beta 12: an eBay result is only as good as its title - a game or accessory that matched the search is rejected here, before any picture is downloaded or checked.
+        add(item.imageUrl.replace(/s-l\d+(\.\w+)$/i, "s-l1600$1"), `eBay listing photo — ${item.title.slice(0, 80)}`, item.title);
       }
     } catch {
       // eBay being unavailable just means fewer candidates.
@@ -1027,22 +1040,22 @@ export async function findFreeReferencePhotos(
   try {
     const candidates: ReferenceCandidate[] = opts.candidates ? [...opts.candidates] : [];
     const seen = new Set<string>();
-    const add = (url: string, label: string) => {
+    const add = (url: string, label: string, text?: string | null) => {
       if (!seen.has(url)) {
         seen.add(url);
-        candidates.push({ url, label });
+        candidates.push({ url, label, text: text ?? null });
       }
     };
     if (!opts.candidates) {
-      const wiki = await findImageViaWikipedia(productName);
-      if (wiki) add(wiki, "Stock photo — Wikipedia");
+      const wiki = await findWikipediaPage(productName);
+      if (wiki) add(wiki.url, "Stock photo — Wikipedia", wiki.title);
     }
     if (!opts.candidates && hasEbayCredentials()) {
       try {
         const items = await searchEbayItems(productName, { limit: 30 });
         for (const item of items) {
           if (!item.imageUrl || !titleLooksLikeProduct(productName, item.title)) continue;
-          add(item.imageUrl.replace(/s-l\d+(\.\w+)$/i, "s-l800$1"), `eBay listing: ${item.title.slice(0, 90)}`);
+          add(item.imageUrl.replace(/s-l\d+(\.\w+)$/i, "s-l800$1"), `eBay listing: ${item.title.slice(0, 90)}`, item.title);
         }
       } catch {
         // eBay being unavailable just means fewer candidates.
@@ -1060,6 +1073,9 @@ export async function findFreeReferencePhotos(
     }
     for (const candidate of candidates.slice(0, 14)) {
       if (photos.length >= opts.want) break;
+      // Beta 12: with no picture check available, only a title that confirms the product may file an image (photoIdentity.fileableWithoutPicture); an image search result has no title.
+      const identity = judgeCandidateByText(productName, candidate.text ?? titleFromLabel(candidate.label));
+      if (!fileableWithoutPicture(identity)) continue;
       const download = await downloadImageBuffer(candidate.url);
       if (!download) continue;
       const normalized = await normalizeReferencePhoto(download.buffer);
@@ -1109,13 +1125,14 @@ export async function findReferencePhotos(
   // `candidates`: photos already in hand (e.g. from eBay listings that were confirmed to be this product) to check
   // instead of searching the web for some. They go through the same download, duplicate and vision checks.
   opts: { want: number; existingImages?: string[]; candidates?: ReferenceCandidate[]; extraQueries?: string[]; realWorld?: boolean }
-): Promise<{ photos: ReferencePhoto[]; examined: number }> {
+): Promise<{ photos: ReferencePhoto[]; examined: number; rejectedByIdentity?: number }> {
   // Save-credits mode: no vision check of any candidate. See findFreeReferencePhotos.
   if (isLowAiMode()) {
     return { photos: await findFreeReferencePhotos(productName, opts), examined: 0 };
   }
   const photos: Array<ReferencePhoto & { rank: number }> = [];
   let examined = 0;
+  let rejectedByIdentity = 0;
   try {
     const candidates = opts.candidates ?? (await gatherReferenceCandidates(productName, { queries: opts.extraQueries, realWorld: opts.realWorld }));
     const hashes: string[] = [];
@@ -1137,6 +1154,12 @@ export async function findReferencePhotos(
         const rank = next++;
         if (rank >= candidates.length) return;
         const candidate = candidates[rank];
+        // Beta 12: a candidate whose own title says it is a game, an accessory or another model is rejected here, with no download and no AI call.
+        const identity = judgeCandidateByText(productName, candidate.text ?? titleFromLabel(candidate.label));
+        if (identity.status === "mismatch") {
+          rejectedByIdentity++;
+          continue;
+        }
         const download = await downloadImageBuffer(candidate.url);
         if (!download) continue;
         const normalized = await normalizeReferencePhoto(download.buffer);
@@ -1164,6 +1187,6 @@ export async function findReferencePhotos(
     console.error(`[referencePhotos] "${productName}" failed: ${(err as Error).message}`);
   }
   photos.sort((a, b) => a.rank - b.rank);
-  console.log(`[referencePhotos] "${productName}": kept ${photos.length}/${opts.want} (checked ${examined})`);
-  return { photos: photos.map(({ imageData, label }) => ({ imageData, label })), examined };
+  console.log(`[referencePhotos] "${productName}": kept ${photos.length}/${opts.want} (checked ${examined}, ${rejectedByIdentity} rejected by identity)`);
+  return { photos: photos.map(({ imageData, label }) => ({ imageData, label })), examined, rejectedByIdentity };
 }

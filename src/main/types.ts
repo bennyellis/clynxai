@@ -11,6 +11,8 @@ export interface RecentSearch {
   minPriceUsd: number | null;
   maxPriceUsd: number | null;
   includeBroken?: boolean;
+  // Beta 12 — "Search for variants" was on for this search (see SearchItem.acceptVariants). Missing = off, so searches saved before it exist unchanged.
+  acceptVariants?: boolean;
   linkedProductId?: string | null;
   at: number;
 }
@@ -52,6 +54,11 @@ export interface SearchItem {
   // Database (see brokenVariant.ts) that Clynx creates and researches, instead of being written off at a quarter of the working
   // price, and "for parts" titles are not rejected as mismatches.
   includeBroken?: boolean;
+  // Beta 12 — SEARCH FOR VARIANTS (default off, so every existing entry behaves exactly as before). It changes which of the listings Facebook ALREADY returned are accepted, never what
+  // is searched: the Marketplace keyword stays `item`, no extra query or browser session is made. Off: "iPhone 15" accepts only iPhone 15 (a Pro, Plus, Pro Max, a different model
+  // or an accessory is skipped). On: the product family's own variants are accepted too (15 Plus / Pro / Pro Max, an edition or color or capacity), but still never a different
+  // model, a case or part, or a game that merely names the platform. Each variant is priced from ITS OWN Database entry and comparable sales, never from the base model's value.
+  acceptVariants?: boolean;
   // eBay only — set when this search target is an eBay Watch with a minimum
   // seller rating (see Watch.minSellerRatingPercent). Search For items never
   // carry one. Read by ebayEngine.ts, which drops results from sellers below

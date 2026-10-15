@@ -159,6 +159,10 @@ const TOOLS = [
             type: "boolean",
             description: "true = ALSO look for broken / for-parts / not-working copies of this product and price them as their own Database variant (they often resell well). Only set it when the user asks for broken or for-parts items.",
           },
+          acceptVariants: {
+            type: "boolean",
+            description: "true = also accept the product family's own variants among the listings Facebook returns for this search (iPhone 15 -> 15 Plus / Pro / Pro Max). It adds no extra searches. Only set it when the user asks to include variants of the product.",
+          },
         },
         required: ["item", "matchKeywords"],
       },
