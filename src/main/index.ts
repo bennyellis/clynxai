@@ -4292,6 +4292,8 @@ app.whenReady().then(() => {
   // the TRUE all-time count, not listings.length off the capped
   // listListings(500, 0) page the Feed uses for display.
   ipcMain.handle("listings:count", () => store.countListings());
+  // Beta 12: honest stages (listingLifecycle.ts): what happened to each saved listing, adding up to the saved total.
+  ipcMain.handle("listings:lifecycle", () => store.lifecycleCounts());
   ipcMain.handle(
     "listings:feedback",
     (_e, args: { id: string; verdict: FeedbackVerdict; note: string | null }) =>

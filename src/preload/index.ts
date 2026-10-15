@@ -104,6 +104,7 @@ const api = {
   // Per explicit instruction — Dashboard's "Listings evaluated" stat wants
   // the true all-time count, not listings.length off the capped page above.
   countListings: (): Promise<number> => ipcRenderer.invoke("listings:count"),
+  listingLifecycle: (): Promise<{ total: number; opened: number; fullyEvaluated: number; stages: Record<"prefiltered" | "postfiltered" | "pending" | "profitable" | "unprofitable" | "uncertain" | "failed" | "deferred", number> }> => ipcRenderer.invoke("listings:lifecycle"),
   setFeedback: (id: string, verdict: FeedbackVerdict, note: string | null): Promise<void> =>
     ipcRenderer.invoke("listings:feedback", { id, verdict, note }),
   clearFeedback: (id: string): Promise<void> => ipcRenderer.invoke("listings:clearFeedback", { id }),

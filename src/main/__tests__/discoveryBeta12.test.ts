@@ -7,6 +7,8 @@ import { reevaluationReason, requalifyEligible, scoredFromRecord, currentAgeText
 import { detailTextFields } from "../listingText.js";
 import { estimateListingAgeHours } from "../listingAge.js";
 import { shouldValidateDismissal } from "../research.js";
+import { assessListingAge } from "../listingAge.js";
+import { isNonRoundPrice } from "../scrapeEngine.js";
 import { FAKE_PAGE, baseConfig, detail, installFetchStub, makeEngine, makeStore, ntfy, resetNetwork, searchItem, setAiReply, summary } from "./_fixtures.js";
 import { check, run, section } from "./_testkit.js";
 
@@ -213,6 +215,41 @@ run(async () => {
     const s = store.saved[store.saved.length - 1];
     check("rejected for seller risk, not a deal, no alert", s.research?.code === "SELLER_RISK" && s.isDeal === false && ntfy.length === 0, s.research);
     check("the reason says it would otherwise clear the margin on the Database's numbers", /only the seller checks holding it back/.test(s.research?.reason ?? ""), s.research?.reason);
+  }
+
+  section("freshness: the age is read correctly, so the 24-hour window rejects what is really old (and is still the user's setting)");
+  {
+    const state = (t: string, h: number | null = 24) => assessListingAge(t, h).state;
+    check("fresh phrases", ["about an hour ago", "2 hours ago", "23 hours ago", "5 minutes ago", "Listed just now", "a few hours ago"].every((t) => state(t) === "fresh"));
+    check("old phrases", ["1 day ago", "yesterday", "2 days ago", "a week ago", "over a week ago", "3 weeks ago", "a month ago"].every((t) => state(t) === "stale"));
+    check("a wider window the user chose is respected", state("2 days ago", 72) === "fresh" && state("1 day ago", 48) === "fresh");
+    check("an age that is not understood is unknown (never silently fresh)", state("sometime recently") === "unknown");
+    check("the default window is unchanged (24 h)", baseConfig().maxListingAgeHours === 24);
+  }
+
+  section("protections that must not change");
+  {
+    check("a non-round price is still only a reordering hint (never a skip), exactly as before", isNonRoundPrice(59) === true && isNonRoundPrice(60) === false);
+    const h = makeEngine({ config: baseConfig({ generalDeal: { enabled: true, minConfidence: "medium" } }) });
+    h.engine.detailToLoad = detail("Xbox Series X console", 59, { listingAge: "1 hour ago" });
+    const r = await (h.engine as any).evaluateListing(FAKE_PAGE, summary("Xbox Series X console", 59, "np59"), h.config);
+    check("a $59 listing is still opened and judged (the old rule moved to a queue priority long ago)", r.counted === true, r);
+    const scam = makeEngine({ config: baseConfig({ generalDeal: { enabled: true, minConfidence: "medium" } }) });
+    scam.engine.detailToLoad = detail("PS5 console", 150, { listingAge: "1 hour ago", description: "Call me 804**555**1234 ships fast" });
+    const sr = await (scam.engine as any).evaluateListing(FAKE_PAGE, summary("PS5 console", 150, "scam1"), scam.config);
+    check("a masked-phone scam bot is still skipped as a scam bot", sr.counted === true && scam.store.saved[scam.store.saved.length - 1].research?.code === "SCAM_BOT", scam.store.saved[scam.store.saved.length - 1]?.research);
+    const ph = makeEngine({ config: baseConfig({ generalDeal: { enabled: true, minConfidence: "medium" } }) });
+    ph.engine.detailToLoad = detail("Xbox Series X", 1, { listingAge: "1 hour ago" });
+    const pr = await (ph.engine as any).evaluateListing(FAKE_PAGE, summary("Xbox Series X", 1, "ph1"), ph.config);
+    check("a placeholder price is still skipped before opening", !pr.counted && pr.outcome === "skipped_before_opening");
+    const stale = makeEngine({ config: baseConfig({ generalDeal: { enabled: true, minConfidence: "medium" } }) });
+    stale.engine.detailToLoad = detail("Xbox Series X", 200, { listingAge: "3 days ago" });
+    await (stale.engine as any).evaluateListing(FAKE_PAGE, summary("Xbox Series X", 200, "old1"), stale.config);
+    check("a three-day-old listing is still rejected as too old", stale.store.saved[stale.store.saved.length - 1].research?.code === "TOO_OLD");
+    const ship = makeEngine({ config: baseConfig({ generalDeal: { enabled: true, minConfidence: "medium" } }) });
+    ship.engine.detailToLoad = detail("Xbox Series X", 200, { listingAge: "1 hour ago", hasOfficialShipping: true });
+    await (ship.engine as any).evaluateListing(FAKE_PAGE, summary("Xbox Series X", 200, "ship1"), ship.config);
+    check("Facebook's own shipping program is still not a hidden local deal", ship.store.saved[ship.store.saved.length - 1].research?.code === "OFFICIAL_SHIPPING");
   }
 
   section("honest lifecycle counts: every saved listing is in exactly one stage");

@@ -35,6 +35,8 @@ import { Store } from ${JSON.stringify(path.join(root, "src/main/store.ts"))};
 import { resaleOutcome, DEFAULT_RESALE_SETTINGS, CONDITION_VALUE_FACTOR, maxBuyPriceExactUsd } from ${JSON.stringify(path.join(root, "src/main/resaleMath.ts"))};
 import { withinNegotiationReach } from ${JSON.stringify(path.join(root, "src/main/profitGate.ts"))};
 import { detectConditionImpact } from ${JSON.stringify(path.join(root, "src/main/scorer.ts"))};
+import { analyzeCondition } from ${JSON.stringify(path.join(root, "src/main/conditionParser.ts"))};
+import { listingOwnText } from ${JSON.stringify(path.join(root, "src/main/listingText.ts"))};
 
 const args = process.argv.slice(2);
 const flag = (n: string) => args.includes(n);
@@ -192,7 +194,30 @@ function selftest(): string {
     if (r.research_code === "OFFICIAL_SHIPPING") { own.shippingFlagged++; if (!SHIP_RE.test(o.text)) own.shippingFlagFromOtherCards++; }
     if (r.research_code === "MENTIONS_EBAY") { own.ebayFlagged++; if (!EBAY_RE.test(o.text)) own.ebayFlagFromOtherCards++; }
   }
-  const result = { source: isSelf ? "(self-test database)" : src, copiedTo: copy, listings: rows.length, opened, neverOpened, deals, stillWaitingForPhotos: waiting, byOutcome, replay: summary, ownTextReplay: own, leads: leads.slice(0, 500) };
+  // ---- Part 4: what the Beta 12 reading would have decided (own text + negation-aware parser) for listings priced from the Database
+  const b12 = { dbPriced: 0, wouldQualifyNow: 0, wasNotDeal: 0, examples: [] as any[] };
+  for (const r of rows) {
+    if (!r.description || r.price == null || r.is_deal) continue;
+    if (["TOO_OLD", "SCAM_BOT", "UNSHIPPABLE", "BLACKLISTED", "PLACEHOLDER_PRICE", "OFFICIAL_SHIPPING", "MENTIONS_EBAY"].includes(r.research_code)) continue;
+    const known = store.getEbayValueForTitle(r.title);
+    if (!known) continue;
+    b12.dbPriced++;
+    const o = listingOwnText(String(r.description));
+    const impact = analyzeCondition((r.title ?? "") + " " + (o.cut ? o.text : (r.title ?? ""))).impact;
+    const stored = r.condition_impact === "minor" || r.condition_impact === "major" ? r.condition_impact : "none";
+    const before = verdictAt(known.value, r.price, stored);
+    const after = verdictAt(known.value, r.price, impact);
+    if (before === "no" && after !== "no") { b12.wouldQualifyNow++; if (b12.examples.length < 15) b12.examples.push({ title: r.title, price: r.price, product: known.name, valueUsd: Math.round(known.value), was: stored, now: impact, verdict: after, url: r.url }); }
+  }
+  // ---- Part 5: how old were the listings that were rejected as too old? (is the age being read correctly, and is it the feed that returns old listings?)
+  const ageBuckets: Record<string, number> = {};
+  for (const r of rows) {
+    if (r.research_code !== "TOO_OLD") continue;
+    const m = /(\\d+|a|an|about an|one|two|three|four|five|six|seven)\\s+(minute|hour|day|week|month|year)s?/i.exec(String(r.listing_age ?? ""));
+    const key = m ? m[2].toLowerCase() + "s" : r.listing_age ? "other: " + String(r.listing_age).slice(0, 20) : "(age text not saved)";
+    ageBuckets[key] = (ageBuckets[key] ?? 0) + 1;
+  }
+  const result = { source: isSelf ? "(self-test database)" : src, copiedTo: copy, listings: rows.length, opened, neverOpened, deals, stillWaitingForPhotos: waiting, byOutcome, replay: summary, ownTextReplay: own, beta12Replay: b12, tooOldByUnit: ageBuckets, leads: leads.slice(0, 500) };
   fs.writeFileSync(path.join(${JSON.stringify(root)}, "discovery-audit-results.json"), JSON.stringify(result, null, 2));
   const csvPath = opt("--csv");
   if (csvPath) {
@@ -212,6 +237,8 @@ function selftest(): string {
   console.log("  condition discount came ONLY from other cards: " + own.conditionDroppedToNone + " (of which would now qualify on Database numbers: " + own.becameQualifying + ")");
   console.log("  OFFICIAL_SHIPPING rejections: " + own.shippingFlagged + ", of which the wording is NOT in the listing's own text: " + own.shippingFlagFromOtherCards);
   console.log("  MENTIONS_EBAY rejections: " + own.ebayFlagged + ", of which 'eBay' is NOT in the listing's own text: " + own.ebayFlagFromOtherCards);
+  console.log("Beta 12 reading (the listing's own text + negation-aware condition parser) on Database-priced listings: " + b12.dbPriced + " checked, " + b12.wouldQualifyNow + " were not deals but qualify on the saved numbers once read correctly (examples in the JSON).");
+  console.log("Rejected as too old, by the unit of their age: " + (Object.entries(ageBuckets).map(([k, v]) => k + "=" + v).join(", ") || "none"));
   console.log("Details: discovery-audit-results.json" + (csvPath ? " and " + csvPath : ""));
   store.close();
   db.close();

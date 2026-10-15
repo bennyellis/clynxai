@@ -72,6 +72,11 @@ export function Dashboard({
   useEffect(() => {
     api.countListings().then(setTotalListingsEvaluated);
   }, [listings]);
+  // Beta 12: "evaluated" used to be every saved row. These are the real stages (a listing is in exactly one), so the number means what it says.
+  const [lifecycle, setLifecycle] = useState<Awaited<ReturnType<typeof api.listingLifecycle>> | null>(null);
+  useEffect(() => {
+    api.listingLifecycle().then(setLifecycle).catch(() => setLifecycle(null));
+  }, [listings]);
 
   const dealsToday = useMemo(() => {
     const since = Date.now() - 24 * 60 * 60 * 1000;
@@ -204,7 +209,16 @@ export function Dashboard({
       <div style={{ display: "flex", gap: 16, flex: 1, minHeight: 0 }}>
         <div style={{ flex: 2, minWidth: 0, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", paddingRight: 4, paddingBottom: 64 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 14 }}>
-            <StatCard label="Listings evaluated" value={totalListingsEvaluated} />
+            <StatCard
+              label="Listings fully evaluated"
+              value={lifecycle ? lifecycle.fullyEvaluated : totalListingsEvaluated}
+              hint={
+                lifecycle
+                  ? `${lifecycle.total.toLocaleString()} saved · ${lifecycle.opened.toLocaleString()} opened · ${lifecycle.stages.prefiltered.toLocaleString()} skipped before opening · ${lifecycle.stages.postfiltered.toLocaleString()} ruled out by a rule · ${lifecycle.stages.uncertain.toLocaleString()} uncertain · ${lifecycle.stages.deferred.toLocaleString()} deferred · ${lifecycle.stages.failed.toLocaleString()} failed · ${lifecycle.stages.pending.toLocaleString()} pending`
+                  : undefined
+              }
+              title="A listing counts here only when it got a real verdict: a deal, or judged not worth it on real numbers. Skipped, rule-filtered, uncertain, deferred, failed and pending listings are counted separately and add up to everything saved."
+            />
             <StatCard label="Deals in last 24h" value={dealsToday} accent="var(--success)" />
           </div>
 
@@ -1218,12 +1232,13 @@ function FiltersCard() {
   );
 }
 
-function StatCard({ label, value, accent }: { label: string; value: number; accent?: string }) {
+function StatCard({ label, value, accent, hint, title }: { label: string; value: number; accent?: string; hint?: string; title?: string }) {
   const display = useCountUp(value);
   return (
-    <div className="card" style={{ padding: 24 }}>
+    <div className="card" style={{ padding: 24 }} title={title}>
       <div style={{ fontSize: 13.5, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</div>
       <div style={{ fontSize: 40, fontWeight: 700, marginTop: 6, color: accent ?? "var(--text)" }}>{display}</div>
+      {hint && <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 6, lineHeight: 1.4 }}>{hint}</div>}
     </div>
   );
 }
