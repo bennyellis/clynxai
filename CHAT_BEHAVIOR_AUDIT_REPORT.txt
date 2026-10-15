@@ -1,0 +1,106 @@
+CLYNX CHAT BEHAVIOR AUDIT: THE REFERENCE-PHOTO CONVERSATION (REPORT ONLY; NOTHING IMPLEMENTED)
+================================================================================================
+No product code was changed, no Database record was touched, nothing was published. The only addition is a measurement tool, scripts/chat-audit.cjs.
+
+WHAT I COULD AND COULD NOT RUN (stated first, so nothing below is mistaken for a measured model result)
+ - This session has no OpenAI access (no key, outbound network denied). I therefore could NOT run the real model, so I have NO measured model latency, NO measured
+   clarification counts and NO measured pass rate for the 20+ interactions. Anything below about what the model "did" in your conversation comes from your transcript.
+ - I DID run the app's real chat pipeline (streamChat, the real prompts, tool lists and context injection, a real Database with 240 products and a focused product) against
+   a recording stub, and read the code. Those facts are measured and marked MEASURED.
+ - scripts/chat-audit.cjs runs 23 interactions through the real pipeline and the REAL model on your PC and records first-word time, final time, AI calls, inference time,
+   tools called, questions asked, menus offered, re-asked answered questions and completion. It uses canned tool results and a throw-away database, costs a few cents.
+     PowerShell:  $env:OPENAI_API_KEY="sk-..."   then   node scripts\chat-audit.cjs        (writes chat-audit-results.json)
+   Scenarios 3 to 6 are your conversation (the first request, then "both", then "both" again, then frustration).
+
+1. ROOT CAUSE OF THE REFERENCE-PHOTO FAILURE
+ Clynx was asked for something it has NO TOOL to do, was never told how to behave when it cannot, and its instructions reward asking over acting. In order:
+ a) MISSING CAPABILITY (MEASURED): the Discovery chat (context "database") is offered exactly four tools: research_product, web_research, add_blacklist_term,
+    remove_blacklist_term. None finds or saves reference photos. The product page chat has three (research_product, web_research, add_product_watch_note).
+ b) THE ENGINE EXISTS BUT IS NOT EXPOSED: findReferencePhotos / fillReferencePhotos (webResearch.ts, index.ts) already search Wikipedia, Bing Images and eBay, download,
+    drop near-duplicates, vision-check each photo against the product and save up to 10 to the product. Chat cannot call it. It runs only as a side effect of
+    research_product (which, on an existing product, tops the gallery up to 10 if it has fewer), as a manual "backfill" button, and for new products. The research_product
+    tool description never says it also adds photos, so the model cannot know that a refresh would partly do what was asked.
+ c) MISSING CONTEXT (MEASURED): the open product's text facts reach the model (its name, summary, evidence; your transcript shows it used them: "VERIFIED... Microsoft pages
+    reference the name"), but its thumbnail is NOT sent (no image part in the request). That is why it kept asking you to "paste the thumbnail".
+ d) POOR DECISION-MAKING ON TOP OF THAT: the prompts contain no rule to act when intent is clear, to pick defaults, to never repeat a question, to read "both" / "do it" /
+    "yes" / "the first one" as answers to the previous question, to say plainly when it cannot do something, or to stop asking when the user is frustrated. What they DO say:
+    "Ask at most one follow-up question" (a per-message allowance, so every reply may ask), "Never invent facts... say how you would find out", and in the research tool
+    bullet "ask a clarifying question if the request could mean different products". With no tool for the job, the model filled the gap with A/B menus ("8-12 images or 6+6?")
+    and promised work ("I'll go pull both") that nothing could perform.
+ e) NO ACTION GUARD: when the model answers in text without a tool call, streamChat simply returns (chat.ts loop: `if (!result.toolCalls.length) return`). Nothing checks
+    whether the reply promised an action it did not perform, and answered questions are not tracked: the model must re-infer them from raw history each turn.
+ f) A SEPARATE, REAL BUG: you pasted the exact Google Images link. web_research with a link only tries to READ the page; a search-results link is unreadable (and its udm=2
+    means Google Images), and the query inside it ("xbox series x galaxy black") was NOT used as a search. Only the variant verifier does that. So the one concrete thing
+    you handed it was dropped.
+
+2. DOES CLYNX HAVE FUNCTIONAL IMAGE SEARCH AND ATTACHMENT TOOLS?
+ Functional internally, absent from chat. Image search: yes (Bing Images, Wikipedia, eBay listing photos; with AI on, each candidate is vision-verified; in "save credits" mode a
+ free text-based check is used). Attach to the correct product: yes (store.addProductImage by product id, with dedupe by perceptual hash and a gallery cap of 10, and
+ never replacing a thumbnail the user chose). Chat access to either: no. Both live behind internal functions and two UI buttons.
+
+3. EVIDENCE OF EXECUTION OR NON-EXECUTION
+ - Non-execution of a photo search: certain for the photo task (no tool exists to call; MEASURED tool lists above).
+ - "I ran a quick web sweep... UNVERIFIED" (your turn 4): cannot be proven either way. The app does not record chat tool calls anywhere (no log line for web_research or
+   research_product calls, no per-round timing). It is consistent with a real web_research call or with an invented claim. This gap is itself a finding.
+ - Every "I'll pull / I'll go grab / I'll start the search" in the transcript was a promise with no tool behind it.
+
+4. OTHER CONVERSATIONAL FAILURES (from code and prompt inspection; confirm with the harness)
+ - Terse follow-ups ("both", "do it", "yes", "the first one") are not linked to the question they answer; the model must infer it from up to 12 raw history messages
+   (chat.ts history.slice(-12)), including its own long A/B menus, which then anchor the next reply.
+ - Tools that are unavailable in a context (scanner, watches, settings in the Database chat) are handled by prompt text only; the model may offer them as if possible.
+ - Tool calls inside one round run one after another, and each tool round is a fresh model request with the whole prompt (MAX_TOOL_ROUNDS = 4).
+ - After research_product the app appends a "have you sold one before?" question to every reply (deterministic), so even a successful action ends on a question.
+ - No signal exists for repeated instructions or frustration.
+
+5. RESPONSE-TIME MEASUREMENTS
+ MEASURED (app side only): building the request for the Database chat took 352 ms for the first call and ~90 ms after, with 240 products; that is not the bottleneck.
+ MEASURED prompt size: Database chat system prompt = 16.5k chars (~4.1k tokens) with an empty Database, 18.9k (~4.7k) at 50 products, 28.2k (~7.0k) at 240, 65.4k (~16.4k) at
+ 1000 products, because every product name is injected on every turn; the product page chat is ~3.6k tokens, the global bar ~4.8k. Model: gpt-5-mini, reasoning_effort "minimal",
+ max_completion_tokens 900, timeout 45 s.
+ NOT MEASURED (needs the real model): time to first response, time to final response, inference time, number of AI calls, unnecessary tool calls. Use the harness.
+ Expected shape: one AI call for a plain answer; 2 calls for one tool (decide, then explain), up to 4 rounds; a web_research tool call adds search plus up to 4 page reads
+ (seconds). Latency will worsen as the Database grows because the whole product list rides along every turn.
+
+6. SPECIFIC CODE AND PROMPT CHANGES NEEDED
+ Capability
+  - New tool add_reference_photos(product?, count?) in the database, product and global contexts: defaults to the open product; defaults to ~8 verified photos from
+    official/retailer and real listings together; calls fillReferencePhotos' engine for that product id only; waits (bounded) and returns the TRUTHFUL result ("added 6 of 8,
+    2 duplicates skipped" or "image search was blocked, nothing saved"). Never changes the thumbnail the user chose. Update research_product's description to say what it
+    also does to the gallery.
+  - web_research: if the user's link is a search-results page, use its query as the search (variantEvidence already has searchLinks.ts) and say it was not read as a page.
+ Context
+  - Give the model the focus product's thumbnail only when the message refers to it ("thumbnail", "photo", "picture", "this image", "similar to"), as one small image part.
+  - Replace the full product list with the focus product, its parent/variants, the user's starred products and a count, plus an on-demand lookup, to cut 3k to 12k tokens a turn.
+ Prompt (a new ACTING RULES block, shared by every chat)
+  - Act when intent is clear; routine, non-destructive research and photo gathering never need permission. Pick sensible defaults (counts, sources) instead of offering options.
+  - Never ask a question the user already answered; "both", "yes", "do it", "the first one", "the second" answer the last question you asked: proceed with them.
+  - If a tool can do it, call it now; never say you will do something without calling the tool in the same reply. If no tool can, say so in one sentence and offer the nearest thing.
+  - If the user repeats an instruction or sounds frustrated, ask nothing: act, or state the limit.
+  - Change "at most one follow-up question" to "ask only when two reasonable readings lead to different actions, and never twice about the same thing".
+ Orchestration (chat.ts)
+  - Promise guard: if a text-only reply promises an action ("I'll pull / grab / search / start / run") and no tool ran, run ONE more round that says "call the tool now or say
+    you cannot", then return that.
+  - Deterministic follow-up resolver (no AI): when the user's message is a short answer ("both", "yes", "do it", "the first one", ...), prepend a one-line hint tying it to the
+    assistant's last question ("The user answered '<last question>' with 'both': proceed with both, ask nothing"). Same for repeated or frustrated messages.
+  - Telemetry: log every chat tool call (name, arguments, result summary, ms) and every model round (ms, tokens) to Activity/metrics.
+ Model and speed
+  - Keep reasoning "minimal" only where it is needed; test "low" for tool-routing turns with the harness; stream the first words before tools run; run independent tool
+    calls in a round in parallel; put the static prompt first and the per-turn data last so the provider's prompt cache applies. None of this touches product verification or
+    the cost guards (spending caps, low-AI mode).
+
+7. PRIORITIZED IMPLEMENTATION PLAN
+ P0 (fixes your conversation): ACTING RULES block; add_reference_photos tool and the research_product description fix; follow-up resolver and frustration rule; web_research uses a
+    pasted search link's query.
+ P1: promise guard; tool-call telemetry; thumbnail-on-demand; truthful "cannot do that here" handling for tools missing from a context.
+ P2: smaller, relevant-only product context; parallel tool calls and first-token streaming; model/effort tuning against the harness; drop the automatic "have you sold one before"
+    question when the user is mid-task.
+
+8. REGRESSION TESTS THAT WOULD KEEP THESE FAILURES FROM RETURNING
+ Offline (CI, no model): (a) tool availability: add_reference_photos is offered in database/product/global; (b) prompt contract: the ACTING RULES text is present in every chat and
+ the "at most one follow-up question" wording is gone; (c) follow-up resolver unit tests: "both", "yes", "do it", "the first one", "2", repeated "just do it", "stop asking" each
+ produce the right hint against realistic last questions, including your transcript; (d) promise guard with a scripted model: it promises without a tool, the second round forces
+ a call, and a reply that really called the tool is not retried; (e) integration with a real Database, product and thumbnail and a local image server: the tool saves photos only to
+ the open product, dedupes, respects the cap and a user-chosen thumbnail, reports a blocked image search truthfully, and never reports saved photos that were not saved; (f) a
+ search-results link's query is used by web_research; (g) your 6-turn photo conversation replayed through streamChat with a scripted model that obeys the prompt contract.
+ Live (release gate, needs a key): scripts/chat-audit.cjs with thresholds, e.g. at least 90% of the 23 scenarios completed, zero re-asked answered questions in scenarios 3 to 6
+ and 20, at most one AI call for questions that need no tool, and a median time to first word under a target you set after the first measured run.
