@@ -66,6 +66,7 @@ import { resolveIdentityTarget } from "./productIdentity.js";
 import { beta13Flags } from "./beta13.js";
 import { makeThumb, noteDecision } from "./aiDecisionLog.js";
 import { fileImage, setFilingRecorder, type FileImageEvidence } from "./fileImage.js";
+import { selectReferenceImages } from "./referenceSelection.js";
 import { LibraryOps, TRASH_RETENTION_MS, type LibraryOp } from "./libraryOps.js";
 import { buyerTotalUsd, estimateMarketValue } from "./marketValue.js";
 import { compMatchesSpecs, modelLettersConflict, titleLooksLikeProduct } from "./compFilter.js";
@@ -2402,7 +2403,8 @@ async function runProductLookupInner(
       // Database card with no photo at all. Returns null itself (leaving
       // the card genuinely blank) only when fewer than 2 usable photos
       // exist to build one from.
-      imageUrl = await buildImageCollage(store.listProductImages(id).map((img) => img.imageData));
+      // Beta 13: the best usable reference photo (never a stored collage of the gallery, which froze any contamination into the thumbnail); the Library draws collages itself.
+      imageUrl = selectReferenceImages(store.listProductImages(id), 1)[0]?.imageData ?? null;
     }
 
     store.updateProductProfile(id, {

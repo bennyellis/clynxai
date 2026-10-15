@@ -9,6 +9,7 @@ import { DiscoveryTab, resetDiscoveryUi } from "./DiscoveryTab.js";
 import { ReviewTab } from "./ReviewTab.js";
 import { keepRangeUsd } from "../../../main/resaleMath.js";
 import { imageSource } from "../lib/imageSource.js";
+import { FolderDialog, LibraryNote, MY_FOLDERS, NeedsReviewPanel, OrganizeCard, PhotoActions, TrashPanel, doLibraryOp, folderPaths, statusBadge, type LibraryFolder } from "../components/LibraryTools.js";
 import {
   homeDatabaseNav,
   libraryRootNav,
@@ -79,11 +80,30 @@ interface FamilyNode {
   children: FamilyNode[];
 }
 
-function buildFamilyTree(products: ProductProfile[]): FamilyNode[] {
+// pathOf: where a product sits (its auto-organized family, or its own folder path for "My folders"). extraPaths: folders to show even when empty.
+function buildFamilyTree(products: ProductProfile[], pathOf: (p: ProductProfile) => string | null | undefined = (p) => p.family, extraPaths: string[] = []): FamilyNode[] {
   const roots: FamilyNode[] = [];
+  const ensure = (path: string): FamilyNode | undefined => {
+    const segments = path.split(">").map((s) => s.trim()).filter(Boolean);
+    let level = roots;
+    let parentPath = "";
+    let node: FamilyNode | undefined;
+    for (const segment of segments) {
+      node = level.find((n) => n.segment === segment);
+      if (!node) {
+        node = { segment, path: parentPath ? `${parentPath} > ${segment}` : segment, items: [], children: [] };
+        level.push(node);
+      }
+      parentPath = node.path;
+      level = node.children;
+    }
+    return node;
+  };
+  for (const extra of extraPaths) ensure(extra);
   for (const p of products) {
-    if (!p.family) continue;
-    const segments = p.family
+    const familyPath = pathOf(p);
+    if (!familyPath) continue;
+    const segments = familyPath
       .split(">")
       .map((s) => s.trim())
       .filter(Boolean);
@@ -533,6 +553,29 @@ export function Database({
   const [missingPhotos, setMissingPhotos] = useState(0);
   const [photoBackfill, setPhotoBackfill] = useState<{ running: boolean; done: number; total: number }>({ running: false, done: 0, total: 0 });
   const photoInfoLoaded = useRef(false);
+  // Beta 13: the person's own folders, Needs review / Trash panels and the folder dialogs (see components/LibraryTools.tsx).
+  const [folders, setFolders] = useState<LibraryFolder[]>([]);
+  const [reviewCount, setReviewCount] = useState(0);
+  const [trashCount, setTrashCount] = useState(0);
+  const [showReview, setShowReview] = useState(false);
+  const [showTrash, setShowTrash] = useState(false);
+  const [folderDialog, setFolderDialog] = useState<{ mode: "create" | "rename" | "delete"; folder: LibraryFolder | null } | null>(null);
+  const loadLibraryMeta = useCallback(() => {
+    api.libraryFolders().then(setFolders);
+    api.libraryReview().then((r) => setReviewCount(r.length));
+    api.libraryTrash().then((t) => setTrashCount(t.products.length + t.folders.length + t.images.length));
+  }, []);
+  useEffect(() => {
+    loadLibraryMeta();
+    const off = api.onLibraryChanged((what) => {
+      loadLibraryMeta();
+      // a folder rename / delete changes where many products are shown: reload them
+      if (what.folders) void api.listProducts().then(setProducts);
+    });
+    return () => {
+      off();
+    };
+  }, [loadLibraryMeta]);
   useEffect(() => {
     const off = api.onPhotoBackfillProgress((p) => {
       setPhotoBackfill(p);
@@ -673,11 +716,14 @@ export function Database({
   const grouped = useMemo(() => {
     const map = new Map<string, ProductProfile[]>();
     for (const p of products) {
-      const cat = p.category || "Other";
+      // A product the person put in one of their own folders is shown there instead of in its auto-organized place.
+      const cat = p.folderPath ? MY_FOLDERS : p.category || "Other";
       if (!map.has(cat)) map.set(cat, []);
       map.get(cat)!.push(p);
     }
+    if (folders.length > 0 && !map.has(MY_FOLDERS)) map.set(MY_FOLDERS, []);
     const categories = [...map.keys()].sort((a, b) => {
+      if (a === MY_FOLDERS || b === MY_FOLDERS) return a === MY_FOLDERS ? -1 : 1; // the person's own folders come first
       const ai = CATEGORY_ORDER.indexOf(a);
       const bi = CATEGORY_ORDER.indexOf(b);
       if (ai === -1 && bi === -1) return a.localeCompare(b);
@@ -687,11 +733,12 @@ export function Database({
     });
     return categories.map((category) => {
       const items = map.get(category)!;
-      const tree = buildFamilyTree(items);
-      const ungrouped = items.filter((p) => !p.family);
+      const mine = category === MY_FOLDERS;
+      const tree = mine ? buildFamilyTree(items, (p) => p.folderPath, folderPaths(folders).map((f) => f.path)) : buildFamilyTree(items);
+      const ungrouped = mine ? [] : items.filter((p) => !p.family);
       return { category, items, tree, ungrouped };
     });
-  }, [products]);
+  }, [products, folders]);
 
   // Falls back to "show everything" if the selected category disappears (its last product got deleted) rather than silently showing
   // nothing; the same for a folder view left open when its last member gets deleted (or reassigned elsewhere by a fresh research pass),
@@ -897,6 +944,7 @@ export function Database({
         onDelete={() => remove(selectedProduct.id)}
         onSaveEdit={(patch) => saveEdit(selectedProduct.id, patch)}
         onPickThumbnail={() => pickThumbnail(selectedProduct.id)}
+        folders={folders}
       />
     );
   }
@@ -990,6 +1038,15 @@ export function Database({
                   {photoBackfill.running ? `📸 Finding photos… ${photoBackfill.done}/${photoBackfill.total}` : `📸 Find photos (${missingPhotos})`}
                 </button>
               )}
+              <button className="icon ghost" onClick={() => setFolderDialog({ mode: "create", folder: null })} title="Make a folder of your own">
+                📁 New folder
+              </button>
+              <button className="icon ghost" onClick={() => setShowReview(true)} title="Photos and names Clynx wants you to look at" style={reviewCount > 0 ? { color: "var(--warn)" } : undefined}>
+                🔎 Needs review{reviewCount > 0 ? ` (${reviewCount})` : ""}
+              </button>
+              <button className="icon ghost" onClick={() => setShowTrash(true)} title="Deleted items stay here for 30 days; recent changes can be undone">
+                🗑 Trash{trashCount > 0 ? ` (${trashCount})` : ""}
+              </button>
               <button className="primary" onClick={() => setShowAddProductDialog(true)}>
                 + Add product
               </button>
@@ -1036,6 +1093,27 @@ export function Database({
                   onSearchProduct={searchProduct}
                   onDeleteProduct={remove}
                   onTogglePrioritized={togglePrioritized}
+                  folderActions={
+                    viewingPath.category === MY_FOLDERS ? (
+                      (() => {
+                        const here = folderPaths(folders).find((f) => f.path === viewingPath.segments.join(" > "));
+                        const folder = folders.find((f) => f.id === here?.id) ?? null;
+                        return folder ? (
+                          <span style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+                            <button className="icon ghost" onClick={() => setFolderDialog({ mode: "create", folder })}>
+                              + Subfolder
+                            </button>
+                            <button className="icon ghost" onClick={() => setFolderDialog({ mode: "rename", folder })}>
+                              Rename
+                            </button>
+                            <button className="icon ghost" style={{ color: "var(--danger)" }} onClick={() => setFolderDialog({ mode: "delete", folder })}>
+                              Delete
+                            </button>
+                          </span>
+                        ) : null;
+                      })()
+                    ) : undefined
+                  }
                 />
               );
             })()
@@ -1135,6 +1213,11 @@ export function Database({
                     ))}
             </>
           )}
+
+          <LibraryNote />
+          {showReview && <NeedsReviewPanel products={products} onClose={() => setShowReview(false)} />}
+          {showTrash && <TrashPanel onClose={() => setShowTrash(false)} />}
+          {folderDialog && <FolderDialog mode={folderDialog.mode} folders={folders} folder={folderDialog.folder} onClose={() => setFolderDialog(null)} />}
 
           {showClearAllDialog && (
             <Modal title="Clear the whole Database?" onClose={() => setShowClearAllDialog(false)}>
@@ -1807,7 +1890,10 @@ function FolderView({
   onSearchProduct,
   onDeleteProduct,
   onTogglePrioritized,
+  folderActions,
 }: {
+  // Buttons for the person's own folders (new subfolder / rename / delete); absent for the auto-organized ones.
+  folderActions?: React.ReactNode;
   category: string;
   segments: string[];
   node: FamilyNode;
@@ -1849,6 +1935,7 @@ function FolderView({
           ))}
         </div>
         <span style={{ fontSize: 14, color: "var(--text-dim)" }}>({totalCount})</span>
+        {folderActions}
       </div>
       <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(${librarySize}px, 1fr))`, gap: 14 }}>
         {sortFamilyNodes(node.children, sortBy).map((child) => (
@@ -2465,6 +2552,7 @@ function ReferencePhotoCarousel({
 function ReferencePhotosModal({
   productId,
   productName,
+  allProducts,
   images,
   adding,
   onAdd,
@@ -2474,6 +2562,7 @@ function ReferencePhotosModal({
 }: {
   productId: string;
   productName: string;
+  allProducts: ProductProfile[];
   images: ProductImage[];
   adding: boolean;
   onAdd: () => void;
@@ -2514,11 +2603,17 @@ function ReferencePhotosModal({
                     onFeedbackApplied: onRefresh,
                   })
                 }
-                style={{ width: 64, height: 64, borderRadius: 8, objectFit: "cover", border: "1px solid var(--border)", cursor: "zoom-in" }}
+                style={{ width: 64, height: 64, borderRadius: 8, objectFit: "cover", border: "1px solid var(--border)", cursor: "zoom-in", opacity: statusBadge(img.status) ? 0.55 : 1 }}
               />
               <div style={{ fontSize: 10, color: "var(--text-dim)", textAlign: "center", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                 {imageSource(img.sourceTitle).name}
               </div>
+              {statusBadge(img.status) && (
+                <div style={{ fontSize: 10, textAlign: "center", color: statusBadge(img.status)!.color, fontWeight: 700 }} title="Not used as a reference until you confirm it (Needs review)">
+                  {statusBadge(img.status)!.label}
+                </div>
+              )}
+              <PhotoActions image={img} productId={productId} products={allProducts} onChanged={onRefresh} />
               <button
                 className="icon"
                 title="Delete this reference photo"
@@ -2562,7 +2657,9 @@ function ProductDetailPage({
   onDelete,
   onSaveEdit,
   onPickThumbnail,
+  folders,
 }: {
+  folders: LibraryFolder[];
   product: ProductProfile;
   // Per explicit instruction — the "Variants" section below needs the
   // whole Library to find this product's own siblings (see
@@ -2739,7 +2836,7 @@ function ProductDetailPage({
                   left much larger to compensate" (for the observedNotes/
                   lookoutNotes sections removed from below, freeing up the
                   vertical room this now uses). */}
-              <ReferencePhotoCarousel images={photos.images} fallbackImageUrl={product.imageUrl} onClick={() => setPhotosModalOpen(true)} size={400} />
+              <ReferencePhotoCarousel images={photos.images.filter((i) => i.status !== "needs_review" && i.status !== "quarantined")} fallbackImageUrl={product.imageUrl} onClick={() => setPhotosModalOpen(true)} size={400} />
               <button className="icon ghost" style={{ fontSize: 11.5 }} onClick={onPickThumbnail}>
                 Change thumbnail
               </button>
@@ -2863,6 +2960,10 @@ function ProductDetailPage({
                 </div>
               ) : null}
             </div>
+          </div>
+
+          <div style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)" }}>
+            <OrganizeCard product={product} folders={folders} />
           </div>
 
           {parentProduct && (
@@ -3089,6 +3190,7 @@ function ProductDetailPage({
         <ReferencePhotosModal
           productId={product.id}
           productName={product.name}
+          allProducts={allProducts}
           images={photos.images}
           adding={photos.adding}
           onAdd={photos.add}

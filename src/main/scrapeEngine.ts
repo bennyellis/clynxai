@@ -172,6 +172,7 @@ import { feedCandidates } from "./feedCandidates.js";
 import { apiActivity } from "./apiActivity.js";
 import { judgeCandidateByText } from "./photoIdentity.js";
 import { fileImage } from "./fileImage.js";
+import { selectReferenceImages } from "./referenceSelection.js";
 import { beta13Flags } from "./beta13.js";
 import { REEVAL_MAX_PER_VISIT, currentAgeText, reevaluationReason, requalifyEligible, scoredFromRecord, type ReevalReason } from "./relisting.js";
 import { checkArrivedLocation, type LocationCheck } from "./locationCheck.js";
@@ -1205,7 +1206,10 @@ export class ScrapeEngine {
           const prioritized = this.opts.store.listPrioritizedProductsWithImages();
           const seen = new Set(recent.map((r) => r.product.id));
           const merged = [...recent, ...prioritized.filter((p) => !seen.has(p.product.id))];
-          return merged.flatMap(({ product, images }) => (images[0] ? [{ name: product.name, imageDataUri: images[0].imageData }] : []));
+          return merged.flatMap(({ product, images }) => {
+            const best = selectReferenceImages(images, 1)[0];
+            return best ? [{ name: product.name, imageDataUri: best.imageData }] : [];
+          });
         })();
     // The OTHER direction of the same idea, for a listing that DOES have a
     // claimed item: real reference photos of that exact product (from its
@@ -1228,11 +1232,7 @@ export class ScrapeEngine {
     // whether it looks equally beat-up), so only normal reference photos
     // are ever offered here.
     const claimedItemReferenceImages = claimedProduct
-      ? this.opts.store
-          .listProductImages(claimedProduct.id)
-          .filter((img) => img.kind === "normal")
-          .slice(0, 2)
-          .map((img) => img.imageData)
+      ? selectReferenceImages(this.opts.store.listProductImages(claimedProduct.id), 2).map((img) => img.imageData)
       : [];
     this.log("info", `Analyzing ${imageUrls.length} photo(s) for "${title}"...`);
     const result = await analyzeListingPhotos(imageUrls, { title, description, price }, isLowAiMode() ? 4 : 8, {
