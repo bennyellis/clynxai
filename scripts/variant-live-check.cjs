@@ -61,4 +61,10 @@ buildSync({
   logLevel: "error",
   external: ["node:sqlite", "sharp", "playwright", "playwright-extra", "puppeteer-extra-plugin-stealth", "electron"],
 });
-require("node:child_process").spawnSync(process.execPath, [out, ...process.argv.slice(2)], { stdio: "inherit", cwd: root });
+// The bundle sits in the temp folder, so it is told where the project's own modules (playwright) are.
+const modules = path.join(root, "node_modules");
+require("node:child_process").spawnSync(process.execPath, [out, ...process.argv.slice(2)], {
+  stdio: "inherit",
+  cwd: root,
+  env: { ...process.env, NODE_PATH: [modules, process.env.NODE_PATH].filter(Boolean).join(path.delimiter) },
+});
