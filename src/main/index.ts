@@ -1749,7 +1749,10 @@ function isExactProduct(productName: string, matchedItem: string | null, title: 
   return titleLooksLikeProduct(productName, title);
 }
 
-async function checkMarketBeforeAlert(listing: { title: string; matchedItem: string | null; purpose?: "bundle"; identityTexts?: string[] }): Promise<MarketCheck | null> {
+// Listings that asked for a market check which timed out, by product: when the late answer lands they are judged again (scrapeEngine.requalifyListing).
+const lateCheckWaiters = new Map<string, Set<string>>();
+
+async function checkMarketBeforeAlert(listing: { title: string; matchedItem: string | null; purpose?: "bundle"; identityTexts?: string[]; listingId?: string }): Promise<MarketCheck | null> {
   const signals = store.getProductSignals(listing.matchedItem, listing.title, listing.identityTexts);
   const exact = !!signals && isExactProduct(signals.name, listing.matchedItem, listing.title, signals.unconfirmedCodes ?? []);
   const recentlyChecked = (checkedAt: number | null | undefined) => !!checkedAt && Date.now() - checkedAt < MARKET_RECENT_MS;
@@ -1772,14 +1775,19 @@ async function checkMarketBeforeAlert(listing: { title: string; matchedItem: str
       : moreSpecific || listing.matchedItem?.trim() || focalProductName({ signalName: null, matchedItem: null, category: null, title: listing.title });
   if (!name) return null;
   const key = name.toLowerCase();
+  if (listing.listingId) {
+    const waiting = lateCheckWaiters.get(key) ?? new Set<string>();
+    waiting.add(listing.listingId);
+    lateCheckWaiters.set(key, waiting);
+  }
   const running = marketChecksInFlight.get(key);
   if (running) return running;
-  const job = runMarketCheck(name, listing.title, signals && exact ? signals.id : null, listing.purpose).finally(() => marketChecksInFlight.delete(key));
+  const job = runMarketCheck(name, listing.title, signals && exact ? signals.id : null, listing.purpose, key).finally(() => marketChecksInFlight.delete(key));
   marketChecksInFlight.set(key, job);
   return job;
 }
 
-async function runMarketCheck(name: string, listingTitle: string, existingId: string | null, purpose?: "bundle"): Promise<MarketCheck | null> {
+async function runMarketCheck(name: string, listingTitle: string, existingId: string | null, purpose?: "bundle", waitKey?: string): Promise<MarketCheck | null> {
   let id = existingId;
   let created = false;
   if (!id) {
@@ -1814,6 +1822,7 @@ async function runMarketCheck(name: string, listingTitle: string, existingId: st
     return null;
   });
   if (timer) clearTimeout(timer);
+  if (waitKey && winner !== timedOut) lateCheckWaiters.delete(waitKey); // answered in time: the gate already used the numbers
   if (winner === timedOut || winner === null) {
     discovery.note(productId, "warn", winner === timedOut ? "eBay was too slow to answer, so I'm going with what the Database already knows." : "I couldn't get a price check through, so I'm going with what the Database already knows.");
     discovery.finish(productId, "failed");
@@ -1826,6 +1835,12 @@ async function runMarketCheck(name: string, listingTitle: string, existingId: st
         deleteProduct: (id) => store.deleteProduct(id),
         fillIn: () => void runProductLookup(productId, name, { triggeringListing: { title: listingTitle, imageDataUri: null } }),
         note: (message) => recordLog({ ts: Date.now(), level: "info", message: `"${name}": ${message}` }),
+        // Beta 12: the late answer is judged against the listings that asked for it (they stayed "worth a look" for want of exactly this number).
+        onValue: () => {
+          const ids = waitKey ? [...(lateCheckWaiters.get(waitKey) ?? [])] : [];
+          if (waitKey) lateCheckWaiters.delete(waitKey);
+          for (const id of ids) void getPrimaryEngine().requalifyListing(id, `the late price check for "${name}" finished`).catch(() => undefined);
+        },
       });
     } else if (created) {
       store.deleteProduct(productId);

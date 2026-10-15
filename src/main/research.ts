@@ -266,3 +266,28 @@ export function shortLabel(status: ResearchStatus | null): string | null {
       return null;
   }
 }
+
+// ---------------------------------------------------------------------------------------------------------------- validating a dismissal
+// A listing of a product the Database knows nothing about is judged by a text-only AI answering from memory. "Not a deal" from that is a guess. For a listing with credible upside
+// (a specific product, a price worth a market lookup) the guess is checked against real numbers, within the same bounded market-lookup allowance the photo-first finds use.
+export const MIN_VALIDATE_DISMISSED_PRICE_USD = 75;
+
+export interface DismissalInput {
+  price: number;
+  title: string;
+  matchedItem: string | null;
+  isDeal: boolean;
+  judgeUnavailable: boolean;
+  offTopic: boolean;
+  /** Market lookups left for this location visit and this pass. */
+  lookLeftVisit: number;
+  lookLeftPass: number;
+  hasChecker: boolean;
+}
+
+export function shouldValidateDismissal(i: DismissalInput): boolean {
+  if (!i.hasChecker || i.isDeal || i.matchedItem !== null || i.judgeUnavailable || i.offTopic) return false;
+  if (i.price < MIN_VALIDATE_DISMISSED_PRICE_USD) return false;
+  if (i.lookLeftVisit <= 0 || i.lookLeftPass <= 0) return false;
+  return !titleIsVague(i.title);
+}

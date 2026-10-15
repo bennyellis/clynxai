@@ -1,6 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatAttachment, ChatMessage, EventStats, LogLine, MetricsSnapshot, ProductProfile, ScrapeStatus, StageStats } from "../lib/api.js";
 import { api } from "../lib/api.js";
+import { useStickToBottom } from "../lib/stickToBottom.js";
+import {
+  ACTIVITY_LEVEL_KEY,
+  ACTIVITY_VIEW_KEY,
+  buildActivityItems,
+  buildAskPrompt,
+  isRoutineSkip,
+  parseActivityView,
+  parseLevelFilter,
+  type ActivityView,
+  type AskableEvent,
+  type LevelFilter,
+} from "../lib/activityView.js";
 
 // Same cap vision.ts already applies when downloading a listing's own
 // photos — keeping this consistent rather than inventing a different limit
@@ -45,8 +58,6 @@ interface ChatEntry {
   attachments?: ChatAttachment[];
 }
 
-type FeedItem = { kind: "log"; ts: number; line: LogLine } | { kind: "chat"; ts: number; entry: ChatEntry };
-
 // Per explicit instruction — Activity used to be a card embedded directly
 // in Dashboard; it's now this screen's whole reason for existing. Still
 // uses chat context "dashboard" (unchanged — see chat.ts's
@@ -75,10 +86,24 @@ function logKey(line: LogLine): number {
   return key;
 }
 
-// The routine, per-listing "skip (reason): title" chatter.
-function isRoutineSkip(line: LogLine): boolean {
-  return line.level === "info" && /^skip\b/i.test(line.message);
+function readSaved(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
 }
+
+function writeSaved(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // not persisted: fine
+  }
+}
+
+// Screen-reader-only (still read aloud, never drawn).
+const SR_ONLY: React.CSSProperties = { position: "absolute", width: 1, height: 1, margin: -1, padding: 0, overflow: "hidden", clip: "rect(0 0 0 0)", whiteSpace: "nowrap", border: 0 };
 
 export function Activity({
   status,
@@ -104,7 +129,6 @@ export function Activity({
   // cleared once the message actually goes out.
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
-  const feedScrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Just for resolving a log line's productName to an id on click — not
@@ -229,16 +253,32 @@ export function Activity({
     };
   }, []);
 
-  // Follow new lines only while the reader is parked at the bottom. It used to
-  // scroll on every single new line, which yanked the view away from anything
-  // the reader had scrolled up to read — and with a busy scan that is several
-  // times a second.
-  const stickToBottomRef = useRef(true);
-  function onFeedScroll() {
-    const el = feedScrollRef.current;
-    if (!el) return;
-    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  // Follow new lines only while the reader is parked at the bottom (lib/stickToBottom.ts). It used to scroll on every single new line,
+  // which yanked the view away from anything the reader had scrolled up to read, and with a busy scan that is several times a second.
+  const stick = useStickToBottom<HTMLDivElement>();
+
+  // Which view is showing: the operational Activity Feed, the conversation with Clynx, or both interleaved (how this screen always worked).
+  // The choice is remembered across launches; switching to Chat because you sent a message or asked about an event is not.
+  const [view, setViewState] = useState<ActivityView>(() => parseActivityView(readSaved(ACTIVITY_VIEW_KEY)));
+  const [level, setLevelState] = useState<LevelFilter>(() => parseLevelFilter(readSaved(ACTIVITY_LEVEL_KEY)));
+  function chooseView(next: ActivityView) {
+    setViewState(next);
+    writeSaved(ACTIVITY_VIEW_KEY, next);
   }
+  function chooseLevel(next: LevelFilter) {
+    setLevelState(next);
+    writeSaved(ACTIVITY_LEVEL_KEY, next);
+  }
+  // A different view is a different list: start it at its newest end.
+  const viewMounted = useRef(false);
+  useEffect(() => {
+    if (!viewMounted.current) {
+      viewMounted.current = true;
+      return;
+    }
+    stick.scrollToBottom();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, level]);
 
   // Routine "skip (...)" lines are by far the most common thing in the log and
   // rarely worth reading; this hides them while keeping deals, warnings,
@@ -261,22 +301,18 @@ export function Activity({
     });
   }
 
-  // Chronological merge — chat messages, AI narration, and raw activity
-  // log lines all interleaved in the order they actually happened, rather
-  // than split across two panels.
-  const feed: FeedItem[] = useMemo(() => {
-    const items: FeedItem[] = [
-      ...logs.filter((line) => showRoutine || !isRoutineSkip(line)).map((line): FeedItem => ({ kind: "log", ts: line.ts, line })),
-      ...chat.map((entry): FeedItem => ({ kind: "chat", ts: entry.ts, entry })),
-    ];
-    items.sort((a, b) => a.ts - b.ts);
-    return items;
-  }, [logs, chat, showRoutine]);
+  // The rows for the current view, oldest first (lib/activityView.ts): log lines and AI narration are events, the rest is the conversation.
+  const feed = useMemo(() => buildActivityItems(logs, chat, { view, showRoutine, level }), [logs, chat, view, showRoutine, level]);
 
-  useEffect(() => {
-    if (!stickToBottomRef.current) return;
-    feedScrollRef.current?.scrollTo({ top: feedScrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [feed.length, chat]);
+  // The latest finished reply, read out by a screen reader whichever view is showing. The list itself stays quiet (aria-live off): a busy
+  // scan would otherwise announce every line.
+  const lastReply = useMemo(() => {
+    for (let i = chat.length - 1; i >= 0; i--) {
+      const m = chat[i];
+      if (m.role === "assistant" && !m.auto && !m.streaming && m.content) return m;
+    }
+    return null;
+  }, [chat]);
 
   // Per explicit instruction — "add animations for when the ai is
   // Analyzing something, maybe a spinning gear." An "Analyzing..." line is
@@ -308,6 +344,9 @@ export function Activity({
     setAttachments([]);
     setAttachError(null);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
+    // Sending means you want the conversation: show it, and follow the reply as it streams in.
+    if (view !== "chat") setViewState("chat");
+    stick.scrollToBottom();
 
     const history: ChatMessage[] = chat
       .filter((m) => !m.streaming && !m.error)
@@ -327,6 +366,27 @@ export function Activity({
     api.startChat(requestId, text, history, "dashboard", undefined, attachments);
   }
 
+  // "Ask Clynx about this" on an event row: the chat opens with a ready-made question in the box. It is only a draft, never sent for you.
+  const askAboutEvent = useCallback((event: AskableEvent) => {
+    setViewState("chat");
+    setDraft(buildAskPrompt(event, (ts) => new Date(ts).toLocaleString()));
+    requestAnimationFrame(() => {
+      const box = textareaRef.current;
+      if (box) {
+        box.focus();
+        box.setSelectionRange(box.value.length, box.value.length);
+      }
+    });
+  }, []);
+
+  // The box grows with its text, including a draft that was filled in for you.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    if (draft) el.style.height = `${el.scrollHeight}px`;
+  }, [draft, view]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20, height: "100%" }}>
       <div>
@@ -344,11 +404,13 @@ export function Activity({
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
+            flexWrap: "wrap",
+            gap: 10,
             padding: "14px 18px",
             borderBottom: "1px solid var(--border)",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             <strong>Activity</strong>
             {narrating && (
               <span className="pill enter-fade" style={{ display: "flex", alignItems: "center", gap: 5 }}>
@@ -356,55 +418,126 @@ export function Activity({
                 narrating
               </span>
             )}
+            <div role="group" aria-label="What to show" style={{ display: "flex", gap: 4 }}>
+              {(
+                [
+                  ["all", "All"],
+                  ["feed", "Activity Feed"],
+                  ["chat", "Chat with Clynx"],
+                ] as Array<[ActivityView, string]>
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  className="ghost"
+                  aria-pressed={view === id}
+                  onClick={() => chooseView(id)}
+                  style={{
+                    fontSize: 12.5,
+                    padding: "4px 11px",
+                    borderRadius: 999,
+                    border: `1px solid ${view === id ? "var(--accent-1)" : "var(--border)"}`,
+                    color: view === id ? "var(--text)" : "var(--text-muted)",
+                    background: view === id ? "var(--bg-card-hover)" : "transparent",
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
             {status.currentSearch && (
               <span className="pill">
                 {status.currentSearch} · location {status.locationIndex + 1} · {status.listingsThisCycle} checked
               </span>
             )}
-            <button
-              className="icon ghost"
-              onClick={toggleRoutine}
+            {view === "feed" && (
+              <select aria-label="Which events to show" value={level} onChange={(e) => chooseLevel(parseLevelFilter(e.target.value))} style={{ fontSize: 12.5 }}>
+                <option value="all">All events</option>
+                <option value="issues">Warnings and errors</option>
+                <option value="deals">Deals</option>
+              </select>
+            )}
+            {view !== "chat" && (
+              <button
+                className="icon ghost"
+                onClick={toggleRoutine}
               title={showRoutine ? "Hide the routine \"skip\" lines and keep deals, warnings and research" : "Show every line, including routine skips"}
               style={{ fontSize: 12.5 }}
             >
-              {showRoutine ? "Hide skips" : "Show skips"}
-            </button>
+                {showRoutine ? "Hide skips" : "Show skips"}
+              </button>
+            )}
           </div>
         </div>
 
-        <div ref={feedScrollRef} onScroll={onFeedScroll} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
-          {feed.length === 0 && (
-            <div style={{ color: "var(--text-dim)", padding: "16px 18px" }}>
-              No activity yet. Start the scanner from Dashboard, or just talk to me below: I can track down a specific item,
-              dig into what something really sells for, or help with anything else about reselling. I'll chime in here as
-              I find things too.
+        <div style={{ flex: 1, minHeight: 0, position: "relative", display: "flex", flexDirection: "column" }}>
+          <div
+            ref={stick.scrollRef}
+            onScroll={stick.onScroll}
+            data-stick-bottom=""
+            role="log"
+            aria-label={view === "chat" ? "Conversation with Clynx" : view === "feed" ? "Activity Feed" : "Activity and conversation"}
+            aria-live="off"
+            tabIndex={0}
+            style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}
+          >
+            <div ref={stick.contentRef} style={{ display: "flex", flexDirection: "column", minHeight: "100%", justifyContent: "flex-end" }}>
+              {feed.length === 0 && (
+                <div style={{ color: "var(--text-dim)", padding: "16px 18px" }}>
+                  {view === "chat"
+                    ? "Nothing here yet. Ask me anything below: I can track down a specific item, dig into what something really sells for, or help with anything else about reselling."
+                    : view === "feed"
+                      ? level !== "all" || !showRoutine
+                        ? "No events match this filter."
+                        : "No activity yet. Start the scanner from Dashboard, and what it finds will show up here as it happens."
+                      : "No activity yet. Start the scanner from Dashboard, or just talk to me below: I can track down a specific item, dig into what something really sells for, or help with anything else about reselling. I'll chime in here as I find things too."}
+                </div>
+              )}
+              {feed.map((item) =>
+                item.kind === "log" ? (
+                  <LogRowMemo
+                    key={`log-${logKey(item.line)}`}
+                    line={item.line}
+                    onGoToProduct={goToProductByName}
+                    onAsk={askAboutEvent}
+                    isAnalyzing={(() => {
+                      const m = item.line.message.match(/^Analyzing \d+ photo\(s\) for "(.+)"\.\.\.$/);
+                      return !!m && analyzingTitles.has(m[1]);
+                    })()}
+                  />
+                ) : (
+                  <ChatRow key={item.entry.id} entry={item.entry} onAsk={askAboutEvent} />
+                )
+              )}
             </div>
+          </div>
+          {!stick.atBottom && (
+            <button
+              type="button"
+              className="icon"
+              onClick={stick.scrollToBottom}
+              aria-label="Jump to the latest"
+              title="Jump to the latest"
+              style={{ position: "absolute", right: 18, bottom: 12, borderRadius: 999, padding: "6px 14px", fontSize: 13, border: "1px solid var(--border-strong)", background: "var(--bg-card)", boxShadow: "0 2px 10px rgba(0,0,0,0.25)" }}
+            >
+              ↓ Latest
+            </button>
           )}
-          {feed.map((item) =>
-            item.kind === "log" ? (
-              <LogRowMemo
-                key={`log-${logKey(item.line)}`}
-                line={item.line}
-                onGoToProduct={goToProductByName}
-                isAnalyzing={(() => {
-                  const m = item.line.message.match(/^Analyzing \d+ photo\(s\) for "(.+)"\.\.\.$/);
-                  return !!m && analyzingTitles.has(m[1]);
-                })()}
-              />
-            ) : (
-              <ChatRow key={item.entry.id} entry={item.entry} />
-            )
-          )}
+          <div aria-live="polite" aria-atomic="true" style={SR_ONLY}>
+            {lastReply ? `Clynx: ${lastReply.content}` : ""}
+          </div>
         </div>
 
+        {/* The box belongs to the conversation, so it is hidden in the Activity Feed view (there is nothing to reply to there). */}
         <form
+          hidden={view === "feed"}
           onSubmit={(e) => {
             e.preventDefault();
             sendChat();
           }}
-          style={{ display: "flex", flexDirection: "column", gap: 8, padding: 14, borderTop: "1px solid var(--border)" }}
+          style={{ display: view === "feed" ? "none" : "flex", flexDirection: "column", gap: 8, padding: 14, borderTop: "1px solid var(--border)" }}
         >
           {/* Per explicit instruction — lets the user show the assistant a
               photo of a product they don't know the name of. Pending
@@ -716,10 +849,12 @@ const LogRowMemo = React.memo(LogRow);
 function LogRow({
   line,
   onGoToProduct,
+  onAsk,
   isAnalyzing,
 }: {
   line: LogLine;
   onGoToProduct: (name: string) => void;
+  onAsk: (event: AskableEvent) => void;
   isAnalyzing: boolean;
 }) {
   const isDeal = line.level === "deal";
@@ -740,6 +875,8 @@ function LogRow({
     gap: 10,
     alignItems: "baseline",
     padding: "3px 18px",
+    flex: 1,
+    minWidth: 0,
     color: levelColor(line.level),
     fontFamily: "ui-monospace, monospace",
     fontSize: 11.5,
@@ -779,23 +916,33 @@ function LogRow({
     </>
   );
 
+  let row: React.ReactNode;
   if (line.listingUrl) {
-    return (
+    row = (
       <a href={line.listingUrl} target="_blank" rel="noreferrer" className={`${animClass} log-row-link`} style={rowStyle}>
         {content}
       </a>
     );
-  }
-  if (line.productName) {
-    return (
+  } else if (line.productName) {
+    row = (
       <div className={`${animClass} log-row-link`} style={rowStyle} onClick={() => onGoToProduct(line.productName!)}>
         {content}
       </div>
     );
+  } else {
+    row = (
+      <div className={animClass} style={rowStyle}>
+        {content}
+      </div>
+    );
   }
+  // The action sits beside the row rather than inside it: a button cannot live inside the row's link.
   return (
-    <div className={animClass} style={rowStyle}>
-      {content}
+    <div className="log-row-wrap">
+      {row}
+      <button type="button" className="icon ghost log-row-ask" onClick={() => onAsk(line)} title="Ask Clynx about this event" style={{ fontSize: 11, padding: "1px 8px" }}>
+        Ask Clynx
+      </button>
     </div>
   );
 }
@@ -810,7 +957,7 @@ function LogRow({
 // normal streamed reply.
 const SEARCH_ACK_RE = /^Searching\.\.\.$/;
 
-function ChatRow({ entry }: { entry: ChatEntry }) {
+function ChatRow({ entry, onAsk }: { entry: ChatEntry; onAsk: (event: AskableEvent) => void }) {
   const isUser = entry.role === "user";
   const isDealNarration = entry.auto === "deal";
   const isBatchNarration = entry.auto === "batch";
@@ -819,6 +966,8 @@ function ChatRow({ entry }: { entry: ChatEntry }) {
   return (
     <div
       className="enter"
+      role="article"
+      aria-label={isUser ? "You" : isDealNarration || isBatchNarration ? "Clynx (note)" : entry.error ? "Clynx (error)" : "Clynx"}
       style={{
         background: isUser ? "transparent" : "var(--bg-elevated)",
         borderBottom: "1px solid var(--border)",
@@ -879,6 +1028,18 @@ function ChatRow({ entry }: { entry: ChatEntry }) {
         )}
         {entry.streaming && entry.content && <span className="cursor-blink" />}
       </div>
+      {/* Clynx's own narration is an event: it can be asked about like a log line. */}
+      {(isDealNarration || isBatchNarration) && !entry.streaming && entry.content && (
+        <button
+          type="button"
+          className="icon ghost"
+          onClick={() => onAsk({ ts: entry.ts, level: isDealNarration ? "deal" : "info", message: entry.content })}
+          title="Ask Clynx about this"
+          style={{ alignSelf: "flex-start", flexShrink: 0, fontSize: 11, padding: "1px 8px" }}
+        >
+          Ask Clynx
+        </button>
+      )}
     </div>
   );
 }

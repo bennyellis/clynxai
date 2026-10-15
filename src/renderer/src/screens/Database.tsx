@@ -1,14 +1,24 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { BlacklistedImage, BlacklistTerm, ChatContext, ChatMessage, ProductImage, ProductProfile } from "../lib/api.js";
 import { api } from "../lib/api.js";
 import { Modal } from "../components/Modal.js";
 import { useLightbox } from "../components/ImageLightbox.js";
 import { ThumbnailSizeSlider, useThumbnailSize } from "../components/ThumbnailSize.js";
 import { WatchFormFlow } from "../components/WatchFormFlow.js";
-import { DiscoveryTab } from "./DiscoveryTab.js";
+import { DiscoveryTab, resetDiscoveryUi } from "./DiscoveryTab.js";
 import { ReviewTab } from "./ReviewTab.js";
 import { keepRangeUsd } from "../../../main/resaleMath.js";
 import { imageSource } from "../lib/imageSource.js";
+import {
+  homeDatabaseNav,
+  libraryRootNav,
+  readSavedDatabaseNav,
+  validateDatabaseNav,
+  writeSavedDatabaseNav,
+  type DatabaseNav,
+  type DatabaseTabId,
+  type LibrarySortId,
+} from "../lib/navState.js";
 
 // Per explicit instruction — the Database screen is now three clearly
 // separated sections instead of one long scrolling page: Discovery (a live
@@ -18,7 +28,7 @@ import { imageSource } from "../lib/imageSource.js";
 // to another top-level screen and back the same way every other bit of
 // this screen's own state already does (Database itself never unmounts —
 // see App.tsx).
-type DatabaseTab = "discovery" | "library" | "review" | "blacklist";
+type DatabaseTab = DatabaseTabId;
 
 // Mirrors chat.ts's PRODUCT_CATEGORIES — only used here to pick a stable,
 // sensible display order for section headers (real grouping just uses
@@ -443,7 +453,7 @@ function isHotProduct(product: ProductProfile, avgSoldPriceAcrossLibrary: number
 // same real watchcount-confirmed average sale price isHotProduct reads,
 // not the general (unverified) estimate — a product with none pushes to
 // the end regardless of direction rather than being treated as free.
-type LibrarySortBy = "recent" | "priceDesc" | "priceAsc" | "az";
+type LibrarySortBy = LibrarySortId;
 
 function compareProducts(a: ProductProfile, b: ProductProfile, sortBy: LibrarySortBy): number {
   if (sortBy === "az") return a.name.localeCompare(b.name);
@@ -487,6 +497,7 @@ export function Database({
   active = true,
   requestedProductId,
   onRequestedProductHandled,
+  homeSignal,
 }: {
   // False while another screen is showing. The library (every product with its photo, tens of MB) is loaded the first time this screen is
   // shown, not when the app starts.
@@ -498,18 +509,22 @@ export function Database({
   // component doesn't strictly depend on App.tsx's navigation plumbing).
   requestedProductId?: string | null;
   onRequestedProductHandled?: () => void;
+  // Bumped by App.tsx when the Database's sidebar icon is clicked while it is already showing: back to the Database's home.
+  homeSignal?: number;
 } = {}) {
-  const [tab, setTab] = useState<DatabaseTab>("discovery");
+  // Where the Database was left last time (lib/navState.ts): read once, validated against the real products once they load (see below).
+  const [savedNav] = useState(readSavedDatabaseNav);
+  const [tab, setTab] = useState<DatabaseTab>(savedNav.tab);
   const [products, setProducts] = useState<ProductProfile[]>([]);
   // null = show every category (the old behavior). Clicking a category pill
   // below jumps straight to just that section instead of making the user
   // scroll past every other category to find it.
-  const [activeCategory, setActiveCategory] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [activeCategory, setActiveCategory] = useState<string | null>(savedNav.activeCategory);
+  const [searchQuery, setSearchQuery] = useState(savedNav.searchQuery);
   // Set the instant a product tile is clicked — swaps the whole screen to a
   // dedicated detail page for that one product (see ProductDetailPage
   // below), per explicit instruction, rather than expanding inline.
-  const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
+  const [selectedProductId, setSelectedProductId] = useState<string | null>(savedNav.selectedProductId);
   const [clearing, setClearing] = useState(false);
   const [showClearAllDialog, setShowClearAllDialog] = useState(false);
   // Library's "Find photos" catch-up button — how many products still have
@@ -547,7 +562,7 @@ export function Database({
   // wherever products are actually rendered (the category grid's own
   // folders/ungrouped items, search results, and a drilled-into folder's
   // own contents) — see compareProducts/sortProducts/sortFamilyNodes above.
-  const [librarySortBy, setLibrarySortBy] = useState<LibrarySortBy>("recent");
+  const [librarySortBy, setLibrarySortBy] = useState<LibrarySortBy>(savedNav.sortBy);
   // Per explicit instruction — small → extra large, remembered per grid;
   // 140 matches this grid's original fixed minimum width.
   const [librarySize, setLibrarySize] = useThumbnailSize("dbLibraryThumbSize", 140);
@@ -558,7 +573,7 @@ export function Database({
   // a search is active (see the render below) rather than tracked
   // separately, since a name search should show flat matches, not make the
   // user pick their way back out of a folder first.
-  const [viewingPath, setViewingPath] = useState<{ category: string; segments: string[] } | null>(null);
+  const [viewingPath, setViewingPath] = useState<{ category: string; segments: string[] } | null>(savedNav.viewingPath);
   // Guards against refetching products.list on every render while waiting
   // for a requested product that genuinely doesn't exist (a bug, or a race
   // that never resolves) — at most one extra refetch per request.
@@ -588,11 +603,16 @@ export function Database({
     }
   }, [requestedProductId, products, onRequestedProductHandled]);
 
+  // True once the library has been fetched at least once: a remembered product, category or folder is only judged "gone" after that.
+  const [productsLoaded, setProductsLoaded] = useState(false);
   const libraryLoaded = useRef(false);
   useEffect(() => {
     if (!active || libraryLoaded.current) return;
     libraryLoaded.current = true;
-    api.listProducts().then(setProducts);
+    api.listProducts().then((list) => {
+      setProducts(list);
+      setProductsLoaded(true);
+    });
   }, [active]);
   useEffect(() => {
     // A folder's brand logo was just found (see requestFolderImage): its products carry it, so reload them (once the library has been loaded).
@@ -673,20 +693,96 @@ export function Database({
     });
   }, [products]);
 
-  // Falls back to "show everything" if the selected category disappears
-  // (its last product got deleted) rather than silently showing nothing.
+  // Falls back to "show everything" if the selected category disappears (its last product got deleted) rather than silently showing
+  // nothing; the same for a folder view left open when its last member gets deleted (or reassigned elsewhere by a fresh research pass),
+  // which falls back out to the category grid, and for an open product that no longer exists (deleted from another window), which falls
+  // back to the grid. The same check validates what was remembered from last time, so a restored Database never lands on something that
+  // is gone. Waits for the first load: before it, every product would look "deleted".
   useEffect(() => {
-    if (activeCategory && !grouped.some((g) => g.category === activeCategory)) setActiveCategory(null);
-  }, [grouped, activeCategory]);
+    if (!productsLoaded) return;
+    const current: DatabaseNav = { tab, selectedProductId, searchQuery, activeCategory, sortBy: librarySortBy, viewingPath, scrollTop: 0 };
+    const next = validateDatabaseNav(current, {
+      productIds: new Set(products.map((p) => p.id)),
+      categories: new Set(grouped.map((g) => g.category)),
+      hasFolder: (category, segments) => findFamilyNode(grouped.find((g) => g.category === category)?.tree ?? [], segments) !== null,
+    });
+    if (next === current) return;
+    if (next.selectedProductId !== selectedProductId) setSelectedProductId(next.selectedProductId);
+    if (next.tab !== tab) setTab(next.tab);
+    if (next.activeCategory !== activeCategory) setActiveCategory(next.activeCategory);
+    if (next.viewingPath !== viewingPath) setViewingPath(next.viewingPath);
+  }, [productsLoaded, products, grouped, tab, selectedProductId, searchQuery, activeCategory, librarySortBy, viewingPath]);
 
-  // Same idea for a folder view left open when its last member gets
-  // deleted (or reassigned elsewhere by a fresh research pass) — falls
-  // back out to the category grid rather than showing an empty folder.
+  // ---- remembering where the Database was left (lib/navState.ts). The Library grid unmounts whenever another tab or a product page is
+  // showing, so its scroll offset is saved as the reader scrolls and put back when the grid returns (rather than keeping a second copy of
+  // the photo-heavy grid mounted out of sight).
+  const libraryScroll = useRef(savedNav.scrollTop);
+  const libraryEl = useRef<HTMLDivElement | null>(null);
+  const restoreScrollPending = useRef(false);
+  const scrollSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const navSnapshot = useRef<DatabaseNav>(savedNav);
+  navSnapshot.current = { tab, selectedProductId, searchQuery, activeCategory, sortBy: librarySortBy, viewingPath, scrollTop: libraryScroll.current };
+  const setLibraryEl = useCallback((el: HTMLDivElement | null) => {
+    libraryEl.current = el;
+    if (el) restoreScrollPending.current = true;
+  }, []);
+  // Runs after every render, cheap when nothing is pending. Until the library has loaded the grid is too short to scroll to a remembered
+  // offset, so a non-zero offset waits for the load.
+  useLayoutEffect(() => {
+    const el = libraryEl.current;
+    if (!el || !restoreScrollPending.current) return;
+    if (libraryScroll.current > 0 && !productsLoaded) return;
+    restoreScrollPending.current = false;
+    el.scrollTop = libraryScroll.current;
+  });
   useEffect(() => {
-    if (!viewingPath) return;
-    const tree = grouped.find((g) => g.category === viewingPath.category)?.tree ?? [];
-    if (!findFamilyNode(tree, viewingPath.segments)) setViewingPath(null);
-  }, [grouped, viewingPath]);
+    writeSavedDatabaseNav(navSnapshot.current);
+  }, [tab, selectedProductId, searchQuery, activeCategory, librarySortBy, viewingPath]);
+  useEffect(
+    () => () => {
+      if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
+    },
+    []
+  );
+  // Coming back from another screen (the Database stays mounted, hidden): make sure the grid is where it was left.
+  useLayoutEffect(() => {
+    const el = libraryEl.current;
+    if (active && el && el.clientHeight > 0 && productsLoaded && Math.abs(el.scrollTop - libraryScroll.current) > 1) el.scrollTop = libraryScroll.current;
+  }, [active, productsLoaded]);
+  function onLibraryScroll(e: React.UIEvent<HTMLDivElement>) {
+    // A hidden grid reports a zero-height box: that is not the reader scrolling.
+    if (e.currentTarget.clientHeight === 0) return;
+    libraryScroll.current = e.currentTarget.scrollTop;
+    if (scrollSaveTimer.current) return;
+    scrollSaveTimer.current = setTimeout(() => {
+      scrollSaveTimer.current = null;
+      writeSavedDatabaseNav(navSnapshot.current);
+    }, 400);
+  }
+  function resetLibraryToRoot() {
+    const root = libraryRootNav(navSnapshot.current);
+    setSelectedProductId(root.selectedProductId);
+    setSearchQuery(root.searchQuery);
+    setActiveCategory(root.activeCategory);
+    setViewingPath(root.viewingPath);
+    libraryScroll.current = 0;
+    libraryEl.current?.scrollTo({ top: 0 });
+  }
+  // The Database's sidebar icon was clicked while already open: back to the home view (the Discovery tab, nothing selected). Sorting is a
+  // preference and stays.
+  const seenHomeSignal = useRef(homeSignal);
+  useEffect(() => {
+    if (homeSignal === undefined || homeSignal === seenHomeSignal.current) return;
+    seenHomeSignal.current = homeSignal;
+    const home = homeDatabaseNav(navSnapshot.current.sortBy);
+    setTab(home.tab);
+    setSelectedProductId(home.selectedProductId);
+    setSearchQuery(home.searchQuery);
+    setActiveCategory(home.activeCategory);
+    setViewingPath(home.viewingPath);
+    libraryScroll.current = home.scrollTop;
+    resetDiscoveryUi();
+  }, [homeSignal]);
 
   const visibleGroups = activeCategory ? grouped.filter((g) => g.category === activeCategory) : grouped;
 
@@ -704,13 +800,6 @@ export function Database({
   }, [visibleGroups, searchQuery]);
 
   const selectedProduct = selectedProductId ? products.find((p) => p.id === selectedProductId) ?? null : null;
-
-  // Falls back to the grid if the open product gets deleted out from under
-  // the detail page (e.g. deleted from another window) rather than showing
-  // a detail page for a product that no longer exists.
-  useEffect(() => {
-    if (selectedProductId && !selectedProduct) setSelectedProductId(null);
-  }, [selectedProductId, selectedProduct]);
 
   async function refresh(id: string) {
     setProducts((prev) => prev.map((p) => (p.id === id ? { ...p, loading: true } : p)));
@@ -833,7 +922,9 @@ export function Database({
           <button
             key={t}
             className="ghost"
-            onClick={() => setTab(t)}
+            // Clicking the tab you are already on takes the Library back to its root (folders, category, search and scroll cleared).
+            onClick={() => (t === tab ? t === "library" && resetLibraryToRoot() : setTab(t))}
+            aria-current={tab === t ? "page" : undefined}
             style={{
               padding: "13px 20px",
               borderRadius: "10px 10px 0 0",
@@ -864,7 +955,7 @@ export function Database({
       )}
 
       {tab === "library" && (
-        <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 18, paddingRight: 4 }}>
+        <div ref={setLibraryEl} onScroll={onLibraryScroll} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 18, paddingRight: 4 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
               {products.length > 0 && (

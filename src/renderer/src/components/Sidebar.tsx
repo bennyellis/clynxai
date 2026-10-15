@@ -445,6 +445,7 @@ export function Sidebar({
             key={item.id}
             className={`nav-item ghost${active === item.id ? " active" : ""}`}
             onClick={() => onSelect(item.id)}
+            aria-current={active === item.id ? "page" : undefined}
             style={{
               justifyContent: "flex-start",
               display: "flex",

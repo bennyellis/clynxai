@@ -1,3 +1,5 @@
+import { REQUALIFY_CODES, type SavedListingState } from "./relisting.js";
+import { countLifecycle, type LifecycleCounts } from "./listingLifecycle.js";
 import { DatabaseSync, backup as sqliteBackup } from "node:sqlite";
 import { colorsConflict, colorsIn, isColorWord, sameColors } from "./colors.js";
 import { compMatchesSpecs, hasSingleModelLetter, modelLettersConflict } from "./compFilter.js";
@@ -144,6 +146,12 @@ export class Store {
         listing_age TEXT,
         seller_name TEXT,
         description TEXT
+      );
+      -- Beta 12: how often a seen listing has been looked at again (bounded re-evaluation, see relisting.ts). A side table so saveScored's INSERT OR REPLACE never resets it.
+      CREATE TABLE IF NOT EXISTS listing_reeval (
+        listing_id TEXT PRIMARY KEY,
+        count INTEGER NOT NULL DEFAULT 0,
+        last_at INTEGER
       );
       CREATE TABLE IF NOT EXISTS feedback (
         listing_id TEXT PRIMARY KEY REFERENCES listings(id),
@@ -2199,6 +2207,54 @@ export class Store {
   // stat once evaluation volume actually passes 500. A real COUNT(*) instead
   // of fetching every row keeps this cheap regardless of how large the table
   // grows.
+  /** What is saved about an already-seen listing, for deciding whether it deserves another look (relisting.reevaluationReason). null when it is not saved. */
+  getListingState(id: string): SavedListingState | null {
+    const row = this.db
+      .prepare(
+        `SELECT l.price, l.research_status, l.research_code, l.is_deal, l.notified, l.first_seen_at, r.count AS reeval_count, r.last_at AS reeval_at
+         FROM listings l LEFT JOIN listing_reeval r ON r.listing_id = l.id WHERE l.id = ?`
+      )
+      .get(id) as any;
+    if (!row) return null;
+    return {
+      price: row.price ?? null,
+      researchStatus: row.research_status ?? null,
+      researchCode: row.research_code ?? null,
+      isDeal: !!row.is_deal,
+      notified: !!row.notified,
+      firstSeenAt: row.first_seen_at,
+      reevalCount: row.reeval_count ?? 0,
+      lastReevalAt: row.reeval_at ?? null,
+    };
+  }
+
+  noteReevaluation(id: string): void {
+    this.db.prepare("INSERT INTO listing_reeval (listing_id, count, last_at) VALUES (?, 1, ?) ON CONFLICT(listing_id) DO UPDATE SET count = count + 1, last_at = excluded.last_at").run(id, Date.now());
+  }
+
+  /** Listings kept as "worth a look" for want of evidence that the saved record could now settle (no page visit needed), newest first. */
+  listRequalifyCandidates(sinceMs: number, limit: number): string[] {
+    const codes = REQUALIFY_CODES.map((c) => `'${c}'`).join(",");
+    const rows = this.db
+      .prepare(
+        `SELECT id FROM listings WHERE is_deal = 0 AND notified = 0 AND matched_item IS NOT NULL AND price IS NOT NULL AND first_seen_at >= ?
+           AND research_status = 'insufficient_evidence' AND research_code IN (${codes}) ORDER BY first_seen_at DESC LIMIT ?`
+      )
+      .all(sinceMs, limit) as Array<{ id: string }>;
+    return rows.map((r) => r.id);
+  }
+
+  /** How many saved listings are in each stage of their life (listingLifecycle.ts): the Dashboard's honest "evaluated" numbers. */
+  lifecycleCounts(): LifecycleCounts {
+    const rows = this.db
+      .prepare(
+        `SELECT research_status AS status, research_code AS code, is_deal AS deal, (CASE WHEN description IS NOT NULL AND length(description) > 0 THEN 1 ELSE 0 END) AS opened, COUNT(*) AS n
+         FROM listings GROUP BY research_status, research_code, is_deal, opened`
+      )
+      .all() as Array<{ status: string | null; code: string | null; deal: number; opened: number; n: number }>;
+    return countLifecycle(rows.map((r) => ({ status: r.status, code: r.code, isDeal: !!r.deal, opened: !!r.opened, n: r.n })));
+  }
+
   countListings(): number {
     const row = this.db.prepare("SELECT COUNT(*) as count FROM listings").get() as { count: number };
     return row.count;

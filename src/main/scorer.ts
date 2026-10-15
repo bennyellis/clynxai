@@ -1,6 +1,8 @@
 import type { EngineConfig, ExtractionResult, FeedbackExample, ListingDetail, SearchItem, ScoredListing } from "./types.js";
 import { CLYNX_VOICE } from "./voice.js";
 import { looksBroken } from "./brokenVariant.js";
+import { conditionTextOf } from "./listingText.js";
+import { detectConditionImpactText, type ConditionImpact } from "./conditionParser.js";
 import { withinNegotiationReach } from "./profitGate.js";
 import { modelLettersConflict } from "./compFilter.js";
 import { DEFAULT_RESALE_SETTINGS, isGoodResale, keepRangeUsd, resaleOutcome, resaleSettingsFrom, type ResaleSettings } from "./resaleMath.js";
@@ -298,22 +300,11 @@ export function findGreenFlagCandidate(title: string, searchItems: SearchItem[])
 // A keyword scan can't grade real severity, so this is necessarily a rough
 // split: "major" is for wording that suggests the item may not function at
 // all; "minor" is everything else that flags a real but survivable issue.
-const MAJOR_CONDITION_PATTERNS: RegExp[] = [
-  /\bfor parts\b/i, /\bparts only\b/i, /\bnot working\b/i, /\bdoesn'?t work\b/i, /\bwon'?t (turn on|power on|charge)\b/i,
-  /\bno power\b/i, /\bdead\b/i, /\bdefective\b/i, /\bicloud locked\b/i, /\bblacklisted\b/i,
-  /\bneeds repair\b/i, /\brepair needed\b/i,
-];
-const MINOR_CONDITION_PATTERNS: RegExp[] = [
-  /\bbroken\b/i, /\bcrack(ed)?\b/i, /\bshatter(ed)?\b/i, /\bdamage[ds]?\b/i, /\bwater damage\b/i,
-  /\bas.?is\b/i, /\bmissing (charger|remote|controller|cable)\b/i,
-];
+export type { ConditionImpact } from "./conditionParser.js";
 
-export type ConditionImpact = "none" | "minor" | "major";
-
+// Context-sensitive since Beta 12 (conditionParser.ts): "no damage" / "not cracked" are not damage, an accessory's crack is not the item's.
 export function detectConditionImpact(text: string): ConditionImpact {
-  if (MAJOR_CONDITION_PATTERNS.some((re) => re.test(text))) return "major";
-  if (MINOR_CONDITION_PATTERNS.some((re) => re.test(text))) return "minor";
-  return "none";
+  return detectConditionImpactText(text);
 }
 
 // Per explicit instruction — a flagged condition used to disqualify a
@@ -640,7 +631,7 @@ export async function scoreListing(
     // in any order, consider it of interest." The only thing left to check
     // in the listing's own text is an explicit red flag (broken, for
     // parts, water damage, etc.); anything else is a match.
-    const conditionImpact = detectConditionImpact(`${listing.title} ${listing.description}`);
+    const conditionImpact = detectConditionImpact(conditionTextOf(listing));
     const extraction: ExtractionResult = {
       matchedItem: candidate.item,
       extractedAttributes: "",
@@ -678,7 +669,7 @@ export async function scoreListing(
     // needed at all.
     // With "include broken" on, a broken / for-parts listing is worth what broken ones of it sell for (the Database variant),
     // not a quarter of the working price.
-    const broken = candidate.includeBroken && looksBroken(`${listing.title} ${listing.description}`) ? (brokenValueFor?.(candidate.item) ?? null) : null;
+    const broken = candidate.includeBroken && looksBroken(conditionTextOf(listing)) ? (brokenValueFor?.(candidate.item) ?? null) : null;
     const databaseValueUsd = broken ? broken.value : (valueFor?.(candidate.item, listing.title) ?? null);
     if (broken) {
       extraction.brokenVariant = broken.name;
@@ -782,12 +773,12 @@ export async function scoreListing(
 
   const known = valueForTitle?.(listing.title) ?? null;
   if (known) {
-    const knownCondition = detectConditionImpact(`${listing.title} ${listing.description}`);
+    const knownCondition = detectConditionImpact(conditionTextOf(listing));
     const knownSettings = resaleSettingsFrom(config);
     const knownShipping = listing.ebayShippingUsd ?? 0;
     // A broken / for-parts copy of a Database product is priced from its "(For Parts / Broken)" variant when there is one (the
     // variant only exists once the user has included broken listings for that product).
-    const knownBroken = looksBroken(`${listing.title} ${listing.description}`) ? (brokenValueFor?.(known.name) ?? null) : null;
+    const knownBroken = looksBroken(conditionTextOf(listing)) ? (brokenValueFor?.(known.name) ?? null) : null;
     const knownValue = knownBroken ? knownBroken.value : known.value;
     const pricing = evaluateSearchItemPricing(
       { item: known.name, matchKeywords: [], typicalResaleUsd: knownValue, minPriceUsd: null, maxPriceUsd: null, linkedProductId: null },

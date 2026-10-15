@@ -731,6 +731,23 @@ a {
   flex-shrink: 0;
 }
 
+/* "Ask Clynx about this" on an Activity event row: out of the way until the row is hovered or the keyboard reaches it. */
+.log-row-wrap {
+  display: flex;
+  align-items: baseline;
+}
+.log-row-ask {
+  opacity: 0;
+  flex-shrink: 0;
+  margin-right: 12px;
+  transition: opacity 0.15s ease;
+}
+.log-row-wrap:hover .log-row-ask,
+.log-row-wrap:focus-within .log-row-ask,
+.log-row-ask:focus-visible {
+  opacity: 1;
+}
+
 .glow-text {
   /* --gradient-text, not --gradient: the raw accents can match the page
      background (a dark accent on a dark theme), which would make this text

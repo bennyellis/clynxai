@@ -711,6 +711,11 @@ export interface ListingDetail extends ListingSummary {
   // so converting it to an absolute timestamp would just be manufacturing
   // false precision. Null when it couldn't be found on the page.
   listingAge: string | null;
+  // Beta 12 — where the description came from. `cut` false means the page had none of the markers that end the listing's own text (a layout change): the description
+  // is then only the top of the page and condition conclusions drawn from it are lower confidence. Not persisted.
+  textProvenance?: { cut: boolean; marker: string | null; ownChars: number; pageChars: number };
+  // The condition Facebook states for the listing ("Used - like new"), when found.
+  declaredCondition?: string | null;
 }
 
 export interface SellerRiskConfig {

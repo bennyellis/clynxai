@@ -1,3 +1,4 @@
+import { detailTextFields } from "./listingText.js";
 import type { Page } from "playwright";
 import type { ListingDetail, ListingSummary } from "./types.js";
 import { timed, recordStage, recordEventBulk } from "./metrics.js";
@@ -1148,24 +1149,16 @@ export async function fetchListingDetail(page: Page, listing: ListingSummary): P
     return { hasProfilePhoto: true, sellerName: nameMatch ? nameMatch[1] : null };
   });
 
-  const description = bodyText.slice(0, 4000);
-  const shippingMentioned = /\bship(ping|s)?\b|\bdelivery\b|\bmail(ed)?\b/i.test(description);
+  // Beta 12: the listing's OWN text. The page also carries "Related searches" and "Today's picks" (other sellers' cards); reading them as the description let another
+  // seller's "PS5 as is for parts" discount an Xbox, and fed unrelated text to the bundle, scam and AI checks (see listingText.ts).
+  const text = detailTextFields(bodyText);
+  const { description, shippingMentioned, hasOfficialShipping, mentionsEbay, ownBody } = text;
 
-  // Verified live via a screenshot the user shared: a listing that's opted
-  // into Facebook's own shipping program shows its own distinct wording
-  // ("Ships for $13.18," "No returns for this item," "Estimated arrival
-  // Sep 21 - Sep 24," "Door dropoff") — not a hidden local deal, since it's
-  // already visible and buyable by every other reseller nationally through
-  // Facebook's own logistics. A mention of eBay is treated the same way
-  // (implies it's already cross-listed/benchmarked elsewhere). Checked
-  // against the full bodyText (not just the 4000-char description slice
-  // above), since this wording can sit further down the page than that
-  // slice covers.
-  const hasOfficialShipping = /\bships for \$|\bestimated arrival\b|\bdoor drop[- ]?off\b/i.test(bodyText);
-  const mentionsEbay = /\bebay\b/i.test(bodyText);
-
-  const seller = await extractSellerSignals(page, bodyText, hasProfilePhotoRaw, sellerName);
-  const listingAge = extractListingAge(bodyText);
+  // Verified live via a screenshot the user shared: a listing that's opted into Facebook's own shipping program shows its own distinct wording ("Ships for $13.18,"
+  // "Estimated arrival Sep 21 - Sep 24," "Door dropoff"): already visible and buyable nationally, not a hidden local deal. A mention of eBay is treated the same way.
+  // (Checked against the listing's own text since Beta 12; on a real database 33 such rejections were all genuine but one.)
+  const seller = await extractSellerSignals(page, ownBody, hasProfilePhotoRaw, sellerName);
+  const listingAge = extractListingAge(ownBody) ?? (text.textProvenance.cut ? extractListingAge(bodyText) : null);
 
   // Best-effort: grab every photo on the listing page, not just the one
   // search-card thumbnail. Facebook's photo galleries often render a full
@@ -1261,6 +1254,8 @@ export async function fetchListingDetail(page: Page, listing: ListingSummary): P
     hasOfficialShipping,
     mentionsEbay,
     listingAge,
+    textProvenance: text.textProvenance,
+    declaredCondition: text.declaredCondition,
   };
 }
 

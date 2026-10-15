@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Sidebar, type Screen } from "./components/Sidebar.js";
+import { Sidebar } from "./components/Sidebar.js";
 import { StarfieldBackground } from "./components/StarfieldBackground.js";
 import { SpaceBackdrop } from "./components/SpaceBackdrop.js";
 import { GlobalAssistantBar } from "./components/GlobalAssistantBar.js";
@@ -12,6 +12,7 @@ import { Database } from "./screens/Database.js";
 import { LoginScreen } from "./screens/LoginScreen.js";
 import { useNotices } from "./components/NoticesPanel.js";
 import { describeScannerState } from "./lib/scannerState.js";
+import { initialNavState, readSavedScreen, reduceNav, writeSavedScreen, type ScreenId } from "./lib/navState.js";
 import { FreezeWhenHidden, ScreenActive } from "./lib/screenActive.js";
 import { getTier } from "./lib/performance.js";
 import { api } from "./lib/api.js";
@@ -192,7 +193,13 @@ export default function App() {
     checkSession();
   }, [checkSession]);
 
-  const [screen, setScreen] = useState<Screen>("dashboard");
+  // Which screen is showing, plus a per-screen "go home" counter bumped when its already-active sidebar icon is clicked again (the same
+  // incrementing-signal pattern as configShakeSignal below). The last screen is remembered across launches (never Config): lib/navState.ts.
+  const [nav, setNav] = useState(() => initialNavState(readSavedScreen()));
+  const screen = nav.screen;
+  useEffect(() => {
+    writeSavedScreen(screen);
+  }, [screen]);
   // Per explicit instruction — multiple Facebook accounts, each its own
   // ScrapeEngine/status (see index.ts's engineStatusMap) — a flat map
   // instead of one shared ScrapeStatus, keyed by account id. Dashboard
@@ -292,7 +299,7 @@ export default function App() {
   );
 
   const goToProduct = useCallback((productId: string) => {
-    setScreen("database");
+    setNav((n) => reduceNav(n, { type: "goToProduct" }, { configDirty: false }).state);
     setOpenProductId(productId);
   }, []);
 
@@ -301,23 +308,38 @@ export default function App() {
   const stopAccount = useCallback((accountId: string) => api.stopEngine(accountId), []);
   const handleLoggedOut = useCallback(() => {
     setAuthenticated(false);
-    setScreen("dashboard");
+    setNav((n) => reduceNav(n, { type: "reset" }, { configDirty: false }).state);
   }, []);
 
   // Per explicit instruction — trying to tab away from Config with unsaved
   // changes is denied (not just discouraged): the screen shakes and Save
   // highlights instead of actually switching. Navigating TO Config, or
   // switching while Config isn't dirty, is untouched.
+  // Clicking the screen you are already on takes it back to its home (lib/navState.ts's reduceNav); a dirty Config stays put either way.
   const handleSelectScreen = useCallback(
-    (next: Screen) => {
-      if (screen === "config" && next !== "config" && configDirty) {
-        setConfigShakeSignal((n) => n + 1);
-        return;
-      }
-      setScreen(next);
+    (next: ScreenId) => {
+      const result = reduceNav(nav, { type: "select", screen: next }, { configDirty });
+      if (result.denied) setConfigShakeSignal((n) => n + 1);
+      else if (result.state !== nav) setNav(result.state);
     },
-    [screen, configDirty]
+    [nav, configDirty]
   );
+
+  // A home click on any screen but the Database (which resets its own state) scrolls that screen's scrollers back to the top. Chat-style
+  // scrollers (data-stick-bottom) are left alone: their "top" is the oldest message, not a home.
+  const screensRef = useRef<HTMLDivElement>(null);
+  const seenHomeSignals = useRef(nav.homeSignals);
+  useEffect(() => {
+    const prev = seenHomeSignals.current;
+    seenHomeSignals.current = nav.homeSignals;
+    for (const id of Object.keys(nav.homeSignals) as ScreenId[]) {
+      if (id === "database" || nav.homeSignals[id] === prev[id]) continue;
+      const root = screensRef.current?.querySelector(`[data-screen="${id}"]`);
+      root?.querySelectorAll<HTMLElement>("*").forEach((el) => {
+        if (el.scrollTop > 0 && el.scrollHeight > el.clientHeight && !el.closest("[data-stick-bottom]")) el.scrollTo({ top: 0, behavior: "smooth" });
+      });
+    }
+  }, [nav.homeSignals]);
 
   const goToFeed = useCallback(() => handleSelectScreen("feed"), [handleSelectScreen]);
   const goToDashboard = useCallback(() => handleSelectScreen("dashboard"), [handleSelectScreen]);
@@ -327,12 +349,14 @@ export default function App() {
   // A clicked desktop notification (a Watch found something) opens the screen it names.
   useEffect(() => {
     const off = api.onNavigate((target) => {
+      // Already there: a notification is not a "go home" click, so leave the screen as it is.
+      if (target === screen) return;
       if (target === "feed" || target === "watch" || target === "dashboard") handleSelectScreen(target);
     });
     return () => {
       off();
     };
-  }, [handleSelectScreen]);
+  }, [handleSelectScreen, screen]);
 
   useEffect(() => {
     // Multi-user login migration — none of this should run (or, on a
@@ -592,7 +616,7 @@ export default function App() {
             databaseBusy={researchActive || photoBackfillActive}
             hasUnseenWatchMatches={hasUnseenWatchMatches}
           />
-          <div style={{ flex: 1, minWidth: 0, padding: 28, overflow: "hidden", position: "relative", zIndex: 1 }}>
+          <div ref={screensRef} style={{ flex: 1, minWidth: 0, padding: 28, overflow: "hidden", position: "relative", zIndex: 1 }}>
             {/* Every screen stays mounted all the time now, just hidden via
                 display:none when not active — per explicit instruction, switching
                 tabs shouldn't wipe out whatever the user was doing on the one
@@ -603,7 +627,7 @@ export default function App() {
                 re-appearing from display:none still replays its own "enter"
                 animation, since a display:none element is removed from the
                 render tree entirely and gets a fresh one when it returns. */}
-            <div className="enter" style={{ display: screen === "dashboard" ? "block" : "none", height: "100%" }}>
+            <div className="enter" data-screen="dashboard" style={{ display: screen === "dashboard" ? "block" : "none", height: "100%" }}>
               <ScreenActive active={screen === "dashboard"}>
                 <FreezeWhenHidden active={screen === "dashboard"}>
                   <DashboardMemo
@@ -618,35 +642,35 @@ export default function App() {
                 </FreezeWhenHidden>
               </ScreenActive>
             </div>
-            <div className="enter" style={{ display: screen === "activity" ? "block" : "none", height: "100%" }}>
+            <div className="enter" data-screen="activity" style={{ display: screen === "activity" ? "block" : "none", height: "100%" }}>
               <ScreenActive active={screen === "activity"}>
                 <FreezeWhenHidden active={screen === "activity"}>
                   <ActivityMemo status={statusMap[accounts[0]?.id ?? ""] ?? EMPTY_STATUS} logs={logs} onGoToProduct={goToProduct} />
                 </FreezeWhenHidden>
               </ScreenActive>
             </div>
-            <div className="enter" style={{ display: screen === "feed" ? "block" : "none", height: "100%" }}>
+            <div className="enter" data-screen="feed" style={{ display: screen === "feed" ? "block" : "none", height: "100%" }}>
               <ScreenActive active={screen === "feed"}>
                 <FreezeWhenHidden active={screen === "feed"}>
                   <FeedMemo active={screen === "feed"} listings={listings} onRefresh={refreshListingsNow} onGoToProduct={goToProduct} scannerKind={scannerKind} hasSearchItems={hasSearchItems} onGoToDashboard={goToDashboard} />
                 </FreezeWhenHidden>
               </ScreenActive>
             </div>
-            <div className="enter" style={{ display: screen === "watch" ? "block" : "none", height: "100%" }}>
+            <div className="enter" data-screen="watch" style={{ display: screen === "watch" ? "block" : "none", height: "100%" }}>
               <ScreenActive active={screen === "watch"}>
                 <FreezeWhenHidden active={screen === "watch"}>
                   <WatchMemo active={screen === "watch"} />
                 </FreezeWhenHidden>
               </ScreenActive>
             </div>
-            <div className="enter" style={{ display: screen === "database" ? "block" : "none", height: "100%" }}>
+            <div className="enter" data-screen="database" style={{ display: screen === "database" ? "block" : "none", height: "100%" }}>
               <ScreenActive active={screen === "database"}>
                 <FreezeWhenHidden active={screen === "database" || openProductId !== null}>
-                  <DatabaseMemo active={screen === "database" || openProductId !== null} requestedProductId={openProductId} onRequestedProductHandled={clearRequestedProduct} />
+                  <DatabaseMemo active={screen === "database" || openProductId !== null} requestedProductId={openProductId} onRequestedProductHandled={clearRequestedProduct} homeSignal={nav.homeSignals.database} />
                 </FreezeWhenHidden>
               </ScreenActive>
             </div>
-            <div className="enter" style={{ display: screen === "config" ? "block" : "none", height: "100%" }}>
+            <div className="enter" data-screen="config" style={{ display: screen === "config" ? "block" : "none", height: "100%" }}>
               <ScreenActive active={screen === "config"}>
                 <FreezeWhenHidden active={screen === "config"}>
                   <ConfigMemo active={screen === "config"} onDirtyChange={setConfigDirty} shakeSignal={configShakeSignal} onLoggedOut={handleLoggedOut} />

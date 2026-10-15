@@ -16,11 +16,20 @@ export function settleLateMarketCheck(args: {
   /** The same follow-up an on-time check does for a new product with prices: fill the entry in. */
   fillIn(): void;
   note?(message: string): void;
+  /** Beta 12: the late answer carries a price (whether or not this check created the entry): the listings that asked for it can be judged again. */
+  onValue?(valueUsd: number): void;
 }): void {
   args.research
     .then((result) => {
-      if (!args.created) return;
       const value = result.estimatedValueUsd ?? result.avgSoldPriceUsd;
+      if (value !== null) {
+        try {
+          args.onValue?.(value);
+        } catch {
+          /* judging the waiting listings again must never break filing the answer */
+        }
+      }
+      if (!args.created) return;
       if (value === null) {
         args.deleteProduct(args.productId);
         args.note?.("The late price check found no prices, so nothing was filed.");

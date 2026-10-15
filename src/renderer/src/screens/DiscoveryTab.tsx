@@ -1,12 +1,14 @@
-import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ChatAttachment, ChatMessage, DiscoveryEntry, DiscoveryThought, ProductProfile } from "../lib/api.js";
 import { api } from "../lib/api.js";
 import { DEFAULT_RESALE_SETTINGS, resaleSettingsFrom, type ResaleSettings } from "../../../main/resaleMath.js";
 import { judgeProduct, type FlipLevel, type FlipVerdict } from "../../../main/productVerdict.js";
+import { automationStamp, buildAutomationStream, buildChatStream, channelOf, chatStamp, hasUnread, type Channel, type ChatTurn } from "../lib/discoveryStream.js";
+import { useStickToBottom, type StickPosition } from "../lib/stickToBottom.js";
 
-// The Database's Discovery tab. Left: a live feed of the products Clynx is looking into. Right: one window that holds Clynx's take on
-// every one of them (is it worth flipping, and why or why not), with a box underneath to ask questions, attach photos or files, or
-// hand it a new product to research. This is about the PRODUCTS (what they're worth and how they sell), never about particular
+// The Database's Discovery tab. Left: a live feed of the products Clynx is looking into. Right: two separate channels. "Automation" holds
+// Clynx's take on every product it looked into on its own (is it worth flipping, and why or why not); "Chat with Clynx" is the conversation,
+// with a box underneath to ask questions, attach photos or files, or hand it a new product to research. Both read oldest first, newest last. This is about the PRODUCTS (what they're worth and how they sell), never about particular
 // listings or sellers: Discovery is where product knowledge is found, and the Library keeps what it found for looking up later.
 
 const GREETING =
@@ -155,27 +157,86 @@ interface Focus {
   name: string;
 }
 
-type StreamItem = { kind: "product"; ts: number; entry: DiscoveryEntry } | { kind: "chat"; ts: number; user: ThreadMsg; reply: ThreadMsg | null };
+// What this tab remembers while it is unmounted (another Database tab or screen is showing), so coming back finds it as it was left.
+const ui: {
+  live: DiscoveryEntry[];
+  fetched: boolean;
+  focus: Focus | null;
+  filter: Filter;
+  panel: Channel;
+  wide: boolean;
+  seen: Record<Channel, string> | null;
+  chatPos: StickPosition | null;
+  autoPos: StickPosition | null;
+} = { live: [], fetched: false, focus: null, filter: "all", panel: "chat", wide: true, seen: null, chatPos: null, autoPos: null };
+const resetters = new Set<() => void>();
+
+// The Database's home (a second click on its sidebar icon) clears this tab's focus, filter and scroll too.
+export function resetDiscoveryUi(): void {
+  ui.focus = null;
+  ui.filter = "all";
+  ui.panel = "chat";
+  ui.chatPos = null;
+  ui.autoPos = null;
+  resetters.forEach((fn) => fn());
+}
+
+// Below this width the two channels become tabs instead of sitting side by side.
+const SIDE_BY_SIDE_MIN_PX = 760;
 
 // ---------- the tab
 
 export function DiscoveryTab({ products, onOpenProduct }: { products: ProductProfile[]; onOpenProduct: (id: string) => void }) {
   const messages = useThread();
-  const [live, setLive] = useState<DiscoveryEntry[]>([]);
-  const [focus, setFocus] = useState<Focus | null>(null);
+  const [live, setLive] = useState<DiscoveryEntry[]>(ui.live);
+  const [focus, setFocusState] = useState<Focus | null>(ui.focus);
   const [flashId, setFlashId] = useState<string | null>(null);
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilterState] = useState<Filter>(ui.filter);
+  const [panel, setPanelState] = useState<Channel>(ui.panel);
+  const [wide, setWide] = useState(ui.wide);
+  const [focusNonce, setFocusNonce] = useState(0);
   const [settings, setSettings] = useState<ResaleSettings>(DEFAULT_RESALE_SETTINGS);
   const [now, setNow] = useState(() => Date.now());
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
   const cardRefs = useRef(new Map<string, HTMLElement>());
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chatStick = useStickToBottom<HTMLDivElement>({ initial: ui.chatPos ?? undefined });
+  const autoStick = useStickToBottom<HTMLDivElement>({ initial: ui.autoPos ?? undefined });
+  // The mount effect below outlives the first render, so it reads the scrollers through a ref rather than closing over stale ones.
+  const sticks = useRef({ chatStick, autoStick });
+  sticks.current = { chatStick, autoStick };
+
+  const setFocus = (next: Focus | null) => {
+    ui.focus = next;
+    setFocusState(next);
+  };
+  const setFilter = (next: Filter) => {
+    ui.filter = next;
+    setFilterState(next);
+  };
+  const setPanel = (next: Channel) => {
+    ui.panel = next;
+    setPanelState(next);
+  };
+
+  useEffect(() => {
+    ui.live = live;
+  }, [live]);
 
   useEffect(() => {
     wireChatListeners();
     let cancelled = false;
     api.getDiscoveryFeed().then((result) => {
-      if (!cancelled) setLive(Array.isArray(result) ? result : []);
+      if (cancelled) return;
+      const list = Array.isArray(result) ? result : [];
+      // The very first load is history, not news: it must not light the unread dot of a hidden channel.
+      if (!ui.fetched) {
+        ui.fetched = true;
+        const next = { chat: chatStamp(thread, list), automation: automationStamp(list) };
+        ui.seen = next;
+        setSeen(next);
+      }
+      setLive(list);
     });
     api.getConfig().then((config) => {
       if (!cancelled && config) setSettings(resaleSettingsFrom(config));
@@ -186,12 +247,40 @@ export function DiscoveryTab({ products, onOpenProduct }: { products: ProductPro
     const tick = setInterval(() => {
       if (!document.hidden) setNow(Date.now());
     }, 30_000);
+    const reset = () => {
+      setFocusState(null);
+      setFilterState("all");
+      setPanelState("chat");
+      sticks.current.chatStick.scrollToBottom();
+      sticks.current.autoStick.scrollToBottom();
+    };
+    resetters.add(reset);
     return () => {
       cancelled = true;
       off();
       clearInterval(tick);
+      resetters.delete(reset);
       if (flashTimer.current) clearTimeout(flashTimer.current);
+      ui.chatPos = sticks.current.chatStick.getPosition();
+      ui.autoPos = sticks.current.autoStick.getPosition();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Side by side when the workspace is wide enough, tabs otherwise. Measured before paint so there is no flash of the wrong layout.
+  useLayoutEffect(() => {
+    const el = workspaceRef.current;
+    if (!el) return;
+    const measure = () => {
+      const next = el.clientWidth >= SIDE_BY_SIDE_MIN_PX;
+      ui.wide = next;
+      setWide(next);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
   }, []);
 
   const entries = useMemo(() => {
@@ -224,46 +313,115 @@ export function DiscoveryTab({ products, onOpenProduct }: { products: ProductPro
     return level === "pass" || level === "thin";
   }
 
-  // The window's contents, newest first: Clynx's take on each product, and any conversation, in the order they happened.
-  const stream = useMemo(() => {
-    const items: StreamItem[] = [];
-    for (const e of entries) if (matchesFilter(e)) items.push({ kind: "product", ts: e.startedAt, entry: e });
-    for (let i = 0; i < messages.length; i++) {
-      if (messages[i].role !== "user") continue;
-      const next = messages[i + 1];
-      items.push({ kind: "chat", ts: messages[i].ts, user: messages[i], reply: next && next.role === "assistant" ? next : null });
-    }
-    return items.sort((a, b) => b.ts - a.ts);
+  // The two channels, each oldest first (lib/discoveryStream.ts). The filter chips narrow the Automation channel only.
+  const chatItems = useMemo(() => buildChatStream(messages, entries), [messages, entries]);
+  const autoItems = useMemo(
+    () => buildAutomationStream(entries, (e) => matchesFilter(e)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries, messages, filter, verdicts]);
+    [entries, filter, verdicts]
+  );
+  const autoEntries = useMemo(() => entries.filter((e) => channelOf(e) === "automation"), [entries]);
+
+  // Unread dots: on the tab of a channel that is hidden (narrow layout) and has had something new since it was last in view.
+  const chatSt = chatStamp(messages, entries);
+  const autoSt = automationStamp(entries);
+  const [seen, setSeen] = useState<Record<Channel, string>>(() => ui.seen ?? { chat: chatSt, automation: autoSt });
+  const chatVisible = wide || panel === "chat";
+  const autoVisible = wide || panel === "automation";
+  useEffect(() => {
+    setSeen((prev) => {
+      const next = { chat: chatVisible ? chatSt : prev.chat, automation: autoVisible ? autoSt : prev.automation };
+      if (next.chat === prev.chat && next.automation === prev.automation) return prev;
+      ui.seen = next;
+      return next;
+    });
+  }, [chatVisible, autoVisible, chatSt, autoSt]);
+  const unread = { chat: !chatVisible && hasUnread(chatSt, seen.chat), automation: !autoVisible && hasUnread(autoSt, seen.automation) };
+
+  function showPanel(channel: Channel) {
+    setPanel(channel);
+  }
 
   function jumpTo(entry: DiscoveryEntry) {
-    if (!matchesFilter(entry)) setFilter("all");
-    // After a filter change the card needs a moment to exist.
+    const channel = channelOf(entry);
+    if (channel === "automation" && !matchesFilter(entry)) setFilter("all");
+    showPanel(channel);
+    const stick = channel === "chat" ? chatStick : autoStick;
+    stick.release();
+    // After a filter or tab change the card needs a moment to exist and be laid out.
     setTimeout(() => {
-      const scroller = scrollRef.current;
+      const scroller = stick.element;
       const el = cardRefs.current.get(entry.id);
       if (!scroller || !el) return;
-      scroller.scrollTo({ top: Math.max(0, el.offsetTop - 8), behavior: "smooth" });
+      const top = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+      scroller.scrollTo({ top: Math.max(0, top - 8), behavior: "smooth" });
       setFlashId(entry.id);
       if (flashTimer.current) clearTimeout(flashTimer.current);
       flashTimer.current = setTimeout(() => setFlashId(null), 1800);
-    }, 30);
+    }, 60);
   }
 
+  // Click on the live feed list: look at that product's card and ask about it next.
   function selectEntry(entry: DiscoveryEntry) {
     setFocus({ entryId: entry.id, productId: entry.productId, name: entry.name });
     jumpTo(entry);
   }
 
+  // "Ask about this" on a card: the question goes to the chat, so the conversation comes to the front and its box takes the cursor.
+  function askAbout(entry: DiscoveryEntry) {
+    setFocus({ entryId: entry.id, productId: entry.productId, name: entry.name });
+    showPanel("chat");
+    setFocusNonce((n) => n + 1);
+  }
+
+  function askClynx() {
+    setFocus(null);
+    showPanel("chat");
+    chatStick.scrollToBottom();
+    setFocusNonce((n) => n + 1);
+  }
+
   const counts = {
-    worth: entries.filter((e) => matchesFilter(e, "worth")).length,
-    pass: entries.filter((e) => matchesFilter(e, "pass")).length,
+    worth: autoEntries.filter((e) => matchesFilter(e, "worth")).length,
+    pass: autoEntries.filter((e) => matchesFilter(e, "pass")).length,
   };
-  const productCards = stream.filter((i) => i.kind === "product").length;
+  const researchingAuto = autoEntries.filter((e) => e.status === "researching").length;
+  const busy = messages.some((m) => m.streaming);
+
+  const renderCard = (entry: DiscoveryEntry) => (
+    <ProductCard
+      key={`entry-${entry.id}`}
+      entry={entry}
+      product={productById.get(entry.productId) ?? null}
+      verdict={verdicts.get(entry.id) ?? null}
+      focused={focus?.entryId === entry.id}
+      flash={flashId === entry.id}
+      now={now}
+      register={(el) => {
+        if (el) cardRefs.current.set(entry.id, el);
+        else cardRefs.current.delete(entry.id);
+      }}
+      onAsk={() => askAbout(entry)}
+      onOpenProduct={onOpenProduct}
+    />
+  );
+
+  const tabKeys = (e: React.KeyboardEvent) => {
+    const order: Channel[] = ["automation", "chat"];
+    const at = order.indexOf(panel);
+    let next: Channel | null = null;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") next = order[(at + 1) % order.length];
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = order[(at + order.length - 1) % order.length];
+    else if (e.key === "Home") next = order[0];
+    else if (e.key === "End") next = order[order.length - 1];
+    if (!next) return;
+    e.preventDefault();
+    setPanel(next);
+    document.getElementById(`discovery-tab-${next}`)?.focus();
+  };
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "minmax(280px, 360px) 1fr", gap: 16, height: "100%", minHeight: 0 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(280px, 360px) minmax(0, 1fr)", gap: 16, height: "100%", minHeight: 0 }}>
       {/* ---- left: the feed */}
       <div className="card" style={{ display: "flex", flexDirection: "column", padding: 0, overflow: "hidden", minHeight: 0 }}>
         <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -280,10 +438,7 @@ export function DiscoveryTab({ products, onOpenProduct }: { products: ProductPro
         <div style={{ flex: 1, overflowY: "auto" }}>
           <FeedRow
             active={focus === null}
-            onClick={() => {
-              setFocus(null);
-              scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-            }}
+            onClick={askClynx}
             thumb={<span style={{ fontSize: 20 }}>💬</span>}
             title="Ask Clynx"
             subtitle="A new product, or anything else"
@@ -336,77 +491,179 @@ export function DiscoveryTab({ products, onOpenProduct }: { products: ProductPro
         </div>
       </div>
 
-      {/* ---- right: Clynx's take on every product, plus the ask box */}
-      <div className="card" style={{ display: "flex", flexDirection: "column", padding: 0, overflow: "hidden", minHeight: 0 }}>
-        <div style={{ padding: "12px 18px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", minHeight: 64 }}>
-          <div style={{ flex: 1, minWidth: 200 }}>
-            <div style={{ fontWeight: 700, fontSize: 17 }}>Clynx's take</div>
-            <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 2 }}>Is each product worth flipping, and why or why not.</div>
-          </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+      {/* ---- right: two channels. Side by side when there is room, tabs when there is not. They scroll independently, and scanner activity
+          never lands inside the conversation. */}
+      <div ref={workspaceRef} style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0, minHeight: 0 }}>
+        {!wide && (
+          <div role="tablist" aria-label="Discovery channels" onKeyDown={tabKeys} style={{ display: "flex", gap: 8 }}>
             {(
               [
-                ["all", `All (${entries.length})`],
-                ["worth", `Worth flipping (${counts.worth})`],
-                ["pass", `Not great (${counts.pass})`],
-                ["researching", `Researching (${researchingCount})`],
-              ] as Array<[Filter, string]>
-            ).map(([key, label]) => (
+                ["automation", "Automation"],
+                ["chat", "Chat with Clynx"],
+              ] as Array<[Channel, string]>
+            ).map(([id, label]) => (
               <button
-                key={key}
+                key={id}
+                id={`discovery-tab-${id}`}
+                role="tab"
                 type="button"
+                aria-selected={panel === id}
+                aria-controls={`discovery-panel-${id}`}
+                tabIndex={panel === id ? 0 : -1}
                 className="ghost"
-                onClick={() => setFilter(key)}
+                onClick={() => setPanel(id)}
                 style={{
-                  fontSize: 12.5,
-                  padding: "4px 11px",
-                  borderRadius: 999,
-                  border: `1px solid ${filter === key ? "var(--accent-1)" : "var(--border)"}`,
-                  color: filter === key ? "var(--text)" : "var(--text-muted)",
-                  background: filter === key ? "var(--bg-card-hover)" : "transparent",
+                  flex: 1,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 8,
+                  padding: "9px 14px",
+                  fontWeight: 600,
+                  fontSize: 14.5,
+                  borderRadius: 10,
+                  border: `1px solid ${panel === id ? "var(--accent-1)" : "var(--border)"}`,
+                  background: panel === id ? "var(--bg-card-hover)" : "transparent",
+                  color: panel === id ? "var(--text)" : "var(--text-muted)",
                 }}
               >
                 {label}
+                {unread[id] && <span className="dot on" role="img" aria-label="new activity" style={{ width: 8, height: 8 }} />}
               </button>
             ))}
           </div>
-        </div>
+        )}
 
-        <div ref={scrollRef} data-testid="take-scroll" style={{ flex: 1, overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 14, position: "relative" }}>
-          {stream.map((item) =>
-            item.kind === "product" ? (
-              <ProductCard
-                key={item.entry.id}
-                entry={item.entry}
-                product={productById.get(item.entry.productId) ?? null}
-                verdict={verdicts.get(item.entry.id) ?? null}
-                focused={focus?.entryId === item.entry.id}
-                flash={flashId === item.entry.id}
-                now={now}
-                register={(el) => {
-                  if (el) cardRefs.current.set(item.entry.id, el);
-                  else cardRefs.current.delete(item.entry.id);
-                }}
-                onAsk={() => selectEntry(item.entry)}
-                onOpenProduct={onOpenProduct}
-              />
-            ) : (
-              <ChatCard key={item.user.id} user={item.user} reply={item.reply} />
-            )
-          )}
-          {productCards === 0 && entries.length > 0 && <div style={{ color: "var(--text-dim)", fontSize: 14 }}>Nothing in this group right now.</div>}
-          <ClynxBubble text={GREETING} />
-        </div>
+        <div style={{ display: "grid", gridTemplateColumns: wide ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(0, 1fr)", gap: 16, flex: 1, minHeight: 0 }}>
+          {/* ---- Automation: what Clynx does on its own */}
+          <section
+            id="discovery-panel-automation"
+            role={wide ? "region" : "tabpanel"}
+            aria-label="Automation"
+            aria-labelledby={wide ? undefined : "discovery-tab-automation"}
+            className="card"
+            style={{ display: wide || panel === "automation" ? "flex" : "none", flexDirection: "column", padding: 0, overflow: "hidden", minHeight: 0 }}
+          >
+            <div style={{ padding: "12px 18px", borderBottom: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 8 }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 17 }}>Automation</div>
+                <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 2 }}>What I find and look into on my own: is each product worth flipping, and why.</div>
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {(
+                  [
+                    ["all", `All (${autoEntries.length})`],
+                    ["worth", `Worth flipping (${counts.worth})`],
+                    ["pass", `Not great (${counts.pass})`],
+                    ["researching", `Researching (${researchingAuto})`],
+                  ] as Array<[Filter, string]>
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    className="ghost"
+                    aria-pressed={filter === key}
+                    onClick={() => setFilter(key)}
+                    style={{
+                      fontSize: 12.5,
+                      padding: "4px 11px",
+                      borderRadius: 999,
+                      border: `1px solid ${filter === key ? "var(--accent-1)" : "var(--border)"}`,
+                      color: filter === key ? "var(--text)" : "var(--text-muted)",
+                      background: filter === key ? "var(--bg-card-hover)" : "transparent",
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{ flex: 1, minHeight: 0, position: "relative", display: "flex", flexDirection: "column" }}>
+              <div
+                ref={autoStick.scrollRef}
+                onScroll={autoStick.onScroll}
+                data-testid="take-scroll"
+                data-stick-bottom=""
+                role="log"
+                aria-label="Automation activity"
+                aria-live="off"
+                tabIndex={0}
+                style={{ flex: 1, overflowY: "auto", padding: "16px 18px", position: "relative" }}
+              >
+                <div ref={autoStick.contentRef} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  {autoItems.map((item) => renderCard(item.entry))}
+                  {autoItems.length === 0 && (
+                    <div style={{ color: "var(--text-dim)", fontSize: 14, lineHeight: 1.5 }}>
+                      {autoEntries.length > 0 ? "Nothing in this group right now." : "Nothing yet. Products I look into while scanning show up here as they happen."}
+                    </div>
+                  )}
+                </div>
+              </div>
+              {!autoStick.atBottom && <JumpToLatest label="Jump to latest activity" onClick={autoStick.scrollToBottom} />}
+            </div>
+          </section>
 
-        <Composer
-          focus={focus}
-          onClearFocus={() => setFocus(null)}
-          messages={messages}
-          showStarters={messages.length === 0}
-          onSent={() => scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" })}
-        />
+          {/* ---- Chat with Clynx: your messages, its replies, and research you asked for */}
+          <section
+            id="discovery-panel-chat"
+            role={wide ? "region" : "tabpanel"}
+            aria-label="Chat with Clynx"
+            aria-labelledby={wide ? undefined : "discovery-tab-chat"}
+            className="card"
+            style={{ display: wide || panel === "chat" ? "flex" : "none", flexDirection: "column", padding: 0, overflow: "hidden", minHeight: 0 }}
+          >
+            <div style={{ padding: "12px 18px", borderBottom: "1px solid var(--border)", minHeight: 64 }}>
+              <div style={{ fontWeight: 700, fontSize: 17 }}>Chat with Clynx</div>
+              <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 2 }}>Ask about a product, or hand me a new one to research.</div>
+            </div>
+            <div style={{ flex: 1, minHeight: 0, position: "relative", display: "flex", flexDirection: "column" }}>
+              <div
+                ref={chatStick.scrollRef}
+                onScroll={chatStick.onScroll}
+                data-testid="chat-scroll"
+                data-stick-bottom=""
+                role="log"
+                aria-label="Conversation with Clynx"
+                aria-live="polite"
+                aria-relevant="additions text"
+                aria-busy={busy}
+                tabIndex={0}
+                style={{ flex: 1, overflowY: "auto", padding: "16px 18px", position: "relative" }}
+              >
+                <div ref={chatStick.contentRef} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  <ClynxBubble text={GREETING} />
+                  {chatItems.map((item) => (item.kind === "product" ? renderCard(item.entry) : <ChatCard key={item.key} turn={item.turn} />))}
+                </div>
+              </div>
+              {!chatStick.atBottom && <JumpToLatest label="Jump to latest message" onClick={chatStick.scrollToBottom} />}
+            </div>
+            <Composer
+              focus={focus}
+              onClearFocus={() => setFocus(null)}
+              messages={messages}
+              showStarters={messages.length === 0}
+              onSent={chatStick.scrollToBottom}
+              focusNonce={focusNonce}
+            />
+          </section>
+        </div>
       </div>
     </div>
+  );
+}
+
+function JumpToLatest({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="icon"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      style={{ position: "absolute", right: 18, bottom: 12, borderRadius: 999, padding: "6px 14px", fontSize: 13, border: "1px solid var(--border-strong)", background: "var(--bg-card)", boxShadow: "0 2px 10px rgba(0,0,0,0.25)" }}
+    >
+      ↓ Latest
+    </button>
   );
 }
 
@@ -681,11 +938,11 @@ function ThoughtBubble({ thought }: { thought: DiscoveryThought }) {
 
 // ---------- a question and Clynx's answer, as one card in the same window
 
-function ChatCard({ user, reply }: { user: ThreadMsg; reply: ThreadMsg | null }) {
+function ChatCard({ turn }: { turn: ChatTurn<ThreadMsg> }) {
   return (
     <div className="enter" style={{ display: "flex", flexDirection: "column", gap: 10, flexShrink: 0 }}>
-      <MessageRow msg={user} />
-      {reply && <MessageRow msg={reply} />}
+      {turn.user && <MessageRow msg={turn.user} />}
+      {turn.reply && <MessageRow msg={turn.reply} />}
     </div>
   );
 }
@@ -693,7 +950,7 @@ function ChatCard({ user, reply }: { user: ThreadMsg; reply: ThreadMsg | null })
 function MessageRow({ msg }: { msg: ThreadMsg }) {
   const isUser = msg.role === "user";
   return (
-    <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexDirection: isUser ? "row-reverse" : "row" }}>
+    <div role="article" aria-label={isUser ? "You" : msg.error ? "Clynx (error)" : "Clynx"} style={{ display: "flex", gap: 10, alignItems: "flex-start", flexDirection: isUser ? "row-reverse" : "row" }}>
       {isUser ? null : <ClynxAvatar />}
       <div
         style={{
@@ -752,12 +1009,15 @@ function Composer({
   messages,
   showStarters,
   onSent,
+  focusNonce,
 }: {
   focus: Focus | null;
   onClearFocus: () => void;
   messages: ThreadMsg[];
   showStarters: boolean;
   onSent: () => void;
+  // Bumped when something outside asks for the cursor to land in the box ("Ask about this", "Ask Clynx").
+  focusNonce: number;
 }) {
   const [draft, setDraft] = useState("");
   const [images, setImages] = useState<ChatAttachment[]>([]);
@@ -767,6 +1027,9 @@ function Composer({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const busy = messages.some((m) => m.streaming);
+  useEffect(() => {
+    if (focusNonce > 0) textareaRef.current?.focus();
+  }, [focusNonce]);
 
   async function addFiles(files: FileList | File[] | null) {
     if (!files || !files.length) return;

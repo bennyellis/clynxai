@@ -23,14 +23,14 @@ import type { GateExtras } from "./dealGate.js";
 import { isSuspiciousPrice } from "./placeholderPrice.js";
 import { looksBroken } from "./brokenVariant.js";
 import { watchAsSearchItems, matchWatchTerm, passesWatchPriceGate, deriveWatchReferencePrice, evaluateWatchConditions } from "./watchMatching.js";
-import { resaleSettingsFrom } from "./resaleMath.js";
+import { resaleOutcome, resaleSettingsFrom } from "./resaleMath.js";
 import { extrasPricedSeparately, isHiddenGemCandidate, repriceWithExtras } from "./profitGate.js";
-import { decideAgeGate } from "./listingAge.js";
+import { assessListingAge, decideAgeGate } from "./listingAge.js";
 import { gateExtrasFromLump, gateExtrasFromValuation, looksLikeBundle, type BundleValuation } from "./bundleBreakdown.js";
 import { analyzeListingPhotos, classifyThumbnailImage, matchesReferenceProduct, type PhotoAnalysisResult } from "./vision.js";
 import { resolveIdentityTarget } from "./productIdentity.js";
 import { hasOpenAIAccess } from "./openai.js";
-import { cleanFilingName, describeDisposition, discoverySettings, disposition, MIN_MARKET_LOOK_PRICE_USD, planPhotoLook, type DiscoverySettings, type LookPlan } from "./research.js";
+import { cleanFilingName, describeDisposition, discoverySettings, disposition, MIN_MARKET_LOOK_PRICE_USD, planPhotoLook, shouldValidateDismissal, type DiscoverySettings, type LookPlan } from "./research.js";
 import { downloadImageAsDataUri, shrinkImageDataUri } from "./webResearch.js";
 import { DEFAULT_COUNTRY_CITIES } from "./config.js";
 import { prefilterWatchListing } from "./watchFacebook.js";
@@ -79,6 +79,13 @@ export { isSuspiciousPrice };
 // unnoteworthy price than a real deal worth a detail-page visit and an AI
 // call. Applies to every price, not just a narrow two-digit band like the
 // old version did.
+const REEVAL_WORDS: Record<ReevalReason, string> = {
+  price_drop: "the asking price came down",
+  no_outcome: "it was saved without an outcome",
+  evidence_missing: "its earlier research could not finish",
+  now_in_focus: "general deal detection is on now",
+};
+
 export function isNonRoundPrice(price: number): boolean {
   return price % 5 !== 0;
 }
@@ -159,6 +166,9 @@ export function isLikelyUnshippable(title: string): boolean {
 // this file (and elsewhere) keeps working unchanged.
 export { estimateListingAgeHours, isListingTooOld } from "./listingAge.js";
 import { estimateListingAgeHours, isListingTooOld } from "./listingAge.js";
+import { conditionTextOf } from "./listingText.js";
+import { feedCandidates } from "./feedCandidates.js";
+import { REEVAL_MAX_PER_VISIT, currentAgeText, reevaluationReason, requalifyEligible, scoredFromRecord, type ReevalReason } from "./relisting.js";
 import { checkArrivedLocation, type LocationCheck } from "./locationCheck.js";
 import { PassAccount, type ListingOutcome } from "./passAccount.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -539,12 +549,38 @@ export class ScrapeEngine {
     return discoverySettings(this.opts.getConfig().discovery);
   }
 
+  // "On the Database's numbers it would otherwise clear your margin" for a listing held back by the seller checks, or "" (never alters the decision).
+  private valueIfSellerClears(listing: ListingSummary & { price: number | null }, detail: ListingDetail, config: EngineConfig): string {
+    try {
+      const known = this.opts.store.getEbayValueForTitle?.(listing.title);
+      if (!known || listing.price === null) return "";
+      const settings = resaleSettingsFrom(config);
+      const factor = CONDITION_VALUE_MULTIPLIER[detectConditionImpact(conditionTextOf({ ...detail, title: listing.title }))];
+      const out = resaleOutcome(known.value * factor, listing.price + (detail.ebayShippingUsd ?? 0), settings.netPercent);
+      if (out.profitUsd > 0 && out.marginPercent >= settings.minMarginPercent) {
+        return `Separately: on the Database's numbers ("${known.name}" sells for about $${Math.round(known.value)}) the price would leave about $${Math.round(out.profitUsd)} profit, so it is only the seller checks holding it back. Not sent as a deal.`;
+      }
+    } catch {
+      /* a note only */
+    }
+    return "";
+  }
+
+  private reevalsThisVisit = 0;
+  private reevaluationReason(listing: ListingSummary, config: EngineConfig): ReevalReason | null {
+    if (this.reevalsThisVisit >= REEVAL_MAX_PER_VISIT) return null;
+    const saved = this.opts.store.getListingState?.(listing.id) ?? null;
+    if (!saved) return null;
+    return reevaluationReason(saved, listing.price, Date.now(), { maxAgeHours: config.maxListingAgeHours, generalDealOn: config.generalDeal.enabled });
+  }
+
   /** Called when the scanner starts on a new location: the budgets for extra looks are per visit, and the last visit gets summed up. */
   beginLocationVisit(): void {
     this.visitSeq++;
     this.logVisitSummary();
     this.speculativeLooksThisVisit = 0;
     this.marketLooksThisVisit = 0;
+    this.reevalsThisVisit = 0;
   }
 
   private visitSeq = 0;
@@ -1297,7 +1333,7 @@ export class ScrapeEngine {
       isHiddenGemCandidate({
         priceUsd: listing.price,
         shippingUsd: detail.ebayShippingUsd ?? 0,
-        baseValueUsd: (scored.referencePriceUsd ?? 0) * (scored.extraction.brokenVariant ? 1 : CONDITION_VALUE_MULTIPLIER[detectConditionImpact(`${listing.title} ${detail.description}`)]),
+        baseValueUsd: (scored.referencePriceUsd ?? 0) * (scored.extraction.brokenVariant ? 1 : CONDITION_VALUE_MULTIPLIER[detectConditionImpact(conditionTextOf({ ...detail, title: listing.title }))]),
         settings: resaleSettingsFrom(config),
         text: `${listing.title} ${detail.description}`,
       })
@@ -1373,7 +1409,7 @@ export class ScrapeEngine {
     if (x.confidence === "low") {
       return disposition("insufficient_evidence", "IDENTITY_UNCLEAR", `The title does not say what this is, and the AI read of it was not sure. ${x.reasoning}`.trim());
     }
-    return disposition("rejected", "AI_ESTIMATE", `Judged not worth it from the title and price alone (Clynx's own estimate, not market numbers). ${x.reasoning}`.trim());
+    return disposition("rejected", "AI_ESTIMATE", `Provisionally judged not worth it from the title and price alone (Clynx's own estimate, no market numbers behind it). ${x.reasoning}`.trim());
   }
 
   // Per explicit instruction — checks each already price-qualified Watch
@@ -1506,10 +1542,20 @@ export class ScrapeEngine {
     // store.ts's hasSeenCached/seenCache), benchmarked directly against the
     // plain DB lookup via the db_dedup_lookup/dedup_cache_check stages.
     if (this.opts.store.hasSeenCached(listing.id)) {
-      recordEvent("duplicate", config.id);
-      return { ...NOT_COUNTED, outcome: "already_seen" };
+      // Beta 12: a seen listing is looked at again only for a bounded set of reasons (price fell, the evidence was missing, a setting changed), never twice within the cooldown
+      // and never more than twice in all (relisting.ts). Everything else is the duplicate it always was.
+      const again = this.reevaluationReason(listing, config);
+      if (!again) {
+        recordEvent("duplicate", config.id);
+        return { ...NOT_COUNTED, outcome: "already_seen" };
+      }
+      this.reevalsThisVisit++;
+      this.opts.store.noteReevaluation(listing.id);
+      recordEvent("reevaluated", config.id);
+      this.log("info", `Looking again at "${listing.title}": ${REEVAL_WORDS[again]}.`, listing.url);
+    } else {
+      recordEvent("unique", config.id);
     }
-    recordEvent("unique", config.id);
     if (listing.price === null) return { ...NOT_COUNTED, outcome: "no_price" };
 
     // Per explicit instruction — instrumenting the pipeline to measure
@@ -2033,7 +2079,10 @@ export class ScrapeEngine {
     const sellerRisk = evaluateSellerRisk(detail.seller, config.sellerRisk);
     if (!sellerRisk.passed) {
       this.log("info", `seller risk: ${listing.title} — ${sellerRisk.reasons.join("; ")}`, listing.url);
-      const risky = disposition("rejected", "SELLER_RISK", `The seller did not pass your seller checks: ${sellerRisk.reasons.join("; ")}`);
+      // Beta 12: safety and profitability are separate questions. The seller still fails (no alert, no deal), but when the Database already prices this product the note says what the
+      // numbers would have been, so a user can decide to look at the seller themselves instead of never learning the listing was otherwise good.
+      const worth = this.valueIfSellerClears(listing, detail, config);
+      const risky = disposition("rejected", "SELLER_RISK", `The seller did not pass your seller checks: ${sellerRisk.reasons.join("; ")}${worth ? ` ${worth}` : ""}`);
       this.tally(risky);
       this.opts.store.saveScored(
         {
@@ -2044,7 +2093,7 @@ export class ScrapeEngine {
             extractedAttributes: "",
             conditionImpact: "unknown",
             confidence: "low",
-            reasoning: `Excluded on seller risk: ${sellerRisk.reasons.join("; ")}`,
+            reasoning: `Excluded on seller risk: ${sellerRisk.reasons.join("; ")}${worth ? ` ${worth}` : ""}`,
           },
           referencePriceUsd: null,
           discountPercent: null,
@@ -2080,7 +2129,7 @@ export class ScrapeEngine {
     // A broken / for-parts listing of an item that includes broken ones gets its own Database variant (made and researched on first
     // sight) so it is priced as what it is, not as a working one at a quarter of the price.
     const brokenCandidate = matchSearchItem(detail.title, config.searchItems);
-    if (brokenCandidate?.includeBroken && looksBroken(`${detail.title} ${detail.description}`)) {
+    if (brokenCandidate?.includeBroken && looksBroken(conditionTextOf(detail))) {
       this.log("info", `Broken / for-parts listing of "${brokenCandidate.item}": checking what broken ones sell for...`, listing.url);
       await this.opts.ensureBrokenVariant?.(brokenCandidate.item, detail.title).catch(() => undefined);
     }
@@ -2351,7 +2400,7 @@ export class ScrapeEngine {
     // the mismatch-override/bundle-value blocks below so a green-flag
     // confirmation counts as a real matchedItem for both of those too.
     if (greenFlagCandidate && !scored.extraction.matchedItem && photoResult?.matchesClaim === true) {
-      const conditionImpact = detectConditionImpact(`${listing.title} ${detail.description}`);
+      const conditionImpact = detectConditionImpact(conditionTextOf({ ...detail, title: listing.title }));
       const pricing = evaluateSearchItemPricing(greenFlagCandidate, listing.price, conditionImpact, greenFlagCandidate.maxPriceUsd, {
         valueUsd: this.opts.store.getEbayValueForProductName(greenFlagCandidate.item),
         settings: resaleSettingsFrom(config),
@@ -2465,7 +2514,7 @@ export class ScrapeEngine {
     if (!scored.isDeal && !scored.extraction.matchedItem && mismatchCorrection === null && photoResult && !photoResult.error && photoResult.matchesClaim !== false) {
       const focal = this.focalProduct(photoResult.identifiedProducts);
       if (focal) {
-        const conditionImpact = detectConditionImpact(`${listing.title} ${detail.description}`);
+        const conditionImpact = detectConditionImpact(conditionTextOf({ ...detail, title: listing.title }));
         const settings = resaleSettingsFrom(config);
         const databaseValue = this.opts.store.getEbayValueForProductName(focal, listing.title);
         if (databaseValue !== null && databaseValue > 0) {
@@ -2572,7 +2621,7 @@ export class ScrapeEngine {
     // When the breakdown is there it replaces the photo-based lump estimate below, which stays as the fallback.
     const baseValueForLot =
       scored.referencePriceUsd !== null && scored.referencePriceUsd > 0
-        ? scored.referencePriceUsd * (scored.extraction.brokenVariant ? 1 : CONDITION_VALUE_MULTIPLIER[detectConditionImpact(`${listing.title} ${detail.description}`)])
+        ? scored.referencePriceUsd * (scored.extraction.brokenVariant ? 1 : CONDITION_VALUE_MULTIPLIER[detectConditionImpact(conditionTextOf({ ...detail, title: listing.title }))])
         : 0;
     let bundleExtras: { valueUsd: number; phrase: string } | null = null;
     // What of the extras the Deal Quality Gate may COUNT (priced item by item, or named in the listing and capped) and what it may not.
@@ -2836,7 +2885,62 @@ export class ScrapeEngine {
     // Dashboard and the notifications all agree.
     const rawIsDeal = scored.isDeal;
     let qualification: Qualification | null = null;
-    if (scored.isDeal || gateExtras !== null || priceQualifiedWatches.length > 0) {
+    // Beta 12: a "not a deal" from the text AI alone, about a specific product the Database has no numbers for, is a guess. Within the market-lookup allowance, check it against real
+    // numbers; the Deal Quality Gate then decides on those (and only on those). No numbers found: the listing stays exactly as the AI left it (provisional), nothing is invented.
+    let checkedDismissal = false;
+    if (
+      gateExtras === null &&
+      priceQualifiedWatches.length === 0 &&
+      photoVerdict === null &&
+      mismatchCorrection === null &&
+      shouldValidateDismissal({
+        price: listing.price,
+        title: listing.title,
+        matchedItem: scored.extraction.matchedItem,
+        isDeal: scored.isDeal,
+        judgeUnavailable: !!scored.extraction.judgeUnavailable,
+        offTopic: !!scored.offTopicSuggestion,
+        lookLeftVisit: this.discovery().marketLooksPerVisit - this.marketLooksThisVisit,
+        lookLeftPass: this.discovery().marketLooksPerPass - this.marketLooksThisPass,
+        hasChecker: !!this.opts.checkMarket,
+      })
+    ) {
+      this.marketLooksThisVisit++;
+      this.marketLooksThisPass++;
+      recordEvent("dismissal_checked");
+      this.log("info", `"${listing.title}" was dismissed on Clynx's own estimate alone: checking what it actually sells for.`, listing.url);
+      try {
+        const market = await this.opts.checkMarket!({ title: listing.title, matchedItem: null, identityTexts: visionSubjects, listingId: listing.id });
+        if (market && market.valueUsd !== null && market.valueUsd > 0 && market.productName) {
+          checkedDismissal = true;
+          const candidate: ScoredListing = {
+            ...scored,
+            extraction: { ...scored.extraction, matchedItem: market.productName, confidence: "medium", reasoning: `${scored.extraction.reasoning} Checked against real prices for "${market.productName}" (about $${Math.round(market.valueUsd)}).` },
+            referencePriceUsd: market.valueUsd,
+            discountPercent: ((market.valueUsd - listing.price) / market.valueUsd) * 100,
+            isDeal: true,
+            dealTier: "general",
+          };
+          qualification = await qualifyScoredListing({
+            scored: candidate,
+            source: this.opts.store,
+            settings: resaleSettingsFrom(config),
+            maxAgeHours: config.maxListingAgeHours,
+            check: undefined,
+            refreshMarket: false,
+            identityTexts: visionSubjects,
+            log: (m) => this.log("info", m, listing.url),
+          });
+          scored = qualification.scored;
+          this.opts.store.saveScored(scored, sellerRisk);
+          const checked = this.opts.store.getLastSavedListing();
+          if (checked) this.opts.onListing(checked);
+        }
+      } catch (err) {
+        this.log("warn", `Could not check the dismissal of "${listing.title}": ${(err as Error).message}`, listing.url);
+      }
+    }
+    if (!checkedDismissal && (scored.isDeal || gateExtras !== null || priceQualifiedWatches.length > 0)) {
       qualification = await qualifyScoredListing({
         scored,
         source: this.opts.store,
@@ -2958,6 +3062,62 @@ export class ScrapeEngine {
       .catch(() => {});
   }
 
+  /**
+   * Beta 12 — judge a stored "worth a look" listing again with whatever the Database knows NOW (a late market check, a value that arrived since, a better product match), without
+   * opening the page. A listing that now qualifies is saved and alerted ONCE (isListingNotified guards a second alert); one the numbers now rule out is settled as unprofitable
+   * instead of staying "uncertain" for ever; one that is still missing evidence is left exactly as it was.
+   */
+  async requalifyListing(id: string, why: string): Promise<"qualified" | "unprofitable" | "unchanged" | "skipped"> {
+    const store = this.opts.store;
+    const rec = store.getById(id);
+    if (!rec || !requalifyEligible(rec)) return "skipped";
+    const config = this.opts.getConfig();
+    const ageText = currentAgeText(rec.listingAge, rec.firstSeenAt, Date.now(), estimateListingAgeHours);
+    if (!ageText || assessListingAge(ageText, config.maxListingAgeHours).state === "stale") return "skipped";
+    const scored = scoredFromRecord(rec, ageText);
+    const q = await qualifyScoredListing({
+      scored,
+      source: store,
+      settings: resaleSettingsFrom(config),
+      maxAgeHours: config.maxListingAgeHours,
+      refreshMarket: false,
+      log: (m) => this.log("info", m, rec.url),
+    });
+    const listing = nonNullPriced({ id: rec.id, title: rec.title, price: rec.price, url: rec.url, thumbnailUrl: rec.thumbnailUrl, locationText: rec.locationText } as ListingSummary);
+    const settled = this.finalDisposition(q.scored, q, null, { vision: false, priority: 3, speculative: false });
+    const unchanged = settled.code === rec.researchCode && !q.verdict.qualified;
+    if (unchanged) return "unchanged";
+    const next = { ...q.scored, research: settled };
+    store.saveScored(next);
+    const saved = store.getLastSavedListing();
+    if (saved) this.opts.onListing(saved);
+    recordEvent("requalified");
+    if (q.verdict.qualified) {
+      this.log("info", `Re-checked "${rec.title}" (${why}): it now qualifies.`, rec.url);
+      await this.pushQualifiedDeal({ ...q, scored: next }, config, listing);
+      return "qualified";
+    }
+    this.log("info", `Re-checked "${rec.title}" (${why}): ${describeDisposition(rec.title, settled)}`, rec.url);
+    return "unprofitable";
+  }
+
+  /** Re-judges the saved "worth a look" listings still inside the freshness window (no page visits, no AI, no network). Called when a pass starts and when a late market check lands. */
+  async requalifyPending(why: string, limit = 25): Promise<number> {
+    const config = this.opts.getConfig();
+    const since = config.maxListingAgeHours !== null ? Date.now() - config.maxListingAgeHours * 3_600_000 : 0;
+    const ids = this.opts.store.listRequalifyCandidates?.(since, limit) ?? [];
+    let changed = 0;
+    for (const id of ids) {
+      try {
+        const r = await this.requalifyListing(id, why);
+        if (r === "qualified" || r === "unprofitable") changed++;
+      } catch (err) {
+        this.log("warn", `Could not re-check a saved listing: ${(err as Error).message}`);
+      }
+    }
+    return changed;
+  }
+
   // Worth a look: kept in the Feed, never pushed unless the user turned that on (Config > notifyWorthALook), and then quietly.
   private async noteWorthALook(q: Qualification, config: EngineConfig, listing: ListingSummary & { price: number }): Promise<void> {
     this.log("info", `Worth a look: ${listing.title} — ${q.verdict.headline}`, listing.url);
@@ -3065,6 +3225,8 @@ export class ScrapeEngine {
     this.speculativeLooksThisPass = 0;
     this.marketLooksThisPass = 0;
     this.setStatus({ lastCycleStartedAt: Date.now(), lastError: null, listingsThisCycle: 0, currentSearch: "browsing" });
+    // Beta 12: saved "worth a look" listings are judged again with whatever the Database learned since (late checks, new values): no page visits, no AI, no network.
+    await this.requalifyPending("a new pass started").catch(() => 0);
 
     const perLocation = Math.max(1, config.listingsPerLocation);
     const locationCount = config.browseUrls.length;
@@ -3546,10 +3708,11 @@ export class ScrapeEngine {
           // only a ceiling.
           let candidateListings = listings;
           if (generalSearchMode) {
-            candidateListings = listings.filter(
-              (l) => isRelevantToSearchItems(l.title, config.searchItems) || findGreenFlagCandidate(l.title, config.searchItems) !== null
-            );
-            if (listings.length > 0 && candidateListings.length === 0) {
+            // Beta 12: with general detection ON the whole feed stays in play (Search For look-alikes first); only with it OFF is the feed narrowed to the Search For list.
+            const generalOn = this.opts.getConfig().generalDeal.enabled;
+            const picked = feedCandidates(listings, config.searchItems, generalOn);
+            candidateListings = picked.candidates;
+            if (listings.length > 0 && picked.focused === 0 && !generalOn) {
               this.log("info", `Nothing here matched your Search For list — moving to the next location.`);
             }
           }

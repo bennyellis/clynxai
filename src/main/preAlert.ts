@@ -28,7 +28,7 @@ export interface MarketCheck {
 }
 
 // purpose "bundle": the product is one item of a listing that holds several, priced on its own (not an alert check).
-export type MarketChecker = (listing: { title: string; matchedItem: string | null; purpose?: "bundle"; identityTexts?: string[] }) => Promise<MarketCheck | null>;
+export type MarketChecker = (listing: { title: string; matchedItem: string | null; purpose?: "bundle"; identityTexts?: string[]; listingId?: string }) => Promise<MarketCheck | null>;
 
 export interface QualifyArgs {
   scored: ScoredListing;
@@ -139,7 +139,7 @@ export async function qualifyScoredListing(args: QualifyArgs): Promise<Qualifica
   if (wantsCheck && args.check && !hardStop) {
     const variant = scored.extraction.brokenVariant;
     try {
-      market = (await args.check({ title: variant ?? scored.listing.title, matchedItem: variant ?? scored.extraction.matchedItem, identityTexts: args.identityTexts })) ?? null;
+      market = (await args.check({ title: variant ?? scored.listing.title, matchedItem: variant ?? scored.extraction.matchedItem, identityTexts: args.identityTexts, listingId: scored.listing.id })) ?? null;
     } catch (err) {
       args.log(`Market check failed (${(err as Error).message}), using what the Database already knows.`);
     }
