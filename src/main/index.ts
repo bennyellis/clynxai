@@ -42,7 +42,8 @@ import { randomUUID } from "node:crypto";
 import { lookupProduct, expandSearchKeywords } from "./products.js";
 import { downloadImageAsDataUri, shrinkImageDataUri, findBrandLogoImage, findGroupImage, findPoorConditionProductImage, findReferencePhotos, findFreeReferencePhotos, buildImageCollage, generateCategoryImage, lookUpOnWeb, webVerifyDeps } from "./webResearch.js";
 import { verifyVariant, reconcileVerdict, type VariantVerdict } from "./variantEvidence.js";
-import { createdVariantMessage, createVerdictMemory, decideResearchTarget, makeClaimVerifier, publicHttpUrls } from "./variantResearch.js";
+import { createVerdictMemory, makeClaimVerifier, publicHttpUrls } from "./variantResearch.js";
+import { runResearchProductTool } from "./researchTool.js";
 import { distinguishingTokens } from "./variantIdentity.js";
 import {
   answerImageQuestion,
@@ -962,60 +963,14 @@ async function executeChatTool(
   }
 
   if (call.name === "research_product") {
-    const product = String(call.args.product ?? "").trim();
-    if (!product) return "Failed: no product name given.";
-    const userUrls = publicHttpUrls(`${String(call.args.url ?? "")} ${product}`);
-    // A more specific version of a product already on file (an edition, a capacity, a color, a bundle, a regional model) is a separate product:
-    // it is checked against evidence first, and only then recorded as its own entry linked to the general one. The old behavior folded it into the
-    // general entry (rewriting that profile, showing the standard model's prices for it) and filed names nobody had confirmed.
-    const decision = await decideResearchTarget(product, {
-      findMatching: (name) => store.findMatchingProduct(name),
-      listTracked: () => store.listProductIndex(),
-      verify: (name, parent) => verifyClaim(name, parent, userUrls),
+    return await runResearchProductTool(call.args, call.userMessage, {
+      store,
+      verifyClaim,
+      startLookup: (id, name, opts) => void runProductLookup(id, name, opts),
+      notify: (id) => sendToRenderer("products:updated", store.getProductById(id)),
+      newId: () => randomUUID(),
+      progress: onSearchUpdate,
     });
-
-    if (decision.kind === "not_recorded") {
-      // Nothing becomes a product. What was found is kept on the general entry so the next question starts from it.
-      store.recordVariantClaim(decision.parent.id, decision.verdict);
-      sendToRenderer("products:updated", store.getProductById(decision.parent.id));
-      return decision.message;
-    }
-
-    if (decision.kind === "create_variant") {
-      const parentFull = store.getProductById(decision.parent.id);
-      const candidateId = randomUUID();
-      const id = store.addProductStub(candidateId, product);
-      if (id !== candidateId) {
-        // Already in the Database under this name: refresh that one, with the evidence.
-        store.setProductLoading(id, true);
-        store.setProductVariantEvidence(id, reconcileVerdict(store.getProductById(id)?.variantEvidence ?? null, decision.verdict));
-        sendToRenderer("products:updated", store.getProductById(id));
-        runProductLookup(id, product, { source: "you", verdict: decision.verdict, skipSiblingDiscovery: true });
-        return `Already have "${product}" in the Database; refreshing it now with the evidence (${decision.verdict.status}: ${decision.verdict.basis}). It is saved when that finishes.`;
-      }
-      store.setProductParent(id, decision.parent.id);
-      store.setProductVariantEvidence(id, decision.verdict);
-      sendToRenderer("products:updated", store.getProductById(id));
-      runProductLookup(id, product, { source: "you", verdict: decision.verdict, skipSiblingDiscovery: true, forcedFamily: parentFull?.family ?? undefined });
-      return createdVariantMessage(product, decision.parent, decision.verdict);
-    }
-
-    if (decision.kind === "refresh_existing") {
-      const existing = store.getProductById(decision.existing.id);
-      if (existing) {
-        store.setProductLoading(existing.id, true);
-        sendToRenderer("products:updated", store.getProductById(existing.id));
-        // The user's own wording is what gets researched, not the entry's more generic stored name (a verified past bug: the AI never saw
-        // "Galaxy Edition" because the entry's plain name was searched instead).
-        runProductLookup(existing.id, product, { source: "you" });
-        return `Already have a Database profile for "${existing.name}"; refreshing it with a fresh web search for "${product}" now. It is saved when the research finishes (the Discovery tab shows progress), so don't say it is saved yet.`;
-      }
-    }
-
-    const id = store.addProductStub(randomUUID(), product);
-    sendToRenderer("products:updated", store.getProductById(id));
-    runProductLookup(id, product, { source: "you" });
-    return `Started researching "${product}" and added it to the Database as a new entry. It is saved when the research finishes (the Discovery tab shows progress), so don't say it is saved yet.`;
   }
 
   if (call.name === "add_product_watch_note") {

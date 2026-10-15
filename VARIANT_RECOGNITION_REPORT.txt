@@ -88,3 +88,34 @@ BUILD AND RELEASE STATUS (as of 2026-10-15)
                  -Version 0.3.0-beta.8 -ExpectSha256 <hash>
               2. Console (https://ben.tail0e333d.ts.net/console/releases): 0.3.0-beta.8 > Approve > Publish (type the version).
               Not done yet: draft registration, approval, publication. To undo a release: Releases > Withdraw.
+
+FOLLOW-UP: THE SCREENSHOT (Discovery chat still researched the parent)
+ Exact cause. The Database chat's own system prompt (chat.ts, buildDatabaseSystemPrompt) still said: "Pass ONLY the general, canonical product name as the
+ product argument ... never a variant ... that kind of detail belongs in the writeup." The first Beta 8 change fixed the research_product TOOL description
+ but not this prompt, so the two contradicted each other and the model obeyed the prompt: it shortened "xbox series x galaxy" to "Xbox Series X" before the
+ tool was ever called. The tool then correctly treated "Xbox Series X" as the same product and refreshed the parent (the $523 card), and the model, with
+ no variant in play, asked "keep it under the main entry or flag it as a variant?". The product-page prompt had the same fault ("call it with
+ <product name> unless the user is clearly asking about a different product"), and the open product in the Discovery tab (focus) reinforced it.
+ Answers to the three questions asked:
+  - Was the full variant name lost? Yes, by the model, from the stale prompt rule. It never reached the tool.
+  - Was the new verifier invoked? No. The tool received the parent's name, so there was no variant claim to verify.
+  - Did old chat context override new behavior? Not the history. The prompt did. (The history of clarifying questions was the model following that prompt.)
+ Fix (no installed data is touched):
+  - Both prompts now say: pass a named version's FULL name as typed; never shorten it to its parent; never ask whether to keep it under the main entry or
+    whether it is official/custom before researching; the open product's section says a named version is a separate product.
+  - Backstop that does not depend on the model: the tool now receives what the user actually typed (ToolCall.userMessage). If the user's whole message is
+    a bare product name that says more than the model passed ("xbox series x galaxy" vs "Xbox Series X"), the user's wording is used. Questions and
+    sentences are never treated as names ("is the xbox series x worth flipping?" still refreshes the parent).
+  - A "Checking manufacturer and retailer sources for ..." progress line shows while the evidence check runs.
+  - The research_product handler moved to researchTool.ts so the whole path can be tested.
+ Integration test (variantChatFlow.test.ts, 48 checks). The real chat loop runs against a scripted model over a stubbed OpenAI endpoint, with the
+ screenshot's history, the Xbox Series X open in focus, a real temp Database holding the parent with its $523 value, the real tool handler, the real
+ decision logic and a fake web. It checks: the prompts and tool definitions no longer contradict each other; the full name reaches the tool even when the
+ model shortens it; the verifier runs; a separate entry is created under the parent with its evidence and NO value; the parent's profile and $523 are
+ untouched and it is not set to "researching"; an unconfirmed claim creates nothing, is kept on the parent and is not called fake; a repeat question reuses
+ the finding without searching again; a question about the open product is still a plain refresh. Run against the previous Beta 8 chat.ts the same test
+ fails 26 of 48 checks; with the fix it passes 48 of 48. Full suite: 1743 checks pass, 1 fails (the existing startupErrors test, unrelated).
+ Does this need a new installer? Yes. The prompts and the tool handler are in the app's main process, which is inside the installer. The installer built
+ earlier (commit 1cb2737678fc) still has the old prompt. Rebuild from the new commit. If 0.3.0-beta.8 was already registered as a draft on the server,
+ withdraw/replace that draft or bump the version, because the server will not accept two different installers under one version.
+ Not done: no installer built, nothing registered or published.

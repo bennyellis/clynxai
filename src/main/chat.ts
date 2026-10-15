@@ -47,6 +47,9 @@ export interface ToolCall {
     | "delete_watch"
     | "list_watch_matches";
   args: Record<string, unknown>;
+  // What the user actually typed this turn. The model sometimes shortens a product name when it fills in a tool's arguments; tools that need the
+  // user's own wording (research_product) read it from here.
+  userMessage?: string;
 }
 
 export type ToolExecutor = (call: ToolCall) => Promise<string>;
@@ -634,6 +637,7 @@ function buildDatabaseSystemPrompt(products: ProductProfile[], blacklistTerms: B
   const focusSection = focus
     ? `The user has "${focus.name}" selected in the feed, so unless they clearly mean something else, their questions are about it. What the Database knows about it:
 ${productFactLines(focus)}
+If they name a more specific version of it (an edition, color, capacity, bundle or regional model, like "xbox series x galaxy"), they mean that version, which is a separate product: research it by its full name instead of refreshing "${focus.name}".
 ${attachNote}
 
 `
@@ -647,7 +651,7 @@ ${whereYouAre("database")} This chat has its own conversation and its own tools,
 
 Your tools:
 - web_research — look something up on the web yourself, like a person with a search engine, and explain what you found in your own words. Use it for questions and opinions ("is the Series S worth flipping?", "what breaks on these?"); it doesn't save anything.
-- research_product — build (or refresh) an in-depth product profile from a real live web search for specs/variants/common issues (not just your own training knowledge), saved to the Database so it's there for next time. Call this whenever the user asks you to learn about/research/build a profile for a product. A broad, family-level request ("research iPhones", "look into Nintendo Switch") is completely normal — call this once with the general family name and let the writeup itself cover the real variants (storage sizes, generations, OLED vs base, etc.); don't refuse it or demand they narrow it down to one exact SKU first. Only ask a clarifying question if the request could genuinely mean different, unrelated products. Pass ONLY the general, canonical product name as the product argument — e.g. "Xbox Series X", "iPhone", "Nintendo Switch" — never a parenthetical qualifier or variant/bundle/accessory list tacked onto it (NOT "Xbox Series X (console, all variants/bundles/accessories)"); that kind of detail belongs in the writeup itself, not the title.
+- research_product — build (or refresh) an in-depth product profile from a real live web search for specs/variants/common issues (not just your own training knowledge), saved to the Database so it's there for next time. Call this whenever the user asks you to learn about/research/build a profile for a product. A broad, family-level request ("research iPhones", "look into Nintendo Switch") is completely normal — call this once with the general family name and let the writeup itself cover the real variants (storage sizes, generations, OLED vs base, etc.); don't refuse it or demand they narrow it down to one exact SKU first. Only ask a clarifying question if the request could genuinely mean different, unrelated products. Pass the product the user asked about, in their words. A family-level request gets the general name ("Xbox Series X", "iPhone", "Nintendo Switch"). A request for ONE specific edition, color, capacity, bundle or regional model gets its FULL name exactly as they said it ("Xbox Series X Galaxy", "Xbox Series X 2TB Galaxy Black Special Edition", "iPhone 15 Pro 256GB Natural Titanium"): that is a different product from the general one, and the app checks it against manufacturer and retailer evidence and files it as its own entry linked to the general one. So NEVER shorten a named version to its parent, NEVER ask whether to "keep it under the main entry" or "flag it as a separate variant" (the app does that itself), and NEVER ask whether it is "official" or an aftermarket custom first: call the tool right away and report what it says. A parenthetical qualifier or a list tacked onto a general name is still wrong (NOT "Xbox Series X (console, all variants/bundles/accessories)").
 - add_blacklist_term / remove_blacklist_term — manage the scanning blacklist: any listing whose title matches a blacklisted term gets skipped automatically before it's ever opened, with no credits spent on it. Only for things categorically unrelated to reselling (real estate, rentals, job postings, services, event tickets), not just uninteresting resalable items. Call add_blacklist_term whenever the user says to blacklist/ignore/stop showing something like that.
 
 ${focusSection}Existing products in the Database:
@@ -716,7 +720,7 @@ ${facts}
 
 Your tools:
 - web_research — look something up on the web yourself, like a person with a search engine, and explain what you found in your own words (specs, faults, what it really sells for, what to check). It doesn't save anything.
-- research_product — refresh this product's research from a fresh live web search. Call it with "${product.name}" as the product argument unless the user is clearly now asking about a genuinely different product.
+- research_product — refresh this product's research from a fresh live web search. Call it with "${product.name}" as the product argument to refresh this product. If the user names a more specific version of it (an edition, color, capacity, bundle or regional model) or a different product, pass THAT full name exactly as they said it: a specific version is its own product (checked against evidence and filed under this one), so never shorten it back to "${product.name}".
 - add_product_watch_note — log something to actively check for in real listings of this product: a commonly bundled extra that adds resale value and that sellers often photograph without mentioning in the title (games with a console, a lens with a camera, cables/accessories), or a condition red flag. Call this whenever the user describes something like that. If they mention something bundle- or condition-related but haven't given you a clear, actionable instruction yet, ask a short clarifying question first (e.g. "should I flag listings that mention games, or just check photos for game cases?").
 
 This renders in a normal chat window, so write like a person chatting, not a report, and stay in character as Clynx. After using a tool, say what you did in your own words.`;
@@ -930,7 +934,7 @@ export async function streamChat(
       let toolResult: string;
       try {
         const args = tc.args ? JSON.parse(tc.args) : {};
-        toolResult = await executeTool({ name: tc.name as ToolCall["name"], args });
+        toolResult = await executeTool({ name: tc.name as ToolCall["name"], args, userMessage });
         if (tc.name === "research_product" && !toolResult.startsWith("Failed:")) {
           researchedProduct = true;
         }
