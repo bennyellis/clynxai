@@ -1,0 +1,435 @@
+CLYNX BETA 12 - COMPLETE PRE-IMPLEMENTATION AUDIT (SELF-CONTAINED, FOR REVIEW BY ANOTHER AI)
+=================================================================================================
+Branch master-wveebf, audited at commit 9e0190d (Beta 11 = 6ef4ad1, version 0.3.0-beta.11). Repo: bennyellis/clynxai. No product code was changed by this audit; the only
+additions are this report and a read-only tool, scripts/discovery-audit.cjs. Nothing was built, published or deployed.
+
+0. CONTEXT FOR A READER WHO HAS NOT SEEN THE PROJECT
+ Clynx is an Electron + React + TypeScript desktop app for a Facebook Marketplace reseller. A Playwright-driven scanner browses Marketplace locations, opens listings, scores them
+ (deterministic Search For matching, Database eBay values, or a text AI judge), optionally analyzes photos with a vision model, validates anything it may push with a WatchCount/eBay
+ market check, and passes it through a Deal Quality Gate (profit after eBay's 16% cut, evidence strength, age, identity). A local SQLite "Database" holds products, reference
+ photos and eBay comps. Main process: src/main (index.ts, scrapeEngine.ts, scorer.ts, research.ts, dealGate.ts, preAlert.ts, scraper.ts, webResearch.ts, vision.ts, store.ts,
+ compIdentity.ts, variantIdentity.ts...). Renderer: src/renderer/src (App.tsx, components/Sidebar.tsx, screens/Dashboard|Database|DiscoveryTab|Activity.tsx).
+ Beta 12 planned changes: (1) Discovery chat flows downward, conversations separate from scanner activity; (2) Database/Library remember last navigation state and a second click
+ on the active sidebar icon returns home; (3) reference-photo verification must stop unrelated products being filed under wrong Database records; (4) Dashboard Search For gets
+ an optional variant-matching toggle with NO extra Facebook queries; (5) Activity separates user conversations from automated events; (6) explain why 300+ "investigated"
+ listings produced only 2 deals.
+ Constraints honored: no Database/settings/scanner changes, no destructive migrations, no uncontrolled scanning or AI spend, nothing published. Non-round-price scam filter and the
+ scam-bot / placeholder-price rules were left untouched and are to be preserved.
+
+0.1 METHOD AND EVIDENCE LABELS
+ CONFIRMED = read in code on this branch, reproduced with a probe of the real pure functions, or measured on the owner's real database.
+ HYPOTHESIS = plausible from code, not proven. NOT AVAILABLE = not observable from the audit sandbox (no OpenAI key/network, no owner data).
+ Sources of evidence: (a) full read of the evaluation pipeline (scrapeEngine.evaluateListing / runPostScoringPipeline, scorer.ts, research.ts, dealGate.ts, preAlert.ts,
+ resaleMath.ts, profitGate.ts, scraper.fetchListingDetail, store dedupe); (b) two read-only code-audit sub-agents (renderer UI/navigation; photo verification + Search For),
+ whose key claims I spot-checked in code; (c) probes of compIdentity/compFilter/scorer/variantIdentity on example titles; (d) scripts/discovery-audit.cjs run BY THE OWNER on
+ their real scout.db (copy), output pasted back into the session - section 8 below contains those numbers verbatim.
+
+0.2 HEADLINE ANSWERS
+ - Low deal count: 329 saved listings -> 2 deals. 48% of opened pages (127 of 265) were rejected as TOO OLD after the page load; 35 listings were skipped unopened by a since-fixed
+   bug (NOT_FOCUSED); 55 were genuinely unprofitable on the numbers; ~33 were genuine Facebook-shipping/eBay-mention rejections. The recoverable missed deals look like roughly 5-12
+   listings, not ~300. So the low count is mostly funnel/freshness waste plus one measurable defect, not an unprofitable-market artefact alone and not mass wrong decisions.
+ - New confirmed defect (largest fixable): the scanner reads the WHOLE Facebook page as the listing's description, including "Related searches" and "Today's picks" (other
+   sellers' cards). Damage words from other cards (e.g. "Sony PlayStation 5 as is for parts") discount a listing's value to 25%/60%. 61 of 265 opened pages (23%) were affected;
+   5 would qualify on Database numbers once removed. The same text feeds bundle/extras detection, the scam-bot check and the 2000 characters sent to the text AI judge.
+ - Reference-photo contamination: the vision prompt for reference photos accepts "cover art" and never rejects games/software; title text checks are bag-of-words with no
+   console-vs-game vocabulary; several write paths are unverified or fail open.
+ - Search For: a plain item already matches variants (and also games/accessories naming the platform) because matching is "all my words appear in the title"; there is no family mode.
+ - UI: Discovery chat is newest-first with scanner cards interleaved by timestamp; Activity already has the fields to split conversations from events; sidebar re-click is a no-op
+   and Library state/scroll is lost across tab switches.
+
+=====================================================================================================================================================
+PRIORITY 1 / CHANGE 6 - WHY 300+ "INVESTIGATED" LISTINGS GAVE 2 DEALS
+=====================================================================================================================================================
+
+A. WHAT "INVESTIGATED" ACTUALLY MEANS (CONFIRMED) - three different numbers share the word
+ 1. Dashboard "Listings evaluated" = SELECT COUNT(*) FROM listings, all time (store.countListings, index.ts listings:count; Dashboard.tsx:207). That is every
+    saved row, including listings that were NEVER OPENED (skipped from the search card by recordInstantSkip: wrong state, placeholder price, "unshippable" words,
+    blacklist, over/under the item's price range, "not a Search For item", photo shows an ineligible category) and listings opened only to be skipped
+    (too old, Facebook shipping/eBay mention, scam bot, seller risk). It does not count duplicates or no-price cards (never saved).
+ 2. The per-location line "Done at X (N listings evaluated)" counts only listings that were OPENED (result.counted).
+ 3. Activity > "Evaluated/sec" counts every call into evaluateListing, duplicates included.
+ So "300 investigated" most likely means "300 rows saved since you started", not "300 listings fully evaluated". Also all-time, not per day.
+
+B. THE FUNNEL, STAGE BY STAGE (CONFIRMED, scrapeEngine.ts / scorer.ts / research.ts / dealGate.ts / preAlert.ts)
+ S0 Retrieval. Default mode (no Search For items, or general detection on) browses Facebook's generic "Today's picks" feed per location: ~18 cards per page
+    (log evidence in the Beta 9 report: "found 18"). It is a recommendation feed across ALL categories, not a price-sorted or electronics view.
+    A dedicated keyword search runs only when Search For items exist AND "Rotate search terms" is on, or there is exactly one item (see finding D4).
+ S1 Silent drops (not saved, only visible in the pass accounting since Beta 9): already seen, no price.
+ S2 Cheap filters, no page opened (saved as unresearched/rejected): OUT_OF_STATE, PLACEHOLDER_PRICE, UNSHIPPABLE (regex list: bikes, furniture, vehicles,
+    "for rent", "lot for sale"...), BLACKLISTED, OVER_MAX_PRICE/UNDER_MIN_PRICE (the matched item's own range), NOT_FOCUSED, PHOTO_INELIGIBLE.
+ S3 Detail page opened (1.2-3 s random pause + page load). A load failure is not saved and the listing is retried next pass (not seen yet).
+ S4 Filters after opening: TOO_OLD (default 24 h), OFFICIAL_SHIPPING / MENTIONS_EBAY ("not a hidden local deal"), SCAM_BOT (masked phone number),
+    SELLER_RISK (defaults: account at least 1 year old, profile photo required).
+ S5 Text verdict (scoreListing):
+      a) matches a Search For item -> deterministic price maths (free);
+      b) title contains every word of a Database product that has an eBay value -> deterministic maths (free);
+      c) anything else -> ONE text-only AI call (extractGeneralDeal) that estimates value from the model's memory; the prompt says "be conservative: the large
+         majority should NOT be flagged"; needs confidence >= "medium" (default) to count.
+ S6 Photo-look plan (research.planPhotoLook). Default "Save OpenAI credits" (lowAiMode) is ON: a listing the text read did not flag gets a photo look only if
+    the read was unsure (low confidence / vague title) AND price >= $35 AND the visit budget (3) and pass budget (30) allow; otherwise it ends unresearched
+    (LOOK_BUDGET / LOW_PRICE) or rejected (AI_ESTIMATE). A non-round price on an unknown title only moves the look behind others.
+ S7 Photo analysis (2 background workers, priority queue, unbounded). If photos name a specific product ("photo-first find"): Database value -> maths; else a
+    fresh WatchCount+eBay market look, allowance 2 per location visit, 12 per pass, price >= $35, otherwise NO_RESALE_NUMBERS (insufficient evidence).
+ S8 Deal Quality Gate (dealGate.ts), run only for listings that are already isDeal / have counted extras / are Watch candidates (qualifyScoredListing call is
+    guarded by that condition). Anything about to be pushed is first re-priced by a live market check (150 s limit).
+    Evidence: strong >=5 sold comps, moderate >=3, weak otherwise or asking-price-only. A WEAK-evidence listing qualifies only with margin >= 2x the minimum.
+ S9 Outcome: profitable_now / negotiation = a Deal; worth_a_look (kept, not pushed); pass.
+
+C. THRESHOLDS (CONFIRMED, resaleMath.ts / profitGate.ts; defaults: keep 84% of the eBay price, minimum margin 20% OF PROCEEDS, negotiation reach 15%)
+ The maths is internally consistent and matches its comments. Margin is measured against what you KEEP, not against what you pay, so:
+     Deal now ............ price + shipping <= 0.672 x eBay value        (20% of proceeds = 25% return on cost)
+     Negotiation deal .... asking price   <= 0.79 x eBay value           (needs <= 15% off)
+     Weak evidence ....... price + shipping <= 0.504 x eBay value        (margin >= 40% of proceeds)
+     Minor condition word  = value x 0.6  -> 0.40 / 0.47 of the nominal value;   major condition word = value x 0.25 -> 0.17 / 0.20
+ Example, a console worth $400 on eBay: deal at <= $268 (negotiate up to $316); with "as is" anywhere in the text <= $161 ($190); with little sold history <= $201.
+ Verdict: not a calculation bug. It is a strict policy; together with the weak-evidence rule it makes qualifying deals rare by design. Whether Marketplace
+ prices in your categories ever sit below ~67-79% of eBay value is a MARKET question I cannot answer without your data (HYPOTHESIS that this is a large part of it).
+
+D. CONFIRMED DEFECTS AND STRUCTURAL LOSSES (ranked by likely impact on the missed-deal count)
+ D1  Unknown products are judged on the AI's memory and never validated when it says "no" (CONFIRMED).
+     A listing for a product the Database has no numbers for, whose text read says "not a deal", ends rejected/AI_ESTIMATE ("Clynx's own estimate, not market
+     numbers"). The market check only runs for listings already flagged as deals. In default Save-credits mode no photo look happens unless the read was unsure, and
+     then only inside the 3-per-visit / 30-per-pass budget. A model told to be conservative, answering from memory, with no real prices, is the weakest link in the
+     chain, and its "no" is final. (Not "ignored because not in the Database": the photo-first and AI-flag paths do exist - but they are throttled, see D9.)
+ D2  Condition words are applied with no negation (CONFIRMED, probe of the real patterns):
+        "works perfectly, no damage, not broken"      -> minor (value x 0.6)
+        "Sold as is, works great"                      -> minor
+        "Nothing is cracked or damaged"                -> minor
+        "screen not cracked"                           -> minor
+        "no dead pixels, no cracks"                    -> MAJOR (value x 0.25)
+        "dead mint condition" / "no power issues"      -> MAJOR
+     The text scanned is title + the whole page text ("may be noisy, includes unrelated UI text" per the scorer's own comment), so even unrelated words on the page
+     can trip it (HYPOTHESIS for the page-text part). This lowers the value used by the Search For maths, the Database-known maths and photo-first finds, so a
+     listing that is a real deal on paper is recorded as confirmed_unprofitable. This is a CONFIRMED false-negative source; its frequency in your data is unknown
+     (the benchmark below counts it).
+ D3  Dedupe by listing id only, forever (CONFIRMED, store.hasSeenCached, evaluateListing first lines). A listing seen once is never evaluated again:
+       - a seller dropping the price is never noticed;
+       - a listing first seen when the look budget was spent, the AI was unavailable, the Database had no numbers yet, or Clynx was closed (INTERRUPTED) is never
+         revisited after the Database learns the product;
+       - a worth_a_look listing is never re-checked.
+ D4  Search For + general discovery interact badly in the DEFAULT multi-item mode (CONFIRMED, scrapeEngine.ts ~3299-3560). With 2+ Search For items and "Rotate
+     search terms" off (default false), generalSearchMode is true: NO dedicated Facebook search runs, and the general feed is filtered down to titles relevant to
+     the Search For list EVEN WHEN "general deal detection" is ON. So general discovery of unrelated products silently does nothing in that mode and the yield is
+     "Search-For-relevant cards that happen to be in a ~18-card generic feed". Also: Config.load resets searchItems to [] and generalDeal.enabled to its default at
+     every launch (config.ts ~428-430), so the setup is rebuilt each session.
+ D5  A late market-check answer never re-qualifies the listing that asked (CONFIRMED: marketCheckSettle.ts only files the product; no code re-gates a listing).
+     The listing stays worth_a_look / AI_UNVERIFIED and no alert is ever sent for it. Beta 9 fixed the lost product and the wrong-location attribution, not this.
+ D6  Seller risk defaults reject after the page is opened (CONFIRMED defaults: min account age 1 year, profile photo required) - a new or photo-less seller's
+     genuine bargain becomes SELLER_RISK. Frequency unknown (HYPOTHESIS that it matters).
+ D7  Scoring failure leaves an opened listing unsaved (CONFIRMED, scrapeEngine ~2090-2093): counted as "opened", no row, no reason; it is retried next pass, so not lost,
+     but it is an accounting gap.
+ D8  Counting is not comparable (see A). Also PHOTOS_QUEUED listings already count as evaluated while their verdict is pending.
+ D9  Budgets throttle the "profitable unknown product" paths (CONFIRMED constants): 3 speculative photo looks / visit, 30 / pass, 2 market looks / visit, 12 / pass,
+     $35 floor for both. At ~18 cards per location most unknown listings can never get either.
+ D10 One structural fact, not a defect: the queue is unbounded and ordered by priority, so late = slow, not dropped; closing the app marks waiting ones INTERRUPTED
+     (insufficient evidence, not a verdict).
+
+E. QUESTIONS ASKED, DIRECT ANSWERS
+ - What is "investigated"? A saved listing row (see A). Many were never opened.
+ - How many reach complete evaluation? Cannot be stated without your database. A listing is "completely" evaluated only if it is opened, passes S4, gets a verdict
+   AND (S6-S8) either a photo look or a Database/Search For price. The benchmark prints this split.
+ - Where rejected/skipped/deferred/lost? Table in B. "Lost" candidates: D3 (never revisited), D5 (late answer), D6.
+ - Is failed research treated as unprofitable? CONFIRMED NO for the main failures: AI/text judge unavailable (TEXT_JUDGE_UNAVAILABLE), photo failure
+   (PHOTO_ANALYSIS_FAILED), photo background crash (RESEARCH_FAILED), no AI (AI_UNAVAILABLE), market check failure/timeout -> worth_a_look / insufficient_evidence. Remaining
+   risk (HYPOTHESIS): when the market check fails the gate falls back to the Database's existing value; if that value is old or thin the gate can still return
+   "pass" -> confirmed_unprofitable on stale numbers.
+ - Do queues/timeouts/late results cause misses? Yes, via D5 and D3; the queue itself does not drop work.
+ - Do general discovery and Search For settings interact incorrectly? Yes, D4 (and the Beta 9 add-switches-general-off bug is already fixed).
+ - Do identity/comp errors produce false negatives? Yes in two ways: D2 (value cut by condition text) and, for Database-known products, listingContradictsEntry /
+   compMatchesSpecs can make a title decline a Database value (by design, protects against wrong-product pricing; frequency unknown). The comp-identity audit
+   (COMPARABLE_IDENTITY_REPORT.txt) also found a RECALL gap: "Xbox Series X 2TB Galaxy Black Special Edition Console" is rejected against an entry named "... Galaxy Black
+   Edition" (EDITION_PHRASE), reproduced again this audit.
+ - Profitable unknown products ignored? Throttled, not ignored (D1, D9).
+ - Photos used appropriately for vague listings? In design yes (speculative looks), but budget-capped (D9) and OFF for listings the text AI confidently dismissed (D1).
+ - Thresholds calculated correctly? Yes (C). They are strict.
+ - Non-round-price scam filter: PRESERVE. Current behavior (CONFIRMED, scrapeEngine.ts:1559 comment + planLook): a non-round price is NOT a skip any more (it caused real
+   misses); it only moves a speculative photo look to the back of the queue when the title names nothing known. The scam rules that do skip are the masked-phone scam-bot
+   detector and the placeholder-price filter. Nothing in the recommendations below touches either.
+
+F. LISTING-ACCOUNTING BREAKDOWN
+ NOT AVAILABLE for your 300+ listings (no data here). What exists: every saved listing already carries research_status / research_code / research_reason, so the real
+ breakdown is one command on your PC. The tool was verified here only on a seeded self-test database (5 listings, known answers).
+ Verdict on "market vs missed evaluations vs wrong decisions": cannot be split honestly without that run. Code evidence says all three are possible: market (C), missed
+ evaluations (D1, D3, D4, D5, D9), wrong decisions (D2).
+
+G. REPRODUCIBLE BENCHMARK (new: scripts/discovery-audit.cjs; read-only, no network, no AI)
+ Run on your Windows PC from the project folder (separate lines):
+     Get-ChildItem $env:APPDATA -Recurse -Filter scout.db -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+     node scripts\discovery-audit.cjs "FULL PATH TO THE scout.db THAT IS NEWEST/BIGGEST" --csv review.csv
+   (add  --since-hours 72  to look at recent listings only; the file is copied first and never modified; Clynx can stay open or closed.)
+ It prints and saves (discovery-audit-results.json, optional CSV):
+   1. Accounting: total, opened vs never opened, deals, still waiting for photos, and every listing grouped by research status/code (the S2-S9 outcomes above).
+   2. Replay leads: (a) Database-priced listings that qualify on the saved numbers but were not a deal; (b) listings that qualify ONLY if the condition discount is removed
+      (D2); (c) negated condition wording that was still discounted; (d) listings of products the Database has no value for that ended on text/estimate alone
+      (D1/D9) - sorted so a person can open the URLs and check.
+ Limits: it re-uses saved data only; it does not re-open, re-photograph or re-price. Its output is leads to verify, not verdicts. Intentional filters (too old, scam,
+ unshippable, blacklist, placeholder price) are excluded from the "missed" lists.
+ Self-test result (seeded data): 5 listings -> 4 opened, 1 never opened, 1 deal; the "no damage / not cracked" Xbox at $250 vs a $400 Database value was flagged as
+ "qualifies only without the condition discount" and the genuinely unprofitable $390 one was not.
+ Recommended acceptance bar for Beta 12: after fixes, the same replay on the same database should show the (b)/(c) lists empty and every (a) lead explained.
+
+H. RECOMMENDED IMPLEMENTATION (Change 6), smallest effective set, in order
+ 1. Condition wording: negation-aware detection (no/not/without/never/nothing within a few words; "as is" only when it is not "as is, works"), and scan the title + the
+    description text only (not the whole noisy page). Pure function + tests. Complexity S.
+ 2. Re-qualify on late/improved evidence: when a market check files late, or the Database gains a value for a product, re-run the gate for listings that are
+    worth_a_look/insufficient_evidence in the last N hours (cheap, no Marketplace visit); alert once if it now qualifies (reuse isListingNotified). Complexity M.
+ 3. Revisit rather than "seen forever": keep the dedupe, but re-evaluate an already-seen listing when its PRICE changed (card price differs from the saved price) or
+    it ended in an evidence-gap state and the evidence now exists. Needs saved price compare in evaluateListing. Complexity M.
+ 4. Validate "no" for unknown products cheaply: for a text-dismissed listing above a price floor, let the Database/WatchCount path (not photos) price the title once per
+    product name (cached per product, not per listing), instead of the AI's memory. Complexity M-L; affects AI/network cost - needs your decision on budget.
+ 5. Fix D4: in multi-item mode with general detection ON, do not relevance-filter the feed (or run a real per-item search with rotation default ON). Must not add Facebook
+    queries beyond today's pacing - this is a decision for you. Complexity S (filter) / M (search).
+ 6. Clear counters: show opened / skipped-before-opening / duplicates separately in Dashboard and Activity. Complexity S.
+ 7. Persist (or restore) Search For and general toggle across restarts, or make the reset visible. Complexity S.
+ Risks: any change that lets more listings reach the market check raises OpenAI/WatchCount use and Marketplace page loads (pacing must stay); changing condition handling
+ changes which listings alert (guard with tests and a flag); re-qualification must never alert twice.
+ Regression tests: negation table (the probe rows above + real damage rows must stay minor/major); late-check re-gate alerts exactly once; price-drop re-evaluation;
+ generalSearchMode keeps/does not keep unrelated listings per the chosen setting; counters add up (passAccount); the non-round-price and scam-bot cases unchanged;
+ failed research never becomes confirmed_unprofitable.
+ Complexity overall: L (items 1,5,6,7 are small; 2-4 carry the weight).
+
+=====================================================================================================================================================
+PRIORITY 2 / CHANGE 3 - REFERENCE-PHOTO CONTAMINATION (Guardians of the Galaxy game filed under Xbox Series X Galaxy Black Edition)
+=====================================================================================================================================================
+1. Current implementation. Candidates: webResearch.gatherReferenceCandidates (Wikipedia exact-title image; Bing "name" and "name product photo"; the chat tool adds user
+   link queries first and "name used for sale"; eBay Browse results for the name when credentials exist; cap 44). Verification: webResearch.findReferencePhotos ->
+   vision.verifyThumbnailCandidate(..., "reference"): one vision call per image at minimal reasoning, which sees ONLY the product name text. Errors fail closed here.
+   Save: referencePhotos.topUpReferencePhotos / store.addProductImage (no dedupe across products, no verification of its own, prunes oldest past 20).
+2. Confirmed defects (CONFIRMED by code and probes; the exact path that stored YOUR image is a HYPOTHESIS until its sourceTitle is read - "Stock photo -", "Image search -",
+   "Real-world photo -" or "eBay listing photo -" identifies the source):
+   a) The "reference" prompt (vision.ts:1092) ACCEPTS "packaging/box art or cover art for it" and does not reject games/software/discs; its reject list names accessories,
+      parts, cases, logos, screenshots. A cover reading "Guardians of the Galaxy - Xbox Series X" is easy to accept against the name "Xbox Series X Galaxy Black Edition"
+      (HYPOTHESIS on the model; the prompt gap is confirmed). The other prompts (matchesReferenceProduct, comp photo check) do say "not a game, accessory".
+   b) In full-AI mode eBay candidates are added with NO title filter (webResearch ~1002-1008); the free path filters, the paid path does not.
+   c) titleLooksLikeProduct (free path and low-AI comp judge) is a bag-of-words test: "Marvel's Guardians of the Galaxy - Xbox Series X Game Disc Black Case" is accepted for
+      "Xbox Series X Galaxy Black Edition" (probe). ACCESSORY_WORDS has no game/disc/software words.
+   d) Fail-open: thumbnail checks accept on a verifier error (webResearch:444), low-AI mode uses NO vision at all for reference photos (findFreeReferencePhotos), and
+      researchBlankProduct's free path stores Wikipedia/eBay images unchecked.
+   e) Eight of twelve code paths that call addProductImage have no vision check (scanner/Search-For listing photos filed under the matched entry, mark-interested,
+      new-entry creation, manual actions are by design the user's or the listing's own photo; but listing photos are filed on a title match that games also satisfy).
+   f) The gallery audit (ensurePhotoGalleryAudit) only runs from 3 or 10 photos up, uses consensus, skips in low-AI mode - a contaminated majority is not caught.
+3. Root causes (ranked): permissive context-free verifier prompt; no product-type (console vs game) vocabulary anywhere in the identity text checks; unverified paths;
+   unfiltered eBay source; user-supplied search phrases ranked first.
+4. Similar weakness in comparable-sale valuation (CONFIRMED by probe of classifyComparable for "Xbox Series X Galaxy Black Edition"):
+     "Guardians of the Galaxy (Xbox Series X) Brand New Sealed" -> compatible (usable);  "... Xbox Series X|S Black Edition game" -> exact;
+     "Marvel's Guardians of the Galaxy ... Game Disc Black Case" -> exact;  Series S Galaxy Black, controllers, skins, for-parts -> rejected;
+     real "Xbox Series X 2TB Galaxy Black Special Edition Console" -> rejected (EDITION_PHRASE: recall gap).
+   Backstops that exist: the AI judge (judgeSameProduct) which names games, the comp photo check, category restriction when the family says Consoles, the eBay product
+   filter's category taxonomy. They are weaker in low-AI mode (same title test) and when the gallery itself is contaminated (the photo check uses the entry's own photos).
+5. Recommended implementation (M, with a path-unification part that is L):
+   - Add "reject video games, software, discs, game cover art and merchandise that merely names the platform or shares a word, unless the product itself is that game" to the
+     reference and product prompts, and pass the product's family/category (console vs game) into the prompt.
+   - One shared looksLikeMediaOrAccessory(title) guard (game, disc, steelbook, DLC, "(Xbox Series X)" platform badge, Funko/LEGO...) used by titleLooksLikeProduct,
+     compIdentity ACCESSORY_WORDS and the Search For variant filter (Change 4) - one vocabulary, three consumers.
+   - Run titleLooksLikeProduct on eBay candidates in the paid path too; fix the label mismatch ("eBay listing photo -" vs the "eBay listing:" prefix used for the cap).
+   - Reference gallery photos must be vision-verified or tagged unverified; thumbnails may stay lenient. Free-path images go to the thumbnail only.
+   - Audit each newly saved photo against the gallery at save time; do not wait for 10 photos.
+   - Fix the EDITION_PHRASE recall gap (accept "Special/Limited Edition" when the reference already says "Galaxy ... Edition").
+   - Migration: DO NOT auto-delete existing photos. Offer a one-time "review suspect photos" list (reuse the gallery audit) so the user decides.
+6. Risks: stricter prompts may reject real box art for products that ARE games (gate the clause on category); fail-closed thumbnails leave more entries blank during an
+   outage (blank sweep retries); media-word guards can hit "console with game" bundles (the existing bundle exemption must stay).
+7. Regression tests: compIdentity cases above (games rejected for both "Xbox Series X Galaxy Black Edition" and "Xbox Series X"; real Galaxy console titles still accepted);
+   referenceCandidates (a game title from mocked eBay is not added); a vision prompt contract test pinning the new clause; verifier-error policy per photo kind;
+   a test that every addProductImage caller is verified or tagged.
+   Complexity: M (prompts + guard), L with path unification.
+   OPEN QUESTION that changes the fix: read that image's stored sourceTitle (Product page > photo details) - it tells us which path let it through.
+
+=====================================================================================================================================================
+PRIORITY 3 / CHANGE 4 - SEARCH FOR VARIANT MATCHING (optional, no extra Facebook searches)
+=====================================================================================================================================================
+1. Current implementation. SearchItem (types.ts:18-60); matching in scorer.ts: matchSearchItem / isRelevantToSearchItems / findGreenFlagCandidate = every word of a keyword phrase
+   must appear in the title (any order, word boundaries), minus accessory-only phrases, minus six "variant qualifier" words the item did not ask for (pro, max, plus,
+   mini, lite, se, xl, oled, air), minus model-letter conflicts. The Facebook query is getSearchQuery(item) = item.item, fixed (scorer.ts:35; scrapeEngine 3313/3417/3676).
+   Price bounds go into the URL and are re-checked per listing (scrapeEngine 1748-1771). Search For items are session-only (reset every launch); Recent searches persist.
+2. Confirmed behavior (probe). A plain "Xbox Series X" item ALREADY matches: 2TB Galaxy Black Special Edition console, 1TB Black, Digital, Halo Limited Edition... but also the
+   controller, a cooling stand, a skin and games that name the platform ("Guardians of the Galaxy (Xbox Series X)"). It correctly rejects Series S and Xbox One X. The reverse
+   (a specific item such as "Xbox Series X Galaxy Black Edition") does not match plain "Xbox Series X 1TB". So today there is no "family" mode: it is "contains all my
+   words". Only downstream photo checks stop games - skipped when photo analysis is off or in Save-credits mode (a listing then keeps the base model's price).
+3. Root cause of the need: the item has one string; a family and a specific variant cannot both be expressed, and the permissive matcher has no product-type guard.
+4. Recommended implementation (M-L):
+   - New optional SearchItem field acceptVariants (default false = byte-identical to today) plus familyTerms resolved at add time (linked Database product's parent, else
+     findParentCandidate, else the user's own words). Thread it like includeBroken (Dashboard add flow and checkbox, preload, search:addProducts, add_search_item chat tool,
+     RecentSearch + its dedupe key sameSearch).
+   - The Facebook keyword stays item.item: no new queries. The decision is made AFTER retrieval in one helper used by matchSearchItem and isRelevantToSearchItems:
+     accept when all family words are present, no unrequested qualifier/model-letter conflict, classifyComparable(family, title) has no hard reasons (ignore EDITION, CAPACITY,
+     COLOR - those are what a variant adds), the shared media/accessory guard passes, and the extra tokens are capacity/color/edition/region or a themed word next to the
+     family phrase. Probe of a first version: accepts 2TB Galaxy Black, 1TB Black, Digital, Halo Limited; rejects Series S, Xbox One X, controller, stand, game disc, Call of Duty,
+     for-parts, storage cards; STILL accepts "Guardians of the Galaxy (Xbox Series X) Brand New Sealed" with token rules alone - so add the structural rule (family phrase inside
+     parentheses/after a dash, or preceded by other title words + "of/the", means platform badge) and the shared media guard.
+   - Valuation: a variant-only match must NOT use the item's typicalResaleUsd (a Digital or Galaxy model against the base price makes false deals or false misses): use the
+     variant's own Database entry if present (moreSpecificProductForTitle) else the "no reference price" path, which defers to evidence.
+5. Risks: price range min/max applies to the whole item (a variant range excludes base listings and vice-versa; say so in the UI and in skip reasons); Galaxy-type word collisions
+   remain heuristic (keep the photo claim check as last gate); Watches share the SearchItem shape (leave undefined); eBay Search For uses the same filter; no migration needed
+   (searchItems is cleared each launch; old recent searches default to false).
+6. Regression tests (new searchVariants.test.ts): flag off identical to today; accept/reject tables above; getSearchQuery unchanged; price floor/ceiling still skip variants;
+   variant-only match never uses typicalResaleUsd; recentSearches dedupe with/without the flag.
+7. Complexity: M (field + UI + plumbing), M-L (matcher + valuation guard + tests). Depends on Change 3's shared media guard.
+
+=====================================================================================================================================================
+PRIORITY 4 - INTERFACE AND NAVIGATION (CHANGES 1, 2, 5)
+=====================================================================================================================================================
+Shared facts (CONFIRMED, src/renderer/src). Routing is plain state: App.tsx screen via useState (line ~195); Sidebar onClick -> handleSelectScreen (App.tsx ~311) which only
+blocks leaving a dirty Config. All six screens stay MOUNTED and are hidden with display:none (FreezeWhenHidden/ScreenActive in lib/screenActive.tsx), so Database keeps its own
+state across sidebar switches. There are three separate chat UIs (DiscoveryTab, Activity, GlobalAssistantBar) and no shared message-list component. No renderer unit tests
+exist (no jsdom/testing library): logic must be extracted to pure functions in lib/ (like lib/scannerState.ts) to be testable.
+
+CHANGE 1 - Discovery chat flows downward; conversations separate from scanner activity
+ 1. Current: DiscoveryTab.tsx. User/assistant messages are a module-level array thread (line ~39). Scanner/automation is a different type: DiscoveryEntry from main/discovery.ts
+    (in-memory DiscoveryFeed, one entry per product with thoughts, pushed on IPC discovery:entry). They are merged only in the renderer: stream memo (lines ~228-238) builds a
+    union of {product entry} and {chat user+reply} and sorts NEWEST FIRST (b.ts - a.ts); the static greeting bubble renders last. Scroll container data-testid="take-scroll".
+ 2. Confirmed defects: newest-at-top (opposite of chat convention and of Activity); conversation and product cards interleave by timestamp so a busy scan buries the Q&A;
+    no stick-to-bottom, only scrollTo(top) after sending; chat history is lost on restart (module state, nothing stored); Q/A pairing assumes strict alternation; switching Database
+    tabs unmounts DiscoveryTab (focus, filter, scroll lost; thread survives). HYPOTHESIS: new cards inserted above the viewport make the view jump.
+ 3. Root cause: one sorted StreamItem[] list for two different kinds of content.
+ 4. Recommended: keep the types separate (already separate in main) and render two regions: Conversation (oldest-first, stick-to-bottom, composer under it) and a Live feed
+    of product cards (keep newest-first or collapsible). Extract a useStickToBottom hook from Activity.tsx:236-279. Persistence of the conversation is optional (M): store text
+    only, strip image data URIs.
+ 5. Risks: jumpTo uses offsetTop and "scroll to top on send"; data-testid hooks (take-scroll, product-card...) may be used by external e2e tests (HYPOTHESIS).
+ 6. Tests: extract stream/pairing/ordering to a pure function and test ordering, unpaired messages, error replies, filter counts, late thoughts (LATE_THOUGHT_MS).
+ 7. Complexity: S (split + downward + stick-to-bottom), M with persistence.
+
+CHANGE 5 - Activity: user conversations separate from automated events
+ 1. Current: Activity.tsx (884 lines). feed memo (~267) merges logs (LogLine[], capped at 300 in App.tsx) and chat entries (ChatEntry with optional auto:"deal"|"batch" for AI
+    narration) sorted ascending, stick-to-bottom within 80 px. Only filter: hide/show routine skips (localStorage clynx.activity.showRoutine).
+ 2. Confirmed defects: conversation is unfiltered against up to 300 log lines; narration (auto) is interleaved with real replies; chat is lost on restart.
+ 3. Root cause: one merged feed, no view selector.
+ 4. Recommended: the discriminator already exists: Conversations = chat entries without auto; System events = log lines + chat entries with auto. Add a three-way segmented
+    control (All / Conversations / System events) in the card header, persisted under the clynx.activity.* localStorage namespace, filter the existing memo, re-stick to bottom
+    on change, switch to Conversations when the user sends. No main-process or data change, historical data untouched.
+ 5. Risks: replies from startChat never set auto (verified in code), so no real answer is hidden; stick-to-bottom must be re-evaluated on filter change.
+ 6. Tests: pure filter function for the three modes; persistence; routine-skip interplay.
+ 7. Complexity: S.
+
+CHANGE 2 - Database and Library remember last navigation state; second click on the active sidebar icon returns home
+ 1. Current: Database.tsx state: tab (starts "discovery"), selectedProductId, searchQuery, activeCategory, librarySortBy, viewingPath; the tab bodies are conditionally rendered, so
+    leaving the Library tab unmounts its grid (scroll position lost), and opening a product replaces the whole tab UI (grid scroll lost on Back). Sidebar re-click is a no-op
+    (setScreen to the same value). Persisted today: only thumbnail size, activity filter, last email, assistant-bar state; NOT the last screen, Database tab, product, search,
+    category, sort, path or scroll.
+ 2. Confirmed defects: second click does nothing; Library/Discovery sub-state and scroll are lost across tab switches and product round trips; nothing survives a restart.
+ 3. Root cause: per-tab local state under conditional rendering; no navigation store; no home action.
+ 4. Recommended: (a) a small navigation store (module-level or reducer) holding {screen, dbTab, selectedProductId, query, category, sort, path, scrollTop per tab},
+    persisted in localStorage under clynx.nav.* (per-viewer convenience, not synced config), validated on restore (deleted product, missing path -> home).
+    (b) Save/restore scrollTop on tab change and on returning from a product (or keep tab bodies mounted but hidden - costs memory: the Library holds tens of MB of photos).
+    (c) Home: in handleSelectScreen, when next === current screen, bump a per-screen homeSignal counter (the configShakeSignal pattern, App.tsx ~219); Database resets tab,
+    selection, query, category, path and scroll; other screens scroll to top. Respect the dirty-Config guard (no-op there). Use useScreenActive to restore scroll on re-show.
+ 5. Risks: accidental double-click loses a deep position (offer back-to-where-I-was for one step, or require the second click within the screen's home state only); interaction
+    with openProductId/requestedProductId/onNavigate; persisted ids pointing at deleted products; the global click sound.
+ 6. Tests: extract the nav reducer: same-screen click -> home; dirty-Config guard; goToProduct and notification navigation; restore with deleted product; per-tab scroll restore.
+ 7. Complexity: M.
+
+=====================================================================================================================================================
+SUGGESTED ORDER FOR BETA 12 (dependencies)
+=====================================================================================================================================================
+ 1. Run scripts\discovery-audit.cjs on your database first (5 minutes). It decides how much of Change 6 is market vs fixable loss, and the order inside it.
+ 2. Change 3 shared media/accessory guard + prompt fix (feeds Change 4). 3. Change 6 items 1, 5, 6 (small, high value), then 2-3. 4. Change 4.
+ 5. UI: Change 5 (S), Change 1 (S), Change 2 (M), sharing useStickToBottom/usePersistentState hooks.
+ Nothing here needs a schema migration or touches existing records; the only data-affecting idea (suspect-photo cleanup) is review-first, never automatic.
+
+WHAT WAS NOT DONE / NOT PROVEN
+ - No live Facebook, OpenAI, WatchCount or eBay call was made. Model behavior (what the vision model said about the Guardians image, what the text AI says about your
+   listings) is HYPOTHESIS everywhere it appears.
+ - The 300+ listing breakdown and the missed-opportunity count need your database (command in section G).
+ - Renderer behavior (scroll jump, double-click) was read, not run.
+
+=====================================================================================================================================================
+ADDENDUM - MEASURED ON THE OWNER'S REAL DATABASE (329 listings, scripts/discovery-audit.cjs run on a copy; run by the owner, output pasted into the session)
+=====================================================================================================================================================
+ Accounting: 329 listings = 265 opened + 64 never opened; 2 deals (1 recorded as DEAL, 1 in the older rows).
+   127 TOO_OLD (39%, 48% of opened pages) | 55 UNPROFITABLE_AT_PRICE | 35 NOT_FOCUSED (never opened; the Beta 9 bug, fixed since) | 32 no outcome stored (older rows)
+   26 OFFICIAL_SHIPPING | 14 AI_ESTIMATE | 14 UNSHIPPABLE | 7 MENTIONS_EBAY | 6 AI_UNVERIFIED | 5 SELLER_RISK | 4 UNDER_MIN_PRICE | 1 each INTERRUPTED, DEAL, WEAK_EVIDENCE, PHOTOS_MISMATCH.
+ CONFIRMED DEFECT (new, measured): the scanner stores and reads the WHOLE page text, including Facebook's "Related searches" and "Today's picks" (other sellers' cards).
+   Real example: an "Xbox series X" listing was discounted to 25% value ("MAJOR") because a different seller's card said "Sony PlayStation 5 as is for parts".
+   Boundary: the listing's own text ends at "Send seller a message" / "Related searches" / "Today's picks" (marker found on 264 of 265 pages).
+   Impact: 61 of 265 opened pages (23%) had a condition discount that came ONLY from other cards; 5 of them qualify on Database numbers once the discount is removed.
+   Same polluted text also feeds: looksBroken, bundle/extras detection, scam-bot check, the 2000 characters sent to the AI judge (scraper.ts fetchListingDetail: description = bodyText.slice(0,4000)).
+ CLEARED hypotheses: OFFICIAL_SHIPPING rejections are genuine (1 of 26 came from other cards); MENTIONS_EBAY are genuine (0 of 7). Leave those filters as they are.
+ Reading of the 329: the low deal count is mainly a funnel/freshness problem (too-old pages opened, 35 unfocused skips since fixed) plus the page-text defect; the realistic recoverable
+   count is roughly 5-12 listings, not ~300. Unknown-product AI dismissals (AI_ESTIMATE, 14) looked plausible on a manual read of titles/prices (general knowledge, not data).
+ Open: why 127 old listings reach the detail page (is the age readable on the card or search filter?) and why 5 listings from 2026-10-14 ~23:00 have no stored outcome.
+ Beta 12 Discovery order now: (1) own-text-only extraction, (2) negation-aware condition check, (3) skip old listings before opening if the card/feed allows, (4) re-evaluate on price change /
+   late evidence, (5) clear counters. The earlier items D1, D4, D5 in the report stay as secondary.
+
+
+=====================================================================================================================================================
+8. APPENDIX A - OWNER'S REAL-DATABASE RESULTS (verbatim from scripts/discovery-audit.cjs; DB copy of the most recently written scout.db, 54 MB)
+=====================================================================================================================================================
+Listings in the database copy: 329
+  opened (detail page read): 265   never opened (skipped from the search card): 64   deals: 2   still waiting for photos: 0
+How they ended (count, research status / code):
+   127 rejected / TOO_OLD          55 confirmed_unprofitable / UNPROFITABLE_AT_PRICE     35 unresearched / NOT_FOCUSED     32 (none) / (none)
+    26 rejected / OFFICIAL_SHIPPING 14 rejected / AI_ESTIMATE   14 rejected / UNSHIPPABLE   7 rejected / MENTIONS_EBAY   6 insufficient_evidence / AI_UNVERIFIED
+     5 rejected / SELLER_RISK        4 rejected / UNDER_MIN_PRICE   1 insufficient_evidence / INTERRUPTED   1 researched / DEAL   1 insufficient_evidence / WEAK_EVIDENCE   1 rejected / PHOTOS_MISMATCH
+Replay: priced from the Database's own eBay value 48 (profitable on saved numbers 5, within negotiation reach 2); qualify ONLY without the condition discount 5; negated condition
+ wording still discounted 3; unknown to the Database, decided on text/estimate alone 14.
+Own-text replay (page cut where other sellers' cards begin): opened pages 265, cut marker found on 264; condition discount came ONLY from other sellers' cards on 61 pages
+ (5 would now qualify on Database numbers); OFFICIAL_SHIPPING 26 rejections, 1 not in the listing's own text; MENTIONS_EBAY 7, 0 not in own text (shipping/eBay tests are lower
+ bounds: only the stored first 4000 characters can be re-tested).
+
+APPENDIX B - THE 29 REVIEW LEADS (interpretation by the auditor)
+ Condition-discount cases (stored condition vs trigger):
+  "Xbox series X" $200, Database value $501, applied MAJOR - trigger text was another seller's card ("Sony PlayStation 5 as is for parts/ 300 obo, Fredericksburg VA"). Deal threshold
+     at $501 is ~$337 (67%) -> would qualify. Listing facts: seller account joined Facebook 2025, listing far from the owner's location ("far from your current location", Bronson MI),
+     "price is firm": a classic scam-bait pattern, so a human check of the seller is warranted; the condition cut was nevertheless the wrong reason to reject it.
+  "Xbox series X" $375 vs $501 MAJOR (same trigger) -> within negotiation reach (~$396).
+  "Xbox Series X Galaxy Black Edition" $600 vs Database "Xbox Series X Galaxy Edition" $1,027 MAJOR (same trigger; seller's own text mentions a controller with some damage).
+     The $1,027 value looks too high and may itself be inflated by comp contamination (audit section Priority 2).
+  "iPhone 13 red unlocked" $200 vs $256 minor -> qualifies only as a negotiation (weak). "Demon's Souls PS3" $20 vs $42 -> trivial.
+  "iPhone 15 Pro Max 256GB" $525 vs $580 minor (trigger: another card "2DS LL ... AS-IS/FOR PARTS"); "iPhone 15 (unlocked)" $300 vs $364 MAJOR; "New Nintendo Switch Lite" $150 vs $131
+     (seller's own text: "no damage, no stick drift ... The crack on the screen is just a tempered glass") -> none would be deals even without discount.
+ Unopened skip (NOT_FOCUSED): "iPhone 16 pro max ATT" $450 vs Database $732 -> clearly profitable on paper (carrier-locked "ATT" could lower value). This is the Beta 9 "general detection
+     switched off" defect; fixed in Beta 11 builds; this row pre-dates the fix.
+ No stored outcome (null/null, first seen 2026-10-14 ~23:00, five rows): "Launch Xbox series x" $300, "XBOX Series X" $350, "Xbox series X 1TB" $350 (all vs $501), "Nintendo Switch Lite" $50
+     (vs $131), "iPhone 15 pro max" $300 (vs $580). All would qualify on Database numbers. Why they have no outcome is UNEXPLAINED (hypothesis: saved by an older build before outcomes
+     were recorded, or saved by a path that skips the research columns).
+ Held back correctly: "PSA 8 1st Edition Machamp Holo" $150 vs $374 -> WEAK_EVIDENCE worth-a-look (the Database match "PSA 8 1st Edition" is generic: wrong-product risk).
+ Unknown products dismissed on the AI's estimate (14): perfume (2), lunch bag, costume, spiderweb, Dragonball print, Ray-Bans $200, PS5 disc $475, Switch 2 $480, Switch $250, iPad $400,
+     MacBook neo $540, 3DS XL $200 and $350 CIB. On a manual read with general market knowledge (not data) none is an obvious miss; 3DS XL $200 is marginal.
+
+APPENDIX C - STORED PAGE TEXT OF THE $200 XBOX LISTING (shows the pollution; trimmed by the tool to the first 4000 characters of the page)
+ Own text: "This listing is far from your current location. / Xbox series X / $200 / Listed about an hour ago in Bronson, MI / Message / Details / Condition: Used - like new / I bought a
+ gaming pc awhile ago ... price is firm. / Bronson, MI / Seller information / Austin Barnett / Joined Facebook in 2025 / Ad ... / Related searches: series s, cbox series x, xbox series s,
+ video game consoles / Send seller a message / Send"
+ Then "Today's picks / Cheyenne - 500 mi / $550 PlayStation 5 with two wireless controllers and games bundle ... Richmond, VA / $430 Xbox series X OR TRIDE FOR A PS5!!! ... /
+ $300 Sony PlayStation 5 as is for parts/ 300 obo, Fredericksburg, VA / ..." (about 20 other sellers' cards). Boundary markers: "Send seller a message", "Related searches", "Today's picks".
+
+APPENDIX D - CODE MAP (where each finding lives)
+ Page text extraction: src/main/scraper.ts fetchListingDetail (bodyText = [role=main].innerText; description = bodyText.slice(0,4000); hasOfficialShipping / mentionsEbay / seller / age
+   read from full bodyText).  Condition detection: src/main/scorer.ts detectConditionImpact + MAJOR/MINOR_CONDITION_PATTERNS (no negation), used by scorer.scoreListing, scrapeEngine
+   (photo-first, hidden gem, green flag), CONDITION_VALUE_MULTIPLIER/CONDITION_VALUE_FACTOR 0.6/0.25.  Pipeline: scrapeEngine.ts evaluateListing (cheap filters ~1523-1841, detail
+   open ~1884, age/shipping/scam/seller gates ~1932-2070, scoring ~2087, photo plan ~2100), runPostScoringPipeline (~2239), finalDisposition (~2906); research.ts planPhotoLook and budgets
+   (3 speculative looks/visit, 30/pass; 2 market looks/visit, 12/pass; $35 floor); dealGate.ts qualifyListing; preAlert.ts qualifyScoredListing (guarded by isDeal/extras/watch);
+   index.ts runMarketCheck (150 s timeout) + marketCheckSettle.ts (late result filed, listing never re-gated); store.hasSeenCached (dedupe by listing id only).
+   Search For matching: scorer.ts matchSearchItem / isRelevantToSearchItems / findGreenFlagCandidate / VARIANT_QUALIFIER_WORDS; generalSearchMode in scrapeEngine.ts ~3299 and the feed
+   relevance filter ~3548; config.ts ~428-430 resets searchItems and generalDeal.enabled each launch.  Photos: webResearch.ts gatherReferenceCandidates / findReferencePhotos /
+   findFreeReferencePhotos / findAndVerifyImage; vision.ts verifyThumbnailCandidate + THUMBNAIL_VERIFICATION_PROMPTS (kind "reference"); referencePhotos.ts topUpReferencePhotos;
+   store.addProductImage; compIdentity.ts ACCESSORY_WORDS/classifyComparable; compFilter.ts titleLooksLikeProduct; variantIdentity.ts editionConflict.
+   UI: DiscoveryTab.tsx (thread module state, stream memo ~228), Activity.tsx (feed memo ~267, stick-to-bottom ~236), App.tsx (screen state ~195, handleSelectScreen ~311, configShakeSignal
+   ~219), Sidebar.tsx onClick ~447, Database.tsx (tab/selectedProductId/viewingPath state ~503-557), lib/screenActive.tsx.
+
+APPENDIX E - PROPOSED BETA 12 IMPLEMENTATION SPEC WITH ACCEPTANCE CRITERIA (nothing below is implemented)
+ E1 Own-text extraction. Add a pure function listingOwnText(pageText) that cuts at the earliest of "Send seller a message", "Related searches", "Today's picks" (case-insensitive;
+    apostrophe may be curly) and use it for description, condition, bundle/extras, scam-bot and the AI judge input. Keep full bodyText for seller block/age/shipping/eBay (verified
+    genuine). Acceptance: the $200 Xbox page text yields condition "none"; re-running scripts/discovery-audit.cjs on the same database shows "condition discount came only from other
+    cards" = 0 for newly scanned listings; existing listings are not rewritten.
+ E2 Negation-aware condition check. "no/not/without/never/nothing/zero ... damage|crack|broken|dead|defect|scratch|issue|problem" must not count; "as is" only when not followed by
+    working wording; accessory-scoped cracks ("tempered glass") ignored. Acceptance: the probe table in section D2 of the Priority 1 text, plus real damage phrases still minor/major.
+ E3 Re-evaluation: re-run a seen listing when its card price drops (or it is worth_a_look/insufficient_evidence and evidence now exists); never alert twice (isListingNotified).
+ E4 Late market-check results re-gate the listing that requested them. E5 Counters: show opened / skipped-before-opening / duplicates separately.
+ E6 Investigate (not yet understood): why 127 too-old listings reach the detail page; whether card/feed exposes age or a "date listed" filter can be applied without extra queries.
+ E7 Multi-item mode: do not relevance-filter the general feed when general detection is ON (or default Rotate on), with no extra Facebook queries beyond today's pacing.
+ E8 Photos: add the "reject games/software/discs/cover art/merchandise naming the platform" clause (gated on console/hardware category) to reference + product prompts; shared
+    looksLikeMediaOrAccessory guard used by titleLooksLikeProduct, compIdentity and the Search For variant filter; filter eBay reference candidates by title; verify-or-tag every gallery
+    write; fix the "eBay listing photo -" vs "eBay listing:" label mismatch; fix EDITION_PHRASE recall (Special/Limited Edition); review-first (never automatic) cleanup of suspect photos.
+ E9 Search For variants: SearchItem.acceptVariants (default false = identical behavior) + familyTerms; decision after retrieval only; Facebook query unchanged; variant-only matches
+    never priced from the base item's typicalResaleUsd; recent-search dedupe includes the flag.
+ E10 UI: Discovery chat oldest-first stick-to-bottom with separate conversation and live-feed regions; Activity All/Conversations/System events filter persisted in localStorage;
+    navigation store persisted under clynx.nav.* with scroll restoration and a per-screen home signal for a second click; pure modules in renderer lib with unit tests.
+ Regression tests required: see each change's section 6 above; plus unchanged non-round-price behavior, scam-bot, placeholder-price, hard price cap, identity safeguards, financial
+ safeguards (deal gate arithmetic) - none may be weakened.
+
+APPENDIX F - OPEN QUESTIONS FOR THE REVIEWER / OWNER
+ 1. Which write path stored the Guardians of the Galaxy image (read its sourceTitle in the product's photo details)?
+ 2. Why do five 2026-10-14 ~23:00 rows have no stored research outcome?
+ 3. Can listing age be read on the search card (or filtered at query time) to avoid opening old listings? Needs a look at the card markup in a live session.
+ 4. Should multi-item mode default to Rotate search terms ON, or should the general feed stop being relevance-filtered?
+ 5. Is the $1,027 "Xbox Series X Galaxy Edition" Database value contaminated by game listings? (check its comps).
