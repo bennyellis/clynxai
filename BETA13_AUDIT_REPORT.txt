@@ -1,0 +1,986 @@
+================================================================================
+CLYNX BETA 13 - COMPREHENSIVE PRE-IMPLEMENTATION AUDIT
+Target build: 0.3.0-beta.13        Audited baseline: 0.3.0-beta.12 (HEAD 25385d8, branch master-wveebf)
+AUDIT ONLY. No production behavior, setting, record, version or release was changed.
+Self-contained: written so another AI (or engineer) can turn it into a Beta 13 build prompt without
+seeing the conversation. Every finding is labelled and cites file + function (line numbers are from
+HEAD 25385d8 and will drift).
+================================================================================
+
+HOW TO READ THIS REPORT
+-----------------------
+Labels (every finding carries one):
+  CONFIRMED     reproduced by code reading AND by a deterministic fixture in this repo, or read directly from code
+                with no inference needed. Fixtures: scripts/beta13-audit/*.ts, run with  node scripts/beta13-audit.cjs <name>
+  HYPOTHESIS    the mechanism exists in code, but whether it produced the owner's specific screenshots / data is not proven
+                from here (the sandbox has no access to the owner's scout.db, no OpenAI key, no network).
+  NOT VERIFIED  needs live data or a live model call; listed in section 13 with exactly how to verify.
+Severity: CRITICAL (wrong data enters the Library / money decisions, or the feature goal cannot work),
+          HIGH (wrong data or wrong money in common cases), MEDIUM (real defect, bounded impact), LOW (polish / cosmetic).
+Fixtures never import Electron, never touch the network, never write outside the OS temp folder, and live apart
+from production code (scripts/beta13-audit/). They PRINT what today's code does; they assert nothing, so they can
+keep running unchanged after Beta 13 and show the before/after.
+
+Reproduce everything:
+  node scripts/beta13-audit.cjs identity-probe       screenshot cases A-D + accessory/config attributes
+  node scripts/beta13-audit.cjs store-probe          filing, fuzzy matching, galleries, merge, delete, folders (real Store, temp SQLite)
+  node scripts/beta13-audit.cjs condition-probe      text-condition parsing + money effect of the flat multipliers
+  node scripts/beta13-audit.cjs library-db-audit "C:\path\to\scout.db"    READ-ONLY report on a COPY of the owner's database
+  node scripts/beta13-audit.cjs library-db-audit --selftest               same, on a synthetic database
+
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+The three screenshot failures are not three bugs. They are one structural weakness seen from three angles:
+
+   Clynx has FIVE separate, partly contradictory models of "what is this product", and the one place where
+   a picture is actually written to a product (store.addProductImage) asks none of them.
+
+The five models: (1) photoIdentity.ts + compIdentity.ts (Beta 12 text gate and comparable-sale model),
+(2) productIdentity.ts (AI "attach / new / generic" judge), (3) identity/* foundation + safeguard (Phase 4 veto,
+SHIPPED OFF by default), (4) store.isSimilarProductName / findMatchingProduct / productDuplicateKey (token
+containment, used for ALL Database matching), (5) variantIdentity.ts / variantFamily.ts (variant research).
+Pictures reach a product through 13 addProductImage call sites (section 4.1); the Beta 12 text gate guards four of them.
+
+Headline findings (details in sections 3-9):
+
+ ID-01 CRITICAL CONFIRMED  addProductImage is an unguarded choke point; 7 of 13 machine-driven call sites have no identity check.
+ ID-02 CRITICAL CONFIRMED  Products and gallery moves are named from what the PICTURE looks like (vision subject,
+                           gallery-audit "actualSubject", feedback re-file) while the listing/source title - which
+                           contradicts it - is merely carried along as a label. This is exactly failure A:
+                           a white Series X photo, whose own source title says "SERIES X", filed as "Series S".
+ ID-03 HIGH     CONFIRMED  findMatchingProduct returns the FIRST fuzzy match in newest-first order, not the best one,
+                           and token-containment makes a generic entry ("Xbox Series") absorb S and X, and makes games and
+                           accessories ("Metroid Dread (Nintendo Switch)", "Nintendo Switch Dock") resolve to the console.
+                           This is failure C's engine.
+ ID-04 HIGH     CONFIRMED  The identity model has no concept of hardware configuration (disc drive vs All-Digital),
+                           board design (MSI Gaming X Trio vs Ventus), region, carrier lock or SKU. Two visually different
+                           MSI RTX 2070 SUPER cards are "exact" to each other; Series X All-Digital is "exact" to Series X
+                           (and so is its valuation comp). This is failure B and the MSI screenshot.
+ ID-05 HIGH     CONFIRMED  The Phase 4 identity safeguard (config.identitySafeguard.mode) defaults to "off": every
+                           identityVeto(...) call site is a no-op in a default install.
+ CV-01 CRITICAL CONFIRMED  Visual condition evidence NEVER reaches valuation. Vision flaws are off by default
+                           (Config.researchCondition=false), and when on they are stored for a UI badge only.
+ CV-02 HIGH     CONFIRMED  Condition is three buckets with flat multipliers (1 / 0.6 / 0.25) from a keyword list with
+                           large gaps (scratch, dent, bent, hinge, corrosion, chip, drift, fungus, burn-in all = "none").
+                           A cracked BACK glass and a cracked SCREEN cost the same 40%.
+ LB-01 HIGH     CONFIRMED  "Folders" in the Library are not records. They are the string products.family split on ">" and
+                           rebuilt in the renderer on every render. There is no folder table, no empty folder, no folder
+                           id, and updateProductProfile OVERWRITES family+category on every research/refresh, so any
+                           manual move would be silently reverted.
+ LB-02 HIGH     CONFIRMED  Store.deleteProduct deletes the product row BEFORE its photos; on a schema with the declared
+                           foreign key it throws "FOREIGN KEY constraint failed" for any product that has a photo.
+                           (Fresh schema: confirmed. The owner's older database may differ: verify with library-db-audit.)
+ UX-01 HIGH     CONFIRMED  There is no cancel, no tool-progress event, no elapsed time, no choice protocol; GlobalAssistantBar
+                           and the Database product chat have no attachments (2 of 4 chats); ai:searchUpdate text is
+                           appended into the assistant message and therefore into history.
+ UX-02 MEDIUM   CONFIRMED  Attachments up to 4 x 8 MB (base64 ~ 43 MB) exceed the Clynx Cloud body limit (10 MiB);
+                           the chat would fail with an HTTP error in shared mode, not degrade gracefully (arithmetic from
+                           code; not exercised live).
+
+What is already good and must be preserved (Beta 12 contract): the title gate (judgeCandidateByText) is correct
+for every screenshot title - it rejects the Series X title for a Series S gallery (MODEL_LETTER), the Metroid / game-case
+titles for a Switch gallery (MEDIA), and EVGA for MSI (TIER). The valuation path already has title-aware defenses
+(modelLettersConflict, listingContradictsEntry, moreSpecificProductForTitle in store.ts). The failures are therefore
+(a) gate not applied on most write paths, (b) things the gate cannot see (configuration, board design, region, lock),
+(c) name resolution that picks the wrong entry before any gate runs, and (d) no way to see, quarantine or repair it.
+
+Important baseline caveat (HYPOTHESIS, high likelihood): per the working record, Beta 12 had not been built,
+registered or published when the screenshots were taken. The galleries in them were therefore most likely written by
+Beta 11 or older, before the Beta 12 gate existed. That explains Nintendo Switch contamination WITHOUT a Beta 12 bug -
+but ID-01/02/03/04 show that several of the same contaminations remain reachable in Beta 12 code, and no Beta 12 code
+ever cleans an existing gallery (the gallery audit does not run below 3/10 photos, is off in Save-credits mode, and
+decides by appearance). Section 13 gives the 2-minute check that settles which build the screenshots came from.
+
+Recommended shape of Beta 13 (details in sections 10-12):
+  1. ONE evidence-carrying identity model + ONE gate, and ONE writer for pictures (fileImage), enforced by a test that
+     fails if anything else calls addProductImage.
+  2. Never name a product from appearance. A picture may confirm or contradict; it may not create or rename.
+     Conflicting evidence => "unresolved" => a quarantined image / "Needs review" item, never a silent move.
+  3. Library becomes a real tree (folders table + products.folder_id), with auto-organization kept as the default and
+     user placement as an override that research never overwrites. One typed operations service shared by UI and chat.
+  4. Condition becomes structured evidence (defect class, location, severity, source, confidence) that reaches the
+     gate as a defect-specific adjustment with an uncertainty range, with text+vision de-duplicated.
+  5. Chat: one engine hook, one composer, a typed choice protocol, real status events, cancellation, short answers.
+Estimated total: 28-42 engineer-days (section 11). Incremental OpenAI cost: well under $0.10/day at the owner's
+scan volume (section 14; token assumptions flagged as such).
+
+
+================================================================================
+2. REPOSITORY / BETA 12 BASELINE (Phase 0)
+================================================================================
+2.1 Repo state (CONFIRMED)
+  repo bennyellis/clynxai, branch master-wveebf, HEAD 25385d8 "API check: count its eBay results in the activity tracker",
+  package.json version 0.3.0-beta.12, working tree clean before the audit (only the new scripts/beta13-audit* are added).
+  Beta 12 modules present: listingText, photoIdentity, productKind, variantFamily, aiDecisionLog, apiActivity, apiSelfTest,
+  listingLifecycle, navState/discoveryStream/activityView/aiActivityView renderer libs, listing_reeval table.
+2.2 Tests (CONFIRMED, Linux sandbox): npm test => 74 of 75 test files pass. The one failure,
+  startupErrors.test.ts "the original database is still there" (section "a locked damaged database"), is platform-specific:
+  the test itself prints "(non-Windows: a rename of an open file succeeds; locked-file case not applicable)" and then asserts
+  the Windows locked-file outcome. It exists at HEAD, is unrelated to identity/Library/chat, and is not a Beta 13 defect.
+  Treat as "Windows-only expectation run on Linux"; confirm green on the owner's Windows build (NOT VERIFIED here).
+2.3 What exists that Beta 13 must build on (inventory)
+  Identity/pictures : photoIdentity.ts (judgeCandidateByText, withVision, fileableWithoutPicture, listingMayFeedProduct,
+                      visionKindHint, titleFromLabel), productKind.ts (mediaSignal, accessorySignal, kindOfName, headOf),
+                      compIdentity.ts (classifyComparable: exact|compatible|uncertain|rejected + reason codes),
+                      variantIdentity.ts (editionConflict, distinguishingTokens, findParentCandidate, extractVariantAttributes),
+                      variantFamily.ts (variantFamilyDecision), colors.ts, productIdentity.ts (AI judge), research.ts (cleanFilingName),
+                      identity/* (foundation, resolver, safeguard, safeguardRuntime; mode "off" by default), webResearch.ts
+                      (findReferencePhotos, findFreeReferencePhotos, findProductImage, findGroupImage), vision.ts
+                      (verifyThumbnailCandidate, auditReferencePhotoGallery, analyzeReferencePhotoDifferences, reconsiderImageFeedback,
+                      analyzeListingPhotos), referencePhotos.ts (topUpReferencePhotos, runAddReferencePhotos).
+  Storage           : store.ts (node:sqlite). products, product_images, group_thumbnails, blacklisted_images, listings, listing_reeval,
+                      watches, schema_flags (one-time data migrations). Additive ALTER TABLE ... ADD COLUMN migrations in the constructor.
+  Safety nets       : dbBackups.ts (online-backup API, >=20h apart, keeps 3 recent + 4 weekly, verified restore at next start),
+                      dbIntegrity.ts (quick_check in a child process, corrupt DB moved aside never deleted).
+  Tests             : compIdentity, photoIdentity, referencePhotoIdentity, identity*, safeguard*, foundation*, variant*, productIndex,
+                      researchPolicy, visionPromptContract, qualification, dealGate, chatBehavior, variantChatFlow, discoveryBeta12,
+                      storeBeta12 and 60 more (75 files). Benchmark: __tests__/_discoveryBench.ts (+ scripts/discovery-bench.cjs).
+                      Live/offline audit tools: scripts/chat-audit.cjs (real model, 23 scenarios), photo-audit.cjs (title-based suspect
+                      photos), discovery-audit.cjs, api-diagnose.cjs. NO image corpus exists anywhere: no test can judge a real picture.
+  Flags / switches  : config.identitySafeguard.mode (off|shadow|enforce, default off), config.chatFlags.{followUpHints,promiseGuard,
+                      leanContext,thumbnail,parallelTools,reasoningEffort} (all on), Config.lowAiMode ("Save OpenAI credits"),
+                      Config.researchCondition (default FALSE), Config.photoAnalysis.enabled, Config.autoResearchListings.
+  Diagnostics       : AI Activity panel (Beta 12: requests, tokens, cost, skips, decisions with image + thought via aiDecisionLog.noteDecision),
+                      engine log, Activity metrics, apiSelfTest.
+2.4 Does the owner's RUNNING build contain the Beta 12 fixes? (NOT VERIFIED - cannot be known from the sandbox)
+  By the record, no: the owner asked "help me release beta12" immediately before the screenshots were requested. Settle it in two
+  minutes: (a) Settings/About shows the version string; build-info.json carries commit + dirty flag (buildInfo.ts); (b) run
+  node scripts\beta13-audit.cjs library-db-audit "<copy of scout.db>": section 1 prints whether the Beta 12 table listing_reeval exists
+  (it is created the first time a Beta 12+ build opens the database). If it is absent, the screenshots predate Beta 12.
+2.5 Findings that REQUIRE live validation (full list with procedures in section 13): vision accuracy for white Series X vs Series S and
+  the Switch family; the owner's real contamination counts; the owner's product_images foreign-key DDL; cloud body-limit failure;
+  whether the model accepts a "verbosity" parameter; real tool elapsed times; WatchCount sold lookups (carried over from Beta 12).
+
+
+================================================================================
+3. RELEASE-BLOCKING IDENTITY DEFECTS  (Change 1: universal product identity and image recognition)
+================================================================================
+
+3.1 The pathway map (CONFIRMED by reading each function)
+  Stage                         Where                                        Evidence used today
+  ----------------------------  -------------------------------------------  ------------------------------------------------
+  listing retrieval             scraper.ts / facebookMarketplaceSource.ts     title, description (own-text since Beta 12), price, photos
+  title/description parsing     scorer.ts, listingText.ts, conditionParser   keyword lists; matchSearchItem token rules
+  identification (text)         scorer.ts AI extraction -> matchedItem        AI string "matchedItem"
+  identification (photo)        vision.ts analyzeListingPhotos                free-text identifiedProducts[] (no attributes, no confidence)
+  family resolution             chat.ts generateProductSummary(FromWeb)       AI free text "family" path + category; store.resolveFamilyName (fuzzy)
+  exact model / variant         variantIdentity, variantFamily, productIdentity  3 different rule sets + AI judge
+  claim vs picture              scrapeEngine ~2492-2530 (mismatchCorrection)  vision matchesClaim can nullify matchedItem (picture overrides title)
+  Database matching             store.findMatchingProduct / isSimilarProductName   token containment, first match, newest first
+  reference-photo selection     scrapeEngine.runPhotoAnalysis ~1199-1234      listProductImages()[0] and .slice(0,2) = NEWEST photos
+  persistence                   store.addProductImage                         nothing checked; keeps only (data, source_title, kind)
+  automatic Library filing      runProductLookup -> updateProductProfile      AI category + family, overwritten on every refresh
+  comparable-sale validation    compIdentity.classifyComparable (+ watchcount.analyzeEbayComps, ebayActive)   title only; no picture check of sold comps except compPhotoCheck
+  display valuation             store.enrichManyWithMatchedProductPricing     modelLettersConflict + listingContradictsEntry + safeguard
+
+3.2 ID-01  CRITICAL  CONFIRMED  Unguarded choke point; 7 of 13 machine-driven call sites bypass the identity gate
+  Evidence: store-probe section 3: Store.addProductImage("Xbox Series S", pic, "MICROSOFT XBOX SERIES X - CONSOLE - 1TB - 1882 (G4P004519)")
+  succeeds; the same call to listingMayFeedProduct("Xbox Series S", thatTitle) returns false. The write never asks.
+  addProductImage (store.ts:1836) inserts, then prunes the oldest beyond MAX_IMAGES_PER_PRODUCT=20. No dedupe, no verdict, no provenance.
+  The 13 call sites and their gate status are in 4.1. Ungated machine writers: ensurePhotoGalleryAudit move, images:feedback move,
+  createPlainProduct, createSpecificModel (twin + new), listings:research; partial: the poor-condition web photo. Gated: scanner reinforce,
+  findReferencePhotos callers (2), researchBlankProduct free path (weakly: 'compatible' titles pass). User-initiated: createManual, addImage.
+  Root cause: gate logic lives in callers, not in the writer.
+  Proposed correction: one writer, fileImage(productId, imageBytes, evidence, opts) -> {filed|quarantined|rejected|review}, that runs
+  the identity gate itself; addProductImage becomes module-private. A repo-wide test fails if any other file references it.
+  Tests: path-table-driven test (section 13.3): for each of the 12 paths, feed the Series X photo+title into the Series S entry and assert
+  the image is never in a "trusted" status.   Regression risk: MEDIUM (every writer is touched) - mitigated by shadow mode (section 12).
+
+3.3 ID-02  CRITICAL  CONFIRMED (mechanism) / HYPOTHESIS (that it produced screenshot A)  Pictures name products
+  Failure A: a white Series X filed as "Xbox Series S", with source title "MICROSOFT XBOX SERIES X - CONSOLE - 1TB - 1882 (G4P004519)".
+  The source title is a Facebook/eBay-style listing title with no "eBay listing:" / "Stock photo" prefix, so it came through a scanner or a
+  MOVE (which preserves the title), not through findReferencePhotos (which prefixes labels). Three code paths can put that exact pair together:
+   (a) ensurePhotoGalleryAudit (index.ts ~1574-1591): vision reads the gallery by APPEARANCE ("a white console among black ones is obvious early" - the
+       audit runs from 3 photos for any colour-named entry) and returns actualSubject; the code deletes the image from the source product,
+       resolves findMatchingProduct(actualSubject) (first fuzzy match) or findColorVariant(), and calls store.addProductImage(target, imageData,
+       image.sourceTitle). The source title travels with the photo; nothing compares it with the destination. A white Series X (Robot White)
+       looks like "a white Xbox console", the Series S is the famous white Xbox, so "Xbox Series S (White)" is a plausible appearance-only answer.
+       The prompt tells the model to treat "a different color of the same product" as a mismatch when the entry names a colour.
+   (b) scrapeEngine ~2723-2736 + 2830-2910: visionSubjects = photoResult.identifiedProducts (free text from the picture). A subject with no
+       existing entry and in specificSubjects goes to onNewProductFound(subject, image, listing.title): a NEW entry named by the picture, source
+       title = the contradicting listing title. There is no title-versus-subject check on creation (identityVeto only runs for EXISTING entries,
+       and is a no-op by default, ID-05). The Beta 12 listingMayFeedProduct guard sits on the existing-entry branch only.
+   (c) resolveIdentityTarget -> action "create" -> createSpecificModel(action.name...): the NAME comes from the AI's specificName for the listing.
+   Common root: the filing decision is derived from the picture/AI while the textual evidence that contradicts it is only stored as a label.
+  Why the Beta 12 gate does not catch it: it exists only where the code calls listingMayFeedProduct / judgeCandidateByText.
+  Policy violated: "never infer a model from appearance alone" (the brief's rule). The gallery audit, feedback re-file and vision subject
+  creation all infer a model from appearance.
+  Proposed correction: (1) a picture can CONFIRM or CONTRADICT an identity that text proposes; it can never create, rename or re-file one.
+  (2) every move/creation is evaluated by the same gate with BOTH the picture verdict and the source-title verdict; text MISMATCH is final
+  (as in withVision today); a picture-only proposal that disagrees with the title becomes status=conflict -> review queue.
+  (3) the audit's "move" becomes "quarantine + suggest": the image leaves reference use immediately and a suggestion is queued; the user (or the
+  chat, sections 7-8) applies it.
+  Tests: fixture A (below) with a scripted vision answer "Xbox Series S (White)" on a Series X-titled image must end in quarantine, not in the S gallery.
+  Regression risk: MEDIUM - the audit currently also fixes real misfiles automatically; quarantine keeps that benefit (the bad photo stops being
+  used) without the risk.
+
+3.4 ID-03  HIGH  CONFIRMED  Name resolution is first-match + token containment
+  Evidence (store-probe section 1, products: Xbox Series X, Xbox Series S, Xbox Series S (Black), Xbox Series, Nintendo Switch, Nintendo Switch Lite):
+     findMatchingProduct("Xbox Series S (White)")        -> "Xbox Series"      (exact "Xbox Series S" also matches; the generic one was newer)
+     findMatchingProduct("Xbox Series X (White)")        -> "Xbox Series"
+     findMatchingProduct("Halo Infinite (Xbox Series X)")-> "Xbox Series"
+     findMatchingProduct("Xbox Series X Controller")     -> "Xbox Series"
+     findMatchingProduct("Metroid Dread (Nintendo Switch)")/"Super Mario Odyssey Nintendo Switch"/"Nintendo Switch Dock"/"Joy-Con Pair"/"Game Case" -> "Nintendo Switch"
+  Cause: store.findMatchingProduct (store.ts:1699) = exact name, else listProductIndex().find(isSimilarProductName) i.e. the FIRST row in
+  ORDER BY created_at DESC. isSimilarProductName (store.ts:3113) accepts any name whose >=2 base tokens are all contained in the other, unless a
+  variant word (pro/slim/max/plus/mini/lite/se/xl/oled/air), a storage size, a colour conflict or an edition term differs. "S", "X", "Dock",
+  "Controller", a game's title are not in any of those lists. The same rule drives productDuplicateKey/mergeDuplicateProducts, listing->product
+  linking (saveScored, store.ts:708), getEbayValueForProductName (first match again) and the vision-subject filing loop.
+  Why it matters here: even a perfect gate downstream receives the WRONG TARGET. For failure C, a vision-named subject "Metroid Dread (Nintendo
+  Switch)" resolves to the console entry, so game art lands in the console gallery whenever the path lacks a title (gallery moves, feedback re-file,
+  free blank-product path) - and cleanFilingName (research.ts) lets such names through (store-probe section 2: only chargers/adapters are refused).
+  Positive: valuation display is protected (store.ts:951-957: modelLettersConflict, listingContradictsEntry, moreSpecificProductForTitle).
+  Proposed correction: best-match, not first-match: score every candidate by the identity model (section 10); require a unique best with margin, else
+  "unresolved". Resolve platform-named software/accessories to their own kind (kindOfName) BEFORE console containment.
+  Tests: the 14 subjects above must resolve as: S(White)->"Xbox Series S" (or its colour child), game/accessory subjects -> NOT the console.
+  Regression risk: MEDIUM-HIGH (matching is used everywhere) - stage behind flag; keep isSimilarProductName for dedupe only.
+
+3.5 ID-04  HIGH  CONFIRMED  The identity model cannot see hardware configuration, board design, region, lock, SKU
+  Evidence (identity-probe B, E, F):
+   - Failure B. "Xbox Series X 1TB" as the entry: titles "...1TB Carbon Black Console with disc drive" and "...1TB Robot White All-Digital Console" are BOTH
+     text=match/exact, comp=exact. The only thing separating those two products in the current pairwise table is an accidental COLOR hit.
+     "Xbox Series X" vs "Xbox Series X All-Digital no disc drive" = comp exact, editionConflict=false. The 2TB Galaxy Black Special Edition and the
+     Halo Infinite Limited Edition ARE separated (EDITION / CAPACITY) - those cases work. variantIdentity classifies "...with disc drive" as bundle=true
+     (the word "with").
+   - MSI. "MSI GeForce RTX 2070 SUPER Gaming X Trio" vs "MSI GeForce RTX 2070 SUPER Ventus OC" = exact. Entry "MSI RTX 2070 SUPER" sees both titles as
+     insufficient/compatible, and fileableWithoutPicture(compatible) = TRUE: in Save-credits mode both designs enter ONE gallery without any picture
+     check; "MSI RTX 2070 Super Armor OC" is text=match/exact (no vision at all). distinguishingTokens() does see "gaming x trio" as `other` tokens but
+     nothing consumes it for photos. Two visually different cards under one entry (the screenshot) is the designed outcome of today's rules.
+   - Region / lock: "iPhone 13 128GB Unlocked" vs "...Verizon locked" = exact; "Nintendo Switch Japan Import" vs "US" = exact.
+   - Accessory lexicon holes in the valuation model: "Nintendo Switch Carrying Case Pouch", "Console Stand", "Joy-Con Grip" = comp EXACT (the photo gate
+     rejects them via accessorySignal, the comparable-sale model does not); "Skin Decal" rejected for the wrong reason (NOT_WORKING).
+   - FALSE rejects (fail-closed, but starve galleries and comps): "Nintendo Switch Console Neon Blue Red Joy-Con 32GB HAC-001" => photo gate MISMATCH
+     (accessorySignal sees "Joy-Con" as the head); "Nintendo Switch Console with Dock and Joy-Con Controllers HAC-001" => comp REJECTED (ACCESSORY);
+     "Nintendo Switch HAC-001(-01) V2 battery" => REJECTED (ACCESSORY: "battery"). A genuine bundle/console set and a revised console are thrown away.
+  Root cause: compIdentity attributes are model letter/number, generation, tier, capacity, colour, edition, accessory/lot/not-working, media. No attribute
+  for drive/config, board design (AIB partner line), region, lock, SKU/MPN, nor a "headline noun" rule that separates "console WITH accessories" from
+  "accessory FOR console".
+  Proposed correction: extend the attribute set (section 10.2) with DRIVE (disc/all-digital), BOARD_DESIGN (GPU partner line), REGION, LOCK, SKU/MPN,
+  each with a materiality class (value-defining vs cosmetic), and make the accessory/console decision use a headline-noun parse plus a bundle allow-list
+  ("console with dock and Joy-Con controllers" is a console).  Photos use the STRICT set (any value-defining difference => not the same entry); valuation
+  uses the same attributes but may down-weight cosmetic ones. Colour is value-defining only where tied to an edition or configuration (Galaxy Black
+  Special Edition, Robot White All-Digital, limited-edition Halo) and cosmetic for products where colour does not move price.
+  Tests: every pair above becomes an assertion table (section 13.3).  Regression risk: MEDIUM (valuation comps get stricter: fewer but cleaner comps -
+  verify sample sizes in the AI Activity / comps counters before enforcing).
+
+3.6 ID-05  HIGH  CONFIRMED  Phase 4 safeguard is off by default
+  config.ts:193 `identitySafeguard: { mode: "off" }`; safeguardRuntime.vetoes() returns false when off. All of: scrapeEngine.identityVeto (sites
+  "reinforce", "hard-cap", "reference-photos"), store.saveScored (site "filing"), enrichManyWithMatchedProductPricing (site "display"),
+  getEbayValueForProductName (site "valuation") are no-ops in a default install. It has a shadow mode that logs without acting; nobody has
+  evidence of its precision on the owner's data.   Proposed: do NOT turn it on as-is; fold its resolver (identity/foundationResolver) into the single
+  model or retire it. Interim: run it in "shadow" during Beta 13 development to collect disagreement data (zero risk).  Risk: LOW to run shadow.
+
+3.7 ID-06  HIGH  CONFIRMED  Fail-open paths
+   - productIdentity.resolveIdentityTarget: no OpenAI key / error / timeout (judgeProductIdentity returns null) => decideIdentityAction => attach to the
+     name-matched entry; verdict "generic" => attach; listingHasExtraDetail false (title adds <2 new words) => attach with NO check at all. "Series X
+     Robot White All-Digital 1TB" against an entry named "Xbox Series X" adds >=2 words, but "Xbox Series X Digital" adds one => unchecked attach.
+   - Save-credits mode: fileableWithoutPicture accepts insufficient+compatible (ID-04 MSI case); the gallery audit and photo-difference analysis are
+     skipped (isLowAiMode), so nothing ever repairs a gallery in that mode.
+   - webResearch.findAndVerifyImage: a verifier ERROR is accepted for kinds "brandLogo" and "group" (folder pictures); product kind is fail-closed
+     (Beta 12) - correct.
+   - ensurePhotoGalleryAudit is itself unattended auto-delete.
+  Proposed: every gate decision has an explicit outcome for "evidence unavailable" = quarantine/unverified, never trusted; surface the count.
+
+3.8 ID-07  MEDIUM  CONFIRMED  Vision verification prompt: binary, no discriminators, no evidence
+  verifyThumbnailCandidate (vision.ts:1116) returns {matches:boolean, reason}. The "reference" prompt asks for "the correct model, generation and
+  variant" but supplies no model-specific discriminators; "product" (used for thumbnails) only rejects logos/unrelated items and says nothing about
+  model or variant. A white Series X vs a Series S is decided by the model's own recall of form factor. The decision is logged to AI Activity with
+  the image and one reason sentence - useful for audit, but it is not data the Library keeps.
+  Proposed: structured vision output: {formFactor, visibleText (OCR of model/labels), ports/vents/disc-slot observations, claimed model, matchesProposed:
+  yes|no|cannot_tell, confidence, evidence[]}; "cannot_tell" => unverified (not match). Per-category discriminator hints (consoles: tower vs slab,
+  vent, disc slot, controller included; GPUs: cooler design, fan count, shroud; phones: camera layout) injected from a small table.
+  NOT VERIFIED: how accurate the current prompt is on X vs S (needs labelled images, 13.2).
+
+3.9 ID-08  MEDIUM  CONFIRMED  Evidence has no source or confidence anywhere it matters
+  product_images: (id, product_id, image_data, source_title, created_at, kind). products: free-text name/family/category. ProductProfile has
+  variantEvidence/compsValidation JSON for variants only. Nothing records HOW an identity was decided (title/aspect/ocr/vision/user), how sure, or
+  when. Answer to the cross-system question "does identity/condition evidence keep source and confidence?": NO (only the AI Activity ring, which is
+  bounded, in-memory style logging, keeps the image + one sentence).
+
+3.10 Reproduced screenshot failures (deterministic; run identity-probe + store-probe)
+  A. Series X (white) in Series S gallery
+       judgeCandidateByText("Xbox Series S", "MICROSOFT XBOX SERIES X - CONSOLE - 1TB - 1882 (G4P004519)") = mismatch (MODEL_LETTER) - correct;
+       addProductImage(that product, picture, that title) = accepted - no gate on the writer;
+       findMatchingProduct("Xbox Series S (White)") = "Xbox Series" (first match, generic) - wrong target.
+  B. Series X configurations
+       entry "Xbox Series X 1TB": Carbon Black+disc and Robot White All-Digital both exact;  "All-Digital no disc drive" vs "Xbox Series X" = exact;
+       2TB Galaxy Black SE and Halo Infinite LE are separated (works today).
+  C. Switch gallery: game cases and Metroid art
+       Beta 12 gate rejects "Metroid Dread - Nintendo Switch (game case)" (MEDIA) and game titles; but the NAME "Metroid Dread (Nintendo Switch)"
+       resolves to the console entry (findMatchingProduct) and a gallery holds anything (store-probe 4: 4 mixed images, one untitled, nothing flags it).
+  D. MSI RTX 2070 SUPER: Gaming X Trio vs Ventus OC = exact; Armor OC = exact to the entry; Save-credits mode files both without a picture check.
+  What an exact SKU additionally needs (the screenshot title "...1882 (G4P004519)" shows the pattern): (1) the model number printed on the unit
+  and in titles (the "1882" - HYPOTHESIS: Series X family vs a different number for Series S; verify against manufacturer data, do not hard-code
+  from memory), (2) the manufacturer part number/SKU (the "G4P-00xxx" style code), (3) eBay Browse item aspects when the listing is an eBay item
+  (Brand, Model, MPN, Storage Capacity, Color, Platform, Edition) via getItem localizedAspects - a structured source that beats title parsing,
+  (4) photo evidence that can be READ: rear/underside label OCR, disc-drive slot visible or not, port layout, (5) a per-family SKU table built from
+  verified evidence (manufacturer page / retailer listing) rather than hand-written. SKU confidence is "high" only with (1)+(2) or aspects; a
+  title that merely says "1TB Series X" is model+capacity, not SKU. Without it the correct output is a configuration-level identity, not a SKU.
+
+
+================================================================================
+4. REFERENCE-IMAGE FINDINGS  (how pictures get in, get used, and get kept)
+================================================================================
+
+4.1 All 13 addProductImage call sites (CONFIRMED by grep + reading each)
+  #  Site (file:function ~line)                                   Decides the target by            Identity check before writing              Status
+  -- ------------------------------------------------------------ -------------------------------- ------------------------------------------ ----------
+  1  scrapeEngine filing loop :2900 (reinforce existing entry)     findMatchingProduct(vision name) listingMayFeedProduct(target, listing title) GATED (title only; Beta 12)
+  2  index.ts ensurePhotoGalleryAudit :1583 (move)                 AI appearance -> findMatchingProduct NONE; keeps old source title           UNGATED
+  3  index.ts addEbayReferencePhotos :2008 -> findReferencePhotos  product being researched           title gate + vision (fail-closed)          GATED
+  4  index.ts runProductLookup poor-condition :2438                web og:image search               vision "product" check only (no model/title) PARTIAL
+  5  index.ts createPlainProduct :2801                             vision subject / text name       NONE (title saved as label)                UNGATED
+  6  index.ts createSpecificModel (twin) :2822                     AI specificName                  NONE                                       UNGATED
+  7  index.ts createSpecificModel (new) :2833                      AI specificName                  NONE                                       UNGATED
+  8  index.ts researchBlankProduct free path :2879                 the blank product itself         title gate; compatible titles pass (ID-04) GATED-WEAK
+  9  index.ts listings:research new product :4414                  listing subject (text)           NONE (text-named, so low risk)             UNGATED
+  10 index.ts products:createManual :4578                          user                             n/a (user's own photo)                     USER
+  11 index.ts products:addImage :4664                              user                             n/a                                        USER
+  12 index.ts images:feedback re-file :5086                        AI appearance -> findMatchingProduct NONE; user statement not authoritative UNGATED
+  13 referencePhotos.topUpReferencePhotos :71 (fillReferencePhotos, chat add_reference_photos) findReferencePhotos   title gate + vision          GATED
+  Summary: 4 gated (1,3,8-weak,13), 2 user-initiated (10,11), 7 machine-driven with no (or partial) identity check (2,4,5,6,7,9,12).
+  Plus non-image writers that also move identity: mergeDuplicateProducts (merges whole galleries), upsertProductFromCloud (name/family from the cloud).
+
+4.2 RI-01  HIGH  CONFIRMED  Reference-photo SELECTION trusts the newest photo
+  runPhotoAnalysis (scrapeEngine.ts ~1199-1234): for an unmatched listing, the comparison set is listProductsWithImages(3) (3 most recently
+  TOUCHED products) plus all prioritized products, ONE photo each = images[0]; listProductImages is ORDER BY created_at DESC (store.ts:1824),
+  so images[0] is the NEWEST photo filed - i.e. the photo least reviewed. For a claimed product it passes .slice(0,2) = the two newest.
+  store-probe 5: order returned ["title 2","title 1","title 0"]. Effect: one contaminated photo filed last becomes "ground truth" for
+  matchesClaim and matchedKnownProduct, and the 20-photo cap prunes the OLDEST (the curated ones, 4.4).
+  Correction: choose references by (status verified/user) then quality then angle diversity then recency, with an explicit is_primary and
+  sort_order; never rely on insertion order. Tests: selection ignores quarantined/unverified; picks <=2-3 diverse photos.   Risk: LOW-MEDIUM.
+
+4.3 RI-02  MEDIUM  CONFIRMED  Dedupe and quality control are per-call, not persisted
+  Near-duplicate rejection (averageHash, hammingDistance) runs against `existingImages` supplied by the caller each time; there is no content_hash
+  column, so manual/scanner/feedback writers never dedupe, and merges can duplicate. Width/size normalization exists only for web candidates
+  (normalizeReferencePhoto). Correction: content_hash (aHash + sha1) column, enforced in fileImage. Risk: LOW.
+
+4.4 RI-03  MEDIUM  CONFIRMED  The 20-photo cap prunes the oldest photo, including curated/manual photos
+  store-probe 6: after 1 manual + 20 automatic photos the manual one is gone. A comment in code states this is deliberate ("the cap protects DB
+  size, not curation intent"). Correction: pin flag (user-added, primary, or thumbnail source are not prunable); prune lowest-value first
+  (unverified, duplicate, worst quality). Risk: LOW.
+
+4.5 RI-04  MEDIUM  CONFIRMED  Thumbnails are denormalized copies and can be built from a contaminated gallery
+  products.image_url holds a full data: URI copy, not a reference to a product_images row; setThumbnailFromImage accepts an arbitrary renderer-supplied
+  data URI with no size/type check (index.ts:4650); runProductLookup persists buildImageCollage(gallery) as the product thumbnail when web search found
+  nothing (index.ts:2405) - a contaminated gallery therefore produces a persisted contaminated thumbnail that survives gallery cleanup.
+  Library folder tiles (Database.tsx FamilyTile/CollageImage :1522-1684) render, at draw time, a 2x2 collage of up to 4 member products' image_url plus a
+  cached "group thumbnail"; so one wrong member thumbnail shows up in the folder collage (this is what the "Nintendo > Consoles" tile in the screenshot
+  is: HYPOTHESIS that it contains a contaminated member thumbnail or the web-found group image; the rendering itself is by design).
+  Group thumbnails (findGroupImage, webResearch.ts:537) take og:image from the first search-result pages and accept anything the "group" vision prompt
+  calls "reasonably represents the whole grouping" - a verifier error is also accepted for this kind (3.7).
+  Correction: thumbnail_image_id pointer (primary image of the gallery) instead of a copy; derived collages are rendered, never stored; group
+  thumbnail = a member product's verified primary, not a web search, unless the user pins one.   Risk: MEDIUM (migration of image_url consumers).
+
+4.6 RI-05  MEDIUM  CONFIRMED  Difference analysis feeds contamination back into prompts
+  ensurePhotoDifferenceAnalysis (index.ts:1480) runs a vision pass over the newest 8 photos and appends the summary to lookoutNotes
+  ("Watching for, in real listings"); lookoutNotes are injected into every later vision prompt for that product (scrapeEngine ~1180: watchFor).
+  A mixed gallery therefore writes confident-sounding "differences" (e.g. between a console and a game case) into future prompts.
+  Correction: only verified photos feed difference analysis; notes carry source + date; allow reset.   Risk: LOW.
+
+4.7 RI-06  MEDIUM  CONFIRMED  Gallery audit gating and mode
+  ensurePhotoGalleryAudit runs only at >=3 photos (colour-named entry) / >=10 (others), is skipped in Save-credits mode, is consensus-based (the
+  majority defines truth - a gallery that is 6/10 wrong confirms itself), and auto-deletes+moves. The owner's Switch gallery of 4 photos never
+  qualified. Correction: replace with a per-image verdict at write time (3.2) plus an on-demand/occasional re-verification that quarantines.
+
+4.8 RI-07  LOW  CONFIRMED  Source labels are inconsistent
+  Labels used: "eBay listing photo — <title>" (reference search), "eBay listing: <title>" (free path), "Stock photo — host", "Real-world photo — host",
+  "Image search — host", or the raw listing title (scanner), null (manual). titleFromLabel parses the first two; imageSource() in the renderer parses
+  them for display. A structured source_kind + source_title + source_url column replaces string conventions.
+
+4.9 AI mode vs Save-credits mode (CONFIRMED)
+  AI mode: findReferencePhotos = text gate then download then dedupe then vision verify (fail-closed). Save-credits: findFreeReferencePhotos =
+  Wikipedia + eBay titles through judgeCandidateByText and fileableWithoutPicture (exact, or insufficient+compatible). No vision, no gallery audit, no
+  difference analysis, scanner filing skipped unless a photo look happened. Net: Save-credits files more weakly confirmed pictures than AI mode and
+  can never repair them. Correction: in Save-credits mode require strength "exact" for generic/multi-design entries, otherwise file as `unverified`.
+
+
+================================================================================
+5. LIBRARY FILING / MERGING FINDINGS  (Change 2)
+================================================================================
+5.1 How identities are created, matched, named, merged, photographed, foldered (CONFIRMED)
+  created  : addProductStub (store.ts:1221) - exact productDuplicateKey (sorted unique tokens minus grammar words) dedupe; createManualProduct;
+             onNewProductFound / createPlainProduct / createSpecificModel / listings:research / researchTool.
+  named    : whatever string the caller passes (vision subject cleaned by cleanFilingName, AI specificName, user text, AI research name).
+  matched  : findMatchingProduct (3.4). listing->product: saveScored (store.ts:708).
+  merged   : mergeDuplicateProducts (store.ts:1241): groups by productDuplicateKey (case, punctuation, word order, duplicates ignored; colours count),
+             keeps the "fullest" row, fills empty columns from the loser, repoints product_images, listings, children, watches (+ terms_json), then
+             deleteProduct(loser). It runs automatically EVERY time the Database is opened (products:list calls mergeDuplicateProductEntries, index.ts:4497). It never looks at the pictures it moves.
+  photos   : 13 writers (4.1). thumbnail: image_url copy (4.5). folder: products.family string + category string (5.4).
+  aliases  : none stored. Search For items carry matchKeywords (separate). The only alias-like logic is expandSearchKeywords (AI) for Search For.
+  duplicate detection: productDuplicateKey only (exact token set). Near-duplicates ("Xbox Series" vs "Xbox Series S", "PS5" vs "PlayStation 5") are not detected.
+  variant decisions: variantFamilyDecision (Search For), findParentCandidate/distinguishingTokens (child products), productIdentity AI judge, parentProductId
+             column (LOCAL ONLY, not cloud-synced).
+5.2 LB-01  HIGH  CONFIRMED  Folders are a derived string, not data (also Change 4)
+  Database.tsx grouped (:673) = category string -> buildFamilyTree(:82) over p.family.split(">") rebuilt on every render; findFamilyNode compares
+  segment text case-SENSITIVELY while store.resolveFamilyName compares case-insensitively with includes() containment (store.ts:1557).
+  Consequences (store-probe 9): resolveFamilyName("Xbox One > Games") returns "Xbox > Games" when an "Xbox" folder exists - a distinct product line collapses
+  into its parent. An empty folder cannot exist; folder rename = rewriting family on every product; a typo or AI re-spelling forks a folder.
+  runProductLookup -> updateProductProfile(...category, family...) (store.ts:1332, index.ts:2408) OVERWRITES category and family on EVERY research/refresh
+  (only the thumbnail has a keepThumbnail guard). Category is "AI-only" by design (editProductProfile comment) - there is no user-editable category.
+  Library categories are NOT used as evidence by the photo gate, but createSpecificModel inherits family from familyFromId and discoverSiblingProducts
+  uses family to propose siblings, so a wrong folder can seed wrong siblings.
+5.3 LB-02  HIGH  CONFIRMED (fresh schema) / HYPOTHESIS (owner's DB)  deleteProduct fails for products with photos
+  store.ts:1795-1803 runs `DELETE FROM products` and only then `DELETE FROM product_images`; product_images.product_id REFERENCES products(id) and node:sqlite
+  enforces foreign keys by default. store-probe 8: "deleteProduct THREW for a product that has a reference photo: FOREIGN KEY constraint failed (product
+  still exists=true, images=1)"; a product with no photos deletes fine. mergeDuplicateProducts avoids it because it repoints the images first.
+  The owner's database may predate the FK clause (CREATE TABLE IF NOT EXISTS never alters an old table) - library-db-audit section 1 prints the actual
+  FK list. Correction (trivial, but belongs in Beta 13 because Change 4 adds delete): delete images first inside one transaction, or soft-delete (7.4).
+5.4 LB-03  HIGH  CONFIRMED  Gallery audit and feedback re-file move pictures by appearance, destructively
+  ensurePhotoGalleryAudit deletes the photo from the source BEFORE finding a target; if no target exists and no colour case applies the photo is simply
+  gone ("just removed"); appends a "Correction: auto-removed a reference photo that actually showed X" note to the SOURCE product (so a wrong move is
+  recorded on the wrong side). images:feedback (index.ts:5042) does deleteProductImage first, then findMatchingProduct(actualSubject) or creates a new
+  product named by the AI from the image with keepThumbnail:true; the user's own correction ("this is a Series X") is only a prompt to the model, which
+  may disagree. Neither has undo.  Correction: typed `reassignImage` op with undo log; user statement is authoritative evidence (source "user");
+  quarantine instead of delete.
+5.5 LB-04  HIGH  CONFIRMED  Merge moves whole galleries unchecked
+  store-probe 7: two entries with the same token set merge and the surviving gallery contains both titles, one of which names a different product
+  ("Some Game Title (Probe Console One) disc"). Cascade: because the merge is automatic, any two entries that reduce to the same token set are folded together on its own, with their galleries. Correction: merge becomes propose-only (review queue),
+  and when approved re-verifies every moved image with the gate (unverified -> kept but not used as reference).
+5.6 LB-05  MEDIUM  CONFIRMED  Cascading contamination (Section 9 has the full chain)
+  Wrong target (3.4) -> image filed -> newest-photo reference (4.2) -> wrong matchesClaim/matchedKnownProduct -> lookoutNotes (4.6) -> collage thumbnail
+  (4.5) -> folder tile -> sibling discovery (family) -> new wrong entries.
+5.7 Recommendations (separation of concerns; nothing auto-deleted/merged/split/renamed)
+  Separate and store independently: (1) family (taxonomy node), (2) exact product (manufacturer+model+generation+tier), (3) SKU/configuration
+  (storage, drive, colour/edition, region, board design), (4) individual listing (price, seller, text), (5) listing condition (structured defects),
+  (6) reference image (provenance, verdict, status), (7) comparable sale (identity verdict + condition + date), (8) user folder (placement only).
+  A listing points to (3) when resolvable else (2) else "unresolved"; a reference image belongs to (3) or (2) with an explicit scope
+  ("any {color}" for products whose colours do not matter); comps attach to (3)/(2) by attribute match; folders only organize products.
+  Uncertain identity: status unresolved|conflict is a first-class value, stored with the evidence; those items live in a "Needs review" smart
+  folder; the review workflow is: show evidence side by side (picture, source title, proposed entry, reason codes, vision observation) with typed
+  choices [Keep here / Move to ... / Make new entry / Quarantine / Remove] (each an undoable op). Suggestions are generated; applying needs a click
+  or an explicit chat confirmation.
+
+
+================================================================================
+6. CONDITION / VALUATION FINDINGS  (Change 3)
+================================================================================
+6.1 The pipeline today (CONFIRMED)
+  text   : listingText.conditionTextOf (own listing text only) -> conditionParser.analyzeCondition (negation-aware) -> impact none|minor|major
+           (+ evidence phrases) -> scorer.detectConditionImpact -> CONDITION_VALUE_MULTIPLIER (scorer.ts:350) / CONDITION_VALUE_FACTOR (resaleMath.ts:50)
+           = 1 / 0.6 / 0.25 applied to the whole reference value in evaluateSearchItemPricing (scorer.ts:411) and dealGate (dealGate.ts:283), and
+           to the "withinBudget" price cap. AI extraction (scorer.ts prompt) also returns conditionImpact; scorer combines the text verdict with the AI's own conditionImpact (scorer.ts ~728).
+  vision : analyzeListingPhotos (vision.ts:275) can return flaws[{photoNumber, description, boundingBox, confidence}] ONLY when Config.researchCondition
+           (default false). Flaws are saved with updatePhotoAnalysis (store.ts:896 -> listings.photo_flaws) and drawn as a yellow outline by ListingCard.
+           grep shows no other consumer: not preAlert, not dealGate, not scorer.
+  comps  : WatchCount comps segment by "New"/"Used" and use the LARGEST segment; "parts / not working" sold comps are dropped for working products;
+           a separate "(For Parts / Broken)" child product exists for broken listings (brokenVariant). eBay active listings: conditionIds 7000 only for
+           the parts search; used/new matching in ebayActive. There is no defect-level comp matching.
+6.2 CV-01  CRITICAL  CONFIRMED  Visual evidence does not reach valuation
+  Evidence: grep for `.flaws`/`photoFlaws` outside vision.ts: scrapeEngine.ts:1252 (store) and ListingCard (display) only. photoAnalysis.summary is
+  never parsed by analyzeCondition (conditionTextOf takes title/description/declaredCondition). So damage visible in the photos but absent from the
+  text (the brief's case C) changes nothing the money math sees, and even a vision-reported flaw is a badge. Default off means most installs never ask.
+6.3 CV-02  HIGH  CONFIRMED  Flat multipliers and a keyword lexicon with holes (condition-probe)
+  Text -> impact (probe results): "back glass cracked, screen perfect" = minor x0.6 (same as "screen is cracked"); "HDMI port damaged" = minor x0.6;
+  "disc drive not working" = major x0.25; "water damage, still powers on" = minor x0.6 (water damage is often a write-off); NO deduction (impact none,
+  x1.0) for: "minor scratches on screen", "hinge loose and frame bent", "corrosion on battery contacts", "dented frame and chipped corner",
+  "Joy-Con drift", "lens scratched and fungus inside"; "bad motherboard" is only caught because the sentence also says "for parts".
+  Correctly handled: "no damage, not broken" (negated), "cracked screen protector only, device is mint" (accessory). Cosmetic: the `ignored` evidence strings
+  are sliced mid-word ("rfectly, no damage").
+  Money (condition-probe section 2; repair costs are ILLUSTRATIVE ASSUMPTIONS, not data; net 84%, min margin 20%):
+    iPhone 13 Pro, cracked BACK glass, value $450 ask $300: flat x0.6 => value $270, profit -$73, max buy $180; with an assumed $40 repair => value $410,
+      profit +$44, max buy $275.  (flat factor throws away a profitable buy)
+    iPhone 13 Pro, cracked SCREEN: flat => -$73 / $180; assumed $110 repair => -$14 / $225.
+    PS5 disc drive dead, value $400 ask $200: flat x0.25 => -$116, max buy $65; assumed $60 repair => +$86, max buy $225.
+    Gaming PC "water damage", value $900 ask $350: flat x0.6 => +$104 (looks like a deal); assumed $500 repair/total loss => -$14.
+  The flat factor both over-penalizes cheap, fixable damage and under-penalizes expensive/unknown damage.
+6.4 CV-03  MEDIUM  CONFIRMED  Two copies of the constants; comps are not condition-matched
+  CONDITION_VALUE_MULTIPLIER (scorer.ts) and CONDITION_VALUE_FACTOR (resaleMath.ts) are duplicates kept in step by a test. Sold comps are matched by
+  New/Used only; "Used" comps include units with the same defect and without it, so a defect-specific adjustment on top of a mixed-condition median would
+  double-count the portion of the defect already in the median. Correction: one adjustment module; prefer defect-matched sold comps when >=N
+  exist ("cracked screen" sold listings), else adjust the clean-condition median by a defect repair/discount table and WIDEN the range.
+6.5 CV-04  MEDIUM  CONFIRMED  Vision prompt structure
+  Condition flaws share one call with identification, bundle, matchesClaim, referenceProducts, expertTake (prompt ~275-410, up to 8 photos / 4 in
+  Save-credits). The flaws array has no defect class, no severity, no functional-vs-cosmetic flag, no "area not visible" coverage, and an empty array
+  cannot distinguish "looked and found none" from "the relevant side was not photographed". The prompt rightly says "absence of evidence is not evidence of
+  damage" but there is no field to say "unknown". `expectedTake` and `summary` are free prose.
+6.6 CV-05  The five text-vs-image cases, today (CONFIRMED by reading)
+  A text and photo agree on damage     : text impact applies; photo flaw (if enabled) only draws a badge. OK by accident.
+  B text reports damage, photo does not show it : text wins and the seller report is preserved (correct, because vision never touches impact).
+  C photo shows undisclosed damage     : flaw saved only if researchCondition=true; NO valuation effect, no contradiction flag. MISSED (CV-01).
+  D ambiguous image                    : empty flaws[] indistinguishable from "none". Not representable.
+  E no visible damage                  : nothing recorded; summary prose may say "looks mint"; no "no visible damage detected" state, and no coverage.
+6.7 Recommendation (target behaviour; see section 10.4 for the data model)
+  - Structured condition evidence per listing: [{defectClass, area, severity (cosmetic|functional|unknown), source (text|vision|user|aspects), photoRefs,
+    confidence, quote/bbox}]. Defect classes from the brief: cracked_screen, cracked_back_glass, damaged_frame, scratches, dents, broken_display,
+    missing_parts, damaged_ports, bent_hardware, hinge_damage, corrosion, broken_housing, plus nonvisual_fault (does not power on, no signal, locked)
+    which ONLY text or the user can evidence (vision never asserts them).
+  - Merge rule (no double count): one defect = one (class, area); text and vision evidence of the same defect confirm each other (confidence up, one
+    deduction); a vision-only defect is "undisclosed damage" (contradiction flag; deduction applied at its confidence-weighted value, never above
+    the class cap); a text-only defect the photos cannot show is kept as reported (case B); text-says-damage + photos-clearly-show-that-area-intact
+    is flagged "seller reports X; photos show no sign" and the seller's report STILL stands for pricing.
+  - Valuation: value_adj = comps(condition-matched if available) - repairCost(defect, product class) or x(1 - discount(defect, class)), whichever the
+    evidence supports; output a RANGE (low/likely/high) and widen it for low-confidence or unknown coverage; the gate uses the conservative end for
+    "profitable now" and the likely end for "negotiation" (existing gate states). The Deal Quality Gate gets a new fact (conditionAdjustmentUsd,
+    conditionRange, conditionEvidence[]) and reason codes (UNDISCLOSED_DAMAGE, DAMAGE_UNCERTAIN, NO_VISIBLE_DAMAGE_DETECTED).
+  - Language rule: never "mint verified". Case E renders "No visible damage detected in N photos (screen side not shown)".
+  - Cost control: run the dedicated condition pass only for listings that already clear text+price pre-qualification (about 5-10% of evaluated
+    listings), reuse the photos already downloaded for identification, and merge it into the existing analyzeListingPhotos call when that call runs anyway
+    (the incremental cost is output tokens only, ~150-300). Never run it in Save-credits mode unless the listing is a candidate deal (existing rule).
+  - Repair-cost / discount table: seed from sold-comp medians where a "cracked" sold set is available; otherwise a small hand-curated table per product
+    class kept in one file, shown in the UI as an assumption the user can edit. (Open question 15.5.)
+  Tests: condition-probe text table as assertions with the new lexicon; the five cases as a state table; no-double-count tests (text "cracked screen"
+  + vision cracked_screen => one deduction); range tests; "vision cannot assert nonvisual faults".   Regression risk: HIGH if enforced
+  immediately (changes qualification) => ship as shadow (compute, display "would have changed"), then enforce.
+
+
+================================================================================
+7. LIBRARY FILE-EXPLORER ARCHITECTURE  (Change 4)
+================================================================================
+Goal: keep today's Library look and auto-organization; add create / nest / rename / move / delete folders, move products, rename entries, add / remove /
+replace / reorder images, choose thumbnails, correct filing - from the UI and from chat, through ONE backend, without silently changing identity or valuation.
+
+7.1 What the Library is today (CONFIRMED)
+  Folders: NOT filesystem directories (images live as base64 text in SQLite), NOT SQLite records, NOT generated paths on disk: they are a VIRTUAL GROUPING -
+  products.category (AI string, one level, default "Other") then products.family (AI string path "A > B > C") parsed in the renderer (5.2).
+  IPC surface for Library mutation today: products:createManual (name+category, optional picture), products:edit (name, summary, resale price/time,
+  desired price/cap, prioritized, keepThumbnail), products:pickThumbnail, products:setThumbnailFromImage, products:addImage, products:deleteImage,
+  products:delete, products:clearAll, products:refresh, images:feedback. Missing: any folder op, move product, set category/family, reorder images,
+  replace image, restore, undo, soft delete.
+  Chat tools for the Library today (chat.ts): research_product, add_reference_photos, find_products, add_product_watch_note, add_blacklist_term,
+  remove_blacklist_term (+ web_research). Missing: every explorer operation. The Database chat allows 6 tools and the product chat 5; the dashboard chat has none of the Library tools and the global bar only research_product, add_reference_photos and find_products.
+
+7.2 Recommended design (safest): a real folder tree layered ABOVE the existing virtual one
+  Tables (additive, section 12):
+    library_folders(id TEXT PK, parent_id TEXT NULL REFERENCES library_folders(id), name TEXT NOT NULL, name_key TEXT NOT NULL (casefolded, trimmed),
+                    position INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT 'user', created_at, updated_at, deleted_at NULL,
+                    UNIQUE(parent_id, name_key) WHERE deleted_at IS NULL)
+    products.folder_id TEXT NULL (user placement; NULL = "use auto-organization")
+    products.name_locked INTEGER, products.deleted_at INTEGER NULL
+    library_ops(id, at, actor ('ui'|'chat'|'system'), op, args_json, inverse_json, batch_id, undone_at NULL)    -- audit + undo
+  Effective location of a product = folder_id path when set, else the auto path (category > family). The auto-organized tree stays exactly as is
+  (including new products and the AI); a user-placed product is NEVER touched by updateProductProfile (guard: when folder_id IS NOT NULL the research
+  write skips family/category, or better: research writes go to suggested_family and only fill `family` when folder_id IS NULL).
+  Why not other options:
+    - Filesystem directories: would split truth between disk and SQLite, break backups/integrity/cloud, add path-injection/permission surface (the app
+      already hardens windowSecurity/safeFs) and buys nothing because images are not files.
+    - Just rewrite products.family: no empty folders, no ids, rename = N writes, collides with AI overwrite and fuzzy resolveFamilyName (5.2).
+  The auto tree can be "adopted": an explicit user action turns an auto folder into a real one (creates library_folders rows from the family paths and
+  sets folder_id on its products) - never implicit.
+7.3 One backend: libraryOps.ts (new, main process), typed and pure over the Store
+  Ops: createFolder{parentId,name}, renameFolder{id,name}, moveFolder{id,newParentId}, deleteFolder{id,mode:'move_contents_up'|'trash_with_contents'},
+  moveProduct{productId,folderId|null}, renameProduct{id,name}, setProductCategory{id,category}, addImage{productId,source}, removeImage{imageId},
+  replaceImage{imageId,source}, reorderImages{productId,orderedIds}, setPrimaryImage{productId,imageId}, setThumbnail{productId,imageId|null},
+  reassignImage{imageId,toProductId} (the "correct filing" op; runs the identity gate in advisory mode and records the verdict), restore{opId}, undo{opId}.
+  Each op: validates (exists, not deleted, permission, name rules), runs inside ONE `BEGIN IMMEDIATE` transaction, writes library_ops with its inverse,
+  bumps products.updated_at (cloud LWW), emits one "library:changed" event, returns {ok, opId, summary, needsConfirmation?}.
+  UI (Database.tsx) calls them through new IPC `library:op`; chat calls the SAME functions through a single chat tool `library_op` (typed args = the op union)
+  plus read tools `library_list` / `library_find` (extend find_products). No second implementation of any rule; the chat tool is a thin adapter.
+7.4 Safety rules
+  - Soft delete only: products/images/folders get deleted_at; a Trash view restores for 30 days (configurable), purge is explicit. (Fixes LB-02 by
+    construction; also makes undo of delete possible.) Hard delete stays internal for tests/clearAll.
+  - Confirmation: ops are classified. Reversible & local (rename, move one product, reorder, set thumbnail) => execute + undo toast. Bulk or destructive
+    (delete folder with contents, move > 10 items, replace image, merge) => needsConfirmation, rendered as a typed choice (section 8.3) in chat or a
+    modal in UI; the op executes only with the confirm token returned by the first call (so a model cannot "confirm" for the user).
+  - Integrity: parent must exist and not be deleted; moveFolder rejects cycles by walking ancestors (depth limit 8); name rules (trim, no "/" or ">" or
+    control chars, <=80, no reserved "Needs review"/"Trash" at root); sibling name collisions are rejected with a typed error offering rename or merge-into.
+  - Identity is untouched: moveProduct/renameProduct do not rewrite family, identity or comps; rename of a product is a DISPLAY name change that re-runs
+    the identity resolver only as a suggestion (a rename that changes the model tokens shows "this changes what the product is" and needs confirmation);
+    comps/valuation stay attached to product id, not to its folder.
+  - Images: reassignImage and replaceImage run the identity gate and, if the gate disagrees, ask (never silently); user is authoritative, so the result
+    is stored status='user' with the verdict recorded as a warning, not blocked.
+  - Concurrency: the scanner/audits write the same tables between awaits in the single main process. Ops re-read and validate inside the transaction;
+    background writers use the same fileImage/libraryOps functions (so they hit the same validation and see deleted_at). Optimistic check
+    expectedUpdatedAt on bulk ops; a stale one returns {ok:false, reason:'changed'} with the current state.
+  - Duplicates / collisions: images dedupe by content_hash per product (offer "already there"); two products with the same duplicate key are NOT merged
+    by an op; the existing mergeDuplicateProducts is converted to propose-only (review queue).
+  - Permissions: single-user local app; the relevant boundary is "chat may only call library_op, never raw SQL", ops validate ids against the open
+    account's Database, and cloud accounts: ops go through the same Store so productSync's LWW applies unchanged. Image bytes accepted from the renderer
+    are re-validated in main (type sniff, <=8 MB, re-encoded) - today setThumbnailFromImage trusts any string (4.5).
+  - Audit log: library_ops (actor, op, args, inverse); chat-initiated ops are labelled; surfaced in AI Activity > Decisions and the Library "History".
+  - Cloud sync: today only name/category/family etc. sync (006_products.sql); images, thumbnails, parent_product_id, variant evidence do not. Folders:
+    Beta 13 ships LOCAL-ONLY (documented), because a cloud table + endpoints + conflict rules for a tree is its own project; the product's folder_id is
+    not in user_products so another device shows the auto tree. Risk accepted/flagged in 15.4. upsertProductFromCloud must NOT clobber folder_id.
+7.5 UI (keep what exists)
+  Keep Database.tsx tile/collage layout, search, sort, navState memory (Beta 12). Add: breadcrumb actions, "New folder", drag-and-drop or "Move to..." for
+  products and folders, rename (F2 / inline), delete -> Trash, multi-select, per-product gallery edit mode (reorder by drag, set primary, replace, remove,
+  "wrong product" -> opens the review panel), and the "Needs review" smart folder (5.7). Auto-organized folders are visibly auto (small AI badge) and can be
+  "adopted". The renderer builds the tree from libraryTree() returned by main, not by re-parsing strings, so there is one tree implementation.
+7.6 Tests: libraryOps.test.ts (cycle, collision, depth, soft delete + restore, undo of every op, confirm token, stale expectedUpdatedAt, research does not
+  overwrite folder_id, family/category untouched by move, FK/delete order, concurrent writer simulated between awaits, cloud upsert keeps folder_id),
+  chat adapter test (tool args -> same op results; unknown ids; confirmation round trip), renderer tree test.   Risk: MEDIUM (touches Database.tsx, the
+  largest screen); mitigate by keeping the old grouping path as the fallback when folder_id is NULL everywhere.
+
+
+================================================================================
+8. CONVERSATIONAL UX ARCHITECTURE  (Change 5)
+================================================================================
+8.1 Today (CONFIRMED)
+  Three separate renderer chats: DiscoveryTab (database context, product focus, images up to MAX_IMAGES + text files), Activity.tsx dashboard chat
+  (max 4 images, 8 MB each), GlobalAssistantBar (global; NO attachments), plus the Database page product chat (Database.tsx:3172 startChat, NO attachments).
+  So 2 of 4 chats cannot attach. All use window.api.startChat -> ipc "ai:chatStart" (index.ts:5184) -> streamChat (chat.ts:912).
+  Events: ai:chatChunk, ai:chatDone, ai:chatError, ai:searchUpdate (a text message that Activity.tsx and GlobalAssistantBar.tsx APPEND into the assistant message
+  content, e.g. `m.content + "\n\n" + message` - so tool progress text becomes part of the saved history sent back to the model on the next turn: pollution;
+  DiscoveryTab does not subscribe),
+  ai:narration* (separate, not chat). No progress/elapsed events, no cancel (no ai:chatCancel, streamOnce's AbortController is only a timeout),
+  no structured choices (choices are plain text the model writes, then parsed back with regex in chatIntent.followUpHint), tool timing exists only in the
+  server-side trace (recordStage chat_tool_<name>).
+  Shared already: lib/stickToBottom.ts (useStickToBottom). Attachments are NOT in history by design (chat.ts:14-19 comment: re-sending base64 on every turn
+  would bloat requests) - so a follow-up question about "the photo" loses the photo (silent drop of context across turns).
+  Tool surface: dashboard 16, database 6, product 5, global 19 (= dashboard + research_product, add_reference_photos, find_products).
+8.2 5A Drastically shorter answers  (priority 1, smallest change)
+  Today: clynxPersona.ts:14 "A few short paragraphs at most", :31 "Be brief: a few sentences". Reality (chat-audit.cjs measures time, not length).
+  Design: (1) a single REPLY_STYLE block placed LAST in every system prompt: "1-3 sentences. No restating the request. No 'I've done X' after a tool
+  already reported it. Give numbers and warnings; skip reassurance. If a tool failed say the failure and the next step in one sentence. Lists only for
+  >=3 comparable items." Keep the explicit exceptions: money figures (price, profit, margin, max buy), safety/scam warnings and anything irreversible
+  are never dropped. (2) Provider-side: send `verbosity: "low"` for the GPT-5 family if accepted (NOT VERIFIED: that the cloud proxy and the model
+  accept it; the proxy forwards unknown body keys, clampChatBody only clamps tokens/n) and lower max_completion_tokens for chat from 900 to ~350 with
+  a continuation rule only for requests that explicitly ask for detail. (3) Deterministic post-processing guard (like promiseGuard): strip known
+  confirmation boilerplate ("Sure!", "I've gone ahead and...") and, when a tool result already produced a user-visible status line, suppress a second
+  confirmation. (4) Measure: extend scripts/chat-audit.cjs with words/sentences per reply and a rubric (financial facts preserved, warnings preserved).
+  Tests: unit test on the guard; chat-audit threshold (median <=40 words for action replies, <=80 for questions) - real model, owner-run.
+  Risk: LOW-MEDIUM (a too-terse model may omit the reasoning behind a deal call: keep a "why" slot of one sentence).
+8.3 5B Typed structured-choice protocol
+  Why not parse text: today's "A) ... B) ..." menus are exactly what the audit scenarios 3-6 showed users answering with "both"/"yes"; regex recovery
+  (followUpHint) is a patch. Protocol: a new tool `ask_choice` (available in every context) with schema
+    { id, question, options:[{id, label (<=40 chars), detail?, kind?:'default'|'destructive'|'cancel'}], multi?:boolean, allowText:true (always),
+      expiresInTurns?: number }
+  The tool returns immediately ("choice presented, wait for the user") and the model ends its turn. Main emits ai:chatChoices {requestId, choice}.
+  Renderer shows buttons (variable count, wraps, keyboard 1-9), free text stays enabled (typing = an implicit "other"). Clicking sends a normal chat
+  turn whose payload is {choiceId, optionId, label} and whose history text is "[choice] <label>" so the model sees a plain, unambiguous answer. Stale
+  choices disable after the next user turn. Destructive options require a second explicit confirm (also used by libraryOps confirm tokens, 7.4).
+  Context-sensitive sets are the model's job plus code-side presets for the common ones: scanner/search flow (Add to Search For / Include variants / Not now),
+  product ambiguity (the candidate entries from find_products), photo flow (Official photos / Real listing photos / Both - replaces the A/B text menu),
+  library ops confirmation (Confirm / Cancel), identity review (Keep here / Move to X / New entry / Quarantine).
+  Guardrails: max 6 options; labels sanitized; choices never carry executable instructions (ids are looked up server-side); no choice for the
+  frustrated/repeat case (existing rule: do the task).
+  Tests: schema validation; renderer renders N options; click -> history text; stale disable; confirm round trip; promise guard unaffected.   Risk: LOW.
+8.4 5C Image attachments in every chat
+  Design: ONE composer component (ChatComposer) + lib/chatAttachments.ts used by Discovery, Activity, Global bar and the Database product chat, replacing
+  the two divergent implementations: drag/drop + paste + picker; up to 4 images (policy constant); preview chips with remove; type sniff by magic bytes
+  (jpeg/png/webp/gif; reject svg/heic with a clear message), client-side downscale to <=1568 px longest side and JPEG q~0.85 (cuts a 8 MB photo to a few
+  hundred KB, strips EXIF/GPS - privacy), total request budget ~6 MB so the Clynx Cloud body limit (10 MiB, cloud/src/index.ts:48) cannot be hit
+  (today 4 x 8 MB raw = ~43 MB base64: UX-02). Main re-validates the payload (never trust renderer): count, bytes, data-URI shape, then builds image_url
+  parts with `detail:"auto"` (or "low" for an Identify-by-sight question, saving tokens).
+  Never silently dropped: (a) context -> if the route/model cannot see images (non-vision model name, route flag), the send is BLOCKED with a visible
+  message, not sent without the image; (b) continuity -> history keeps a compact record per attachment ("[photo 1: name, 1024x768]") plus an optional
+  1-sentence model-written description captured after the first turn, so a follow-up still knows what "the photo" was; the pixels are re-sent only when
+  the user re-attaches or says "look again" (explicit, cost-aware); (c) partial failure -> unreadable files are listed by name.
+  Cloud routing: shared mode goes through the Clynx Cloud proxy, which meters tokens (images count as prompt tokens in estimatePromptTokens - verify the
+  estimator counts image parts: NOT VERIFIED) and has plan limits; the composer shows a small "N photos ~ X tokens" hint in shared mode.
+  Privacy: local EXIF strip; images are never written to the engine log; AI Activity decision images are the 120 px thumbs (aiDecisionLog) - attachments are
+  not added to AI Activity by default.
+  Tests: attachment validator (types, sizes, magic-bytes spoof), downscale function, request builder, all four chats expose the composer (render test),
+  blocked-send when vision is unavailable, cloud-size budget test, history record test.   Risk: LOW-MEDIUM.
+8.5 5D Real elapsed-time status
+  Design: tool and model phases emit REAL events from streamChat (chat.ts runOne wraps each tool already; the rounds already have start timestamps):
+    ai:chatStatus { requestId, stepId, kind:'model'|'tool', label, state:'start'|'update'|'end', startedAt (ms epoch), ok?, detail? }
+  The renderer renders "Researching eBay... 8s" by ticking a local interval from startedAt (no per-second IPC), replaces it with the final line on end,
+  and removes it when the answer arrives. It is ephemeral component state - never put in history, never appended to the assistant message (this replaces
+  the ai:searchUpdate text append, fixing the pollution). Labels come from a table keyed by tool name + the REAL sub-phase when the tool reports one:
+  executeChatTool already accepts an onUpdate callback (index.ts ~5226) - extend it to carry phases; research_product maps the existing `discovery.note`
+  steps ("Evidence check", eBay comps, photos) to labels, so "Researching eBay" appears only while eBay work is actually running. No chain-of-thought is
+  shown or logged (status text is code-authored, not model-authored).
+  Streaming: first text chunk ends the "Thinking" step. Parallel tools (PARALLEL_SAFE_TOOLS) show as concurrent lines. Cancellation: new ai:chatCancel
+  {requestId}: aborts the streaming fetch (signal already plumbed to callOpenAI), stops starting new tool rounds, and for tools without abort support
+  marks "stopping after current step" (research_product keeps running in the background by design and says so). Timeouts: model round (OPENAI_TIMEOUT_MS),
+  photo search 170 s, market check 150 s are surfaced as "timed out after Ns" rather than silence. Failures: step ends with ok=false and a one-line reason
+  (also the single place a failure is reported - avoids duplicate "I couldn't" sentences). Interruptions: window reload/close => main gets 'destroyed'
+  sender; guard every event.sender.send with isDestroyed(). Concurrency: events carry requestId + stepId; Discovery, Activity and Global may stream at the same
+  time without crosstalk.
+  Tests: fake-clock test of the status reducer; ordering (start before end), parallel steps, cancel mid-tool, timeout label, no status in history,
+  destroyed-sender safety.   Risk: LOW-MEDIUM (touches chat.ts/index.ts/preload and all three renderers; mitigated by the shared hook below).
+8.6 5E Keep Beta 12's separation
+  User conversations (Discovery chat, Activity chat) and automated activity (engine log, AI Activity, discovery feed events) stay separate surfaces and
+  separate state (discoveryStream.ts / activityView.ts). The new shared pieces are a hook useChatEngine(contextConfig) (send, stream, status, choices,
+  cancel, attachments) and ChatComposer; they carry no knowledge of the log/feed. Status events are chat-turn scoped and are NOT pushed into the
+  Activity log. Add a test that the automated-event stream renders nothing into a chat transcript and vice versa.
+
+
+================================================================================
+9. DATA CONTAMINATION RISKS  (the full chain)
+================================================================================
+The chain asked about, each link with its status:
+  wrong image                 (any of the 7 unchecked machine writers, 4.1; a title-less web result in Save-credits mode)                    CONFIRMED
+  -> wrong product            (first-match findMatchingProduct, generic entry absorbs, game/accessory resolves to console; picture-named creation) CONFIRMED
+  -> contaminated gallery     (no write-time verdict, no provenance, no quarantine; gallery audit only at 3/10 photos, consensus, off in Save-credits) CONFIRMED
+  -> future recognition       (newest photo = reference, 4.2; matchedKnownProduct uses 1 photo per recent product; claimed-item ground truth = 2 newest) CONFIRMED
+  -> wrong comps / value      INDIRECT. Comps come from name-based eBay/WatchCount queries and title-checked classifyComparable; a wrong GALLERY does not
+                              change comps directly (good). It changes (i) matchesClaim: a contaminated reference makes the vision check say "not the claimed
+                              product" => listing demoted/rejected (missed deal), or "yes" for a lookalike (false deal passed to the gate, which then values it
+                              from the wrong product's comps if the NAME also resolved wrongly), (ii) lookoutNotes (4.6), (iii) which product a listing is filed under.
+                              A wrong PRODUCT NAME (ID-03) changes comps directly: getEbayValueForProductName takes the first fuzzy match, partially defended by
+                              the title checks at store.ts:979-987. The display layer is defended; the filing/linking layer is not.     CONFIRMED (mechanism)
+  -> missed or false deal     measurable only with the owner's data (Discovery benchmark has no picture corpus)                                    NOT VERIFIED
+Where to interrupt the chain (in order of leverage): (1) the single writer + gate (3.2) - stops new contamination; (2) best-match resolution with
+"unresolved" (3.4) - removes wrong targets; (3) reference selection by status/diversity not recency (4.2) - limits blast radius of any residual bad photo;
+(4) quarantine + review for existing data (5.7) - repairs history without deleting; (5) pictures cannot name products (3.3).
+Does identity/condition evidence keep source and confidence? No (3.9). Beta 13 adds both (section 10).
+Impact by system (what changes / what could break):
+  Discovery         files via runProductLookup/fillReferencePhotos/createSpecificModel: gate + quarantine; Discovery feed gets new step lines ("kept a photo for review").
+  Search For        variants/matching (variantFamily, matchSearchItem) are separate from Database matching; unaffected unless the shared attribute model replaces
+                    variantIdentity (do it behind an adapter; section 11 step 2). linkedProductId needs repointing logic on merge (exists).
+  Database/Library  schema additions, new writer, tree service, review queue, Trash.
+  Watch / eBay      watch matching uses its own matcher (watchMatching.ts, ebayEngine); valuation reads products; condition adjustment applies to both.
+  WatchCount        unchanged; condition-matched comps would add queries ("cracked") = more Playwright tab time (rate-limit and cache; section 14).
+  Reference-photo verification / OpenAI vision    prompts change; structured output; cost section 14. AI Activity: new decision kinds ('identity_gate',
+                    'condition_check', 'library_op') using the existing noteDecision.
+  Cloud sync        names/category/family continue to sync LWW; images/folders/identity JSON stay local (documented); upsertProductFromCloud must not overwrite
+                    folder_id/identity status; resolveFamilyName fuzzy collapse should not run on cloud-supplied families unaudited.
+
+
+================================================================================
+10. SHARED SYSTEMS AND DESIGN
+================================================================================
+10.1 Principles
+  P1 Evidence over assertion: every identity or condition attribute is {value, source, confidence, evidenceRef, at}.
+  P2 Text proposes, pictures confirm or contradict, users decide. Pictures never create/rename/re-file.
+  P3 Conflict => unresolved => visible and reversible. Uncertainty is stored, not erased.
+  P4 One writer, one gate, one operations service.
+  P5 Additive, flagged, shadow-first, rollbackable.
+  P6 Nothing is auto-deleted, auto-merged, auto-split or auto-renamed. Machines quarantine and suggest; people (or an explicit confirmed chat action) apply.
+10.2 Unified product identity model  (new module identityModel.ts; compIdentity/photoIdentity/variantIdentity become adapters)
+  Attributes (each {value, source: title|description|aspects|ocr|vision|user|web|db, confidence: high|medium|low, evidence}):
+    manufacturer, categoryType (console|handheld|gpu|phone|laptop|accessory|game|...), family, model, generation, tier (slim|pro|oled|lite...),
+    configuration { drive: disc|all-digital|na, storage, ram, boardDesign (AIB line), connectivity, ... }, edition (special|limited|bundle name),
+    colorFinish, region (NTSC-U/J/EU, import), lock (carrier/iCloud/unlocked), sku/mpn/modelNumbers[], aliases[].
+  Materiality classes: IDENTITY (manufacturer, categoryType, family, model, generation, tier) - different value => different product, always;
+    VALUE (storage, drive, edition, boardDesign, region, lock, sku) - different => different entry for photos, comps compared with a stricter weight;
+    COSMETIC (colorFinish) - different product ONLY when colour is tied to an edition/configuration (Galaxy Black SE, Robot White All-Digital,
+    limited Halo) or the category table says so; otherwise a colour variant of the same entry (photo gallery scope "any colour"); LISTING-LEVEL
+    (condition, accessories, bundle contents) - never part of product identity.
+  Resolution output: {status: resolved|partial|unresolved|conflict, level: family|model|configuration|sku, attributes, missing[], conflicts[]}.
+  Rules: (R1) conflicting hard attributes => conflict; (R2) vision-only attributes cap at confidence medium and cannot override a title model;
+    (R3) an attribute absent from evidence is "unknown", not "matches"; (R4) generic entries ("Xbox Series") resolve at level family and CANNOT absorb a
+    model-level listing - the listing attaches to the most specific existing entry or is unresolved; (R5) headline-noun parse decides
+    console-with-extras vs accessory-for-console; (R6) never infer a model from appearance alone.
+  Gate API: decideFiling(evidence, target, mode) => {outcome: file|quarantine|reject|review, reasons[], verdict} used by fileImage, libraryOps.reassignImage,
+    the audit, importers. compIdentity.classifyComparable keeps its verdict names and gains the new attribute codes (DRIVE, BOARD_DESIGN, REGION, LOCK,
+    SKU); the existing 75 tests must stay green (adapter, not rewrite).
+10.3 Reference-image model: product_images gains status (trusted|unverified|quarantined|user|legacy), source_kind, source_url, verdict_json, content_hash,
+  sort_order, is_primary, origin_product_id, deleted_at. Reference selection (4.2) uses status in (trusted,user,legacy-unsuspected). Review queue table
+  review_items(id, kind image|product|merge, subject_id, reasons_json, evidence_json, state open|accepted|rejected|snoozed, created_at, resolved_at, resolved_by).
+10.4 Condition evidence model: listing_condition(listing_id, defect_class, area, severity, source, confidence, photo_ref, quote, created_at) +
+  adjustment summary on the gate facts (6.7). Shared with Watch/eBay engines through dealGate.
+10.5 Shared services: identityModel.ts, identityGate.ts, fileImage.ts, libraryOps.ts, reviewQueue.ts, conditionEvidence.ts, chatEngine hook + ChatComposer +
+  chatStatus reducer + ask_choice tool. All have flags (section 12) and AI Activity decision logging.
+
+
+================================================================================
+11. IMPLEMENTATION SEQUENCE  (convertible into a Beta 13 build prompt)
+================================================================================
+Ground rules for the build: version 0.3.0-beta.13 only when the owner says so; every behaviour change behind a flag in config.json `beta13` with
+off | shadow | enforce where it changes decisions; shadow first (compute + log to AI Activity, change nothing), enforce after the owner's data shows
+the disagreement rate; additive migrations only; npm test and typecheck green at every step; nothing published/registered by the agent.
+
+WP0  Scaffolding and safety (1 d)          files: config.ts, types.ts, store.ts (migration helper), dbBackups use, aiDecisionLog.ts (new kinds)
+     - config.beta13 flag block (defaults: identityGate "shadow", conditionEvidence "shadow", libraryTree "on" but inert until used, chat features "on").
+     - createBackup() before the first Beta 13 migration (dbBackups.ts already verifies the copy).
+     - Promote scripts/beta13-audit probes into permanent assertion tests as each WP lands (they currently print, assert nothing).
+WP1  Data model + delete fix (1.5 d)       files: store.ts, types.ts, __tests__/storeBeta13.test.ts
+     - Additive DDL (section 12). deleteProduct deletes images first in one transaction (fixes LB-02 even before soft delete); soft-delete columns + filters
+       in listProducts/listProductIndex/findMatchingProduct/listProductImages.  New listProductImageMeta() (no image_data) for lists/selection.
+WP2  Unified identity model + gate (6 d)   files: NEW identityModel.ts, identityGate.ts, identityEvidence.ts; compIdentity.ts, photoIdentity.ts,
+                                           productKind.ts, variantIdentity.ts, colors.ts, store.ts (best-match resolver), research.ts (cleanFilingName)
+     - Attribute extraction from title/aspects; DRIVE, BOARD_DESIGN, REGION, LOCK, SKU codes; headline-noun accessory/console rule + bundle allow-list; widen
+       accessory lexicon (case, pouch, stand, grip, skin, decal, strap, dock-only...). Fix false rejects (Joy-Con in console title, "battery" in revision title).
+     - resolveProduct(): score all candidates, unique-best-with-margin else unresolved; platform-named games/accessories resolve to their own kind first.
+     - Adapters keep classifyComparable/judgeCandidateByText signatures; the 75 existing test files stay green.
+     - Assertion tests = identity-probe A-F tables + store-probe section 1/2 tables.
+WP3  Single picture writer (3 d)           files: NEW fileImage.ts; index.ts (13 call sites), scrapeEngine.ts, referencePhotos.ts, webResearch.ts, vision.ts
+     - fileImage(productId, bytes, evidence{sourceKind,title,url,proposer}, mode) => filed|quarantined|rejected|review; trusted only when the gate says
+       match (exact title, or vision "yes" with structured evidence). Save-credits: generic/multi-design entries need exact strength else `unverified`.
+     - Structured vision verdict (formFactor, visible text, discriminator checklist per category, matchesProposed yes|no|cannot_tell, confidence).
+     - Remove picture-named creation: onNewProductFound/createPlainProduct/createSpecificModel names must come from text/aspects/user; a vision-only name
+       becomes a review item. Gallery audit and images:feedback become suggest-only (WP4). addProductImage private; repo test enforces it.
+WP4  Review queue + repair of existing data (3 d)   files: NEW reviewQueue.ts; store.ts; index.ts (audit/feedback/merge rewrites); Database.tsx (panel);
+                                                    scripts/library-audit.cjs (promote library-db-audit)
+     - review_items table; "Needs review" smart folder; side-by-side evidence panel; typed actions (Keep / Move to / New entry / Quarantine / Remove) via libraryOps.
+     - One-time non-destructive backfill: existing images -> status 'legacy'; those whose source title contradicts the product (judgeCandidateByText mismatch)
+       -> status 'needs_review' (excluded from reference use, still visible, deleted nothing). mergeDuplicateProducts -> propose-only.
+WP5  Library tree + operations (6 d)       files: NEW libraryOps.ts; store.ts; index.ts (IPC library:*); preload; Database.tsx; chat.ts (library_op, library_list)
+     - Section 7 in full: folders table, folder_id, ops with undo log, Trash, confirmation tokens, research no longer overwrites a user placement,
+       shared tree builder (main) replacing renderer string parsing, navState (Beta 12) extended to folder ids with fallback to segment paths.
+WP6  Reference selection + thumbnails (2 d)  files: store.ts, scrapeEngine.ts (runPhotoAnalysis), index.ts (thumbnail), Database.tsx (FamilyTile)
+     - Select by status/quality/diversity (not recency); is_primary; thumbnail_image_id pointer; collage derived at render; group thumbnail from verified members;
+       pinned/primary/user photos exempt from the 20-cap prune; difference analysis uses verified photos only.
+WP7  Condition evidence + valuation (6 d)  files: NEW conditionEvidence.ts, conditionAdjust.ts; conditionParser.ts, vision.ts, scrapeEngine.ts, dealGate.ts,
+                                           resaleMath.ts, scorer.ts, preAlert.ts, store.ts (listing_condition), ListingCard.tsx, config.ts
+     - Lexicon expansion + defect classes; vision condition schema (class, area, severity, confidence, coverage, nonvisual never asserted); merge rule; adjustment
+       with range; gate facts + reason codes; shadow display "would change"; single constant source (delete the duplicate multiplier table).
+WP8  Chat foundation (5 d)                  files: NEW renderer lib/useChatEngine.ts, components/ChatComposer.tsx, lib/chatAttachments.ts, lib/chatStatus.ts;
+                                           chat.ts, chatIntent.ts, index.ts (ai:chat*), preload/index.ts, DiscoveryTab.tsx, Activity.tsx, GlobalAssistantBar.tsx, Database.tsx
+     - Shared hook + composer in all four chats; attachments pipeline (downscale, sniff, budget, history record, blocked-send); ai:chatStatus + ai:chatCancel;
+       ask_choice tool + ai:chatChoices + buttons; removal of the ai:searchUpdate text append; destroyed-sender guards.
+WP9  Brevity (1 d)                          files: clynxPersona.ts, chat.ts, scripts/chat-audit.cjs, __tests__/chatBehavior.test.ts
+WP10 Integration, release notes, owner validation kit (2 d)   files: release-notes/0.3.0-beta.13.txt, scripts/*, docs
+Total 36.5 engineer-days (range 28-42 depending on how much of Database.tsx must be restructured and how much vision tuning the owner's corpus needs).
+Dependencies: WP1 before everything; WP2 -> WP3 -> WP4 -> WP5(reassign) ; WP6 after WP3; WP7 and WP8/WP9 are independent tracks that can run in parallel
+with the identity/library track. Minimum viable Beta 13 if scope must shrink: WP1, WP2, WP3, WP4 (stops and repairs contamination), WP7 in shadow,
+WP8 status+attachments, WP9. Folders UI (WP5) is the largest user-facing item and the one most likely to slip safely to Beta 13.1.
+Conflicts with Beta 12 (CONFIRMED by reading) and how to resolve:
+  1. photoIdentity gate is Beta 12's contract: keep exports and tests; reimplement behind identityGate (adapter), do not delete.
+  2. fileableWithoutPicture(compatible) was a Beta 12 decision: reversed for generic / multi-design entries (4.9).
+  3. Beta 12 gallery audit auto-delete/move contradicts "never auto-delete": becomes quarantine + suggestion.
+  4. Beta 12 navState/Library memory stores category + segments: extend to folder ids, fall back to segments.
+  5. Beta 12 AI Activity decision ring: add kinds, keep 120 px thumbs; add "identity_gate" shadow records for the owner to review.
+  6. Beta 12 Search For persistence and listing lifecycle: untouched.
+  7. Beta 12 Discovery/Activity separation: preserved (8.6).
+
+================================================================================
+12. MIGRATIONS AND ROLLBACK
+================================================================================
+12.1 Additive DDL (ALTER TABLE ... ADD COLUMN, CREATE TABLE IF NOT EXISTS, via the existing constructor migration style + schema_flags for backfills)
+  product_images: status TEXT DEFAULT 'legacy', source_kind TEXT, source_url TEXT, verdict_json TEXT, content_hash TEXT, sort_order INTEGER DEFAULT 0,
+                  is_primary INTEGER DEFAULT 0, origin_product_id TEXT, deleted_at INTEGER
+  products:       folder_id TEXT, name_locked INTEGER DEFAULT 0, deleted_at INTEGER, identity_json TEXT, identity_status TEXT, suggested_family TEXT,
+                  thumbnail_image_id TEXT
+  new tables:     library_folders, library_ops, review_items, listing_condition (section 7.2, 10.3, 10.4); indexes on (parent_id,name_key), product_images(product_id,status),
+                  review_items(state), listing_condition(listing_id)
+  schema_flags names: b13-image-backfill, b13-suspect-pass, b13-content-hash (lazy, in batches so a large DB never blocks startup).
+12.2 Backfills (all non-destructive)
+  - existing images: status 'legacy'; content_hash computed lazily in the background (aHash is already implemented).
+  - suspect pass: judgeCandidateByText per titled image; mismatch => status 'needs_review' (excluded from reference selection, still shown with a badge); untitled
+    images stay 'legacy' and are only judged when the owner runs the optional re-verification (cost 14.2).
+  - products: identity_json filled lazily from the name by the extractor (source 'db', confidence low) - never overwrites a user value.
+12.3 Risks
+  - Making unverified images ineligible as references would starve vision (matchesClaim loses ground truth). Hence 'legacy' stays eligible except proven
+    contradictions. Measure reference coverage before/after in shadow.
+  - Soft-deleted rows reappear if the owner downgrades to Beta 12 (it does not filter deleted_at). Documented in release notes; a downgrade also ignores the new tables.
+  - node:sqlite ALTER TABLE ADD COLUMN on a 500 MB DB is metadata-only (fast); the backfill is batched.
+  - Cloud: no server migration. upsertProductFromCloud must not touch the new local columns (test).
+12.4 Rollback
+  - Per-feature flags (config.json beta13.*) can be set to "off" without a new build; "shadow" computes and logs only.
+  - Pre-migration verified backup (dbBackups.createBackup); restore path exists (requestRestore -> prepareDatabase moves the current DB aside, never deletes).
+  - Migrations are idempotent (CREATE IF NOT EXISTS, column-presence checks, schema_flags) - tested by opening a Beta 12 shaped database twice.
+  - Nothing in Beta 13 deletes user data; quarantined/trashed items are restorable.
+
+================================================================================
+13. TESTS AND VALIDATION PLAN
+================================================================================
+13.1 Deterministic tests to add (all runnable on the existing esbuild runner; no network)
+  identityModel.test.ts      attribute extraction + materiality + resolution status from the probe tables: Series X/S/White/All-Digital/Galaxy/Halo, MSI Gaming X Trio/Ventus/
+                             Armor, Switch Lite/OLED/HAC-001 revisions, iPhone unlocked/locked, region imports, SKU in title.
+  identityGate.test.ts       decideFiling for every probe row; fail-closed on evidence unavailable; Save-credits strictness; text MISMATCH is final over vision.
+  resolveProduct.test.ts     the 14 subjects of store-probe 1 (S(White) -> Series S, games/accessories never the console, generic never absorbs a model, unique-best else unresolved).
+  fileImagePaths.test.ts     path-table: each of the 13 sites with the Series X photo/title into the Series S entry => never 'trusted'; repo grep test: no other module calls addProductImage.
+  reviewQueue.test.ts        suggest-only audit/feedback/merge; apply via ops; undo restores bytes and status.
+  libraryOps.test.ts / libraryTree.test.ts   section 7.6.
+  conditionEvidence.test.ts  lexicon table (condition-probe rows incl. the currently-"none" ones), defect classes, five text-vs-image cases as a state table, no double count,
+                             nonvisual faults never from vision, range widening, language ("No visible damage detected", never "mint verified"), shadow vs enforce outputs.
+  dealGateCondition.test.ts  money table from condition-probe section 2 with the new adjustment (flat factor replaced; ranges; conservative vs likely end).
+  chatEngine.test.ts         status reducer with fake clock; cancel; parallel tools; no status in history; destroyed sender.
+  chatAttachments.test.ts    sniffing/spoof, downscale budget under the 10 MiB cloud limit, history record, blocked send, all four chats mount the composer.
+  chatChoices.test.ts        schema, rendering N options, click -> history text, stale disable, confirm tokens, promise guard still works.
+  storeBeta13.test.ts        migrations idempotent on a Beta-12-shaped database; delete order/FK; soft delete filters; cloud upsert keeps local columns.
+  brevity: chat-audit.cjs extended (OWNER-RUN, real model): words/sentences, financial facts + warnings preserved, 23 existing scenarios still pass.
+  Benchmarks: reuse _discoveryBench (must not regress recall/false-deal counts) and add an identity benchmark = the probe tables with precision/recall of "file correctly",
+  "refuse wrongly", "quarantine" per path.
+13.2 Live validation required (NOT VERIFIED today) - the owner runs these; none changes data
+  L1 Which build produced the screenshots: About version + library-db-audit section 1 (listing_reeval present?).
+  L2 Real contamination size: node scripts\beta13-audit.cjs library-db-audit "<copy of scout.db>" -> sections 2-5 (contradicting titles, appearance moves, fuzzy collisions);
+     paste the output back. Also scripts\photo-audit.cjs (existing) for the same lead list in CSV.
+  L3 Owner's FK schema: library-db-audit section 1 "foreign keys declared on product_images". Empty => deleting works today; non-empty => LB-02 reproduces; try deleting a throw-away
+     product WITH a photo and report the message.
+  L4 Vision accuracy (needs the real model and pictures): a labelled set of ~60 images the owner supplies or collects: 15 Series X (black, Robot White All-Digital, Galaxy), 10 Series S
+     (white, black), 10 Switch (standard, Lite, OLED, Metroid OLED), 15 game cases/art/accessories, 10 MSI RTX 2070 SUPER (Gaming X Trio, Ventus, Armor) + other brands. Run the
+     structured verification in shadow; success criteria: 0 wrong-model images marked trusted, >=90% correct images trusted or honestly 'cannot_tell', 'cannot_tell' never trusted.
+     Cost about $0.03 (14.2).
+  L5 Cloud body limit: in shared mode send 4 phone photos with the CURRENT build (expect HTTP 413 / chat error) and with the new downscaler (expect success).
+  L6 Whether gpt-5-mini accepts verbosity:"low" through own-key and Clynx Cloud routes (one-call test via api-diagnose.cjs extension).
+  L7 Real tool durations for the status labels (AI Activity already records chat_tool_* stages; read them after a normal day).
+  L8 Condition: 20 recent listings with known real condition; compare text-only vs text+vision adjustments in shadow; confirm UNDISCLOSED_DAMAGE precision.
+  L9 WatchCount sold lookups and the AI Activity panel against live data (carried over from Beta 12, still unverified).
+  L10 Windows: npm test (expect 75/75; the sandbox's startupErrors failure is Linux-only), npm run dist:beta, install, upgrade from a Beta 12 database copy, run a scan.
+13.3 Fixture inventory shipped with this audit (scripts/beta13-audit/): identity-probe.ts (A-F), store-probe.ts (1-9), condition-probe.ts (1-2), library-db-audit.ts. They are
+     the seed for the assertion tests above; their current output is recorded in this report's evidence lines.
+
+================================================================================
+14. PERFORMANCE AND API COST
+================================================================================
+Prices from the repo (apiActivity.PRICE_PER_MILLION): gpt-5-mini input $0.25 / output $2.00 per million tokens. Image token counts are ASSUMPTIONS (about 765 tokens for a
+1024 px image at auto detail; 85 at low detail) - the real figures should be read from AI Activity during the shadow phase; treat every number below as an estimate.
+14.1 Per operation (incremental over today)
+  Identity verification of one candidate image (1 image 765 + prompt 350 in, 120 out): about $0.0005. Today's binary check is ~60 output tokens: +$0.0001 (+20%) for structured evidence.
+  A new product's photo fill (up to ~12 candidates, text-mismatches never reach vision): <= $0.006, same order as today.
+  Condition: dedicated call (6 photos, 5.1k in, 300 out) about $0.0019 per listing; folded into the existing photo-analysis call about $0.0007 (extra 300 out + 250 prompt tokens).
+  At the owner's scale (~300 evaluated listings/day, condition pass on the 5-10% that clear text+price) = $0.01-$0.06/day dedicated, $0.01-$0.02/day folded.
+  Chat attachments: 1-4 downscaled photos = about 765-3,060 input tokens only on the turn they are sent: $0.0002-$0.0008. Brevity (900 -> ~350 max tokens) can only reduce output cost.
+  Status events, choices, library ops, review queue, folders: no API cost.
+14.2 One-time optional re-verification of existing galleries (user-triggered, non-destructive): batches of 8 images per call, about $0.0024 per 8 = $0.0003 per image;
+  2,000 images about $0.60. library-db-audit prints the real image count.
+14.3 Compute / memory / time
+  - Identity model and gate: pure, microseconds. resolveProduct builds a token index once per products-changed event (N=1,500 trivial).
+  - listProductImages(...) loads full base64 for every call (up to 20 x several hundred KB); add listProductImageMeta for lists and selection; only fetch bytes when drawing or sending.
+  - products:list already ships every product's image_url data URI to the renderer (Beta 12 note: ~600 ms main-thread block for 266 listings elsewhere) - the tree service should return
+    ids + small derived thumbs, not full-size data URIs. Out of scope to fix fully; do not make it worse.
+  - fileImage adds a download + aHash already performed by the web path; the manual/scanner paths gain hashing (fast with sharp).
+  - Defect-matched sold comps (6.4) add WatchCount Playwright tab time (several seconds per query): cache per (product, defect) for the existing MARKET_RECENT_MS window and budget with the
+    existing 2/visit, 12/pass market allowances.
+  - Vision work stays background / fire-and-forget as today, so the scan loop's critical path is unchanged.
+14.4 Total: typical incremental < $0.10/day; one-time re-verification < $1; test corpus run about $0.03.
+
+================================================================================
+15. OPEN QUESTIONS FOR THE OWNER
+================================================================================
+ 1  Quarantined / needs-review images: show dimmed with a badge in the gallery (recommended) or hide until reviewed?
+ 2  Colour policy: treat colour as value-defining only when tied to an edition/configuration (Galaxy Black SE, Robot White All-Digital, Halo LE) and cosmetic elsewhere (phones, laptops) - agree, and
+    which other categories are exceptions?
+ 3  OK to run the one-time, non-destructive suspect pass on existing galleries at first launch (marks needs_review, excludes from reference use, deletes nothing)?
+ 4  Folders local-only in Beta 13 (not synced between devices), or include a cloud migration (library folders + product folder_id) now?
+ 5  Condition adjustments: hand-seeded editable repair-cost / discount table per product class, or only derive from sold comps ("cracked" sold sets) and show "no estimate" otherwise?
+ 6  Dedicated visual condition pass only for qualifying listings (recommended) or every photo-analysed listing?
+ 7  Trash retention (30 days?) and does it cover images and folders?
+ 8  Choice buttons: max 6 options; keep a plain-text menu fallback when the model does not call ask_choice?
+ 9  Accept verbosity "low" + ~350 output tokens for chat, with "give me detail" as the opt-out?
+10  Keep picture-based matching of unmatched listings (matchedKnownProduct) - allowed only against verified references?
+11  Retire the Phase 4 safeguard, or leave it running in shadow for data only?
+12  Privacy: identity-gate decisions store a 120 px thumbnail in AI Activity (like Beta 12 decisions); chat attachments are excluded - OK?
+13  Windows: please confirm npm test is 75/75 on your machine (the sandbox's one failure is the Linux run of a Windows locked-file test).
+14  Will you supply the ~60-image labelled set for L4, or should the build collect one from your Library with your approval of each label?
+
+================================================================================
+16. EXACT FILES TO CHANGE
+================================================================================
+New (main):      identityModel.ts, identityGate.ts, identityEvidence.ts, identityVision.ts, fileImage.ts, reviewQueue.ts, libraryOps.ts, libraryTree.ts, conditionEvidence.ts,
+                 conditionAdjust.ts, chatStatus.ts (main-side step tracker)
+New (renderer):  lib/useChatEngine.ts, lib/chatAttachments.ts, lib/chatStatus.ts, lib/libraryTree.ts, components/ChatComposer.tsx, components/ChatChoices.tsx, components/ReviewPanel.tsx,
+                 components/TrashPanel.tsx
+Modified (main): store.ts (DDL, deleteProduct, listings of images/products, best-match, soft delete, selection, folders), types.ts, config.ts, index.ts (13 image sites, audit/feedback/merge rewrites, IPC
+                 library:*, ai:chat* events, thumbnails), scrapeEngine.ts (filing loop 2830-2912, runPhotoAnalysis 1143+, mismatchCorrection 2492+, qualification facts), referencePhotos.ts,
+                 webResearch.ts (free/AI photo paths, group image), vision.ts (structured verify, audit demoted, condition schema), productIdentity.ts (adapter; fail-open fixed),
+                 compIdentity.ts, photoIdentity.ts, productKind.ts, variantIdentity.ts, variantFamily.ts, colors.ts, research.ts (cleanFilingName), conditionParser.ts, scorer.ts, resaleMath.ts,
+                 dealGate.ts, preAlert.ts, chat.ts (tools, REPLY_STYLE, status, cancel, ask_choice, attachments), chatIntent.ts, clynxPersona.ts, aiDecisionLog.ts, apiSelfTest.ts
+Modified (preload/renderer): preload/index.ts, lib/api.ts, screens/Database.tsx (tree, ops, Trash, review, gallery edit), screens/DiscoveryTab.tsx, screens/Activity.tsx,
+                 components/GlobalAssistantBar.tsx, components/ListingCard.tsx (condition evidence), components/ImageLightbox.tsx (filed-as, provenance, actions), lib/navState.ts
+Cloud (no change in Beta 13): cloud/src/ai/routes.ts only if the owner wants a server-side image-size ceiling to match the client budget (the header comment promises one; clampChatBody only clamps tokens/n)
+Scripts:         scripts/library-audit.cjs (from library-db-audit), chat-audit.cjs (length metrics), api-diagnose.cjs (verbosity probe), beta13-audit.cjs (kept)
+Tests:           see 13.1;  Release notes: release-notes/0.3.0-beta.13.txt
+
+================================================================================
+APPENDIX A. FINDINGS REGISTER  (id | severity | label | primary code | tests | regression risk)
+================================================================================
+ID-01 CRITICAL CONFIRMED  store.addProductImage + 7 unguarded callers            | fileImagePaths.test            | MEDIUM
+ID-02 CRITICAL CONFIRMED  index.ensurePhotoGalleryAudit, images:feedback, scrapeEngine 2723-2910, createSpecificModel | identityGate/reviewQueue tests | MEDIUM
+ID-03 HIGH     CONFIRMED  store.findMatchingProduct / isSimilarProductName       | resolveProduct.test            | MEDIUM-HIGH
+ID-04 HIGH     CONFIRMED  compIdentity / photoIdentity / variantIdentity attribute gaps | identityModel/identityGate tests | MEDIUM
+ID-05 HIGH     CONFIRMED  config.identitySafeguard default off; scrapeEngine.identityVeto; store.safeguard | shadow run   | LOW
+ID-06 HIGH     CONFIRMED  productIdentity.resolveIdentityTarget fail-open; Save-credits modes | identityGate tests        | LOW-MEDIUM
+ID-07 MEDIUM   CONFIRMED  vision.verifyThumbnailCandidate prompts/binary output   | L4 corpus + identityVision test | LOW
+ID-08 MEDIUM   CONFIRMED  no source/confidence on identity or condition evidence  | storeBeta13/identityModel tests | LOW
+RI-01 HIGH     CONFIRMED  scrapeEngine.runPhotoAnalysis newest-photo reference   | selection test                 | LOW-MEDIUM
+RI-02 MEDIUM   CONFIRMED  no persisted hash/dedupe                                | fileImage test                 | LOW
+RI-03 MEDIUM   CONFIRMED  Store.MAX_IMAGES_PER_PRODUCT prunes oldest incl. manual | prune test                     | LOW
+RI-04 MEDIUM   CONFIRMED  thumbnails are copies; buildImageCollage persisted; setThumbnailFromImage unvalidated | thumbnail tests | MEDIUM
+RI-05 MEDIUM   CONFIRMED  ensurePhotoDifferenceAnalysis feeds lookoutNotes        | notes test                     | LOW
+RI-06 MEDIUM   CONFIRMED  gallery audit gating/mode/consensus/auto-delete         | reviewQueue test               | LOW
+RI-07 LOW      CONFIRMED  source label conventions                                | source_kind test               | LOW
+LB-01 HIGH     CONFIRMED  folders are strings; resolveFamilyName fuzzy; updateProductProfile overwrite | libraryOps/tree tests | MEDIUM
+LB-02 HIGH     CONFIRMED (fresh) / HYPOTHESIS (owner DB)  Store.deleteProduct order | storeBeta13 test            | LOW
+LB-03 HIGH     CONFIRMED  gallery audit + feedback destructive appearance moves   | reviewQueue/libraryOps tests   | MEDIUM
+LB-04 HIGH     CONFIRMED  mergeDuplicateProducts moves galleries unchecked        | reviewQueue test               | MEDIUM
+LB-05 MEDIUM   CONFIRMED  cascading contamination chain                           | integration test               | n/a
+CV-01 CRITICAL CONFIRMED  vision flaws not consumed by valuation; default off     | conditionEvidence/dealGateCondition tests | HIGH (ship shadow)
+CV-02 HIGH     CONFIRMED  flat multipliers + lexicon gaps                         | conditionEvidence tests        | HIGH (ship shadow)
+CV-03 MEDIUM   CONFIRMED  duplicate constants; comps not defect-matched           | dealGateCondition test         | MEDIUM
+CV-04 MEDIUM   CONFIRMED  vision prompt/result structure                          | schema test + L8               | LOW
+CV-05 MEDIUM   CONFIRMED  five text-vs-image cases                                | state-table test               | LOW
+UX-01 HIGH     CONFIRMED  no cancel/status/choices; 2 of 4 chats lack attachments; searchUpdate pollution | chatEngine/chatChoices/chatAttachments tests | LOW-MEDIUM
+UX-02 MEDIUM   CONFIRMED (arithmetic) / NOT VERIFIED live  attachments vs 10 MiB cloud limit | chatAttachments test + L5 | LOW
+UX-03 MEDIUM   CONFIRMED  attachments absent from history (follow-ups lose the photo) | history record test        | LOW
+UX-04 LOW      CONFIRMED  persona says "few short paragraphs"; 900 token cap       | chat-audit length metrics      | LOW-MEDIUM
+================================================================================
+END OF REPORT
+================================================================================
