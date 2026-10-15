@@ -1,0 +1,156 @@
+# CLYNX BETA 13 - FULL IMPLEMENTATION BUILD (0.3.0-beta.13)
+
+You are implementing Beta 13 of Clynx (Electron + React + TypeScript resale-opportunity app, repo bennyellis/clynxai, branch master-wveebf).
+Baseline: Beta 12, HEAD 02d5e2e or later, package version 0.3.0-beta.12.
+
+READ FIRST, IN FULL, BEFORE WRITING CODE:
+  1. BETA13_AUDIT_REPORT.txt  (repo root). It is the specification: findings with IDs (ID-xx, RI-xx, LB-xx, CV-xx, UX-xx), the target designs
+     (sections 7, 8, 10), the work packages (section 11), migrations (12), tests (13), cost (14), files (16), and Appendix B (live evidence
+     from the owner's real database). Every file/function it cites exists at HEAD; line numbers may have drifted, search by name.
+  2. scripts/beta13-audit/*.ts and scripts/beta13-audit.cjs  (deterministic probes of today's behaviour). Turn each into ASSERTION tests as
+     the matching work package lands; keep the probes runnable.
+  3. Existing tests in src/main/__tests__ (75 files) and the runner scripts/run-tests.cjs. They must stay green (one Linux-only failure,
+     startupErrors.test.ts "the original database is still there", is a Windows locked-file test and is expected to fail on Linux).
+
+## HARD RULES
+- Do NOT publish, register, deploy, tag or activate anything. Do not run Windows packaging. The owner builds and publishes. Never touch the owner's
+  databases. Never ask for or print API keys.
+- Develop ONLY on branch master-wveebf. Commit after each work package with a clear message; push after each. Commit trailer lines:
+  "Co-Authored-By: Claude <noreply@anthropic.com>" and the session link if your harness provides one.
+- Set package.json (and package-lock.json version lines only, never `npm install` churn) to 0.3.0-beta.13 in the LAST commit, with
+  release-notes/0.3.0-beta.13.txt. Keep earlier commits at 0.3.0-beta.12.
+- Never auto-delete, auto-merge, auto-split or auto-rename user data. Machines QUARANTINE and SUGGEST; the user (or an explicit, confirmed chat
+  action) applies. Soft delete only for anything new.
+- Never infer a product model from a picture alone. A picture may confirm or contradict an identity that text/aspects propose. It may never
+  create, rename or re-file a product. Conflicting evidence => status "unresolved"/"conflict" => review item.
+- Preserve the Beta 12 contracts: photoIdentity exports and their tests, the non-round-price scam filter, Search For persistence, the
+  Discovery/Activity chat separation, AI Activity, Library navigation memory.
+- Every behaviour change that alters decisions is behind a flag in config.json `beta13` (off | shadow | enforce) with the defaults below.
+  Shadow = compute and log to AI Activity (aiDecisionLog.noteDecision), change nothing.
+- Additive migrations only (ALTER TABLE ADD COLUMN, CREATE TABLE IF NOT EXISTS, schema_flags for one-time backfills; backfills batched so a
+  large DB never blocks startup). Take a verified backup (dbBackups.createBackup) before the first Beta 13 migration. Migrations idempotent.
+- Run `npm test` and `npx tsc --noEmit -p tsconfig.node.json && npx tsc --noEmit -p tsconfig.web.json` (npm run typecheck) after every work
+  package. Also `npx electron-vite build` once at the end to prove the renderer compiles. Fix what you break.
+- Report honestly. Distinguish what you verified (tests, fixtures) from what needs the owner's live model/Windows run. Do not claim live
+  success from mocked tests. No invented numbers.
+
+## DECISIONS ALREADY MADE (the report's open questions, answered with its recommendations)
+- Quarantined / needs-review photos stay visible in the gallery, dimmed with a "Needs review" badge; they are excluded from reference use.
+- Colour is value-defining only when tied to an edition/configuration (Galaxy Black SE, Robot White All-Digital, Halo LE, named limited
+  editions) or when the product's own name states it; otherwise cosmetic (gallery scope "any colour").
+- A one-time NON-destructive suspect pass on existing galleries is approved (marks status 'needs_review', excludes from reference use,
+  deletes nothing). Untitled images stay 'legacy' (still eligible).
+- Folders are local-only in Beta 13 (no cloud migration); upsertProductFromCloud must never touch folder_id or other new local columns.
+- Condition: dedicated visual pass only for listings that already clear text+price pre-qualification; adjustment table is hand-seeded,
+  editable in config, shown as an assumption; prefer defect-matched sold comps when >= 3 exist. Ships SHADOW first.
+- Trash retention 30 days, covers products, images, folders.
+- Choice buttons: max 6 options; keep plain-text fallback if the model does not call ask_choice.
+- Chat brevity: 1-3 sentences, max_completion_tokens ~350 for chat (opt-out when the user asks for detail). Send verbosity:"low" only if
+  a test shows the route accepts it; otherwise rely on prompt + token cap + post-guard.
+- Phase 4 safeguard (identity/*): leave code, default mode stays "off"; fold its useful resolver into the new model only where trivial.
+- Identity decisions store a 120 px thumbnail in AI Activity (like Beta 12 decisions). Chat attachments are never stored there.
+
+## FLAG DEFAULTS (config.json beta13)
+  identityGate: "enforce" for the single writer's text-MISMATCH rule and quarantine of unverifiable pictures (this is the bug fix);
+                "shadow" for the new best-match resolver until the owner's AI Activity shows few disagreements (code path complete, one switch).
+  conditionEvidence: "shadow".   libraryTree: "on".   chatStatus / chatChoices / chatAttachments / replyStyle: "on".
+
+## WORK PACKAGES (do them in this order; commit + push after each; tests with each)
+WP0 Scaffolding (report 11/WP0): config.beta13 block + types; aiDecisionLog kinds ('identity_gate','condition_check','library_op').
+WP1 Data model + delete fix (WP1, 12.1): all DDL in section 12.1; Store.deleteProduct deletes images FIRST inside one transaction (fixes
+    LB-02: FOREIGN KEY failure confirmed on the owner's schema); soft-delete columns and filters in listProducts, listProductIndex,
+    findMatchingProduct, listProductImages; listProductImageMeta() without image_data. Tests: storeBeta13.test.ts (migrations idempotent on a
+    Beta-12-shaped DB created with raw DDL; delete with photos works; soft delete filters; cloud upsert leaves new columns alone).
+WP2 Unified identity model + gate (WP2, 3.4-3.6, 10.2): new identityModel.ts, identityGate.ts, identityEvidence.ts; extend compIdentity.ts with
+    DRIVE (disc/all-digital), BOARD_DESIGN (AIB partner line: Gaming X Trio vs Ventus vs Armor), REGION, LOCK, SKU/MPN codes with the
+    materiality classes of 10.2; headline-noun rule so "console WITH dock/Joy-Con/charger/2 games" is a console and "case/pouch/stand/grip/
+    skin/decal/strap for ..." is an accessory (fix both false accepts and false rejects: "Nintendo Switch Console Neon Joy-Con 32GB HAC-001",
+    "Console with Dock and Joy-Con Controllers HAC-001", "HAC-001(-01) V2 battery", "with 2 games and charger"); stop treating "...with disc
+    drive" as a bundle. New resolveProduct(name, candidates, opts): scores every candidate, requires a unique best with margin, otherwise
+    "unresolved"; platform-named games/accessories resolve to their own kind BEFORE console containment; generic entries ("Xbox Series")
+    never absorb a model-level subject. store.findMatchingProduct uses it (flag: shadow computes both, logs disagreements, returns old result).
+    Keep isSimilarProductName only for duplicate detection. Keep every existing export/signature; existing tests stay green.
+    Tests: identityModel.test.ts, identityGate.test.ts, resolveProduct.test.ts built from identity-probe sections A-F and store-probe 1-2
+    (all 14 subjects in store-probe 1; Series X vs S vs White vs All-Digital vs Galaxy vs Halo; MSI trio; Switch/Lite/OLED/HAC revisions; iPhone
+    unlocked/locked; region; accessory lexicon).
+WP3 Single picture writer (3.2, 3.3, 4.1): new fileImage.ts: fileImage(productId, bytes, evidence{sourceKind,title,url,proposer}, opts) =>
+    filed | quarantined | rejected | review. Status 'trusted' only when the gate says match (exact title, or structured vision "yes"). Text
+    MISMATCH is final. Evidence unavailable => 'unverified'/quarantine, never trusted. Save-credits mode: generic/multi-design entries need
+    strength "exact", else 'unverified'. addProductImage becomes module-private; replace all 13 call sites listed in report 4.1; add a repo test
+    that fails if any other file calls it. Structured vision verification (identityVision.ts, vision.ts): {formFactor, visibleText, per-category
+    discriminator checklist, matchesProposed yes|no|cannot_tell, confidence, evidence[]}; cannot_tell => unverified. Remove picture-named
+    creation: onNewProductFound/createPlainProduct/createSpecificModel names must come from text/aspects/user; a vision-only name becomes a review item.
+    Content hash (aHash+sha1) dedupe per product; is_primary/sort_order; pin rules so user/primary/thumbnail photos are never pruned by the
+    20-photo cap (prune lowest-value first). Tests: fileImagePaths.test.ts path table (each of the 13 sites with the Series X photo/title into the
+    Series S entry => never trusted), plus the Switch game-case and MSI cases.
+WP4 Review queue + repair (4.7, 5.3-5.5, 5.7): reviewQueue.ts + review_items; "Needs review" smart folder and a side-by-side evidence panel
+    (picture, source title, proposed entry, reason codes, vision observation) with typed actions (Keep here / Move to ... / Make new entry /
+    Quarantine / Remove-to-Trash), all through libraryOps (WP5) or direct Store ops with undo log if WP5 is not yet in. Convert to suggest-only:
+    ensurePhotoGalleryAudit (never delete/move; quarantine + suggestion), images:feedback (user statement is authoritative evidence, source
+    'user'; no delete-before-add), mergeDuplicateProducts (propose-only; applying re-verifies every moved image through the gate; remove the
+    automatic call on products:list). One-time suspect backfill (schema_flag b13-suspect-pass) as described in report 12.2. Promote
+    library-db-audit into scripts/library-audit.cjs. Tests: reviewQueue.test.ts.
+WP5 Library tree + operations (section 7): libraryOps.ts (typed ops: createFolder, renameFolder, moveFolder, deleteFolder, moveProduct,
+    renameProduct, setProductCategory, addImage, removeImage, replaceImage, reorderImages, setPrimaryImage, setThumbnail, reassignImage, restore,
+    undo), library_folders, products.folder_id, library_ops undo log, Trash view, confirmation tokens for bulk/destructive ops, cycle/depth/name
+    validation, BEGIN IMMEDIATE transactions, expectedUpdatedAt checks; runProductLookup/updateProductProfile must NOT overwrite a user placement
+    (write suggested_family instead when folder_id is set); main-process libraryTree() replaces renderer string parsing; extend lib/navState.ts
+    to folder ids with fallback to segment paths; IPC library:*; preload; Database.tsx UI additions (new folder, move to, rename, delete->Trash,
+    multi-select, gallery edit mode, Needs-review and Trash entries) while keeping today's layout and auto-organization; chat tools `library_op`,
+    `library_list` (extend find_products) as thin adapters over the same functions. Re-validate image bytes from the renderer in main (type
+    sniff, <= 8 MB). Tests: libraryOps.test.ts, libraryTree.test.ts (report 7.6).
+WP6 Reference selection + thumbnails (4.2, 4.5, 4.6): selection by status -> quality -> angle diversity -> recency (never insertion order),
+    <= 2-3 per product; is_primary; products.thumbnail_image_id pointer instead of copies; collage derived at render, never stored; group
+    thumbnail from verified member primaries; difference analysis uses verified photos only. Update scrapeEngine.runPhotoAnalysis accordingly.
+WP7 Condition evidence + valuation, SHADOW (section 6): expand conditionParser lexicon (scratch(es), dent, bent, hinge, corrosion, chip,
+    drift, fungus, burn-in, water/liquid damage as severe, cracked back glass vs cracked screen, HDMI/USB port damage ...), fix mangled
+    `ignored` snippets; conditionEvidence.ts with defect classes (cracked_screen, cracked_back_glass, damaged_frame, scratches, dents,
+    broken_display, missing_parts, damaged_ports, bent_hardware, hinge_damage, corrosion, broken_housing, nonvisual_fault); nonvisual faults only
+    from text/user, never from vision; vision condition schema in vision.ts (class, area, severity cosmetic|functional|unknown, confidence,
+    photo ref, coverage of what was visible; "no visible damage detected" distinct from "unknown/not shown"); merge rule (one defect = one
+    deduction; text+vision confirm; vision-only => UNDISCLOSED_DAMAGE flag; text-only unseen stays as reported; text vs photo-intact => flag but
+    the seller's report stands); conditionAdjust.ts: defect-matched comps when >= 3 else repair/discount table, RANGE (low/likely/high), widened for
+    low confidence; one constant source (delete the duplicate CONDITION_VALUE_MULTIPLIER/CONDITION_VALUE_FACTOR); dealGate facts + reasons
+    (conditionAdjustmentUsd, conditionRange, conditionEvidence, UNDISCLOSED_DAMAGE, DAMAGE_UNCERTAIN, NO_VISIBLE_DAMAGE_DETECTED); listing_condition
+    table; ListingCard shows evidence and "would have changed" in shadow. Never write "mint verified". Config.researchCondition keeps its meaning
+    but the structured pass runs for qualifying listings regardless of it when conditionEvidence != off (cost-aware, merged into the existing
+    analyzeListingPhotos call when that call runs anyway). Tests: conditionEvidence.test.ts, dealGateCondition.test.ts (money table from
+    condition-probe section 2 as assertions).
+WP8 Chat foundation (section 8): lib/useChatEngine.ts + components/ChatComposer.tsx + lib/chatAttachments.ts + lib/chatStatus.ts used by
+    DiscoveryTab, Activity, GlobalAssistantBar AND the Database product chat. Attachments: up to 4 images, magic-byte sniff (jpeg/png/webp/gif),
+    client downscale to <= 1568 px JPEG ~0.85 (strips EXIF/GPS), total request budget <= ~6 MB (cloud body limit is 10 MiB), main re-validates;
+    history keeps a compact record per attachment (and an optional 1-sentence description), pixels re-sent only on explicit re-attach; blocked send
+    (visible message) if the route/model cannot take images. ai:chatStatus {requestId, stepId, kind, label, state, startedAt, ok?, detail?} emitted
+    from chat.ts runOne and tool sub-phases (extend executeChatTool's onUpdate); renderer ticks elapsed locally ("Researching eBay... 8s");
+    ephemeral state, never in history; remove the ai:searchUpdate text append from Activity and GlobalAssistantBar; ai:chatCancel (abort
+    streaming fetch, stop starting rounds, "stopping after current step" for tools that cannot abort); guard every event.sender.send with
+    isDestroyed(); ask_choice tool + ai:chatChoices + buttons (variable count <= 6, keyboard 1-9, free text always available, stale choices
+    disabled, destructive options need a second confirm; clicking sends history text "[choice] <label>"); replace the A/B text menus in prompts
+    with ask_choice presets (photo flow, product ambiguity, library confirmations, identity review). Keep Discovery/Activity separation (8.6).
+    Tests: chatEngine.test.ts, chatAttachments.test.ts, chatChoices.test.ts.
+WP9 Brevity (8.2): REPLY_STYLE block last in every system prompt; token cap; post-guard that removes boilerplate and duplicate confirmations;
+    financial figures and safety/scam warnings never dropped; extend scripts/chat-audit.cjs with words/sentences metrics; update chatBehavior tests.
+WP10 Integration: release-notes/0.3.0-beta.13.txt (plain language: what changed, what is shadow, how to roll back via config.json beta13 flags,
+    downgrade note about soft-deleted rows), BETA13_IMPLEMENTATION_REPORT.txt (what was done per finding ID, what is shadow/enforced, what needs
+    the owner's live validation L1-L10 from report 13.2, test counts, files changed), version bump, full test + typecheck + electron-vite build.
+
+## ACCEPTANCE CRITERIA (verify with tests/fixtures; state each as PASS/FAIL in your final report)
+ 1. The Series X photo+title can never become a trusted image in Series S, by any of the 13 former write paths. (fileImagePaths.test)
+ 2. Game cases, key art, accessories and other consoles cannot enter the Nintendo Switch gallery; genuine console bundle titles are accepted.
+ 3. Series X Carbon Black+disc, Robot White All-Digital, 2TB Galaxy Black SE and Halo Infinite LE resolve to distinct configuration-level
+    identities; All-Digital is no longer "exact" to the disc model; MSI Gaming X Trio / Ventus / Armor do not share one trusted gallery.
+ 4. "Xbox Series S (White)" resolves to the Series S entry (or its colour child), never the generic "Xbox Series"; platform-named games and
+    accessories never resolve to a console.
+ 5. Nothing is deleted, merged, split or renamed automatically; the old gallery audit/feedback/merge flows only quarantine and suggest; undo works.
+ 6. deleteProduct works for products with photos; Trash restores; research refresh does not move a user-placed product.
+ 7. Library: create/nest/rename/move/delete folders, move products, rename entries, add/remove/replace/reorder images, choose thumbnail,
+    correct filing - all via libraryOps, from UI and chat, with undo and confirmation rules.
+ 8. Condition (shadow): the lexicon table and five text-vs-image cases behave as report 6.6/6.7; no double count; ranges; never "mint verified".
+ 9. All four chats: attachments, status with real elapsed time, cancel, choice buttons; no status text in history; replies short.
+10. npm test green (except the known Linux-only startupErrors case), typecheck green, electron-vite build succeeds, migrations idempotent on a
+    Beta-12-shaped DB, no secrets in logs/commits.
+
+## FINAL REPORT FORMAT
+Per finding ID: status (fixed / shadow / partially / not done), files, tests. Then: commits (hashes), test totals, anything skipped and why,
+every item that needs the owner's live validation (L1-L10) with the exact command or step, and the Windows build/validation steps. Do not
+publish, register or activate anything.
