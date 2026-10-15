@@ -984,3 +984,28 @@ UX-04 LOW      CONFIRMED  persona says "few short paragraphs"; 900 token cap    
 ================================================================================
 END OF REPORT
 ================================================================================
+
+================================================================================
+APPENDIX B. LIVE EVIDENCE FROM THE OWNER'S DATABASES (library-db-audit, run on copies, read-only)
+================================================================================
+Three scout.db files exist under %APPDATA%\Clynx\data\users\: local-beta (0 products, pre-Beta-12 schema, ignore), account 1951a4a6... ("A") and 8a90681e... ("B").
+All three declare the product_images foreign key => LB-02 (deleteProduct fails for products that have photos) is CONFIRMED on the owner's schema.
+
+A (1951a4a6): Beta 12 schema present (listing_reeval exists, so a Beta 12-capable build has opened it). 48 products, 320 photos (35 MB), 29 galleries under 10 photos.
+  9 photos contradict their entry under the Beta 12 rules, 94 more are only weakly confirmed. Includes BOTH screenshot cases:
+   - "Xbox Series S" holds "MICROSOFT XBOX SERIES X - CONSOLE - 1TB - 1882 (G4P004519)" and "Microsoft Xbox Series X Console - Digital Edition - 1TB 4K/120 - w/ Cables".
+   - "Nintendo Switch Lite", "Mario Kart 8 Deluxe (Nintendo Switch)" and "Minecraft (Nintendo Switch)" hold "Nintendo Switch with 2 games and charger".
+   - "Dyson V7 Animal" holds "Dyson cordless vacuum lot"; "PlayStation 5 (Disc Edition)" holds "PS5 1 TB"; a Game Boy game holds "Gameboy Color Modded LED Screen and Games".
+  Caveats: the audit applies today's rules retroactively, so it cannot say WHEN each photo was filed (a Beta 12-capable build having opened the file does not prove the gate ran on
+  these photos). Two flags are rule false positives on console bundles ("...with 2 games and charger", "with Controller!") = ID-07/ID-04 accessory-vs-console confusion on real data.
+B (8a90681e): pre-Beta-12 schema, 581 products but only 7 photos left (1 MB). There is a "before-restore" file, so this account was restored from a backup once.
+  The appearance-based gallery audit wrote ~150 "auto-removed a reference photo that actually showed X" notes. That is LB-03/RI-06 CONFIRMED at scale: galleries were emptied by it.
+  - It cannot tell Xbox Series S, Series X and Xbox One apart: "Xbox Series X" lost photos to "Xbox Series S" (x5) and "Xbox One (console)" (x4); "Xbox Series S" lost to "Xbox Series X" (x3)
+    and "Xbox One (console)" (x4); "PlayStation 5" lost a photo to "Xbox Series X". This is the mechanism behind screenshot A (ID-02), observed on real data.
+  - It names destinations that are not products ("Unknown", "PC monitor", "television / monitor (display)", "Xbox One game cases (mixed titles)", "Wired Over-Ear Headset", "iPhone (Apple smartphone)",
+    "Samsung tablet"), i.e. picture-derived generic entries exist in the Library (ID-02).
+  - It routes photos between unrelated things (Xbox Wireless Controller -> "Nintendo Switch Dock"; Madden/Star Wars Battlefront game -> "Turtle Beach Wired Gaming Headset").
+  Fuzzy collisions (ID-03) on real data: "Nintendo switch" matches 7+ games, "Nintendo Switch Dock", "Nintendo Switch V2 (revised battery)", "Nintendo Switch (2017) HAC-001";
+  "Nintendo 3DS" matches 12 games and "Nintendo AC Adapter (3DS)"; "Power cable for Xbox Series S" ~ "Xbox Series S"; "Seagate 1TB Storage Expansion Card for Xbox Series X|S" ~ "Xbox Series S 1TB";
+  "Xbox one X controller" ~ "Xbox One X". 110 distinct folder paths for 581 products; top-level folders mix hardware, games and accessories.
+Consequence for the plan: WP4 (quarantine, never delete) and the single writer WP3 are confirmed necessary; the gallery audit must be replaced before any build re-runs it on account A.
