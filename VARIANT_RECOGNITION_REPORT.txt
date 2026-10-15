@@ -76,3 +76,15 @@ REMAINING LIMITATIONS
  - isSimilarProductName is stricter: a listing titled "... Special Edition" no longer fuzzy-matches the standard entry (intended), so a few loosely
    worded listings that used to attach to the standard product will not.
  - No Windows installer was built or signed, nothing was published, and no production data was touched.
+
+BUILD AND RELEASE STATUS (as of 2026-10-15)
+ Installer    Built on the Windows PC with npm run dist:beta: dist\Clynx-Beta-Setup-0.3.0-beta.8.exe (beta channel, from clean commit 1cb2737678fc,
+              dirty: false). The "signing is skipped" lines are Windows code-signing, which the beta does not use; the update manifest is signed
+              separately by Register-ClynxRelease.ps1.
+ Build issue  electron-builder cannot unpack its signing tools in a non-elevated shell ("Cannot create symbolic link"); it built fine from an
+              Administrator PowerShell (or with Developer Mode on). Already documented in RELEASE_CHECKLIST.md.
+ SHA-256      not recorded yet: run  Get-FileHash dist\Clynx-Beta-Setup-0.3.0-beta.8.exe -Algorithm SHA256  and add the value here and to BETA8_DRAFT.txt.
+ Remaining    1. Register as a draft:  cloud\deploy\windows\Register-ClynxRelease.ps1 -Installer dist\Clynx-Beta-Setup-0.3.0-beta.8.exe
+                 -Version 0.3.0-beta.8 -ExpectSha256 <hash>
+              2. Console (https://ben.tail0e333d.ts.net/console/releases): 0.3.0-beta.8 > Approve > Publish (type the version).
+              Not done yet: draft registration, approval, publication. To undo a release: Releases > Withdraw.
