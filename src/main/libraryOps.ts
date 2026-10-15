@@ -52,6 +52,22 @@ export interface OpContext {
   confirm?: string;
 }
 
+/** "Parent > Child" paths of live folders with their ids (what the chat reads to find a folder). */
+export function folderPathList(folders: Array<{ id: string; parentId: string | null; name: string }>): Array<{ id: string; path: string }> {
+  const byId = new Map(folders.map((f) => [f.id, f]));
+  return folders
+    .map((f) => {
+      const parts: string[] = [];
+      let cur: { id: string; parentId: string | null; name: string } | undefined = f;
+      for (let i = 0; cur && i < 12; i++) {
+        parts.unshift(cur.name);
+        cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+      }
+      return { id: f.id, path: parts.join(" > ") };
+    })
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
 export const MAX_FOLDER_DEPTH = 8;
 export const MAX_NAME_LENGTH = 80;
 const RESERVED_ROOT_NAMES = new Set(["needs review", "trash", "my folders"]);

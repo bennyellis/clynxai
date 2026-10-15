@@ -1,8 +1,11 @@
 import { AiActivityPanel } from "../components/AiActivityPanel";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChatAttachment, ChatMessage, EventStats, LogLine, MetricsSnapshot, ProductProfile, ScrapeStatus, StageStats } from "../lib/api.js";
+import type { ChatAttachment, ChatChoice, ChatChoiceOption, ChatMessage, EventStats, LogLine, MetricsSnapshot, ProductProfile, ScrapeStatus, StageStats } from "../lib/api.js";
 import { api } from "../lib/api.js";
 import { useStickToBottom } from "../lib/stickToBottom.js";
+import { ChatChoiceButtons, ChatStatusLine } from "../components/ChatExtras.js";
+import { attachmentHistoryNote, prepareImages } from "../lib/chatAttachments.js";
+import { dismissAllChoices, dismissChoice, forgetSteps } from "../lib/chatExtras.js";
 import {
   ACTIVITY_LEVEL_KEY,
   ACTIVITY_VIEW_KEY,
@@ -158,37 +161,13 @@ export function Activity({
     if (match) go(match.id);
   }, []);
 
-  async function handleFilesSelected(files: FileList | null) {
+  async function handleFilesSelected(files: FileList | File[] | null) {
     if (!files || !files.length) return;
     setAttachError(null);
-    const incoming = Array.from(files);
-    const room = MAX_ATTACHMENTS - attachments.length;
-    if (room <= 0) {
-      setAttachError(`Up to ${MAX_ATTACHMENTS} photos per message.`);
-      return;
-    }
-    const toRead = incoming.slice(0, room);
-    if (incoming.length > toRead.length) {
-      setAttachError(`Up to ${MAX_ATTACHMENTS} photos per message — only added the first ${toRead.length}.`);
-    }
-    const results: ChatAttachment[] = [];
-    for (const file of toRead) {
-      if (!file.type.startsWith("image/")) {
-        setAttachError(`"${file.name}" isn't an image — only photos can be analyzed.`);
-        continue;
-      }
-      if (file.size > MAX_ATTACHMENT_BYTES) {
-        setAttachError(`"${file.name}" is too large (max ${Math.round(MAX_ATTACHMENT_BYTES / 1024 / 1024)}MB).`);
-        continue;
-      }
-      try {
-        const dataUri = await readFileAsDataUri(file);
-        results.push({ dataUri, name: file.name });
-      } catch {
-        setAttachError(`Couldn't read "${file.name}".`);
-      }
-    }
-    if (results.length) setAttachments((prev) => [...prev, ...results]);
+    // Beta 13: the shared pipeline - checks what the file really is, redraws it smaller (which also drops its location data) and keeps the message within the send budget.
+    const r = await prepareImages(Array.from(files), attachments);
+    if (r.added.length) setAttachments((prev) => [...prev, ...r.added]);
+    if (r.problems.length) setAttachError(r.problems.join(" "));
   }
 
   function removeAttachment(index: number) {
@@ -205,6 +184,7 @@ export function Activity({
       // reply should be a deterministic line (e.g. "Searching for X...")
       // that never went out as chunks at all.
       setChat((prev) => prev.map((m) => (m.id === requestId ? { ...m, content: full, streaming: false } : m)));
+      forgetSteps(requestId);
     });
     const offError = api.onChatError((requestId, message) => {
       setChat((prev) =>
@@ -342,12 +322,13 @@ export function Activity({
     return inProgress;
   }, [logs]);
 
-  function sendChat() {
-    const text = draft.trim();
+  function sendChat(textOverride?: string, choice?: { choiceId: string; optionId: string }) {
+    const text = (textOverride ?? draft).trim();
     // A photo alone is a complete message — "what is this?" is implicit —
     // so this only bails when there's truly nothing to send.
     if (!text && !attachments.length) return;
-    setDraft("");
+    if (!choice) dismissAllChoices();
+    if (textOverride === undefined) setDraft("");
     setAttachments([]);
     setAttachError(null);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
@@ -355,9 +336,10 @@ export function Activity({
     if (view !== "chat") setViewState("chat");
     stick.scrollToBottom();
 
+    // Earlier pictures are remembered as a short note (their pixels are not re-sent) so a follow-up about "the photo" still has something to go on.
     const history: ChatMessage[] = chat
       .filter((m) => !m.streaming && !m.error)
-      .map((m) => ({ role: m.role, content: m.content }));
+      .map((m) => ({ role: m.role, content: m.attachments?.length ? `${m.content}\n${attachmentHistoryNote(m.attachments.map((a) => a.name))}`.trim() : m.content }));
 
     const userMsg: ChatEntry = {
       id: crypto.randomUUID(),
@@ -370,7 +352,12 @@ export function Activity({
     const assistantMsg: ChatEntry = { id: requestId, role: "assistant", content: "", ts: Date.now() + 1, streaming: true };
 
     setChat((prev) => [...prev, userMsg, assistantMsg]);
-    api.startChat(requestId, text, history, "dashboard", undefined, attachments);
+    api.startChat(requestId, text, history, "dashboard", undefined, attachments, choice);
+  }
+
+  function pickChoice(c: ChatChoice, o: ChatChoiceOption, requestId: string) {
+    dismissChoice(requestId);
+    sendChat(o.label, { choiceId: c.id, optionId: o.id });
   }
 
   // "Ask Clynx about this" on an event row: the chat opens with a ready-made question in the box. It is only a draft, never sent for you.
@@ -527,7 +514,7 @@ export function Activity({
                     })()}
                   />
                 ) : (
-                  <ChatRow key={item.entry.id} entry={item.entry} onAsk={askAboutEvent} />
+                  <ChatRow key={item.entry.id} entry={item.entry} onAsk={askAboutEvent} onStop={() => api.cancelChat(item.entry.id)} onPick={(c, o) => pickChoice(c, o, item.entry.id)} />
                 )
               )}
             </div>
@@ -626,6 +613,13 @@ export function Activity({
               ref={textareaRef}
               rows={1}
               style={{ flex: 1, resize: "none", maxHeight: 160, overflowY: "auto", lineHeight: 1.4, padding: "9px 12px" }}
+              onPaste={(e) => {
+                const pasted = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
+                if (pasted.length) {
+                  e.preventDefault();
+                  void handleFilesSelected(pasted);
+                }
+              }}
               placeholder="Talk to Clynx: 'is a used Series S worth flipping?', 'find me a Steam Deck OLED', or attach a photo of something you can't name"
               value={draft}
               onChange={(e) => {
@@ -977,7 +971,7 @@ function LogRow({
 // normal streamed reply.
 const SEARCH_ACK_RE = /^Searching\.\.\.$/;
 
-function ChatRow({ entry, onAsk }: { entry: ChatEntry; onAsk: (event: AskableEvent) => void }) {
+function ChatRow({ entry, onAsk, onStop, onPick }: { entry: ChatEntry; onAsk: (event: AskableEvent) => void; onStop?: () => void; onPick?: (c: ChatChoice, o: ChatChoiceOption) => void }) {
   const isUser = entry.role === "user";
   const isDealNarration = entry.auto === "deal";
   const isBatchNarration = entry.auto === "batch";
@@ -1047,6 +1041,12 @@ function ChatRow({ entry, onAsk }: { entry: ChatEntry; onAsk: (event: AskableEve
           </span>
         )}
         {entry.streaming && entry.content && <span className="cursor-blink" />}
+        {!isUser && !entry.auto && (
+          <>
+            <ChatStatusLine requestId={entry.id} onStop={entry.streaming ? onStop : undefined} />
+            {!entry.streaming && onPick && <ChatChoiceButtons requestId={entry.id} onPick={onPick} />}
+          </>
+        )}
       </div>
       {/* Clynx's own narration is an event: it can be asked about like a log line. */}
       {(isDealNarration || isBatchNarration) && !entry.streaming && entry.content && (

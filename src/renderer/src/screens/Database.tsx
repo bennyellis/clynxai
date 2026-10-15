@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { BlacklistedImage, BlacklistTerm, ChatContext, ChatMessage, ProductImage, ProductProfile } from "../lib/api.js";
+import type { BlacklistedImage, BlacklistTerm, ChatAttachment, ChatChoice, ChatChoiceOption, ChatContext, ChatMessage, ProductImage, ProductProfile } from "../lib/api.js";
+import { AttachButton, AttachmentBar, ChatChoiceButtons, ChatStatusLine, useImageIntake } from "../components/ChatExtras.js";
+import { attachmentHistoryNote } from "../lib/chatAttachments.js";
+import { dismissAllChoices, dismissChoice, forgetSteps } from "../lib/chatExtras.js";
 import { api } from "../lib/api.js";
 import { Modal } from "../components/Modal.js";
 import { useLightbox } from "../components/ImageLightbox.js";
@@ -63,6 +66,8 @@ interface ChatEntry {
   ts: number;
   streaming?: boolean;
   error?: boolean;
+  // Beta 13: photos attached to this message (the model's history keeps a short note instead of the pixels).
+  attachments?: ChatAttachment[];
 }
 
 // Per explicit instruction — a product's family (see types.ts's
@@ -2772,7 +2777,7 @@ function ProductDetailPage({
   // product (see chat.ts's buildProductSystemPrompt) — the AI knows which
   // product it's talking about without being told every message, and gets
   // access to add_product_watch_note, which only makes sense here.
-  const { chat, draft, setDraft, send, scrollRef, textareaRef } = useDatabaseChat({ context: "product", productId: product.id });
+  const { chat, draft, setDraft, send, scrollRef, textareaRef, attachments, setAttachments, intake, busy, pickChoice } = useDatabaseChat({ context: "product", productId: product.id });
   // Per explicit instruction — "the thumbnail in the top left should cycle
   // through all the reference photos automatically... when the user clicks
   // the thumbnail, it'll bring up all Reference Photos": one shared list
@@ -3174,7 +3179,7 @@ function ProductDetailPage({
           </div>
 
           {chat.map((entry) => (
-            <ChatRow key={entry.id} entry={entry} />
+            <ChatRow key={entry.id} entry={entry} onStop={() => api.cancelChat(entry.id)} onPick={(c, o) => pickChoice(c, o, entry.id)} busy={busy} />
           ))}
         </div>
 
@@ -3183,6 +3188,10 @@ function ProductDetailPage({
           setDraft={setDraft}
           onSend={send}
           textareaRef={textareaRef}
+          attachments={attachments}
+          onRemoveAttachment={(i) => setAttachments((a) => a.filter((_, j) => j !== i))}
+          intake={intake}
+          busy={busy}
           placeholder={`Ask Clynx about this one: 'what should I check before buying?', 'be on the lookout for games', 'refresh the research'`}
         />
       </div>
@@ -3230,6 +3239,8 @@ function ProductDetailPage({
 function useDatabaseChat(opts: { context: ChatContext; productId?: string }) {
   const [chat, setChat] = useState<ChatEntry[]>([]);
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const intake = useImageIntake(attachments, setAttachments);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -3239,6 +3250,7 @@ function useDatabaseChat(opts: { context: ChatContext; productId?: string }) {
     });
     const offDone = api.onChatDone((requestId, full) => {
       setChat((prev) => prev.map((m) => (m.id === requestId ? { ...m, content: full, streaming: false } : m)));
+      forgetSteps(requestId);
     });
     const offError = api.onChatError((requestId, message) => {
       setChat((prev) =>
@@ -3256,25 +3268,36 @@ function useDatabaseChat(opts: { context: ChatContext; productId?: string }) {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [chat.length]);
 
-  function send() {
-    const text = draft.trim();
-    if (!text) return;
-    setDraft("");
+  const busy = chat.some((m) => m.streaming);
+
+  function send(textOverride?: string, choice?: { choiceId: string; optionId: string }) {
+    const text = (textOverride ?? draft).trim();
+    if ((!text && !attachments.length) || busy) return;
+    const sent = attachments;
+    if (!choice) dismissAllChoices();
+    if (textOverride === undefined) setDraft("");
+    setAttachments([]);
+    intake.clearProblems();
     if (textareaRef.current) textareaRef.current.style.height = "auto";
 
     const history: ChatMessage[] = chat
       .filter((m) => !m.streaming && !m.error)
-      .map((m) => ({ role: m.role, content: m.content }));
+      .map((m) => ({ role: m.role, content: m.attachments?.length ? `${m.content}\n${attachmentHistoryNote(m.attachments.map((a) => a.name))}`.trim() : m.content }));
 
-    const userMsg: ChatEntry = { id: crypto.randomUUID(), role: "user", content: text, ts: Date.now() };
+    const userMsg: ChatEntry = { id: crypto.randomUUID(), role: "user", content: text, ts: Date.now(), attachments: sent.length ? sent : undefined };
     const requestId = crypto.randomUUID();
     const assistantMsg: ChatEntry = { id: requestId, role: "assistant", content: "", ts: Date.now() + 1, streaming: true };
 
     setChat((prev) => [...prev, userMsg, assistantMsg]);
-    api.startChat(requestId, text, history, opts.context, opts.productId);
+    api.startChat(requestId, text, history, opts.context, opts.productId, sent.length ? sent : undefined, choice);
   }
 
-  return { chat, draft, setDraft, send, scrollRef, textareaRef };
+  function pickChoice(c: ChatChoice, o: ChatChoiceOption, requestId: string) {
+    dismissChoice(requestId);
+    send(o.label, { choiceId: c.id, optionId: o.id });
+  }
+
+  return { chat, draft, setDraft, send: () => send(), scrollRef, textareaRef, attachments, setAttachments, intake, busy, pickChoice };
 }
 
 // The message-composer row (textarea + Send) — shared between ChatPanel's
@@ -3285,12 +3308,20 @@ function ChatComposer({
   onSend,
   textareaRef,
   placeholder = "e.g. 'what's a PS5 Slim usually worth?' or 'learn about the Steam Deck OLED'",
+  attachments,
+  onRemoveAttachment,
+  intake,
+  busy,
 }: {
   draft: string;
   setDraft: (v: string) => void;
   onSend: () => void;
   textareaRef: React.RefObject<HTMLTextAreaElement>;
   placeholder?: string;
+  attachments?: ChatAttachment[];
+  onRemoveAttachment?: (index: number) => void;
+  intake?: ReturnType<typeof useImageIntake>;
+  busy?: boolean;
 }) {
   return (
     <form
@@ -3298,9 +3329,15 @@ function ChatComposer({
         e.preventDefault();
         onSend();
       }}
-      style={{ display: "flex", gap: 8, padding: 12, borderTop: "1px solid var(--border)", alignItems: "flex-end" }}
+      onDrop={intake?.onDrop}
+      onDragOver={(e) => intake && e.preventDefault()}
+      style={{ display: "flex", flexDirection: "column", gap: 4, padding: 12, borderTop: "1px solid var(--border)" }}
     >
+      {intake && attachments && onRemoveAttachment && <AttachmentBar attachments={attachments} problems={intake.problems} onRemove={onRemoveAttachment} />}
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+      {intake && <AttachButton onFiles={(f) => void intake.addFiles(f)} disabled={busy} />}
       <textarea
+        onPaste={intake?.onPaste}
         ref={textareaRef}
         rows={1}
         style={{ flex: 1, resize: "none", maxHeight: 120, overflowY: "auto", lineHeight: 1.4, padding: "8px 11px" }}
@@ -3319,9 +3356,10 @@ function ChatComposer({
           }
         }}
       />
-      <button className="primary" type="submit" disabled={!draft.trim()}>
+      <button className="primary" type="submit" disabled={busy || (!draft.trim() && !(attachments?.length ?? 0))}>
         Send
       </button>
+      </div>
     </form>
   );
 }
@@ -3332,7 +3370,7 @@ function ChatComposer({
 // tool is reachable from this chat as well.
 const SEARCH_ACK_RE = /^Searching\.\.\.$/;
 
-function ChatRow({ entry }: { entry: ChatEntry }) {
+function ChatRow({ entry, onStop, onPick, busy }: { entry: ChatEntry; onStop?: () => void; onPick?: (c: ChatChoice, o: ChatChoiceOption) => void; busy?: boolean }) {
   const isUser = entry.role === "user";
   const isSearchAck = !isUser && !entry.streaming && SEARCH_ACK_RE.test(entry.content);
   return (
@@ -3384,6 +3422,19 @@ function ChatRow({ entry }: { entry: ChatEntry }) {
           </span>
         )}
         {entry.streaming && entry.content && <span className="cursor-blink" />}
+        {entry.attachments?.length ? (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+            {entry.attachments.map((a, i) => (
+              <img key={i} src={a.dataUri} alt={a.name} style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 8, border: "1px solid var(--border)" }} />
+            ))}
+          </div>
+        ) : null}
+        {!isUser && (
+          <>
+            <ChatStatusLine requestId={entry.id} onStop={entry.streaming ? onStop : undefined} />
+            {!entry.streaming && onPick && <ChatChoiceButtons requestId={entry.id} disabled={busy} onPick={onPick} />}
+          </>
+        )}
       </div>
     </div>
   );

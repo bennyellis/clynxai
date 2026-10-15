@@ -1,5 +1,8 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import type { ChatAttachment, ChatMessage, DiscoveryEntry, DiscoveryThought, ProductProfile } from "../lib/api.js";
+import type { ChatAttachment, ChatChoice, ChatChoiceOption, ChatMessage, DiscoveryEntry, DiscoveryThought, ProductProfile } from "../lib/api.js";
+import { ChatChoiceButtons, ChatStatusLine } from "../components/ChatExtras.js";
+import { attachmentHistoryNote, prepareImages } from "../lib/chatAttachments.js";
+import { dismissAllChoices, dismissChoice, forgetSteps } from "../lib/chatExtras.js";
 import { api } from "../lib/api.js";
 import { DEFAULT_RESALE_SETTINGS, resaleSettingsFrom, type ResaleSettings } from "../../../main/resaleMath.js";
 import { judgeProduct, type FlipLevel, type FlipVerdict } from "../../../main/productVerdict.js";
@@ -56,7 +59,10 @@ function wireChatListeners(): void {
   if (wired) return;
   wired = true;
   api.onChatChunk((id, delta) => patchMessage(id, (m) => ({ ...m, content: m.content + delta })));
-  api.onChatDone((id, full) => patchMessage(id, (m) => ({ ...m, content: full, streaming: false })));
+  api.onChatDone((id, full) => {
+    patchMessage(id, (m) => ({ ...m, content: full, streaming: false }));
+    forgetSteps(id);
+  });
   api.onChatError((id, message) => patchMessage(id, (m) => ({ ...m, streaming: false, error: true, content: `Error: ${message}` })));
 }
 
@@ -947,6 +953,9 @@ function ChatCard({ turn }: { turn: ChatTurn<ThreadMsg> }) {
   );
 }
 
+// The ask box registers how a button press is sent (the buttons live in the message card, the box owns the conversation).
+let choiceSender: ((choice: ChatChoice, option: ChatChoiceOption, requestId: string) => void) | null = null;
+
 function MessageRow({ msg }: { msg: ThreadMsg }) {
   const isUser = msg.role === "user";
   return (
@@ -991,6 +1000,12 @@ function MessageRow({ msg }: { msg: ThreadMsg }) {
           </span>
         )}
         {msg.streaming && msg.content && <span className="cursor-blink" />}
+        {!isUser && (
+          <>
+            <ChatStatusLine requestId={msg.id} onStop={msg.streaming ? () => api.cancelChat(msg.id) : undefined} />
+            {!msg.streaming && <ChatChoiceButtons requestId={msg.id} onPick={(c, o) => choiceSender?.(c, o, msg.id)} />}
+          </>
+        )}
       </div>
     </div>
   );
@@ -1037,21 +1052,10 @@ function Composer({
     const nextImages: ChatAttachment[] = [];
     const nextText: PendingText[] = [];
     let problem: string | null = null;
+    const imageFiles: File[] = [];
     for (const file of Array.from(files)) {
       if (file.type.startsWith("image/")) {
-        if (images.length + nextImages.length >= MAX_IMAGES) {
-          problem = `Up to ${MAX_IMAGES} photos per message.`;
-          continue;
-        }
-        if (file.size > MAX_IMAGE_BYTES) {
-          problem = `"${file.name}" is too large (max ${MAX_IMAGE_BYTES / 1024 / 1024}MB).`;
-          continue;
-        }
-        try {
-          nextImages.push({ dataUri: await readAsDataUri(file), name: file.name });
-        } catch {
-          problem = `Couldn't read "${file.name}".`;
-        }
+        imageFiles.push(file);
       } else if (file.type.startsWith("text/") || file.type === "application/json" || TEXT_EXTENSIONS.test(file.name)) {
         if (textFiles.length + nextText.length >= MAX_TEXT_FILES) {
           problem = `Up to ${MAX_TEXT_FILES} files per message.`;
@@ -1070,14 +1074,20 @@ function Composer({
         problem = `I can read photos and text files (txt, csv, md, json). "${file.name}" is something else, so paste the part that matters into the box instead.`;
       }
     }
-    if (nextImages.length) setImages((prev) => [...prev, ...nextImages]);
+    if (imageFiles.length) {
+      // the shared pipeline: what the file really is, redrawn smaller (drops location data), kept inside the send budget
+      const r = await prepareImages(imageFiles, images);
+      if (r.added.length) setImages((prev) => [...prev, ...r.added]);
+      if (r.problems.length) problem = [problem, ...r.problems].filter(Boolean).join(" ");
+    }
     if (nextText.length) setTextFiles((prev) => [...prev, ...nextText]);
     if (problem) setError(problem);
   }
 
-  function send() {
-    const text = draft.trim();
+  function send(textOverride?: string, choice?: { choiceId: string; optionId: string }) {
+    const text = (textOverride ?? draft).trim();
     if ((!text && !images.length && !textFiles.length) || busy) return;
+    if (!choice) dismissAllChoices();
 
     // The model sees the files' text inline; the window only shows their names.
     const fileBlocks = textFiles.map((f) => {
@@ -1087,7 +1097,9 @@ function Composer({
     const fallback = !text ? (images.length ? "" : "Here's a file. What can you tell me from it?") : text;
     const message = [fallback, ...fileBlocks].filter(Boolean).join("\n\n");
 
-    const history: ChatMessage[] = messages.filter((m) => !m.streaming && !m.error).map((m) => ({ role: m.role, content: m.content }));
+    const history: ChatMessage[] = messages
+      .filter((m) => !m.streaming && !m.error)
+      .map((m) => ({ role: m.role, content: m.images?.length ? `${m.content}\n${attachmentHistoryNote(m.images.map((a) => a.name))}`.trim() : m.content }));
     const requestId = crypto.randomUUID();
     const userMsg: ThreadMsg = {
       id: crypto.randomUUID(),
@@ -1101,14 +1113,26 @@ function Composer({
     const replyMsg: ThreadMsg = { id: requestId, role: "assistant", content: "", ts: Date.now() + 1, streaming: true };
     setThread([...thread, userMsg, replyMsg]);
 
-    api.startChat(requestId, message, history, "database", focus?.productId, images);
-    setDraft("");
+    api.startChat(requestId, message, history, "database", focus?.productId, images, choice);
+    if (textOverride === undefined) setDraft("");
     setImages([]);
     setTextFiles([]);
     setError(null);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     onSent();
   }
+
+  const sendRef = useRef(send);
+  sendRef.current = send;
+  useEffect(() => {
+    choiceSender = (c, o, requestId) => {
+      dismissChoice(requestId);
+      sendRef.current(o.label, { choiceId: c.id, optionId: o.id });
+    };
+    return () => {
+      choiceSender = null;
+    };
+  }, []);
 
   const placeholder = focus ? `Ask me about ${focus.name}, or attach photos and files…` : "Tell me a product to research, ask a question, or attach photos and files…";
 

@@ -2,6 +2,7 @@ export const api = window.api;
 export type { Account, CloudStatus, Config, FeedbackVerdict, ListingRecord, LogLine, ScrapeStatus, SearchItem, DealTier, ProductProfile, ProductImage, BlacklistTerm, BlacklistedImage, ActiveProductResearch, Watch, WatchMatch, WatchPlatform, PhotoFlaw } from "../../../main/types.js";
 export type { BackupSummary, BetaInfo } from "../../../main/types.js";
 export type { ChatMessage, ChatContext, ChatAttachment } from "../../../main/chat.js";
+export type { ChatChoice, ChatChoiceOption, ChatStatusEvent } from "../../../main/chatSupport.js";
 export type { DiscoveryEntry, DiscoveryThought, DiscoverySource } from "../../../main/discovery.js";
 export type { ApplyResult, AuditEvent, DecideResult, DecisionRecord, ReviewSnapshot } from "../../../main/identityReview.js";
 export type { ReviewFinding, ReviewProposal, CompareRow, EvidenceLine, PreviewChange } from "../../../main/identity/reviewFindings.js";

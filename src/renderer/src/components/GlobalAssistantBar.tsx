@@ -1,6 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { ChatMessage } from "../lib/api.js";
+import type { ChatAttachment, ChatChoice, ChatChoiceOption, ChatMessage } from "../lib/api.js";
 import { api } from "../lib/api.js";
+import { AttachButton, AttachmentBar, ChatChoiceButtons, ChatStatusLine, useImageIntake } from "./ChatExtras.js";
+import { attachmentHistoryNote } from "../lib/chatAttachments.js";
+import { dismissAllChoices, dismissChoice, forgetSteps } from "../lib/chatExtras.js";
 
 // Per explicit instruction — a persistent assistant reachable from anywhere
 // in the app, not just Dashboard/Database's own separate chats, with full
@@ -25,6 +28,8 @@ interface ChatEntry {
   content: string;
   streaming?: boolean;
   error?: boolean;
+  // Beta 13: photos the person attached to this message (shown as previews; the model's history keeps a short note instead of the pixels).
+  attachments?: ChatAttachment[];
 }
 
 const MINIMIZED_STORAGE_KEY = "globalAssistantMinimized";
@@ -68,6 +73,8 @@ export function GlobalAssistantBar() {
   });
   const [chat, setChat] = useState<ChatEntry[]>([]);
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const intake = useImageIntake(attachments, setAttachments);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   function setMinimizedPersisted(value: boolean) {
@@ -87,6 +94,7 @@ export function GlobalAssistantBar() {
     });
     const offDone = api.onChatDone((requestId, full) => {
       setChat((prev) => prev.map((m) => (m.id === requestId ? { ...m, content: full, streaming: false } : m)));
+      forgetSteps(requestId);
     });
     const offError = api.onChatError((requestId, message) => {
       setChat((prev) =>
@@ -115,18 +123,32 @@ export function GlobalAssistantBar() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [chat.length, chat[chat.length - 1]?.content]);
 
-  function sendText(raw: string) {
-    const text = raw.trim();
-    if (!text) return;
-    setDraft("");
+  const busy = chat.some((m) => m.streaming);
 
-    const history: ChatMessage[] = chat.filter((m) => !m.streaming && !m.error).map((m) => ({ role: m.role, content: m.content }));
-    const userMsg: ChatEntry = { id: crypto.randomUUID(), role: "user", content: text };
+  function sendText(raw: string, choice?: { choiceId: string; optionId: string }) {
+    const text = raw.trim();
+    if ((!text && !attachments.length) || busy) return;
+    const sent = attachments;
+    if (!choice) dismissAllChoices();
+    setDraft("");
+    setAttachments([]);
+    intake.clearProblems();
+
+    // Earlier pictures are remembered as a short note (their pixels are not re-sent), so "the photo" still means something in a follow-up.
+    const history: ChatMessage[] = chat
+      .filter((m) => !m.streaming && !m.error)
+      .map((m) => ({ role: m.role, content: m.attachments?.length ? `${m.content}\n${attachmentHistoryNote(m.attachments.map((a) => a.name))}`.trim() : m.content }));
+    const userMsg: ChatEntry = { id: crypto.randomUUID(), role: "user", content: text, attachments: sent.length ? sent : undefined };
     const requestId = crypto.randomUUID();
     const assistantMsg: ChatEntry = { id: requestId, role: "assistant", content: "", streaming: true };
 
     setChat((prev) => [...prev, userMsg, assistantMsg]);
-    api.startChat(requestId, text, history, "global");
+    api.startChat(requestId, text, history, "global", undefined, sent.length ? sent : undefined, choice);
+  }
+
+  function pickChoice(c: ChatChoice, o: ChatChoiceOption, requestId: string) {
+    dismissChoice(requestId);
+    sendText(o.label, { choiceId: c.id, optionId: o.id });
   }
 
   if (minimized) {
@@ -179,6 +201,13 @@ export function GlobalAssistantBar() {
             overflowWrap: "anywhere",
           }}
         >
+          {m.attachments?.length ? (
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: m.content ? 6 : 0 }}>
+              {m.attachments.map((a, i) => (
+                <img key={i} src={a.dataUri} alt={a.name} style={{ width: 52, height: 52, objectFit: "cover", borderRadius: 6 }} />
+              ))}
+            </div>
+          ) : null}
           {m.content ||
             (m.streaming ? (
               <span className="typing-dots" aria-label="Clynx is typing">
@@ -189,6 +218,12 @@ export function GlobalAssistantBar() {
             ) : (
               ""
             ))}
+          {!mine && m.id !== "welcome" && (
+            <>
+              <ChatStatusLine requestId={m.id} onStop={m.streaming ? () => api.cancelChat(m.id) : undefined} />
+              {!m.streaming && <ChatChoiceButtons requestId={m.id} disabled={busy} onPick={(c, o) => pickChoice(c, o, m.id)} />}
+            </>
+          )}
         </div>
       </div>
     );
@@ -275,25 +310,22 @@ export function GlobalAssistantBar() {
         {chat.map(bubble)}
       </div>
 
-      <div
-        style={{
-          display: "flex",
-          gap: 6,
-          padding: 10,
-          borderTop: "1px solid var(--border)",
-          flexShrink: 0,
-        }}
-      >
-        <input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && sendText(draft)}
-          placeholder="Ask Clynx anything..."
-          style={{ flex: 1, background: "var(--bg-elevated)" }}
-        />
-        <button className="icon" disabled={!draft.trim()} onClick={() => sendText(draft)}>
-          Send
-        </button>
+      <div style={{ padding: 10, borderTop: "1px solid var(--border)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 4 }} onDrop={intake.onDrop} onDragOver={(e) => e.preventDefault()}>
+        <AttachmentBar attachments={attachments} problems={intake.problems} onRemove={(i) => setAttachments((a) => a.filter((_, j) => j !== i))} />
+        <div style={{ display: "flex", gap: 6 }}>
+          <AttachButton onFiles={(f) => void intake.addFiles(f)} disabled={busy} />
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && sendText(draft)}
+            onPaste={intake.onPaste}
+            placeholder="Ask Clynx anything..."
+            style={{ flex: 1, background: "var(--bg-elevated)" }}
+          />
+          <button className="icon" disabled={busy || (!draft.trim() && !attachments.length)} onClick={() => sendText(draft)}>
+            Send
+          </button>
+        </div>
       </div>
     </div>
   );

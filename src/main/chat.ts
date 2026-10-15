@@ -1,4 +1,5 @@
 import type { BlacklistTerm, Config, ListingRecord, LogLine, ProductProfile, Watch } from "./types.js";
+import { REPLY_STYLE, CHAT_TOKENS_LONG, CHAT_TOKENS_SHORT, tightenReply, toolStatusLabel, wantsDetail, type ChatStatusEvent } from "./chatSupport.js";
 import { CLYNX_PERSONA, whereYouAre } from "./clynxPersona.js";
 import { CLYNX_VOICE } from "./voice.js";
 import { isLowAiMode } from "./aiMode.js";
@@ -48,7 +49,10 @@ export interface ToolCall {
     | "pause_watch"
     | "resume_watch"
     | "delete_watch"
-    | "list_watch_matches";
+    | "list_watch_matches"
+    | "ask_choice"
+    | "library_op"
+    | "library_list";
   args: Record<string, unknown>;
   // What the user actually typed this turn. The model sometimes shortens a product name when it fills in a tool's arguments; tools that need the
   // user's own wording (research_product) read it from here.
@@ -102,17 +106,19 @@ const DASHBOARD_TOOL_NAMES = new Set<ToolCall["name"]>([
   "list_watch_matches",
   // Clynx looking something up on its own, like a person googling: every chat has it.
   "web_research",
+  // Beta 13: a question with buttons, available everywhere.
+  "ask_choice",
 ]);
 
-const DATABASE_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "add_blacklist_term", "remove_blacklist_term"]);
+const DATABASE_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "add_blacklist_term", "remove_blacklist_term", "ask_choice", "library_op", "library_list"]);
 
-const PRODUCT_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "add_product_watch_note"]);
+const PRODUCT_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "add_product_watch_note", "ask_choice", "library_op", "library_list"]);
 
 // Per explicit instruction — everything Dashboard can do, plus
 // research_product (Database's own product-research tool). Deliberately
 // NOT add_product_watch_note — that tool only makes sense already scoped
 // to one specific product's own page, which this bar never is.
-const GLOBAL_TOOL_NAMES = new Set<ToolCall["name"]>([...DASHBOARD_TOOL_NAMES, "research_product", "add_reference_photos", "find_products"]);
+const GLOBAL_TOOL_NAMES = new Set<ToolCall["name"]>([...DASHBOARD_TOOL_NAMES, "research_product", "add_reference_photos", "find_products", "library_op", "library_list"]);
 
 export function allowedToolNames(context: ChatContext): Set<ToolCall["name"]> {
   if (context === "dashboard") return DASHBOARD_TOOL_NAMES;
@@ -122,6 +128,65 @@ export function allowedToolNames(context: ChatContext): Set<ToolCall["name"]> {
 }
 
 const TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "ask_choice",
+      description:
+        "Ask the user a question with BUTTONS instead of a typed menu. Use it whenever you would otherwise write 'A) ... B) ...' or 'Which one: 1) ... 2) ...' or ask them to pick between a few concrete options. 2 to 6 short options; the user can still type their own answer. After calling it, STOP: do not write more and do not call other tools; the answer arrives as their next message. Do not use it for yes/no questions you can simply act on, and never when the user is frustrated or has already answered.",
+      parameters: {
+        type: "object",
+        properties: {
+          question: { type: "string", description: "The question, one short sentence." },
+          options: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                label: { type: "string", description: "Short button text, under 40 characters." },
+                detail: { type: "string", description: "Optional one-line explanation." },
+                kind: { type: "string", enum: ["default", "destructive", "cancel"] },
+              },
+              required: ["label"],
+            },
+          },
+          multi: { type: "boolean", description: "true only if several options may be picked together." },
+        },
+        required: ["question", "options"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "library_list",
+      description: "Read the user's Library organisation: their own folders (with ids) and what is in the Trash. Use it to find a folder id before moving something. Reads only; changes nothing.",
+      parameters: { type: "object", properties: { what: { type: "string", enum: ["folders", "trash"], description: "folders (default) or trash" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "library_op",
+      description:
+        "Organise the user's Library: create / rename / move / delete (to the Trash) folders, move a product into a folder or back to Clynx's own filing (folderId empty), rename a product, move a product or photo to the Trash or back, set a product's first photo or thumbnail from one of its photos, or move a wrong photo to another product. Deleting always goes to the Trash for 30 days and everything can be undone from the Library. Moving or renaming NEVER changes what a product is or what it is worth. Use ids from find_products / library_list; never invent ids. Anything bulk or consequential makes the app ask the user to confirm with buttons - you do not confirm for them; just report that it is waiting. Put the fields the operation needs next to `op`.",
+      parameters: {
+        type: "object",
+        properties: {
+          op: { type: "string", enum: ["createFolder", "renameFolder", "moveFolder", "deleteFolder", "moveProduct", "renameProduct", "trashProduct", "restoreProduct", "removeImage", "restoreImage", "setPrimaryImage", "setThumbnail", "reassignImage"] },
+          name: { type: "string", description: "createFolder / renameFolder / renameProduct: the name." },
+          id: { type: "string", description: "renameFolder / moveFolder / deleteFolder: the folder id; renameProduct / trashProduct / restoreProduct: the product id." },
+          parentId: { type: "string", description: "createFolder: the parent folder id (empty = top level). moveFolder: the new parent id (empty = top level)." },
+          productId: { type: "string", description: "moveProduct / setPrimaryImage / setThumbnail: the product id." },
+          folderId: { type: "string", description: "moveProduct: the destination folder id (empty = back to where Clynx files it)." },
+          imageId: { type: "string", description: "removeImage / restoreImage / setPrimaryImage / setThumbnail / reassignImage: the photo id (setThumbnail: empty clears it)." },
+          toProductId: { type: "string", description: "reassignImage: the product the photo really belongs to." },
+          deleteContents: { type: "boolean", description: "deleteFolder: true sends everything inside to the Trash too (asks the user first); default moves it up a level." },
+        },
+        required: ["op"],
+      },
+    },
+  },
   {
     type: "function",
     function: {
@@ -794,10 +859,17 @@ async function streamOnce(
   messages: unknown[],
   tools: typeof TOOLS | null,
   onChunk: (delta: string) => void,
-  effort: "minimal" | "low" | "medium" | "high" = "minimal"
+  effort: "minimal" | "low" | "medium" | "high" = "minimal",
+  opts: { signal?: AbortSignal; maxTokens?: number } = {}
 ): Promise<{ content: string; toolCalls: AccumulatedToolCall[] }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+  // "Stop" from the person aborts the same request; it is reported as a stop, not as a timeout.
+  const onStop = () => controller.abort();
+  if (opts.signal) {
+    if (opts.signal.aborted) controller.abort();
+    else opts.signal.addEventListener("abort", onStop, { once: true });
+  }
 
   try {
     const res = await callOpenAI(
@@ -805,7 +877,7 @@ async function streamOnce(
       {
         model: OPENAI_MODEL,
         messages,
-        max_completion_tokens: 900,
+        max_completion_tokens: opts.maxTokens ?? 900,
         // gpt-5-mini is a reasoning model — verified live it silently burns
         // the whole completion-token budget on invisible reasoning tokens
         // without this (see openai.ts).
@@ -869,11 +941,21 @@ async function streamOnce(
     return { content, toolCalls: [...toolCalls.values()] };
   } catch (err) {
     if ((err as Error).name === "AbortError") {
+      if (opts.signal?.aborted) throw new ChatStopped();
       throw new Error(`OpenAI request timed out after ${OPENAI_TIMEOUT_MS / 1000}s`);
     }
     throw err;
   } finally {
     clearTimeout(timeout);
+    opts.signal?.removeEventListener("abort", onStop);
+  }
+}
+
+/** Thrown inside a chat turn when the person pressed Stop. */
+export class ChatStopped extends Error {
+  constructor() {
+    super("Stopped.");
+    this.name = "ChatStopped";
   }
 }
 
@@ -889,6 +971,15 @@ async function streamOnce(
 // whether it's done or wants to act again, bounded so a model that just
 // won't stop calling tools can't hang the request forever.
 const MAX_TOOL_ROUNDS = 4;
+
+/** What the window needs from a chat turn besides the text: real progress, a way to stop it, and the style switches (Beta 13). */
+export interface ChatHooks {
+  signal?: AbortSignal;
+  onStatus?: (e: Omit<ChatStatusEvent, "requestId">) => void;
+  replyStyle?: boolean;
+  /** Said to the model so it tells the user about attachments that could not be used (never silently dropped). */
+  notice?: string;
+}
 
 /** Timing and decisions of one chat turn: what each model round and each tool cost, and which safeguards stepped in. Filled in by streamChat when given one. */
 export interface ChatTrace {
@@ -931,7 +1022,8 @@ export async function streamChat(
   // both included.
   attachments: ChatAttachment[] = [],
   watches: Watch[] = [],
-  trace?: ChatTrace
+  trace?: ChatTrace,
+  hooks: ChatHooks = {}
 ): Promise<string> {
   const turnStart = Date.now();
   // Feature flags (config.json "chatFlags"): every improvement below is on unless explicitly set to false, so any one can be switched off without a new build.
@@ -951,6 +1043,11 @@ export async function streamChat(
         ? buildProductSystemPrompt(currentProduct)
         : buildDatabaseSystemPrompt(products, blacklistTerms, currentProduct, flags.leanContext ? { message: userMessage, history } : null);
   const tools = toolsForContext(context);
+  const shortStyle = hooks.replyStyle === true && !wantsDetail(userMessage);
+  const styledSystemPrompt = shortStyle ? `${systemPrompt}\n\n${REPLY_STYLE}` : systemPrompt;
+  const stopCheck = () => {
+    if (hooks.signal?.aborted) throw new ChatStopped();
+  };
 
   // Short answers ("both", "yes", "do it", "the first one") and repeated or frustrated instructions are read in code, not left to the model to infer.
   const hint = flags.followUpHints ? followUpHint(userMessage, history) : null;
@@ -969,7 +1066,8 @@ export async function streamChat(
         ]
       : userMessage;
   const messages: unknown[] = [
-    { role: "system", content: systemPrompt },
+    { role: "system", content: styledSystemPrompt },
+    ...(hooks.notice ? [{ role: "system", content: hooks.notice }] : []),
     ...history.slice(-12),
     ...(hint ? [{ role: "system", content: hint }] : []),
     { role: "user", content: userContent },
@@ -982,24 +1080,43 @@ export async function streamChat(
   // that."), so it reads like a person thinking out loud; text from separate rounds is separated by a blank line.
   let roundNo = 0;
   const streamRound = async (roundTools: typeof tools | null) => {
+    stopCheck();
     const needsGap = fullContent.length > 0;
     let started = false;
     const roundStart = Date.now();
     let firstWordMs: number | null = null;
-    const result = await streamOnce(
-      messages,
-      roundTools,
-      (delta) => {
-        if (!started) {
-          if (!delta.trim()) return;
-          started = true;
-          firstWordMs = Date.now() - roundStart;
-          if (needsGap) onChunk("\n\n");
-        }
-        onChunk(delta);
-      },
-      chatEffort(config)
-    );
+    // "Thinking" is a real step: it lasts from the request until the first word (or the tool call) arrives. No reasoning text is ever shown.
+    const thinkId = `think-${roundNo + 1}`;
+    let thinkOpen = true;
+    hooks.onStatus?.({ stepId: thinkId, kind: "model", label: roundNo === 0 ? "Thinking" : "Working it out", state: "start", startedAt: roundStart });
+    const closeThink = (ok: boolean, detail?: string) => {
+      if (!thinkOpen) return;
+      thinkOpen = false;
+      hooks.onStatus?.({ stepId: thinkId, kind: "model", label: roundNo === 0 ? "Thinking" : "Working it out", state: "end", startedAt: roundStart, ok, detail });
+    };
+    let result: Awaited<ReturnType<typeof streamOnce>>;
+    try {
+      result = await streamOnce(
+        messages,
+        roundTools,
+        (delta) => {
+          if (!started) {
+            if (!delta.trim()) return;
+            started = true;
+            firstWordMs = Date.now() - roundStart;
+            closeThink(true);
+            if (needsGap) onChunk("\n\n");
+          }
+          onChunk(delta);
+        },
+        chatEffort(config),
+        { signal: hooks.signal, maxTokens: shortStyle ? CHAT_TOKENS_SHORT : CHAT_TOKENS_LONG }
+      );
+    } catch (err) {
+      closeThink(false, (err as Error).message);
+      throw err;
+    }
+    closeThink(true);
     trace?.rounds.push({ round: ++roundNo, ms: Date.now() - roundStart, firstWordMs, promptChars: JSON.stringify(messages).length, toolCalls: result.toolCalls.length });
     const text = result.content.trim();
     if (text) fullContent += (fullContent ? "\n\n" : "") + text;
@@ -1020,7 +1137,7 @@ export async function streamChat(
       trace.aiCalls = trace.rounds.length;
       trace.guards = guards;
     }
-    return withResoldPrompt(content);
+    return withResoldPrompt(shortStyle ? tightenReply(content) : content);
   };
   let promiseGuardUsed = false;
 
@@ -1058,15 +1175,20 @@ export async function streamChat(
     });
 
     const runOne = async (tc: { id: string; name: string; args: string }, parallel: boolean): Promise<{ id: string; content: string }> => {
+      stopCheck();
       const started = Date.now();
       let toolResult: string;
+      let label = toolStatusLabel(tc.name, {});
       try {
         const args = tc.args ? JSON.parse(tc.args) : {};
+        label = toolStatusLabel(tc.name, args);
+        hooks.onStatus?.({ stepId: tc.id || `${tc.name}-${started}`, kind: "tool", label, state: "start", startedAt: started });
         toolResult = await executeTool({ name: tc.name as ToolCall["name"], args, userMessage });
         if (tc.name === "research_product" && /^Started researching|^Added|new entry/.test(toolResult) && !toolResult.startsWith("Failed:")) researchedNewProduct = true;
       } catch (err) {
         toolResult = `Failed: ${(err as Error).message}`;
       }
+      hooks.onStatus?.({ stepId: tc.id || `${tc.name}-${started}`, kind: "tool", label, state: "end", startedAt: started, ok: !toolResult.startsWith("Failed:"), detail: toolResult.startsWith("Failed:") ? toolResult.slice(0, 160) : undefined });
       toolsRunThisTurn++;
       trace?.tools.push({ name: tc.name, ms: Date.now() - started, parallel });
       return { id: tc.id, content: toolResult };
@@ -1083,6 +1205,8 @@ export async function streamChat(
     }
     if (parallelRun) for (const r of await parallelRun) answers.set(r.id, r.content);
     for (const tc of result.toolCalls) messages.push({ role: "tool", tool_call_id: tc.id, content: answers.get(tc.id) ?? "Failed: no result" });
+    // A question with buttons ends the turn: the answer arrives as the person's next message, so the model must not keep talking or acting.
+    if (result.toolCalls.some((tc) => (tc.name === "ask_choice" || tc.name === "library_op") && /^(Presented|Waiting)/.test(answers.get(tc.id) ?? ""))) return finish(fullContent);
   }
 
   // Hit the round cap with the model still wanting to call tools — force a

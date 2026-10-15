@@ -5,6 +5,7 @@ import type { DiscoveryEntry } from "../main/discovery.js";
 import type { ApplyResult, AuditEvent, DecideResult, ReviewSnapshot } from "../main/identityReview.js";
 import type { OnboardingState } from "../main/types.js";
 import type { LibraryOp, OpResult } from "../main/libraryOps.js";
+import type { ChatChoice, ChatStatusEvent } from "../main/chatSupport.js";
 import type { Account, ActiveProductResearch, BackupSummary, BetaInfo, BillingActionResult, BillingPlanChoice, BillingStatus, BlacklistedImage, BlacklistTerm, CloudStatus, Config, FeedbackVerdict, ListingRecord, LogLine, ProductImage, ProductProfile, ScrapeStatus, Watch, WatchMatch, WatchPlatform } from "../main/types.js";
 import type { ChatMessage, ChatContext, ChatAttachment } from "../main/chat.js";
 import type { MetricsSnapshot } from "../main/metrics.js";
@@ -150,8 +151,21 @@ const api = {
     history: ChatMessage[],
     context: ChatContext,
     productId?: string,
-    attachments?: ChatAttachment[]
-  ) => ipcRenderer.send("ai:chatStart", { requestId, message, history, context, productId, attachments }),
+    attachments?: ChatAttachment[],
+    choice?: { choiceId: string; optionId: string }
+  ) => ipcRenderer.send("ai:chatStart", { requestId, message, history, context, productId, attachments, choice }),
+  // Beta 13: stop a running chat turn; real progress steps (tool / model, with when they really started); and questions with buttons.
+  cancelChat: (requestId: string) => ipcRenderer.send("ai:chatCancel", { requestId }),
+  onChatStatus: (cb: (e: ChatStatusEvent) => void) => {
+    const listener = (_e: unknown, e: ChatStatusEvent) => cb(e);
+    ipcRenderer.on("ai:chatStatus", listener);
+    return () => ipcRenderer.removeListener("ai:chatStatus", listener);
+  },
+  onChatChoices: (cb: (requestId: string, choice: ChatChoice) => void) => {
+    const listener = (_e: unknown, args: { requestId: string; choice: ChatChoice }) => cb(args.requestId, args.choice);
+    ipcRenderer.on("ai:chatChoices", listener);
+    return () => ipcRenderer.removeListener("ai:chatChoices", listener);
+  },
   onChatChunk: (cb: (requestId: string, delta: string) => void) => {
     const listener = (_e: unknown, args: { requestId: string; delta: string }) => cb(args.requestId, args.delta);
     ipcRenderer.on("ai:chatChunk", listener);

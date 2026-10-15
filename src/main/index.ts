@@ -29,6 +29,7 @@ import { loadConfig, saveConfig, takeConfigLoadNotice, DEFAULT_CONFIG, DEFAULT_B
 import {
   streamChat,
   type ChatTrace,
+  ChatStopped,
   streamNarration,
   allowedToolNames,
   discoverSiblingProducts,
@@ -67,7 +68,8 @@ import { beta13Flags } from "./beta13.js";
 import { makeThumb, noteDecision } from "./aiDecisionLog.js";
 import { fileImage, setFilingRecorder, type FileImageEvidence } from "./fileImage.js";
 import { selectReferenceImages } from "./referenceSelection.js";
-import { LibraryOps, TRASH_RETENTION_MS, type LibraryOp } from "./libraryOps.js";
+import { confirmChoice, sanitizeAttachments, validateChoice, type ChatChoice } from "./chatSupport.js";
+import { LibraryOps, TRASH_RETENTION_MS, folderPathList as folderPathsOf, type LibraryOp } from "./libraryOps.js";
 import { buyerTotalUsd, estimateMarketValue } from "./marketValue.js";
 import { compMatchesSpecs, modelLettersConflict, titleLooksLikeProduct } from "./compFilter.js";
 import { focalProductName } from "./dealSummary.js";
@@ -869,14 +871,75 @@ function findWatchByName(name: string): Watch | null {
 // only set (and only meaningful) for a "product"-context call — it's what
 // add_product_watch_note attaches its note to, since that tool only makes
 // sense scoped to whichever product page the conversation is happening on.
+// Beta 13: questions with buttons. A pending choice remembers what to do if the person confirms (the token that authorises a Library operation lives HERE, never in text the
+// model can read), and forgets after ten minutes.
+const pendingChoices = new Map<string, { run?: () => { ok: boolean; summary: string; error?: string }; expires: number }>();
+function rememberChoice(id: string, run?: () => { ok: boolean; summary: string; error?: string }) {
+  for (const [k, v] of pendingChoices) if (v.expires < Date.now()) pendingChoices.delete(k);
+  pendingChoices.set(id, { run, expires: Date.now() + 10 * 60_000 });
+}
+
+function toLibraryOp(args: Record<string, unknown>): LibraryOp | { error: string } {
+  const text = (k: string) => String(args[k] ?? "").trim();
+  const orNull = (k: string) => text(k) || null;
+  const need = (...keys: string[]) => keys.find((k) => !text(k));
+  switch (text("op")) {
+    case "createFolder": return need("name") ? { error: "createFolder needs a name." } : { op: "createFolder", parentId: orNull("parentId"), name: text("name") };
+    case "renameFolder": return need("id", "name") ? { error: "renameFolder needs the folder id and a name." } : { op: "renameFolder", id: text("id"), name: text("name") };
+    case "moveFolder": return need("id") ? { error: "moveFolder needs the folder id." } : { op: "moveFolder", id: text("id"), newParentId: orNull("parentId") };
+    case "deleteFolder": return need("id") ? { error: "deleteFolder needs the folder id." } : { op: "deleteFolder", id: text("id"), mode: args.deleteContents === true ? "trash_with_contents" : "move_contents_up" };
+    case "moveProduct": return need("productId") ? { error: "moveProduct needs the product id." } : { op: "moveProduct", productId: text("productId"), folderId: orNull("folderId") };
+    case "renameProduct": return need("id", "name") ? { error: "renameProduct needs the product id and a name." } : { op: "renameProduct", id: text("id"), name: text("name") };
+    case "trashProduct": return need("id") ? { error: "trashProduct needs the product id." } : { op: "trashProduct", id: text("id") };
+    case "restoreProduct": return need("id") ? { error: "restoreProduct needs the product id." } : { op: "restoreProduct", id: text("id") };
+    case "removeImage": return need("imageId") ? { error: "removeImage needs the photo id." } : { op: "removeImage", imageId: text("imageId") };
+    case "restoreImage": return need("imageId") ? { error: "restoreImage needs the photo id." } : { op: "restoreImage", imageId: text("imageId") };
+    case "setPrimaryImage": return need("productId", "imageId") ? { error: "setPrimaryImage needs the product id and the photo id." } : { op: "setPrimaryImage", productId: text("productId"), imageId: text("imageId") };
+    case "setThumbnail": return need("productId") ? { error: "setThumbnail needs the product id." } : { op: "setThumbnail", productId: text("productId"), imageId: orNull("imageId") };
+    case "reassignImage": return need("imageId", "toProductId") ? { error: "reassignImage needs the photo id and the id of the product it belongs to." } : { op: "reassignImage", imageId: text("imageId"), toProductId: text("toProductId") };
+    default: return { error: `Unknown operation "${text("op")}".` };
+  }
+}
+
 async function executeChatTool(
   call: ToolCall,
   context: ChatContext,
   onSearchUpdate?: (message: string) => void,
-  currentProductId?: string
+  currentProductId?: string,
+  emit?: { choice: (c: ChatChoice) => void }
 ): Promise<string> {
   if (!allowedToolNames(context).has(call.name)) {
     return `Failed: "${call.name}" isn't available from this chat.`;
+  }
+  if (call.name === "ask_choice") {
+    const v = validateChoice(call.args, () => randomUUID());
+    if (!v.ok) return `Failed: ${v.error}`;
+    if (!emit) return "Failed: this chat cannot show buttons; ask in plain words instead.";
+    rememberChoice(v.choice.id);
+    emit.choice(v.choice);
+    return "Presented the choices to the user as buttons. Stop here: write nothing more and call no other tools; their pick arrives as their next message.";
+  }
+  if (call.name === "library_list") {
+    if (String(call.args.what ?? "folders") === "trash") {
+      const t = store.listTrash();
+      return JSON.stringify({ products: t.products.slice(0, 30), folders: t.folders.slice(0, 30), photos: t.images.length });
+    }
+    return JSON.stringify(folderPathsOf(store.listFolders()));
+  }
+  if (call.name === "library_op") {
+    const op = toLibraryOp(call.args);
+    if ("error" in op) return `Failed: ${op.error}`;
+    const result = libraryOps().run(op, { actor: "chat" });
+    if (result.needsConfirmation) {
+      if (!emit) return `Failed: this needs the user's confirmation and this chat cannot show buttons. Tell them: ${result.needsConfirmation.prompt}`;
+      const choiceId = randomUUID();
+      const token = result.needsConfirmation.token;
+      rememberChoice(choiceId, () => libraryOps().run(op, { actor: "chat", confirm: token }));
+      emit.choice(confirmChoice(choiceId, result.needsConfirmation.prompt, "Yes, do it"));
+      return `Waiting for the user to confirm with buttons (asked: "${result.needsConfirmation.prompt}"). Stop here; do not repeat the request and do not say it was done.`;
+    }
+    if (!result.ok) return `Failed: ${result.error ?? "that did not work"}`;
+    return `Done: ${result.summary}`;
   }
   if (call.name === "add_search_item") {
     const item = String(call.args.item ?? "").trim();
@@ -5285,6 +5348,12 @@ app.whenReady().then(() => {
     return store.listBlacklistedImages();
   });
 
+  // Chat turns that can be stopped: requestId -> controller. Removed when the turn ends.
+  const chatTurns = new Map<string, AbortController>();
+  ipcMain.on("ai:chatCancel", (_e, args: { requestId: string }) => {
+    chatTurns.get(args?.requestId)?.abort();
+  });
+
   ipcMain.on(
     "ai:chatStart",
     async (
@@ -5296,8 +5365,22 @@ app.whenReady().then(() => {
         context: ChatContext;
         productId?: string;
         attachments?: ChatAttachment[];
+        // Beta 13: the person pressed one of the buttons from an earlier question (ask_choice / a Library confirmation).
+        choice?: { choiceId: string; optionId: string };
       }
     ) => {
+      // Every event is guarded: the window can be closed or reloaded mid-turn.
+      const send = (channel: string, payload: unknown) => {
+        try {
+          if (!event.sender.isDestroyed()) event.sender.send(channel, payload);
+        } catch {
+          /* the window went away */
+        }
+      };
+      const controller = new AbortController();
+      chatTurns.set(args.requestId, controller);
+      let streamedSoFar = "";
+      const flags = beta13Flags(config);
       try {
         const recentListings = args.context === "dashboard" || args.context === "global" ? store.listRecent(10, 0) : [];
         // Dashboard (and now "global", the persistent bottom bar) also
@@ -5313,8 +5396,34 @@ app.whenReady().then(() => {
           args.context === "database" || args.context === "dashboard" || args.context === "global" ? store.listBlacklistTerms() : [];
         const watches = args.context === "dashboard" || args.context === "global" ? store.listWatches() : [];
         const chatTrace: ChatTrace = { rounds: [], tools: [], totalMs: 0, aiCalls: 0, guards: [] };
+
+        // Pictures: re-checked here (the window is not trusted), and anything that cannot be used is SAID, to the person and to the model - never dropped silently.
+        const checked = sanitizeAttachments(args.attachments);
+        let notice = "";
+        if (!flags.chatAttachments && (args.attachments?.length ?? 0) > 0) {
+          checked.accepted.length = 0;
+          checked.rejected.push({ name: "photos", reason: "photo attachments are switched off" });
+        }
+        if (checked.rejected.length) {
+          notice = `The user attached photo(s) that could NOT be used: ${checked.rejected.map((r) => `${r.name} (${r.reason})`).join("; ")}. Tell them in one short sentence which ones were not used and why, then answer with what you have.`;
+          send("ai:chatStatus", { requestId: args.requestId, stepId: "attachments", kind: "notice", label: `Couldn't use ${checked.rejected.length} photo${checked.rejected.length === 1 ? "" : "s"}: ${checked.rejected.map((r) => `${r.name} (${r.reason})`).join("; ")}`, state: "end", startedAt: Date.now(), ok: false });
+        }
+
+        // A button press from an earlier question: run what it confirmed (here, where the authorising token lives) and tell the model the outcome.
+        let message = args.message;
+        if (args.choice) {
+          const pending = pendingChoices.get(args.choice.choiceId);
+          pendingChoices.delete(args.choice.choiceId);
+          if (pending?.run && args.choice.optionId === "confirm") {
+            const r = pending.run();
+            message += `\n[The user confirmed. ${r.ok ? `Done: ${r.summary}` : `It failed: ${r.error ?? "unknown error"}`}]`;
+          } else if (pending?.run) {
+            message += "\n[The user cancelled. Nothing was changed.]";
+          }
+        }
+
         const full = await streamChat(
-          args.message,
+          message,
           args.history,
           args.context,
           config,
@@ -5322,31 +5431,43 @@ app.whenReady().then(() => {
           recentListings,
           products,
           (delta) => {
-            event.sender.send("ai:chatChunk", { requestId: args.requestId, delta });
+            streamedSoFar += delta;
+            send("ai:chatChunk", { requestId: args.requestId, delta });
           },
           (call) =>
             executeChatTool(
               call,
               args.context,
-              (message) => {
-                event.sender.send("ai:searchUpdate", { requestId: args.requestId, message });
+              (text) => {
+                send("ai:searchUpdate", { requestId: args.requestId, message: text });
               },
-              currentProduct?.id
+              currentProduct?.id,
+              flags.chatChoices ? { choice: (choice) => send("ai:chatChoices", { requestId: args.requestId, choice }) } : undefined
             ),
           currentProduct,
           blacklistTerms,
-          args.attachments ?? [],
+          checked.accepted,
           watches,
-          chatTrace
+          chatTrace,
+          {
+            signal: controller.signal,
+            onStatus: flags.chatStatus ? (e) => send("ai:chatStatus", { requestId: args.requestId, ...e }) : undefined,
+            replyStyle: flags.replyStyle,
+            notice: notice || undefined,
+          }
         );
         // Model and tool timing for every chat turn (Activity > metrics): how long each model round and each tool took, and which safeguards acted.
         recordStage("chat_turn", chatTrace.totalMs, true);
         for (const r of chatTrace.rounds) recordStage("chat_ai_round", r.ms, true);
         for (const t of chatTrace.tools) recordStage(`chat_tool_${t.name}`, t.ms, true);
         console.log(`[chat] ${args.context}: ${chatTrace.totalMs}ms, ${chatTrace.aiCalls} AI call(s) [${chatTrace.rounds.map((r) => `${r.ms}ms/first word ${r.firstWordMs ?? "-"}ms/${r.promptChars} chars`).join(", ")}], tools [${chatTrace.tools.map((t) => `${t.name} ${t.ms}ms${t.parallel ? " (parallel)" : ""}`).join(", ") || "none"}]${chatTrace.guards.length ? `, safeguards: ${chatTrace.guards.join(", ")}` : ""}`);
-        event.sender.send("ai:chatDone", { requestId: args.requestId, full });
+        send("ai:chatDone", { requestId: args.requestId, full });
       } catch (err) {
-        event.sender.send("ai:chatError", { requestId: args.requestId, message: (err as Error).message });
+        // Stop keeps what was already said (the window replaces the bubble with `full`), and says it was stopped.
+        if (err instanceof ChatStopped) send("ai:chatDone", { requestId: args.requestId, full: streamedSoFar.trim() ? `${streamedSoFar.trim()}\n\n(Stopped.)` : "Stopped." });
+        else send("ai:chatError", { requestId: args.requestId, message: (err as Error).message });
+      } finally {
+        chatTurns.delete(args.requestId);
       }
     }
   );
