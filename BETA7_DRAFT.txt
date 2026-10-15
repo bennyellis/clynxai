@@ -1,0 +1,15 @@
+CLYNX BETA 7 - SIGNED DRAFT (NOT PUBLISHED)
+
+Version      0.3.0-beta.7 (beta channel)
+Installer    beta-release\Clynx-Beta-Setup-0.3.0-beta.7.exe  (124,748,810 bytes, not in git)
+SHA-256      5e36bd750c2be456a41ea62bf79e07456df76cb1dfc978dbed705577f665bb67
+Built from   clean commit ae86ab170bfa (tag beta7-draft-prep), server address https://ben.tail0e333d.ts.net built in
+Server       registered as a DRAFT with a signed update manifest, verified against the update public key and the stored installer.
+             Not visible to any app. Beta 6 is already published (19:05 today); Beta 2-4 are withdrawn.
+
+Tests        desktop suite 55/55, typechecks clean, packaged-app database upgrade test 16/16 (audit\phase13\t27_beta7.log).
+Not re-run   the sign-in / update scenarios t22-t25 and the installer test t26: their throw-away server no longer exists and the desktop
+             sign-in and update code is unchanged since Beta 6 (git diff of cloudClient.ts, updater.ts, updateVerifier.ts is empty).
+
+To release: website console > Releases > 0.3.0-beta.7 > Approve, then Publish (type the version).
+To undo a release later: console > Releases > Withdraw.

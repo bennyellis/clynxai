@@ -19,7 +19,7 @@ const check = (name, ok, detail) => { if (ok) { pass++; console.log("  PASS  " +
 const STABLE = {
   listings: "id, title, price, url, matched_item, reasoning, is_deal, first_seen_at",
   products: "id, name, category, family, ai_summary, created_at",
-  blacklist_terms: "id, term",
+  blacklist_terms: "term, source, created_at",
   watches: "id, name",
 };
 function snapshot(file) {
