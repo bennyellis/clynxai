@@ -18,6 +18,7 @@
     "migrate": "tsx src/db/migrate.ts",
     "worker": "tsx src/worker.ts",
     "admin": "tsx src/scripts/admin.ts",
+    "tester": "tsx src/scripts/tester.ts",
     "admin:prod": "node dist/scripts/admin.js",
     "owner": "tsx src/scripts/owner.ts",
     "owner:prod": "node dist/scripts/owner.js",

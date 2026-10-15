@@ -1,5 +1,6 @@
 import { query } from "../db/client.js";
 import { effectivePlanFor } from "../entitlements/enforce.js";
+import { tierForPlan, type Tier } from "../entitlements/plans.js";
 import { viaRedis } from "../queue/redisGuard.js";
 import { hit } from "../security/rateLimit.js";
 
@@ -87,13 +88,14 @@ export async function setEmergencyStop(stopped: boolean, reason: string | null, 
   return getControls();
 }
 
-export type Tier = "free" | "pro" | "owner";
+export type { Tier };
 export async function tierOf(userId: string): Promise<Tier> {
   const eff = await effectivePlanFor(userId);
-  return eff?.owner ? "owner" : eff?.plan === "pro" ? "pro" : "free";
+  return eff ? tierForPlan(eff.owner, eff.plan) : "free";
 }
-export const userDailyCapUsd = (c: Controls, t: Tier) => (t === "owner" ? c.ownerDailyUsd : t === "pro" ? c.userDailyUsdPro : c.userDailyUsdFree);
-export const ebayDailyCap = (c: Controls, t: Tier) => (t === "owner" ? c.ebayDailyCallsOwner : t === "pro" ? c.ebayDailyCallsPro : c.ebayDailyCallsFree);
+// Beta testers have no plan limits, but they are not unlimited spenders: they get the Owner's safety caps (the shared service stays protected).
+export const userDailyCapUsd = (c: Controls, t: Tier) => (t === "owner" || t === "tester" ? c.ownerDailyUsd : t === "pro" ? c.userDailyUsdPro : c.userDailyUsdFree);
+export const ebayDailyCap = (c: Controls, t: Tier) => (t === "owner" || t === "tester" ? c.ebayDailyCallsOwner : t === "pro" ? c.ebayDailyCallsPro : c.ebayDailyCallsFree);
 
 // ------------------------------------------------------------------ price estimates (USD per million tokens; images per image). ESTIMATES - override with AI_PRICES_JSON from the provider's own price list.
 interface Price { in: number; out: number }

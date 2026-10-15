@@ -769,8 +769,8 @@ export type DealStatus = "profitable_now" | "negotiation" | "worth_a_look" | "pa
 // What Clynx Cloud says about the signed-in account's plan (cloud /billing/status). Shown on Config > Account.
 export interface BillingStatus {
   configured: boolean; // false: this server has no billing set up (everyone stays on their base plan)
-  plan: "free" | "pro";
-  basePlan: "free" | "pro";
+  plan: "free" | "pro" | "tester";
+  basePlan: "free" | "pro" | "tester";
   entitlements: { maxWatches: number | null; maxDevices: number | null; maxSearchItems: number | null; aiResearchEnabled: boolean; aiRequestsPerDay: number | null; aiImagesPerDay: number | null };
   subscription: null | { status: string; phase: string; currentPeriodEnd: string | null; trialEnd: string | null; cancelAtPeriodEnd: boolean; graceEndsAt: string | null };
   canManage: boolean;

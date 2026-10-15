@@ -412,7 +412,7 @@ export function isBillingStatus(v: unknown): v is BillingStatus {
     !!b &&
     typeof b === "object" &&
     typeof b.configured === "boolean" &&
-    (b.plan === "free" || b.plan === "pro") &&
+    (b.plan === "free" || b.plan === "pro" || b.plan === "tester") &&
     !!b.entitlements &&
     typeof b.entitlements === "object" &&
     !!b.usage &&

@@ -4,6 +4,8 @@ export const dateText = (iso: string | null) => (iso ? new Date(iso).toLocaleDat
 
 export function describeSubscription(b: BillingStatus): { headline: string; detail: string; tone: "ok" | "warn" | "plain" } {
   if (b.owner === true) return { headline: "Owner — Full Access", detail: "Every feature, with no subscription or plan limits. Safety limits that protect the shared service (rate limits and the daily spending cap) still apply.", tone: "ok" };
+  // A beta tester: an ordinary account with the plan limits lifted by the operator.
+  if (b.plan === "tester") return { headline: "Beta Tester — Unlimited access", detail: "Plan limits are lifted for beta testers. Safety limits that protect the shared service (rate limits and a daily spending cap) still apply.", tone: "ok" };
   const s = b.subscription;
   const planName = b.plan === "pro" ? "Clynx Pro" : "Free";
   if (!s) return { headline: planName, detail: b.plan === "pro" ? "Pro is included with your account." : "No subscription.", tone: "plain" };
