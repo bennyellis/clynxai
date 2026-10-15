@@ -42,6 +42,22 @@ const opt = (n: string) => { const i = args.indexOf(n); return i >= 0 ? args[i +
 const settings = DEFAULT_RESALE_SETTINGS;
 const NEGATED = /\\b(no|not|without|never|nothing|zero|free of)\\b[^.,;\\n]{0,24}\\b(damage[ds]?|crack(ed|s)?|broken|dead|defect(s|ive)?|scratch(es|ed)?|issues?|problems?)\\b/i;
 
+const MAJ_RE: RegExp[] = [/\\bfor parts\\b/i, /\\bparts only\\b/i, /\\bnot working\\b/i, /\\bdoesn'?t work\\b/i, /\\bwon'?t (turn on|power on|charge)\\b/i, /\\bno power\\b/i, /\\bdead\\b/i, /\\bdefective\\b/i, /\\bicloud locked\\b/i, /\\bblacklisted\\b/i, /\\bneeds repair\\b/i, /\\brepair needed\\b/i];
+const MIN_RE: RegExp[] = [/\\bbroken\\b/i, /\\bcrack(ed)?\\b/i, /\\bshatter(ed)?\\b/i, /\\bdamage[ds]?\\b/i, /\\bwater damage\\b/i, /\\bas.?is\\b/i, /\\bmissing (charger|remote|controller|cable)\\b/i];
+// Which words triggered the condition discount, with a little text around them and whether they were in the title or the page text.
+function conditionWhy(title: string, description: string): string {
+  const hits: string[] = [];
+  for (const [label, list] of [["MAJOR", MAJ_RE], ["minor", MIN_RE]] as const) {
+    for (const re of list) {
+      for (const [where, text] of [["title", title], ["page", description]] as const) {
+        const m = re.exec(text || "");
+        if (m) hits.push(label + " in " + where + ": ..." + text.slice(Math.max(0, m.index - 40), m.index + m[0].length + 40).replace(/\\s+/g, " ") + "...");
+      }
+    }
+  }
+  return hits.slice(0, 3).join(" | ");
+}
+
 function verdictAt(valueUsd: number, price: number, impact: string): "profitable" | "negotiable" | "no" {
   const factor = (CONDITION_VALUE_FACTOR as any)[impact] ?? 1;
   const lot = valueUsd * factor;
@@ -127,11 +143,11 @@ function selftest(): string {
       const negated = (stored !== "none" || redetected !== "none") && NEGATED.test(text);
       if (negated) summary.negatedConditionDiscounted++;
       if (asScanned !== "no" || missedByCondition || negated) {
-        leads.push({ kind: asScanned !== "no" ? "database-priced, qualifies on the saved numbers but was not a deal" : missedByCondition ? "qualifies only without the condition discount" : "condition wording is negated", title: r.title, price: r.price, product: known.name, databaseValueUsd: Math.round(known.value), maxBuyAtNoDiscountUsd: Math.floor(maxBuyPriceExactUsd(known.value, 0, settings)), appliedCondition: stored, ended: r.research_status + "/" + r.research_code, reasoning: String(r.research_reason ?? r.reasoning ?? "").slice(0, 160), url: r.url });
+        leads.push({ firstSeen: new Date(r.first_seen_at).toISOString().slice(0, 16), conditionWhy: stored !== "none" ? conditionWhy(r.title ?? "", r.description ?? "") : "", kind: asScanned !== "no" ? "database-priced, qualifies on the saved numbers but was not a deal" : missedByCondition ? "qualifies only without the condition discount" : "condition wording is negated", title: r.title, price: r.price, product: known.name, databaseValueUsd: Math.round(known.value), maxBuyAtNoDiscountUsd: Math.floor(maxBuyPriceExactUsd(known.value, 0, settings)), appliedCondition: stored, ended: r.research_status + "/" + r.research_code, reasoning: String(r.research_reason ?? r.reasoning ?? "").slice(0, 160), url: r.url });
       }
     } else if (TEXT_ONLY_CODES.has(r.research_code) || (r.research_status === "rejected" && r.research_code === "AI_ESTIMATE")) {
       summary.unknownProductCandidates++;
-      leads.push({ kind: "unknown to the Database; decided without market numbers", title: r.title, price: r.price, product: null, databaseValueUsd: null, appliedCondition: stored, ended: r.research_status + "/" + r.research_code, reasoning: String(r.research_reason ?? r.reasoning ?? "").slice(0, 160), url: r.url });
+      leads.push({ firstSeen: new Date(r.first_seen_at).toISOString().slice(0, 16), conditionWhy: stored !== "none" ? conditionWhy(r.title ?? "", r.description ?? "") : "", kind: "unknown to the Database; decided without market numbers", title: r.title, price: r.price, product: null, databaseValueUsd: null, appliedCondition: stored, ended: r.research_status + "/" + r.research_code, reasoning: String(r.research_reason ?? r.reasoning ?? "").slice(0, 160), url: r.url });
     }
   }
   const result = { source: isSelf ? "(self-test database)" : src, copiedTo: copy, listings: rows.length, opened, neverOpened, deals, stillWaitingForPhotos: waiting, byOutcome, replay: summary, leads: leads.slice(0, 500) };
@@ -139,7 +155,7 @@ function selftest(): string {
   const csvPath = opt("--csv");
   if (csvPath) {
     const esc = (v: any) => '"' + String(v ?? "").replace(/"/g, '""') + '"';
-    fs.writeFileSync(csvPath, ["kind,title,price,product,databaseValueUsd,appliedCondition,ended,url", ...leads.map((l) => [l.kind, l.title, l.price, l.product, l.databaseValueUsd, l.appliedCondition, l.ended, l.url].map(esc).join(","))].join("\\n"));
+    fs.writeFileSync(csvPath, ["kind,title,price,product,databaseValueUsd,appliedCondition,ended,firstSeen,conditionWhy,url", ...leads.map((l) => [l.kind, l.title, l.price, l.product, l.databaseValueUsd, l.appliedCondition, l.ended, l.firstSeen, l.conditionWhy, l.url].map(esc).join(","))].join("\\n"));
   }
   console.log("Listings in the database copy: " + rows.length + (sinceH ? " (last " + sinceH + " h)" : ""));
   console.log("  opened (detail page read): " + opened + "   never opened (skipped from the search card): " + neverOpened + "   deals: " + deals + "   still waiting for photos: " + waiting);
