@@ -58,6 +58,16 @@ function conditionWhy(title: string, description: string): string {
   return hits.slice(0, 3).join(" | ");
 }
 
+// The listing's OWN text: the stored page text cut where Facebook's "Send seller a message" / "Related searches" / "Today's picks" begin (other sellers' cards).
+function ownText(page: string): { text: string; cut: boolean } {
+  let end = page.length;
+  for (const re of [new RegExp("Send seller a message", "i"), new RegExp("Related searches", "i"), new RegExp("Today.s picks", "i")]) {
+    const m = re.exec(page);
+    if (m && m.index < end) end = m.index;
+  }
+  return { text: page.slice(0, end), cut: end < page.length };
+}
+
 function verdictAt(valueUsd: number, price: number, impact: string): "profitable" | "negotiable" | "no" {
   const factor = (CONDITION_VALUE_FACTOR as any)[impact] ?? 1;
   const lot = valueUsd * factor;
@@ -89,6 +99,8 @@ function selftest(): string {
   mk(4, "Vintage Leica M6 camera body", 450, "Film camera, tested.", "none", { status: "rejected", code: "AI_ESTIMATE", reason: "x" });
   // 5: never opened (instant skip)
   mk(5, "Gaming console works great", 120, "", "unknown", { status: "unresearched", code: "LOOK_BUDGET", reason: "x" });
+  // 6: the seller's own text is clean; the "for parts" wording is another seller's card further down the page
+  mk(6, "Xbox Series X", 200, "Used - like new, works.\\nSend seller a message\\nToday's picks\\n$300\\nSony PlayStation 5 as is for parts\\nRichmond, VA", "major", { status: "confirmed_unprofitable", code: "UNPROFITABLE_AT_PRICE", reason: "x" });
   s.close();
   return p;
 }
@@ -158,7 +170,29 @@ function selftest(): string {
       leads.push({ firstSeen: new Date(r.first_seen_at).toISOString().slice(0, 16), conditionWhy: stored !== "none" ? conditionWhy(r.title ?? "", r.description ?? "") : "", kind: "unknown to the Database; decided without market numbers", title: r.title, price: r.price, product: null, databaseValueUsd: null, appliedCondition: stored, ended: r.research_status + "/" + r.research_code, reasoning: String(r.research_reason ?? r.reasoning ?? "").slice(0, 160), url: r.url });
     }
   }
-  const result = { source: isSelf ? "(self-test database)" : src, copiedTo: copy, listings: rows.length, opened, neverOpened, deals, stillWaitingForPhotos: waiting, byOutcome, replay: summary, leads: leads.slice(0, 500) };
+  // ---- Part 3: the same pages read from the listing's own text only
+  const own = { pagesWithMarker: 0, opened: 0, conditionDroppedToNone: 0, conditionDropped: [] as any[], shippingFlagFromOtherCards: 0, ebayFlagFromOtherCards: 0, shippingFlagged: 0, ebayFlagged: 0, becameQualifying: 0 };
+  const SHIP_RE = /\\bships for \\$|\\bestimated arrival\\b|\\bdoor drop[- ]?off\\b/i;
+  const EBAY_RE = /\\bebay\\b/i;
+  for (const r of rows) {
+    if (!r.description) continue;
+    own.opened++;
+    const o = ownText(String(r.description));
+    if (o.cut) own.pagesWithMarker++;
+    const stored = r.condition_impact === "minor" || r.condition_impact === "major" ? r.condition_impact : "none";
+    const ownCond = detectConditionImpact((r.title ?? "") + " " + o.text);
+    if (stored !== "none" && ownCond === "none") {
+      own.conditionDroppedToNone++;
+      const known = store.getEbayValueForTitle(r.title);
+      const was = known && r.price != null ? verdictAt(known.value, r.price, stored) : null;
+      const now = known && r.price != null ? verdictAt(known.value, r.price, "none") : null;
+      if (known && was === "no" && now !== "no") own.becameQualifying++;
+      own.conditionDropped.push({ title: r.title, price: r.price, was: stored, product: known?.name ?? null, value: known ? Math.round(known.value) : null, qualifiesNow: now, url: r.url });
+    }
+    if (r.research_code === "OFFICIAL_SHIPPING") { own.shippingFlagged++; if (!SHIP_RE.test(o.text)) own.shippingFlagFromOtherCards++; }
+    if (r.research_code === "MENTIONS_EBAY") { own.ebayFlagged++; if (!EBAY_RE.test(o.text)) own.ebayFlagFromOtherCards++; }
+  }
+  const result = { source: isSelf ? "(self-test database)" : src, copiedTo: copy, listings: rows.length, opened, neverOpened, deals, stillWaitingForPhotos: waiting, byOutcome, replay: summary, ownTextReplay: own, leads: leads.slice(0, 500) };
   fs.writeFileSync(path.join(${JSON.stringify(root)}, "discovery-audit-results.json"), JSON.stringify(result, null, 2));
   const csvPath = opt("--csv");
   if (csvPath) {
@@ -173,6 +207,11 @@ function selftest(): string {
   console.log("  priced from the Database's own eBay value: " + summary.dbPriced + " (profitable on saved numbers: " + summary.dbPricedProfitableNow + ", within negotiation reach: " + summary.dbPricedNegotiable + ")");
   console.log("  qualify ONLY without the condition discount: " + summary.onlyBecauseOfCondition + "   negated condition wording that was still discounted: " + summary.negatedConditionDiscounted);
   console.log("  unknown to the Database, decided on text/estimate alone: " + summary.unknownProductCandidates);
+  console.log("Own-text replay (page cut where other sellers' cards begin; shipping/eBay checks can only be tested on the stored first 4000 characters, so those are lower bounds):");
+  console.log("  opened pages: " + own.opened + ", with the cut marker found: " + own.pagesWithMarker);
+  console.log("  condition discount came ONLY from other cards: " + own.conditionDroppedToNone + " (of which would now qualify on Database numbers: " + own.becameQualifying + ")");
+  console.log("  OFFICIAL_SHIPPING rejections: " + own.shippingFlagged + ", of which the wording is NOT in the listing's own text: " + own.shippingFlagFromOtherCards);
+  console.log("  MENTIONS_EBAY rejections: " + own.ebayFlagged + ", of which 'eBay' is NOT in the listing's own text: " + own.ebayFlagFromOtherCards);
   console.log("Details: discovery-audit-results.json" + (csvPath ? " and " + csvPath : ""));
   store.close();
   db.close();
