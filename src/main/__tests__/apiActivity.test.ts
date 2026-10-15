@@ -50,6 +50,7 @@ run(async () => {
     check("the cost estimate is unknown for an unknown model", estimateCostUsd("some-new-model", { input: 1, output: 1, total: 2 }) === null);
     const scrubbed = scrub(`HTTP 401: Incorrect API key provided: ${KEY}. Authorization: Bearer abcdef1234567890 {"access_token":"v^1.1#i^1#r^0#abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"}`);
     check("keys, bearer tokens and access tokens never survive scrubbing", !scrubbed.includes(KEY) && !/abcdef1234567890/.test(scrubbed) && !/v\^1\.1/.test(scrubbed) && /\[key\]|\[redacted\]/.test(scrubbed), scrubbed);
+    check("a protected (enc:v1:) key blob is scrubbed too", !scrub("Incorrect API key provided: enc:v1:dAbC123+/==*****").includes("dAbC123") && /protected key/.test(scrub("key enc:v1:dAbC123")));
     check("the caller's file names the purpose", purposeFromStack("Error\n    at callOpenAI (C:\\app\\src\\main\\openai.ts:1:1)\n    at judge (C:\\app\\src\\main\\scorer.ts:9:9)") === "listing judgement (text)");
   }
 
@@ -249,6 +250,8 @@ run(async () => {
     check("a malformed answer fails with a reason", !garbage.ok && /not valid JSON/.test(garbage.error ?? ""));
     const emptyEbay = await testEbay({ ...ok, searchEbayItems: async () => [] });
     check("an empty eBay result is a pass with 0 results, visibly", emptyEbay.ok && emptyEbay.retrieved === 0 && emptyEbay.medianAskUsd === null);
+    const wc403 = await testWatchCount({ ...ok, fetch: (async () => new Response("", { status: 403 })) as typeof fetch });
+    check("a WatchCount 403 to a plain request is 'reachable' with an explanation that it does not prove sold lookups work", wc403.ok && /does not show whether sold-price lookups work/.test(wc403.note));
     const wc503 = await testWatchCount({ ...ok, fetch: (async () => new Response("", { status: 503 })) as typeof fetch });
     check("a WatchCount 503 is a failure", !wc503.ok && wc503.status === 503);
   }

@@ -117,6 +117,7 @@ export function estimateCostUsd(model: string | null | undefined, t: TokenUsage 
 export function scrub(text: unknown, max: number = MAX_ERROR): string {
   let s = String(text ?? "");
   s = s.replace(/\bsk-[A-Za-z0-9_-]{6,}/g, "[key]");
+  s = s.replace(/enc:v1:[A-Za-z0-9+/=*._-]*/g, "[protected key]");
   s = s.replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}/gi, "$1 [redacted]");
   s = s.replace(/("?(?:access_token|refresh_token|api[_-]?key|authorization|client_secret|password)"?\s*[:=]\s*)"?[^",\s}]+"?/gi, "$1[redacted]");
   s = s.replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");

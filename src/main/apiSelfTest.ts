@@ -121,7 +121,9 @@ export async function testWatchCount(d: SelfTestDeps): Promise<WatchCountTest> {
   const timer = setTimeout(() => controller.abort(), 10_000);
   try {
     const res = await d.fetch("https://www.watchcount.com", { method: "GET", signal: controller.signal, redirect: "follow" });
-    return { ok: res.status < 500, status: res.status, ms: Date.now() - t0, note, error: res.status < 500 ? null : `HTTP ${res.status}` };
+    // 403 / 429 from a plain request is normal for WatchCount (it expects a browser): the site is reachable, but this request was refused. It is a pass only in the sense of "the host answered".
+    const refused = res.status === 403 || res.status === 429;
+    return { ok: res.status < 500, status: res.status, ms: Date.now() - t0, note: refused ? `${note} The site answered ${res.status} to a plain request, which is normal: the scanner reads it in a browser tab, so this does not show whether sold-price lookups work.` : note, error: res.status < 500 ? null : `HTTP ${res.status}` };
   } catch (err) {
     return { ok: false, status: null, ms: Date.now() - t0, note, error: (err as Error).name === "AbortError" ? "The request timed out." : scrub((err as Error).message) };
   } finally {
