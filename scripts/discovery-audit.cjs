@@ -108,7 +108,7 @@ function selftest(): string {
     const d = new DatabaseSync(copy, { readOnly: true });
     const row = d.prepare("SELECT title, price, listing_age, description FROM listings WHERE url LIKE ? OR id = ?").get("%" + showId + "%", showId) as any;
     if (!row) { console.log("No listing matches " + showId); process.exit(0); }
-    console.log("TITLE: " + row.title + "  PRICE: " + row.price + "  AGE: " + row.listing_age + "\n----- stored page text (first 4000 characters, what the scanner reads) -----\n" + row.description);
+    console.log("TITLE: " + row.title + "  PRICE: " + row.price + "  AGE: " + row.listing_age + "\\n----- stored page text (first 4000 characters, what the scanner reads) -----\\n" + row.description);
     process.exit(0);
   }
   const store = new Store(copy);
