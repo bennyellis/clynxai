@@ -47,19 +47,19 @@ line(`  galleries of 20 (the cap; oldest photos get pruned past it): ${[...per.v
 
 line("\n== 3. Photos whose OWN source title contradicts the product they are filed under (same rules as the Beta 12 gate)");
 const byId = new Map(products.map((p) => [p.id, p]));
-const contradictions: Array<{ product: string; title: string; why: string }> = [];
+const contradictions: Array<{ product: string; title: string; why: string; at: number }> = [];
 let weak = 0;
 for (const i of images) {
   const p = byId.get(i.product_id); if (!p || !i.source_title || i.kind !== "normal") continue;
   const label = i.source_title.replace(/^eBay listing(?: photo)?\s*(?:—|-|:)\s*/i, "");
   const v = judgeCandidateByText(p.name, label);
-  if (v.status === "mismatch") contradictions.push({ product: p.name, title: label, why: v.reasons[0] ?? "" });
+  if (v.status === "mismatch") contradictions.push({ product: p.name, title: label, why: v.reasons[0] ?? "", at: i.created_at });
   else if (v.status === "insufficient") weak++;
 }
 line(`  ${contradictions.length} contradicting photos; ${weak} more are only weakly confirmed (title does not fully state the entry)`);
 const grouped = new Map<string, number>(); for (const c of contradictions) grouped.set(c.product, (grouped.get(c.product) ?? 0) + 1);
 for (const [name, n] of [...grouped].sort((a, b) => b[1] - a[1]).slice(0, 15)) line(`    ${String(n).padStart(3)}  ${name}`);
-for (const c of contradictions.slice(0, 25)) line(`      • "${c.product}"  <-  "${c.title.slice(0, 90)}"  [${c.why.slice(0, 80)}]`);
+for (const c of contradictions.slice(0, 25)) line(`      • [filed ${new Date(c.at).toISOString().slice(0, 16).replace("T", " ")}] "${c.product}"  <-  "${c.title.slice(0, 90)}"  [${c.why.slice(0, 80)}]`);
 
 line("\n== 4. Moves made by the appearance-based gallery audit (it writes a note on the SOURCE product)");
 for (const p of products) {
