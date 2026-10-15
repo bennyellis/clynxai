@@ -12,4 +12,5 @@ Clynx Beta 12 - finds deals it used to miss
 * Discovery chat: messages now read top to bottom (oldest first) with the box at the bottom, separate from a live "Automation" panel for scanner activity. Side by side on wide windows, tabs on narrow ones.
 * Activity: switch between All, Activity Feed and Chat with Clynx, filter events, and use "Ask Clynx" on an event to start a question about it.
 * Database and Library remember where you were (product, folder, search, scroll) across sections and restarts, and clicking the active sidebar icon again takes you home.
+* New: your Search For list is now remembered. The products you are searching for (with their price ranges, include-broken and Search for variants settings) are still there the next time you open Clynx. Restoring them does not start scanning: it still starts only when you press Start. Add, change and remove all save immediately; Recent searches work as before. Custom instructions and the general-deal switch still start fresh each launch.
 * Unchanged: your data, sign-in, Watches, Database, automatic updates, the 24-hour freshness window, the seller checks, and the scam-bot and placeholder-price rules.

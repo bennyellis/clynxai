@@ -1,6 +1,6 @@
 import { preserveCopy, readJsonFileSafe, writeFileAtomicWithBackup } from "./safeFs.js";
 import { randomUUID } from "node:crypto";
-import type { Config } from "./types.js";
+import type { Config, SearchItem } from "./types.js";
 
 // LEGACY, kept only so loadConfig's migration below can recognize an
 // existing account that still has these exact URLs and force it to
@@ -389,7 +389,9 @@ export function loadConfig(configPath: string): Config {
     // Migrate configs saved before the "Search For" rename/simplification
     // — old referencePrices entries (which had a since-removed activeSearch
     // toggle) become searchItems, everything now unconditionally searched.
-    if ((!merged.searchItems || !merged.searchItems.length) && Array.isArray(raw.referencePrices)) {
+    // (Beta 12: only when the file has never stored a Search For list at all. Search For entries now persist, so a user who removed every entry must not get the long-gone
+    // referencePrices of an old install back on the next launch.)
+    if (raw.searchItems === undefined && (!merged.searchItems || !merged.searchItems.length) && Array.isArray(raw.referencePrices)) {
       merged.searchItems = raw.referencePrices.map((r: any) => ({
         item: r.item,
         typicalResaleUsd: r.typicalResaleUsd,
@@ -404,28 +406,13 @@ export function loadConfig(configPath: string): Config {
     // longer declares it, and nothing reads it), left as-is rather than
     // scrubbed out.
 
-    // Per explicit instruction — the Dashboard resets to a clean slate on
-    // every launch: the Search For list, custom instructions, and the
-    // general-deal toggle are session-scoped asks ("find me a PS5 today"),
-    // not standing configuration, so they start fresh here rather than
-    // silently carrying forward whatever the AI was focused on last time.
-    // (This was briefly changed the other way — persisting them like every
-    // other setting — after a report that a tracked item "only ever
-    // searched once": that turned out to be a real, separate bug
-    // [scorer.ts's matchSearchItem was silently skipping any item with no
-    // price set, so it could never be RECOGNIZED as a match again after the
-    // first lucky flag, regardless of whether it stayed in this list] which
-    // is fixed independently of this reset — restoring the reset here is
-    // exactly what the user asked for once that confusion was cleared up.)
-    // Everything else below this point (API-key-adjacent toggles, the
-    // location list, items per location, poll interval, notification
-    // settings, seller-risk filters, Date Listed, etc.) persists exactly as
-    // saved until changed — those live on (or are reachable from) Config/
-    // the Dashboard Filters area, not chat-only. Min/Max Price is the one
-    // exception among "things you set per search item" that's still
-    // session-scoped: it lives ON each (now-reset) searchItems entry rather
-    // than as its own standing Config field.
-    merged.searchItems = [];
+    // Beta 12: the active Search For list PERSISTS across restarts (it used to reset to empty on every launch, by an earlier instruction that is no longer wanted).
+    // Every add / edit / remove already writes config.json (index.ts), so the list saved last time is the list restored now, with each entry's own settings
+    // (price range, include-broken, linked product and the new acceptVariants). Restoring entries starts nothing: scanning still begins only when the user starts it.
+    // Entries from older configs are normalised, never dropped for lacking a newer field (acceptVariants defaults to false).
+    // Custom instructions and the general-deal toggle are NOT part of the Search For list and keep their own behavior: they start fresh each launch as before, so a
+    // stuck "general detection off" from an old session cannot silently persist.
+    merged.searchItems = normalizeSearchItems(merged.searchItems);
     merged.customInstructions = "";
     merged.generalDeal = { ...merged.generalDeal, enabled: DEFAULT_CONFIG.generalDeal.enabled };
 
@@ -435,6 +422,43 @@ export function loadConfig(configPath: string): Config {
     lastConfigLoadNotice = { kind: "reset", savedCopy: preserveCopy(configPath, "unreadable") };
     return { ...DEFAULT_CONFIG };
   }
+}
+
+/**
+ * The Search For list as loaded from a saved config: tolerant of every older shape (missing price fields, no keywords, no acceptVariants), de-duplicated by name, and never
+ * dropping a usable entry. Pure; used on load.
+ */
+export function normalizeSearchItems(raw: unknown): SearchItem[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: SearchItem[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== "object") continue;
+    const e = r as Record<string, unknown>;
+    const item = typeof e.item === "string" ? e.item.trim() : "";
+    if (!item) continue;
+    const key = item.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    const normalized: SearchItem = {
+      ...(e as object),
+      item,
+      typicalResaleUsd: typeof e.typicalResaleUsd === "number" && Number.isFinite(e.typicalResaleUsd) ? e.typicalResaleUsd : 0,
+      matchKeywords: Array.isArray(e.matchKeywords) ? e.matchKeywords.filter((k): k is string => typeof k === "string" && k.trim().length > 0) : [],
+      minPriceUsd: num(e.minPriceUsd),
+      maxPriceUsd: num(e.maxPriceUsd),
+    } as SearchItem;
+    if (typeof e.linkedProductId === "string") normalized.linkedProductId = e.linkedProductId;
+    else delete normalized.linkedProductId;
+    // flags: present only when true, so an entry saved before they existed round-trips unchanged and defaults to false
+    if (e.includeBroken === true) normalized.includeBroken = true;
+    else delete normalized.includeBroken;
+    if (e.acceptVariants === true) normalized.acceptVariants = true;
+    else delete normalized.acceptVariants;
+    out.push(normalized);
+  }
+  return out;
 }
 
 export function saveConfig(configPath: string, config: Config): void {
