@@ -1,7 +1,7 @@
 {
   "name": "marketplace-scout",
   "productName": "Clynx",
-  "version": "0.3.0-beta.20",
+  "version": "0.3.0-beta.21",
   "private": true,
   "description": "Clynx - finds undervalued Marketplace listings",
   "main": "./out/main/index.js",

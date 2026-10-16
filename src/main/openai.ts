@@ -96,6 +96,11 @@ export function cloudRefusal(body: string): { code: string; message: string; pau
     case "ai_not_configured":
     case "ai_unavailable":
       return { code, message: "Clynx's AI service is temporarily unavailable. It comes back by itself; nothing is wrong with your account.", pauseMs: 5 * 60_000 };
+    case "rate_limited": {
+      // The server allows about 60 AI requests a minute and BLOCKS an account that keeps going after being told no (40 refusals in 10 minutes). So stop asking for as long as it says.
+      const secs = Number(/"retryAfterSec"\s*:\s*(\d+)/.exec(body)?.[1]);
+      return { code, message: "Clynx is asking the AI too fast and is waiting a moment. It continues by itself.", pauseMs: Math.min(5 * 60_000, Math.max(30_000, (Number.isFinite(secs) ? secs : 60) * 1000)) };
+    }
     case "temporarily_blocked":
       return { code, message: "Your AI access is paused for a while because of unusually heavy use. It resumes automatically.", pauseMs: 10 * 60_000 };
     default:
@@ -103,6 +108,8 @@ export function cloudRefusal(body: string): { code: string; message: string; pau
   }
 }
 let planLimitUntil = 0;
+/** What the last refusal said, so a pause is explained with its own reason and not always as a used-up allowance. */
+let planLimitMessage = "";
 export const PLAN_LIMIT_MESSAGE = "Today's AI allowance for your Clynx plan is used up. It resets tomorrow, or upgrade in Config > Account.";
 
 // Same early fail-fast shape getOpenAIApiKey() used to provide (call sites
@@ -117,7 +124,7 @@ export function ensureOpenAIAccess(): void {
     apiActivity.record({ provider: "openai", kind: "(request not made)", outcome, route: "none", error: message });
     throw new Error(message);
   };
-  if (Date.now() < planLimitUntil) refuse("skipped_budget", PLAN_LIMIT_MESSAGE);
+  if (Date.now() < planLimitUntil) refuse("skipped_budget", planLimitMessage || PLAN_LIMIT_MESSAGE);
   if (openAICreditsExhausted()) {
     refuse("skipped_budget", "OpenAI credits are used up — add credits at platform.openai.com/settings/organization/billing (Clynx checks again every few minutes).");
   }
@@ -190,7 +197,7 @@ export async function callOpenAI(kind: "chat" | "images", body: unknown, signal?
 }
 
 async function callOpenAIRaw(kind: "chat" | "images", body: unknown, signal?: AbortSignal): Promise<Response> {
-  if (!localApiKey() && Date.now() < planLimitUntil) throw new Error(PLAN_LIMIT_MESSAGE);
+  if (!localApiKey() && Date.now() < planLimitUntil) throw new Error(planLimitMessage || PLAN_LIMIT_MESSAGE);
   if (Date.now() < creditsExhaustedUntil) {
     throw new Error("OpenAI credits are used up — add credits at platform.openai.com/settings/organization/billing.");
   }
@@ -228,6 +235,7 @@ async function callOpenAIRaw(kind: "chat" | "images", body: unknown, signal?: Ab
     const refusal = cloudRefusal(text);
     if (refusal) {
       planLimitUntil = Date.now() + refusal.pauseMs;
+      planLimitMessage = refusal.message;
       console.error(`[openai] Clynx Cloud refused the AI request (${refusal.code}): AI features pause for a few minutes.`);
       throw new Error(refusal.message);
     }
@@ -236,6 +244,7 @@ async function callOpenAIRaw(kind: "chat" | "images", body: unknown, signal?: Ab
     const refusal = cloudRefusal(await result.response.clone().text().catch(() => ""));
     if (refusal) {
       planLimitUntil = Date.now() + refusal.pauseMs;
+      planLimitMessage = refusal.message;
       throw new Error(refusal.message);
     }
   }
@@ -284,6 +293,7 @@ export async function callOpenAISearch(query: string, signal?: AbortSignal): Pro
         const refusal = cloudRefusal(text);
         if (refusal) {
           planLimitUntil = Date.now() + refusal.pauseMs;
+      planLimitMessage = refusal.message;
           throw new Error(refusal.message);
         }
       }

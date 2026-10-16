@@ -1,0 +1,3 @@
+Clynx Beta 21 - Stop tripping the server's block
+* Fixed: when Clynx Cloud told Clynx to slow down, Clynx kept asking. After 40 refused requests in 10 minutes the server blocked the account for 30 minutes, and every AI feature then failed with a message about a used-up allowance. Clynx now pauses for as long as the server asks (at least 30 seconds, at most 5 minutes) and says "Clynx is asking the AI too fast and is waiting a moment" instead of blaming your allowance.
+* Unchanged: everything in Beta 20.

@@ -55,6 +55,9 @@ run(async () => {
   check("emergency stop reads the same way", /temporarily unavailable/.test(cloudRefusal('{"error":"paid_api_disabled"}')?.message ?? ""));
   check("an abuse block says access is paused", /paused/.test(cloudRefusal('{"error":"temporarily_blocked"}')?.message ?? ""));
   check("a momentary too-many-at-once is NOT a pause", cloudRefusal('{"error":"too_many_requests"}') === null);
+  const rl = cloudRefusal('{"error":"rate_limited","retryAfterSec":42}');
+  check("being told to slow down is a pause that honours the server's wait, and says so honestly", rl?.pauseMs === 42_000 && /too fast/.test(rl.message) && !/allowance/.test(rl.message), rl);
+  check("a very long or missing wait is bounded", cloudRefusal('{"error":"rate_limited","retryAfterSec":99999}')?.pauseMs === 300_000 && cloudRefusal('{"error":"rate_limited"}')?.pauseMs === 60_000);
   check("garbage is not a refusal", cloudRefusal("<html>") === null && cloudRefusal("") === null);
 
   cloudStatus = 503;
