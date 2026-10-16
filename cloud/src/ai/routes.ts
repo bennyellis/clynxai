@@ -9,9 +9,11 @@ import { outboundFetch } from "../integrations/http.js";
 import { VaultError } from "../integrations/vault.js";
 import { query } from "../db/client.js";
 import { hit } from "../security/rateLimit.js";
+import { buildSearchRequest, cleanSearchQuery, parseSearchResponse } from "./search.js";
 
 const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
 const OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations";
+const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 
 // The shared, company-managed OpenAI integration. Customers never hold or see a key: the key is the Owner's, stored encrypted on this server (see ../integrations), and every request is
 // attributed to the customer who made it. Before a request leaves the server it must pass:
@@ -110,6 +112,8 @@ export async function aiRoutes(app: FastifyInstance): Promise<void> {
       const clamped = clampChatBody(body as Body, config.aiMaxOutputTokens);
       const maxOut = Math.min(config.aiMaxOutputTokens, (typeof clamped.max_completion_tokens === "number" ? clamped.max_completion_tokens : typeof clamped.max_tokens === "number" ? clamped.max_tokens : DEFAULT_OUTPUT_ESTIMATE) as number);
       reserveUsd = costUsd(model, estimatePromptTokens(clamped), maxOut);
+      // a web search also carries the provider's per-search fee: it is reserved up front
+      if (kind === "search") reserveUsd += config.aiSearchFeeUsd;
     }
     const auth = await authorizePaidSpend(userId, reserveUsd);
     if (!auth.ok) {
@@ -190,6 +194,43 @@ export async function aiRoutes(app: FastifyInstance): Promise<void> {
     const translated = upstream.ok ? null : await translateUpstream(upstream.status, data);
     if (translated) return reply.code(translated.status).send(translated.body);
     return reply.code(upstream.status).send(data ?? { error: "Upstream OpenAI request failed" });
+  });
+
+  // Web search for product research. The app sends only a phrase; the provider request is built here (search.ts), so nothing else can be run on the company's key. Off until the
+  // Owner sets AI_SEARCH_ENABLED=true. Counted as one AI request against the plan's daily allowance, reserved and recorded with the per-search fee, metered like everything else.
+  app.post("/ai/search", async (request, reply) => {
+    if (!config.aiSearchEnabled) return refuse(reply, 503, "search_not_enabled", { message: "Web search through Clynx is not switched on for this server." });
+    const raw = request.body as { query?: unknown } | null;
+    const phrase = cleanSearchQuery(raw && typeof raw === "object" ? raw.query : null);
+    if (!phrase) return refuse(reply, 400, "invalid_query", { message: "A search phrase of 3 to 300 characters is required." });
+    const model = config.aiSearchModel;
+    // the same gate every AI request passes: allowed model, rate limit, plan quota, spending reservation, concurrency
+    const g = await guard({ userId: request.userId, body: { model, messages: [{ role: "user", content: phrase }], max_completion_tokens: config.aiSearchMaxOutputTokens } }, reply, "search");
+    if (!g) return reply;
+    const userId = request.userId as string;
+    const apiKey = await keyFor(reply, g.auth);
+    if (!apiKey) return reply;
+    let upstream: Response;
+    try {
+      upstream = await callUpstream(OPENAI_RESPONSES_URL, buildSearchRequest(phrase, model, config.aiSearchMaxOutputTokens), false, apiKey);
+    } catch {
+      await recordUsage(userId, { kind: "search", model, status: 504, costUsd: 0 });
+      await g.auth.finish(0);
+      return refuse(reply, 504, "upstream_unavailable");
+    }
+    const data = await upstream.json().catch(() => null);
+    if (!upstream.ok) {
+      await recordUsage(userId, { kind: "search", model, status: upstream.status, costUsd: 0 });
+      await g.auth.finish(0);
+      const translated = await translateUpstream(upstream.status, data);
+      if (translated) return reply.code(translated.status).send(translated.body);
+      return refuse(reply, upstream.status === 429 ? 429 : 502, upstream.status === 429 ? "rate_limited" : "upstream_failed");
+    }
+    const parsed = parseSearchResponse(data);
+    const cost = (parsed.inputTokens !== null && parsed.outputTokens !== null ? costUsd(model, parsed.inputTokens, parsed.outputTokens) : 0) + config.aiSearchFeeUsd;
+    await recordUsage(userId, { kind: "search", model, status: 200, promptTokens: parsed.inputTokens, completionTokens: parsed.outputTokens, costUsd: cost });
+    await g.auth.finish(cost);
+    return reply.code(200).send({ answer: parsed.answer, citations: parsed.citations });
   });
 
   app.post("/ai/images/generations", async (request, reply) => {

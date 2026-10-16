@@ -50,7 +50,7 @@ export async function withinCountLimit(userId: string, key: LimitKey, currentCou
   return { ok: false, plan: eff.plan, limit };
 }
 
-export type AiKind = "chat" | "image";
+export type AiKind = "chat" | "image" | "search";
 
 export interface AiUsageToday {
   requests: number;
@@ -62,7 +62,8 @@ export async function aiUsageToday(userId: string, now: Date = new Date()): Prom
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const r = await query<{ kind: string; n: string }>("SELECT kind, count(*)::text AS n FROM ai_usage WHERE user_id = $1 AND created_at >= $2 GROUP BY kind", [userId, start]);
   const get = (k: string) => Number(r.rows.find((x) => x.kind === k)?.n ?? 0);
-  return { requests: get("chat"), images: get("image") };
+  // a web search counts toward the same daily request allowance as a chat request
+  return { requests: get("chat") + get("search"), images: get("image") };
 }
 
 /** Whether this user may make another AI request of this kind today. Metering is always on; the limit applies only when entitlements are enforced. */

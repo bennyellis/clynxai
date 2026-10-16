@@ -59,7 +59,7 @@ run(async () => {
   check("Brave results parse", parseBraveApi(JSON.stringify({ web: { results: [{ title: "B", url: "https://b.example", description: "d" }] } }))[0].url === "https://b.example");
   check("garbage parses to nothing", parseGoogleApi("<html>").length === 0 && parseBraveApi("{").length === 0);
   const g = both[0];
-  check("a spent quota is an error to back off from, not 'no results'", g.isBlocked(429, "") && g.isBlocked(403, "quota") && !g.isBlocked(200, "{}"));
+  check("a spent quota is an error to back off from, not 'no results'", g.isBlocked!(429, "") && g.isBlocked!(403, "quota") && !g.isBlocked!(200, "{}"));
   check("the key travels but is redacted from anything shown", redactSecrets("GET https://www.googleapis.com/customsearch/v1?key=SECRET123&cx=abc&q=x failed").includes("***") && !redactSecrets("?key=SECRET123&cx=abc").includes("SECRET123"));
   const budget = createDailyBudget(2, () => Date.UTC(2026, 0, 1));
   budget.take();

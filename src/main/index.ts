@@ -42,7 +42,7 @@ import {
 } from "./chat.js";
 import { randomUUID } from "node:crypto";
 import { lookupProduct, expandSearchKeywords } from "./products.js";
-import { downloadImageAsDataUri, shrinkImageDataUri, findBrandLogoImage, findGroupImage, findPoorConditionProductImage, findReferencePhotos, findFreeReferencePhotos, buildImageCollage, generateCategoryImage, lookUpOnWeb, webVerifyDeps } from "./webResearch.js";
+import { downloadImageAsDataUri, shrinkImageDataUri, findBrandLogoImage, findGroupImage, findPoorConditionProductImage, findReferencePhotos, findFreeReferencePhotos, buildImageCollage, generateCategoryImage, lookUpOnWeb, webVerifyDeps, webHardDeps, configureOpenAiSearch } from "./webResearch.js";
 import { verifyVariant, reconcileVerdict, type VariantVerdict } from "./variantEvidence.js";
 import { createVerdictMemory, makeClaimVerifier, publicHttpUrls } from "./variantResearch.js";
 import { runResearchProductTool } from "./researchTool.js";
@@ -1047,7 +1047,7 @@ async function executeChatTool(
   if (call.name === "check_model_name") {
     const name = String(call.args.name ?? "").trim();
     if (!name) return "Failed: no model name given.";
-    const result = await challengeModelClaim(name, webVerifyDeps());
+    const result = await challengeModelClaim(name, webHardDeps());
     store.addUsage("claim_check");
     rememberLineup(store.knowledgeGraph(), result);
     return `${describeChallenge(result)} ${result.sources.length ? `Sources read: ${result.sources.slice(0, 3).map((s) => s.url).join(", ")}.` : ""}`.trim();
@@ -2271,7 +2271,7 @@ function getKnowledgeService(): KnowledgeService {
     },
     mode: () => beta13Flags(config).webKnowledge,
     usage: (key, count) => store.addUsage(key, count ?? 1),
-    web: () => webVerifyDeps(),
+    web: () => webHardDeps(),
     ai: () => (hasOpenAIAccess() ? openAiKnowledgeAi() : undefined),
     log: (message, productName) => {
       const line: LogLine = { ts: Date.now(), level: "info", message, productName };
@@ -2286,7 +2286,7 @@ let visualService: ReturnType<typeof createVisualService> | null = null;
 function getVisualService() {
   visualService ??= createVisualService({
     graph: () => store.knowledgeGraph(),
-    web: () => webVerifyDeps(),
+    web: () => webHardDeps(),
     observer: () => (hasOpenAIAccess() ? openAiObserver() : null),
     themes: () => (hasOpenAIAccess() ? openAiThemeClassifier() : undefined),
     mode: () => (beta13Flags(config).visualResearch === "off" ? "off" : "shadow"),
@@ -2296,8 +2296,14 @@ function getVisualService() {
   return visualService;
 }
 
+let openAiSearchConfigured = false;
 function applyIdentitySafeguard(): void {
   setFilingRecorder((d) => noteDecision(d));
+  if (!openAiSearchConfigured) {
+    openAiSearchConfigured = true;
+    // read live: switching beta13.openaiSearch in config.json takes effect without a restart of this wiring
+    configureOpenAiSearch({ enabled: () => beta13Flags(config).openaiSearch && hasOpenAIAccess(), lowAi: () => isLowAiMode(), perHour: Math.max(1, config.openaiSearchPerHour ?? 12) });
+  }
   getKnowledgeService().install();
   const mode = config.identitySafeguard?.mode === "shadow" || config.identitySafeguard?.mode === "enforce" ? config.identitySafeguard.mode : "off";
   store.setIdentitySafeguard(mode, mode === "off" ? null : createSafeguardLogger(path.join(app.getPath("userData"), "logs")));

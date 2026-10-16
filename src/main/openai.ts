@@ -1,4 +1,5 @@
 import type { CloudClient } from "./cloudClient.js";
+import { buildSearchRequest, parseCloudSearch, parseResponses, type SearchAnswer } from "./openaiSearch.js";
 import { apiActivity, purposeFromStack, type Route } from "./apiActivity.js";
 
 // Single paid provider for everything this app's AI touches — chat/tool-
@@ -26,6 +27,7 @@ export const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 export const OPENAI_IMAGE_MODEL = "gpt-image-1";
 
 const REAL_CHAT_URL = "https://api.openai.com/v1/chat/completions";
+const REAL_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const REAL_IMAGES_URL = "https://api.openai.com/v1/images/generations";
 
 // Clynx Cloud — shared-key migration. Set once from index.ts at startup
@@ -238,4 +240,67 @@ async function callOpenAIRaw(kind: "chat" | "images", body: unknown, signal?: Ab
     }
   }
   return result.response;
+}
+
+
+// ---- web search (openaiSearch.ts decides when it is used; this is only the call) -------------------------------------------------------------------------------------
+const SEARCH_MODEL = process.env.OPENAI_SEARCH_MODEL || "gpt-4.1-mini";
+let searchUnavailableUntil = 0;
+const SEARCH_RETRY_MS = 30 * 60_000;
+
+/**
+ * One OpenAI web search, on the route the rest of the app uses: your own key goes straight to OpenAI; otherwise Clynx Cloud's POST /ai/search (the owner must have switched it on there).
+ * Returns the answer and the pages it cites, or throws with a plain reason. A "not available" answer (the model cannot search, the server has it off) stops further tries for 30 minutes.
+ */
+export async function callOpenAISearch(query: string, signal?: AbortSignal): Promise<SearchAnswer | null> {
+  if (Date.now() < searchUnavailableUntil) throw new Error("OpenAI web search is not available right now");
+  ensureOpenAIAccess();
+  const started = Date.now();
+  const route: Route = localApiKey() ? "own_key" : "clynx_cloud";
+  const note = (outcome: "live_ok" | "live_failed", extra: Partial<Parameters<typeof apiActivity.record>[0]> = {}) =>
+    apiActivity.record({ provider: "openai", kind: "web search", outcome, route, model: SEARCH_MODEL, ms: Date.now() - started, ...extra } as never);
+  try {
+    const localKey = localApiKey();
+    if (localKey) {
+      const res = await fetch(REAL_RESPONSES_URL, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${localKey}` }, body: JSON.stringify(buildSearchRequest(query, SEARCH_MODEL)), signal });
+      const data = (await res.json().catch(() => null)) as unknown;
+      if (!res.ok) {
+        const msg = (data as { error?: { message?: string; code?: string } } | null)?.error;
+        if (res.status === 429 && /insufficient_quota/.test(msg?.code ?? "")) creditsExhaustedUntil = Date.now() + CREDITS_RETRY_MS;
+        if (res.status === 400 || res.status === 404) searchUnavailableUntil = Date.now() + SEARCH_RETRY_MS; // the model or the tool is not available to this key
+        throw new Error(`OpenAI answered ${res.status}${msg?.message ? `: ${String(msg.message).slice(0, 120)}` : ""}`);
+      }
+      const parsed = parseResponses(data);
+      note("live_ok", { status: res.status, tokens: { input: parsed.inputTokens, output: parsed.outputTokens, total: (parsed.inputTokens ?? 0) + (parsed.outputTokens ?? 0) } });
+      return parsed.answer;
+    }
+    if (!cloudClientRef) throw new Error("no OpenAI key and no Clynx Cloud session");
+    const result = await cloudClientRef.openAIRequest("search", { query }, signal);
+    if (!result.ok) throw new Error(result.error);
+    const text = await result.response.text().catch(() => "");
+    if (!result.response.ok) {
+      if (/search_not_enabled/.test(text)) searchUnavailableUntil = Date.now() + SEARCH_RETRY_MS;
+      else {
+        const refusal = cloudRefusal(text);
+        if (refusal) {
+          planLimitUntil = Date.now() + refusal.pauseMs;
+          throw new Error(refusal.message);
+        }
+      }
+      throw new Error(`Clynx Cloud answered ${result.response.status} to the search`);
+    }
+    let body: unknown = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      /* not JSON */
+    }
+    const answer = parseCloudSearch(body);
+    if (!answer) throw new Error("Clynx Cloud's search answer was not understood");
+    note("live_ok", { status: result.response.status, tokensNotReported: true } as never);
+    return answer;
+  } catch (err) {
+    note("live_failed", { error: (err as Error).name === "AbortError" ? "the search timed out" : (err as Error).message } as never);
+    throw err;
+  }
 }

@@ -612,14 +612,14 @@ export class CloudClient {
   // and the existing periodic refresh timer re-establishes auth on its own,
   // same posture as every other authenticated call in this file.
   async openAIRequest(
-    kind: "chat" | "images",
+    kind: "chat" | "images" | "search",
     body: unknown,
     signal?: AbortSignal
   ): Promise<{ ok: true; response: Response } | { ok: false; error: string }> {
     const apiUrl = this.resolveApiUrl();
     if (!apiUrl) return { ok: false, error: "Cloud apiUrl not configured" };
     if (!this.accessToken) return { ok: false, error: "Not authenticated — no cloud session available yet" };
-    const path = kind === "chat" ? "/ai/chat/completions" : "/ai/images/generations";
+    const path = kind === "chat" ? "/ai/chat/completions" : kind === "search" ? "/ai/search" : "/ai/images/generations";
     try {
       const response = await fetch(useIpv4Loopback(`${apiUrl}${path}`), {
         method: "POST",

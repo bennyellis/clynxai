@@ -20,6 +20,12 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().optional().transform((v) => (v && v.trim() ? v.trim() : undefined)),
   // The only models the AI proxy will forward (comma separated). A request for any other model is refused, so a stolen or abused account cannot run an expensive model on this key.
   AI_ALLOWED_MODELS: z.string().default("gpt-5-mini,gpt-5,gpt-4.1-mini,gpt-4.1,gpt-4o-mini,gpt-4o,gpt-image-1"),
+  // OpenAI web search for Clynx's product research (POST /ai/search). OFF until the Owner turns it on: each search carries a per-search provider fee on top of tokens.
+  AI_SEARCH_ENABLED: bool,
+  AI_SEARCH_MODEL: z.string().default("gpt-4.1-mini"),
+  // What one search is counted as when reserving and recording spend (USD). An ESTIMATE: set it from the provider's own price list.
+  AI_SEARCH_FEE_USD: z.coerce.number().min(0).max(5).default(0.03),
+  AI_SEARCH_MAX_OUTPUT_TOKENS: z.coerce.number().int().min(100).max(4000).default(600),
   // Upper bound the proxy puts on the output tokens one request may ask for.
   AI_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(32000),
   // Staged activation: plan limits (watches, devices, AI per day) are only ENFORCED when this is true. Metering is always on.
@@ -109,6 +115,10 @@ function loadConfig() {
     openaiApiKey: d.OPENAI_API_KEY ?? null,
     aiAllowedModels: d.AI_ALLOWED_MODELS.split(",").map((m) => m.trim()).filter(Boolean),
     aiMaxOutputTokens: d.AI_MAX_OUTPUT_TOKENS,
+    aiSearchEnabled: d.AI_SEARCH_ENABLED,
+    aiSearchModel: d.AI_SEARCH_MODEL,
+    aiSearchFeeUsd: d.AI_SEARCH_FEE_USD,
+    aiSearchMaxOutputTokens: d.AI_SEARCH_MAX_OUTPUT_TOKENS,
     enforceEntitlements: d.ENFORCE_ENTITLEMENTS,
     trustProxy: d.TRUST_PROXY,
     metricsToken: d.METRICS_TOKEN ?? null,

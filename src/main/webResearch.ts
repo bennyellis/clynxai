@@ -13,7 +13,7 @@ import { noteDecision } from "./aiDecisionLog.js";
 import sharp from "sharp";
 import { verifyThumbnailCandidate } from "./vision.js";
 import { fileableWithoutPicture, judgeCandidateByText, titleFromLabel } from "./photoIdentity.js";
-import { OPENAI_IMAGE_MODEL, callOpenAI } from "./openai.js";
+import { OPENAI_IMAGE_MODEL, callOpenAI, callOpenAISearch } from "./openai.js";
 import { hasEbayCredentials, searchEbayItems } from "./ebayClient.js";
 import { titleLooksLikeProduct } from "./compFilter.js";
 import { isLowAiMode } from "./aiMode.js";
@@ -23,6 +23,7 @@ import { isPublicHttpUrl } from "./variantResearch.js";
 import { queryFromSearchUrl } from "./searchLinks.js";
 import { DEFAULT_BACKENDS, createEvidenceDeps, extractEvidenceText, searchWasUnavailable, type EvidenceDeps } from "./webEvidence.js";
 import { apiBackends } from "./searchApis.js";
+import { openAiWebBackend, type OpenAiSearchPolicy } from "./openaiSearch.js";
 import { checkBrowsers } from "./browserCheck.js";
 import { getStealthChromium } from "./stealthBrowser.js";
 
@@ -203,6 +204,20 @@ async function fetchPage(url: string, maxChars = MAX_CHARS_PER_PAGE): Promise<Fe
 }
 
 const EVIDENCE_PAGE_CHARS = 40_000;
+
+// OpenAI web search, as the FIRST engine for hard research only (unfamiliar items, unclear models, edition and claim checks). The ordinary reader above never uses it. It declines
+// itself (and the next engine answers) when switched off, in Save-credits mode, over its hourly limit, or after a failure. See openaiSearch.ts.
+let hardDeps: EvidenceDeps | null = null;
+let openAiBackend: ReturnType<typeof openAiWebBackend> | null = null;
+export function configureOpenAiSearch(policy: Omit<OpenAiSearchPolicy, "search">): void {
+  openAiBackend = openAiWebBackend({ ...policy, search: callOpenAISearch });
+  hardDeps = null;
+}
+/** The search and page reader for hard research: OpenAI web search first when the owner enabled it, then the usual engines. */
+export function webHardDeps(): EvidenceDeps {
+  hardDeps ??= createEvidenceDeps({ render: renderPageText, backends: [...(openAiBackend ? [openAiBackend] : []), ...apiBackends(), ...DEFAULT_BACKENDS()] });
+  return hardDeps;
+}
 
 /** The real search and page reader, in the shape the evidence check wants (traces what it asks and what comes back). */
 export function webVerifyDeps(): EvidenceDeps {

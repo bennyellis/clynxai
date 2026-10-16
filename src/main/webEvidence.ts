@@ -24,13 +24,15 @@ export interface SearchHit {
 
 export interface SearchBackend {
   name: string;
-  /** The request for a query: a GET address, or a POST with a form body. */
-  request(query: string): { url: string; method?: "GET" | "POST"; body?: string; headers?: Record<string, string> };
-  parse(body: string): SearchHit[];
+  /** The request for a query: a GET address, or a POST with a form body. Not used by a backend that has `run`. */
+  request?(query: string): { url: string; method?: "GET" | "POST"; body?: string; headers?: Record<string, string> };
+  parse?(body: string): SearchHit[];
+  /** A backend that does its own call (OpenAI web search): returns the results, throws on failure. */
+  run?(query: string, maxResults: number): Promise<SearchHit[]>;
   /** A reason this backend must not be used right now (a spent daily allowance), or null; checked before any request. */
   skip?(): string | null;
   /** True when the answer is a bot check / refusal rather than results. */
-  isBlocked(status: number, body: string): boolean;
+  isBlocked?(status: number, body: string): boolean;
 }
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -268,6 +270,19 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
         trace.searches.push({ query, backend: backend.name, outcome: "blocked", results: 0, detail: `skipped: ${skipReason}` });
         continue;
       }
+      if (backend.run) {
+        try {
+          const hits = (await backend.run(query, maxResults)).slice(0, maxResults);
+          trace.searches.push({ query, backend: backend.name, outcome: hits.length ? "ok" : "empty", results: hits.length, detail: hits.length ? undefined : "no cited pages came back" });
+          if (hits.length) return hits;
+        } catch (err) {
+          // a failing paid backend is left alone for a while, not asked again for every query
+          blockedUntil.set(backend.name, now() + Math.min(blockedFor, 5 * 60_000));
+          trace.searches.push({ query, backend: backend.name, outcome: "error", results: 0, detail: redactSecrets((err as Error).message) });
+        }
+        continue;
+      }
+      if (!backend.request || !backend.parse || !backend.isBlocked) continue;
       const req = backend.request(query);
       try {
         const res = await timedFetch(
