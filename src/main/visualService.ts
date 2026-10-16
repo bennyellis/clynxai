@@ -32,6 +32,21 @@ export function describeDecision(d: IdentityDecision): string {
   return parts.length ? parts.join("; ") : "could not identify";
 }
 
+/** What the chat is told after looking at the user's photo: what is established, what is not, and when to ask the person instead of guessing. */
+export function describeIdentification(d: IdentityDecision): string {
+  const seen = d.observation ? `The photo shows: ${[d.observation.objectKind, d.observation.brandVisible && `brand ${d.observation.brandVisible}`, d.observation.colors.length && `colours ${d.observation.colors.join(", ")}`, d.observation.artwork.length && `artwork ${d.observation.artwork.join("; ")}`].filter(Boolean).join("; ")}.` : "Nothing could be made out in the photo.";
+  const found = describeDecision(d);
+  const candidates = d.editionMatches.filter((m) => m.strength !== "unsupported").slice(0, 5).map((m) => m.edition);
+  // "very unsure": no model settled, or several still possible, or no edition and nothing visible
+  const unsure = !d.model || d.remainingModels.length > 1 || (!d.edition && !d.observation);
+  const lines = [seen, `Conclusion: ${found}.`];
+  if (candidates.length) lines.push(`Editions that matched what is visible: ${candidates.join(", ")}.`);
+  if (d.uncertainty.length) lines.push(`Not established: ${d.uncertainty.join(" ")}`);
+  lines.push("A photo cannot show whether a unit is a genuine factory edition or an aftermarket one.");
+  if (unsure) lines.push(`CONFIDENCE IS LOW. Do not state a model or edition as fact. Ask the user with ask_choice${d.remainingModels.length > 1 ? ` (options: ${d.remainingModels.slice(0, 5).join(", ")})` : candidates.length > 1 ? ` (options: ${candidates.join(", ")})` : ""}, or ask for a clearer photo (the model label, back, or underside).`);
+  return lines.join(" ");
+}
+
 /** What a model-name check found, in one line (also used by the chat tool). */
 export function describeChallenge(c: ChallengeResult): string {
   switch (c.verdict) {

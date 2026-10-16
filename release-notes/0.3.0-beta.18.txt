@@ -1,0 +1,5 @@
+Clynx Beta 18 - Watch Clynx search, photos in research, asks when unsure
+* New: while Clynx researches on the web, chat shows what it is doing as it happens: each search (which engine, how many results, or that it was refused) and each page it reads. A "Web activity" list stays under the answer so you can see where facts came from.
+* New: attach a photo (the paperclip) and ask which model or special edition it is. Clynx looks at the picture, searches for editions that match what is visible, rules models out only on what the photo shows, and says what it could not establish. Nothing is saved to your Library by this. A photo can never prove an edition is genuine, and Clynx says so.
+* New: when Clynx is very unsure (several models still possible, or the photo is unclear) it no longer guesses. It asks you with buttons, or asks for a clearer photo of the label, back or underside.
+* Unchanged: everything in Beta 17.

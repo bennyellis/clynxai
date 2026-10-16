@@ -21,8 +21,10 @@ export function ChatStatusLine({ requestId, onStop }: { requestId: string; onSto
     return () => clearInterval(t);
   }, [running.length]);
   const problems = problemSteps(mine);
-  if (!running.length && !problems.length) return null;
+  const notices = (mine ?? []).filter((s) => s.kind === "notice");
+  if (!running.length && !problems.length && !notices.length) return null;
   return (
+    <>
     <div data-testid="chat-status" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "var(--text-dim)", marginTop: 4, flexWrap: "wrap" }}>
       {running.length > 0 && (
         <>
@@ -45,6 +47,17 @@ export function ChatStatusLine({ requestId, onStop }: { requestId: string; onSto
         </span>
       ))}
     </div>
+    {notices.length > 0 && (
+      <details data-testid="chat-web-activity" open={running.length > 0} style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 2 }}>
+        <summary style={{ cursor: "pointer" }}>Web activity ({notices.length})</summary>
+        <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+          {notices.map((n) => (
+            <li key={n.id} style={{ color: n.ok === false ? "var(--warn)" : undefined }}>{n.label}</li>
+          ))}
+        </ul>
+      </details>
+    )}
+    </>
   );
 }
 

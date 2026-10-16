@@ -66,6 +66,7 @@ export function toolStatusLabel(name: string, args: Record<string, unknown>): st
     case "web_research": return str(args.query) ? `Searching the web for ${str(args.query)}` : "Searching the web";
     case "find_products": return "Looking through your Library";
     case "check_model_name": return str(args.name) ? `Checking whether ${str(args.name)} is a real model` : "Checking a model name";
+    case "identify_from_photo": return "Looking closely at your photo";
     case "research_variants": return str(args.product) ? `Researching versions of ${str(args.product)}` : "Researching product versions";
     case "add_reference_photos": return str(args.product) ? `Finding photos for ${str(args.product)}` : "Finding reference photos";
     case "add_search_item": return str(args.item) ? `Adding ${str(args.item)} to Search For` : "Adding to Search For";

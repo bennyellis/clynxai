@@ -1,4 +1,5 @@
 import type { BlacklistTerm, Config, ListingRecord, LogLine, ProductProfile, Watch } from "./types.js";
+import { withWebActivity } from "./webEvidence.js";
 import { REPLY_STYLE, CHAT_TOKENS_LONG, CHAT_TOKENS_SHORT, tightenReply, toolStatusLabel, wantsDetail, type ChatStatusEvent } from "./chatSupport.js";
 import { CLYNX_PERSONA, whereYouAre } from "./clynxPersona.js";
 import { CLYNX_VOICE } from "./voice.js";
@@ -38,6 +39,7 @@ export interface ToolCall {
     | "find_products"
     | "web_research"
     | "research_variants"
+    | "identify_from_photo"
     | "check_model_name"
     | "add_product_watch_note"
     | "add_blacklist_term"
@@ -59,6 +61,8 @@ export interface ToolCall {
   // What the user actually typed this turn. The model sometimes shortens a product name when it fills in a tool's arguments; tools that need the
   // user's own wording (research_product) read it from here.
   userMessage?: string;
+  /** The photos attached to this turn (data URIs), for tools that look at them. */
+  images?: string[];
 }
 
 export type ToolExecutor = (call: ToolCall) => Promise<string>;
@@ -112,15 +116,15 @@ const DASHBOARD_TOOL_NAMES = new Set<ToolCall["name"]>([
   "ask_choice",
 ]);
 
-const DATABASE_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "research_variants", "check_model_name", "add_blacklist_term", "remove_blacklist_term", "ask_choice", "library_op", "library_list"]);
+const DATABASE_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "research_variants", "identify_from_photo", "check_model_name", "add_blacklist_term", "remove_blacklist_term", "ask_choice", "library_op", "library_list"]);
 
-const PRODUCT_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "research_variants", "check_model_name", "add_product_watch_note", "ask_choice", "library_op", "library_list"]);
+const PRODUCT_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "research_variants", "identify_from_photo", "check_model_name", "add_product_watch_note", "ask_choice", "library_op", "library_list"]);
 
 // Per explicit instruction — everything Dashboard can do, plus
 // research_product (Database's own product-research tool). Deliberately
 // NOT add_product_watch_note — that tool only makes sense already scoped
 // to one specific product's own page, which this bar never is.
-const GLOBAL_TOOL_NAMES = new Set<ToolCall["name"]>([...DASHBOARD_TOOL_NAMES, "research_product", "add_reference_photos", "find_products", "research_variants", "check_model_name", "library_op", "library_list"]);
+const GLOBAL_TOOL_NAMES = new Set<ToolCall["name"]>([...DASHBOARD_TOOL_NAMES, "research_product", "add_reference_photos", "find_products", "research_variants", "identify_from_photo", "check_model_name", "library_op", "library_list"]);
 
 export function allowedToolNames(context: ChatContext): Set<ToolCall["name"]> {
   if (context === "dashboard") return DASHBOARD_TOOL_NAMES;
@@ -322,6 +326,21 @@ const TOOLS = [
       description:
         "Check whether a product name a seller used is a real model by reading the maker's own lineup (for example 'NVIDIA GeForce RTX 4080 Ti' or 'iPhone 15 Pro Plus'). Only a lineup actually read can say a name is NOT in it, and the real models it lists are offered as alternatives. When no official page can be read the answer is 'unverified', which is not 'fake'. Use it when a listing or the user names a model that may not exist, before pricing it.",
       parameters: { type: "object", properties: { name: { type: "string", description: "The model name as the seller wrote it." } }, required: ["name"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "identify_from_photo",
+      description:
+        "Work out exactly which product, model and special edition is in the photo(s) the user attached to THIS message. It describes what is visible (colours, artwork, shape, features), searches the web for editions that match, and rules candidates out only on what the photos show. Use it when the user attaches a picture and asks what it is, which edition or version it is, or wants it researched from the picture. The result says what is established, what is not, and how confident it is. When it says it is UNSURE, do not guess: ask the user with ask_choice (the candidates it names as options) or ask for a clearer photo (back, label, serial number, the side with the model text). Photos cannot prove a unit is a genuine factory edition; never claim that.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "What the user called it, if they did (e.g. 'new 3ds xl'). Optional." },
+        },
+        required: [],
+      },
     },
   },
   {
@@ -703,7 +722,7 @@ You have full admin access to this app's own settings and controls. Whatever the
 
 Use tools whenever the conversation calls for one — don't wait for an exact command phrasing, and don't tell the user to go change something in Config that you actually have a tool for. The one thing you still can't touch is the OpenAI API key (stored outside config, in a plaintext .env file) — for that, tell them to use the Config screen.
 
-The user can attach photos to a message (an 📎 button next to the text box) — you can actually see whatever they attach. The main use case: they want to find/track something but don't know its exact name. When a message includes a photo, look at it carefully and identify the specific product (brand, model, notable variant if you can tell) and describe back what you see, in plain language, before doing anything else. If they're clearly asking you to find/track it, that's just a request for add_search_item like any other — call it right away, same as above. If the photo is ambiguous or you're not confident, say so plainly and ask a clarifying question instead of guessing at a specific model.
+The user can attach photos to a message (an 📎 button next to the text box) — you can actually see whatever they attach. The main use case: they want to find/track something but don't know its exact name. When a message includes a photo, look at it carefully and identify the specific product (brand, model, notable variant if you can tell) and describe back what you see, in plain language, before doing anything else. If they're clearly asking you to find/track it, that's just a request for add_search_item like any other — call it right away, same as above. If they want to know exactly which model or special edition it is, call identify_from_photo. If the photo is ambiguous or you're not confident, say so plainly and ask with ask_choice (or for a clearer photo) instead of guessing at a specific model. This applies to anything you are very unsure about, not only photos: never present a guess as fact.
 
 Current setup:
 - Deal threshold: ${config.dealThresholdPercent}% under reference price
@@ -1213,7 +1232,12 @@ export async function streamChat(
         const args = tc.args ? JSON.parse(tc.args) : {};
         label = toolStatusLabel(tc.name, args);
         hooks.onStatus?.({ stepId: tc.id || `${tc.name}-${started}`, kind: "tool", label, state: "start", startedAt: started });
-        toolResult = await executeTool({ name: tc.name as ToolCall["name"], args, userMessage });
+        const stepBase = tc.id || `${tc.name}-${started}`;
+        let activityNo = 0;
+        toolResult = await withWebActivity(
+          (line, ok) => hooks.onStatus?.({ stepId: `${stepBase}:a${++activityNo}`, kind: "notice", label: line, state: "end", startedAt: Date.now(), ok }),
+          () => executeTool({ name: tc.name as ToolCall["name"], args, userMessage, images: attachments.map((a) => a.dataUri) })
+        );
         if (tc.name === "research_product" && /^Started researching|^Added|new entry/.test(toolResult) && !toolResult.startsWith("Failed:")) researchedNewProduct = true;
       } catch (err) {
         toolResult = `Failed: ${(err as Error).message}`;

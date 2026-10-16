@@ -10,6 +10,16 @@
 // Every search and every page read is traced (what was asked, which backend, what came back, how much text), so a failure can be shown, not guessed.
 // Network access is injectable so the whole path can be run against a local server in tests.
 
+// What the web layer is doing right now, for whoever asked (the chat shows it as it happens). The listener belongs to the async call chain that set it, so two chats never see each other's steps.
+import { AsyncLocalStorage } from "node:async_hooks";
+const activityListener = new AsyncLocalStorage<(line: string, ok: boolean) => void>();
+export function withWebActivity<T>(listener: (line: string, ok: boolean) => void, fn: () => Promise<T>): Promise<T> {
+  return activityListener.run(listener, fn);
+}
+function announceWebActivity(line: string, ok: boolean): void {
+  try { activityListener.getStore()?.(line, ok); } catch { /* a display problem never stops a search */ }
+}
+
 import type { EvidenceTrace, PageTrace, SearchTrace, VerifyDeps } from "./variantEvidence.js";
 import { queryFromSearchUrl } from "./searchLinks.js";
 import { isPublicHttpUrl } from "./variantResearch.js";
@@ -252,6 +262,19 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
   const now = opts.now ?? (() => Date.now());
   const blockedUntil = new Map<string, number>();
   let trace: EvidenceTrace = { searches: [], pages: [] };
+  const pushSearch = (e: EvidenceTrace["searches"][number]) => {
+    trace.searches.push(e);
+    announceWebActivity(
+      e.outcome === "ok" ? `Searched ${e.backend} for "${e.query.slice(0, 80)}": ${e.results} result${e.results === 1 ? "" : "s"}` : `${e.backend} ${e.outcome === "blocked" ? "refused" : e.outcome === "empty" ? "found nothing" : "failed"} for "${e.query.slice(0, 60)}"${e.detail ? ` (${e.detail.slice(0, 80)})` : ""}`,
+      e.outcome === "ok"
+    );
+  };
+  const pushPage = (e: EvidenceTrace["pages"][number]) => {
+    trace.pages.push(e);
+    let host = e.url;
+    try { host = new URL(e.url).hostname.replace(/^www\./, ""); } catch { /* keep the raw text */ }
+    announceWebActivity(e.chars > 0 ? `Read ${host}${e.via === "browser" ? " (opened in a browser)" : ""}: ${e.chars.toLocaleString("en-US")} characters` : `Could not read ${host}${e.note ? ` (${e.note.slice(0, 80)})` : ""}`, e.chars > 0);
+  };
   let rendersLeft = opts.maxRenders ?? 2;
   let lastSearchAt = 0;
   const ok = (url: string) => (opts.allowLocal ? /^https?:\/\//i.test(url) : isPublicHttpUrl(url));
@@ -262,23 +285,23 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
     lastSearchAt = now();
     for (const backend of backends) {
       if ((blockedUntil.get(backend.name) ?? 0) > now()) {
-        trace.searches.push({ query, backend: backend.name, outcome: "blocked", results: 0, detail: "skipped: blocked a moment ago" });
+        pushSearch({ query, backend: backend.name, outcome: "blocked", results: 0, detail: "skipped: blocked a moment ago" });
         continue;
       }
       const skipReason = backend.skip?.();
       if (skipReason) {
-        trace.searches.push({ query, backend: backend.name, outcome: "blocked", results: 0, detail: `skipped: ${skipReason}` });
+        pushSearch({ query, backend: backend.name, outcome: "blocked", results: 0, detail: `skipped: ${skipReason}` });
         continue;
       }
       if (backend.run) {
         try {
           const hits = (await backend.run(query, maxResults)).slice(0, maxResults);
-          trace.searches.push({ query, backend: backend.name, outcome: hits.length ? "ok" : "empty", results: hits.length, detail: hits.length ? undefined : "no cited pages came back" });
+          pushSearch({ query, backend: backend.name, outcome: hits.length ? "ok" : "empty", results: hits.length, detail: hits.length ? undefined : "no cited pages came back" });
           if (hits.length) return hits;
         } catch (err) {
           // a failing paid backend is left alone for a while, not asked again for every query
           blockedUntil.set(backend.name, now() + Math.min(blockedFor, 5 * 60_000));
-          trace.searches.push({ query, backend: backend.name, outcome: "error", results: 0, detail: redactSecrets((err as Error).message) });
+          pushSearch({ query, backend: backend.name, outcome: "error", results: 0, detail: redactSecrets((err as Error).message) });
         }
         continue;
       }
@@ -294,17 +317,17 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
         const body = await res.text();
         if (backend.isBlocked(res.status, body)) {
           blockedUntil.set(backend.name, now() + blockedFor);
-          trace.searches.push({ query, backend: backend.name, outcome: "blocked", results: 0, detail: `HTTP ${res.status}: the search engine answered with a bot check or refusal` });
+          pushSearch({ query, backend: backend.name, outcome: "blocked", results: 0, detail: `HTTP ${res.status}: the search engine answered with a bot check or refusal` });
           continue;
         }
         const hits = backend.parse(body).slice(0, maxResults);
-        trace.searches.push({ query, backend: backend.name, outcome: hits.length ? "ok" : "empty", results: hits.length, detail: hits.length ? undefined : `HTTP ${res.status}: no results in the answer` });
+        pushSearch({ query, backend: backend.name, outcome: hits.length ? "ok" : "empty", results: hits.length, detail: hits.length ? undefined : `HTTP ${res.status}: no results in the answer` });
         if (hits.length) return hits;
       } catch (err) {
         // A backend that cannot be reached at all is left alone for a minute, so a down network is one failure per backend, not dozens.
         blockedUntil.set(backend.name, now() + Math.min(blockedFor, 60_000));
         const cause = (err as { cause?: { code?: string; message?: string } }).cause;
-        trace.searches.push({ query, backend: backend.name, outcome: "error", results: 0, detail: redactSecrets(`${(err as Error).message}${cause?.code || cause?.message ? ` (${cause.code ?? cause.message})` : ""}`) });
+        pushSearch({ query, backend: backend.name, outcome: "error", results: 0, detail: redactSecrets(`${(err as Error).message}${cause?.code || cause?.message ? ` (${cause.code ?? cause.message})` : ""}`) });
       }
     }
     return [];
@@ -313,11 +336,11 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
   async function fetchText(url: string, hint?: { tokens: string[] }): Promise<string | null> {
     const searched = queryFromSearchUrl(url);
     if (searched) {
-      trace.pages.push({ url, status: null, chars: 0, via: "fetch", note: `a search-results page, not a product page; its query was "${searched}"` });
+      pushPage({ url, status: null, chars: 0, via: "fetch", note: `a search-results page, not a product page; its query was "${searched}"` });
       return null;
     }
     if (!ok(url)) {
-      trace.pages.push({ url, status: null, chars: 0, via: "fetch", note: "not a public web address, not opened" });
+      pushPage({ url, status: null, chars: 0, via: "fetch", note: "not a public web address, not opened" });
       return null;
     }
     let text: string | null = null;
@@ -330,9 +353,9 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
         const body = await res.text();
         text = /json/i.test(type) ? jsonStrings(body).join("\n") : extractEvidenceText(body);
       }
-      trace.pages.push({ url, status, chars: text?.length ?? 0, via: "fetch", note: res.ok ? undefined : `HTTP ${status}` });
+      pushPage({ url, status, chars: text?.length ?? 0, via: "fetch", note: res.ok ? undefined : `HTTP ${status}` });
     } catch (err) {
-      trace.pages.push({ url, status: null, chars: 0, via: "fetch", note: (err as Error).message });
+      pushPage({ url, status: null, chars: 0, via: "fetch", note: (err as Error).message });
     }
     // A page the plain read could not use (refused, or an empty JavaScript shell that never states the product) is rendered once in a browser.
     const needles = (hint?.tokens ?? []).filter((t) => t.length > 2);
@@ -341,10 +364,10 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
       rendersLeft--;
       try {
         const rendered = await opts.render(url);
-        trace.pages.push({ url, status: null, chars: rendered?.length ?? 0, via: "browser", note: rendered ? undefined : "the browser could not open it" });
+        pushPage({ url, status: null, chars: rendered?.length ?? 0, via: "browser", note: rendered ? undefined : "the browser could not open it" });
         if (rendered && rendered.length > (text?.length ?? 0)) text = rendered;
       } catch (err) {
-        trace.pages.push({ url, status: null, chars: 0, via: "browser", note: (err as Error).message });
+        pushPage({ url, status: null, chars: 0, via: "browser", note: (err as Error).message });
       }
     }
     return text;

@@ -69,7 +69,9 @@ import { makeThumb, noteDecision } from "./aiDecisionLog.js";
 import { fileImage, setFilingRecorder, type FileImageEvidence } from "./fileImage.js";
 import { createKnowledgeService, type KnowledgeService } from "./knowledgeService.js";
 import { openAiKnowledgeAi } from "./knowledgeAi.js";
-import { createVisualService, describeChallenge, rememberLineup } from "./visualService.js";
+import { createVisualService, describeChallenge, describeIdentification, rememberLineup } from "./visualService.js";
+import { identifyFromObservation } from "./identityResearch.js";
+import { seedNintendoHandhelds } from "./knowledgeSeeds.js";
 import { RESET_CONFIRM_WORD, freshConfig } from "./resetClynx.js";
 import { challengeModelClaim } from "./claimChallenge.js";
 import { openAiObserver, openAiThemeClassifier } from "./visualObserver.js";
@@ -1043,6 +1045,18 @@ async function executeChatTool(
     const url = publicHttpUrls(String(call.args.url ?? "") || query, 1)[0] ?? null;
     if (!query && !url) return "Failed: no search query given.";
     return await lookUpOnWeb(query, url);
+  }
+
+  // The photos the user attached to this message: what is visible, what the web says editions look like, and how sure that makes Clynx. Nothing is saved.
+  if (call.name === "identify_from_photo") {
+    const images = call.images ?? [];
+    if (!images.length) return "Failed: no photo is attached to this message. Ask the user to attach one with the paperclip.";
+    if (!hasOpenAIAccess()) return "Failed: looking at photos needs the AI connection, which is not available.";
+    const title = String(call.args.title ?? "").trim() || undefined;
+    const graph = store.knowledgeGraph();
+    seedNintendoHandhelds(graph);
+    const decision = await identifyFromObservation({ images, title }, { graph, web: webHardDeps(), observer: openAiObserver(), themes: openAiThemeClassifier(), usage: (key, count) => store.addUsage(key, count ?? 1) });
+    return describeIdentification(decision);
   }
 
   // Is a seller's model name real? Reads the maker's lineup; only a lineup it read can say a name is not in it.
