@@ -1,5 +1,3 @@
 Clynx Beta 22 - Owner switches no longer disappear
 * Fixed: saving anything in Config, or using Reset Clynx, erased the beta13 switches in config.json (including "openaiSearch": true), so OpenAI web search silently turned itself off. Switches the Config screen does not show are now kept when it saves, and Reset Clynx keeps them too.
-* Fixed: asking chat about variants or special editions could be answered from memory or an old saved profile, with no search and a false "I refreshed it". Chat now must run the edition research first for these questions, so the Web activity list shows what it searched.
-* Changed: DuckDuckGo and Bing are switched off as search sources (they answered with bot checks or unrelated news pages). Research now uses OpenAI web search first, then a Brave key if you have one, then Wikipedia. To turn the two engines back on, add "freeSearchEngines": true to config.json. Everyday product price lookups no longer have DuckDuckGo or Bing either.
 * Unchanged: everything in Beta 21 (which also stops Clynx from tripping the server's block when it is told to slow down).

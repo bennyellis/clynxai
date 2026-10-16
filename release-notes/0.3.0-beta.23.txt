@@ -1,0 +1,4 @@
+Clynx Beta 23 - Edition questions really search; OpenAI search first
+* Fixed: asking chat about variants or special editions could be answered from memory or an old saved profile, with no search and a false "I refreshed it". Chat now must run the edition research for these questions even if it already ran another lookup, so the Web activity list shows what was searched.
+* Changed: DuckDuckGo and Bing are switched off as search sources (they answered with bot checks or unrelated news pages). Research now uses OpenAI web search first, then a Brave key if you have one, then Wikipedia. To turn the two engines back on, add "freeSearchEngines": true to config.json. Everyday product price lookups no longer have DuckDuckGo or Bing either.
+* Unchanged: everything in Beta 22.
