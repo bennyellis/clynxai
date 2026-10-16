@@ -377,6 +377,8 @@ export interface Config {
   // different product from being filed, valued or added to. It never chooses another product. Uncertainty is never a veto.
   identitySafeguard?: { mode: "off" | "shadow" | "enforce" };
   // Beta 13 feature switches (see beta13.ts): identityGate / resolver / conditionEvidence are "off" | "shadow" | "enforce"; the rest are booleans. Missing = the defaults in beta13.ts.
+  /** Library folder pictures (folderArtService.ts): generate decorative pictures automatically (default on, limited per day). */
+  folderArt?: { generate?: boolean; perDay?: number; perDayManual?: number };
   beta13?: { identityGate?: "off" | "shadow" | "enforce"; resolver?: "off" | "shadow" | "enforce"; conditionEvidence?: "off" | "shadow" | "enforce"; webKnowledge?: "off" | "shadow" | "enforce"; libraryTree?: boolean; chatStatus?: boolean; chatChoices?: boolean; chatAttachments?: boolean; replyStyle?: boolean };
   // Chat improvements, each on unless set to false in config.json (a rollback without a new build): followUpHints reads short answers ("both", "do it") and repeated
   // or frustrated instructions in code; promiseGuard re-runs a reply that promised an action without calling a tool; leanContext lists only the relevant products

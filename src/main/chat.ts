@@ -161,8 +161,8 @@ const TOOLS = [
     type: "function",
     function: {
       name: "library_list",
-      description: "Read the user's Library organisation: their own folders (with ids) and what is in the Trash. Use it to find a folder id before moving something. Reads only; changes nothing.",
-      parameters: { type: "object", properties: { what: { type: "string", enum: ["folders", "trash"], description: "folders (default) or trash" } } },
+      description: "Read the user's Library organisation: their own folders (with ids), Clynx's automatic folders (with the `key` path the folder operations take), what is in the Trash, and the recent Library actions (with ids, for undo). Use it to find an id or key before changing something. Reads only; changes nothing.",
+      parameters: { type: "object", properties: { what: { type: "string", enum: ["folders", "autoFolders", "trash", "history"], description: "folders (default), autoFolders, trash or history" } } },
     },
   },
   {
@@ -170,11 +170,11 @@ const TOOLS = [
     function: {
       name: "library_op",
       description:
-        "Organise the user's Library: create / rename / move / delete (to the Trash) folders, move a product into a folder or back to Clynx's own filing (folderId empty), rename a product, move a product or photo to the Trash or back, set a product's first photo or thumbnail from one of its photos, or move a wrong photo to another product. Deleting always goes to the Trash for 30 days and everything can be undone from the Library. Moving or renaming NEVER changes what a product is or what it is worth. Use ids from find_products / library_list; never invent ids. Anything bulk or consequential makes the app ask the user to confirm with buttons - you do not confirm for them; just report that it is waiting. Put the fields the operation needs next to `op`.",
+        "Organise the user's Library: create / rename / move / delete (to the Trash) folders (the user's own folders by id, and Clynx's automatic folders by `key` with renameAutoFolder / deleteAutoFolder; setFolderThumbnail picks an existing photo as a folder picture, restoreFolderThumbnail goes back to automatic pictures, generateFolderThumbnail makes a new decorative generated picture for a folder at the user's request), move a product into a folder or back to Clynx's own filing (folderId empty), rename a product, move a product or photo to the Trash or back, set a product's first photo or thumbnail from one of its photos, or move a wrong photo to another product. Deleting always goes to the Trash for 30 days and everything can be undone from the Library. Moving or renaming NEVER changes what a product is or what it is worth. Use ids from find_products / library_list; never invent ids. Anything bulk or consequential makes the app ask the user to confirm with buttons - you do not confirm for them; just report that it is waiting. Put the fields the operation needs next to `op`.",
       parameters: {
         type: "object",
         properties: {
-          op: { type: "string", enum: ["createFolder", "renameFolder", "moveFolder", "deleteFolder", "moveProduct", "renameProduct", "trashProduct", "restoreProduct", "removeImage", "restoreImage", "setPrimaryImage", "setThumbnail", "reassignImage"] },
+          op: { type: "string", enum: ["createFolder", "renameFolder", "moveFolder", "deleteFolder", "moveProduct", "renameProduct", "trashProduct", "restoreProduct", "removeImage", "restoreImage", "setPrimaryImage", "setThumbnail", "reassignImage", "renameAutoFolder", "deleteAutoFolder", "setFolderThumbnail", "restoreFolderThumbnail", "generateFolderThumbnail", "undo"] },
           name: { type: "string", description: "createFolder / renameFolder / renameProduct: the name." },
           id: { type: "string", description: "renameFolder / moveFolder / deleteFolder: the folder id; renameProduct / trashProduct / restoreProduct: the product id." },
           parentId: { type: "string", description: "createFolder: the parent folder id (empty = top level). moveFolder: the new parent id (empty = top level)." },
@@ -182,7 +182,9 @@ const TOOLS = [
           folderId: { type: "string", description: "moveProduct: the destination folder id (empty = back to where Clynx files it)." },
           imageId: { type: "string", description: "removeImage / restoreImage / setPrimaryImage / setThumbnail / reassignImage: the photo id (setThumbnail: empty clears it)." },
           toProductId: { type: "string", description: "reassignImage: the product the photo really belongs to." },
-          deleteContents: { type: "boolean", description: "deleteFolder: true sends everything inside to the Trash too (asks the user first); default moves it up a level." },
+          deleteContents: { type: "boolean", description: "deleteFolder / deleteAutoFolder: true sends everything inside to the Trash too (asks the user first); default moves it up a level." },
+          key: { type: "string", description: "renameAutoFolder / deleteAutoFolder / setFolderThumbnail / restoreFolderThumbnail / generateFolderThumbnail: the path of one of Clynx's own automatic folders exactly as library_list(what=autoFolders) gives it, e.g. 'Video Games & Consoles > Nintendo > Consoles'." },
+          opId: { type: "string", description: "undo: the id of the action to undo (library_list what=history)." },
         },
         required: ["op"],
       },
@@ -615,7 +617,7 @@ const TOOLS = [
   },
 ];
 
-function toolsForContext(context: ChatContext) {
+export function toolsForContext(context: ChatContext) {
   const names = allowedToolNames(context);
   return TOOLS.filter((t) => names.has(t.function.name as ToolCall["name"]));
 }

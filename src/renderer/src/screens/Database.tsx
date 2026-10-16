@@ -12,6 +12,7 @@ import { DiscoveryTab, resetDiscoveryUi } from "./DiscoveryTab.js";
 import { ReviewTab } from "./ReviewTab.js";
 import { keepRangeUsd } from "../../../main/resaleMath.js";
 import { imageSource } from "../lib/imageSource.js";
+import { AutoFolderMenu, folderLabel, folderMetaFor, pictureNote, useFolderMeta, type FolderMeta } from "../components/AutoFolderTools.js";
 import { FolderDialog, LibraryNote, MY_FOLDERS, NeedsReviewPanel, OrganizeCard, PhotoActions, TrashPanel, doLibraryOp, folderPaths, statusBadge, type LibraryFolder } from "../components/LibraryTools.js";
 import {
   homeDatabaseNav,
@@ -687,6 +688,8 @@ export function Database({
   // ensureGroupThumbnail in index.ts and FamilyTile below. Keyed by the
   // lowercased full path, matching store.ts's group_thumbnails table.
   const [groupThumbnails, setGroupThumbnails] = useState<Record<string, string>>({});
+  // The automatic folders' own settings: the names the person gave them and their pictures (with where each came from).
+  const folderMeta = useFolderMeta();
   useEffect(() => {
     api.listGroupThumbnails().then(setGroupThumbnails);
     const off = api.onGroupThumbnailUpdated((path, imageData) => {
@@ -1091,6 +1094,7 @@ export function Database({
                   node={node}
                   librarySize={librarySize}
                   groupThumbnails={groupThumbnails}
+                  folderMeta={folderMeta}
                   sortBy={librarySortBy}
                   avgSoldPriceAcrossLibrary={avgSoldPriceAcrossLibrary}
                   onNavigate={(segments) => setViewingPath(segments.length ? { category: viewingPath.category, segments } : null)}
@@ -1117,7 +1121,11 @@ export function Database({
                           </span>
                         ) : null;
                       })()
-                    ) : undefined
+                    ) : (
+                      <span style={{ marginLeft: "auto" }}>
+                        <AutoFolderMenu category={viewingPath.category} segments={viewingPath.segments} items={collectAllItems(node)} meta={folderMeta} />
+                      </span>
+                    )
                   }
                 />
               );
@@ -1198,6 +1206,8 @@ export function Database({
                               family={node.segment}
                               items={collectAllItems(node)}
                               isTopLevel
+                              category={category}
+                              folderMeta={folderMeta}
                               pathSegments={[node.segment]}
                               onOpen={() => setViewingPath({ category, segments: [node.segment] })}
                             />
@@ -1682,10 +1692,16 @@ function FamilyTile({
   isTopLevel = false,
   groupThumbnailUrl = null,
   pathSegments = null,
+  category = null,
+  folderMeta = null,
   onOpen,
 }: {
   family: string;
   items: ProductProfile[];
+  // Which category the folder is in, and the automatic folders' settings (renamed labels, pictures).
+  category?: string | null;
+  folderMeta?: Map<string, FolderMeta> | null;
+
   // The folder's full path (["Xbox", "Games"]), for finding its picture when it has none.
   pathSegments?: string[] | null;
   isTopLevel?: boolean;
@@ -1698,7 +1714,12 @@ function FamilyTile({
   groupThumbnailUrl?: string | null;
   onOpen: () => void;
 }) {
-  const logo = isTopLevel ? (items.find((p) => p.familyLogoUrl)?.familyLogoUrl ?? null) : null;
+  const auto = !!category && !!folderMeta && category !== MY_FOLDERS && !!pathSegments?.length;
+  const meta = auto ? folderMetaFor(folderMeta!, category!, pathSegments!) : null;
+  const shownName = auto ? folderLabel(folderMeta!, category!, pathSegments!) : family;
+  // A picture the person chose beats everything, a brand logo included; Clynx's own pictures do not replace a brand logo.
+  const chosen = !!meta?.thumbData && (meta.thumbLocked || meta.thumbSource === "user_upload" || meta.thumbSource === "user_selected");
+  const logo = isTopLevel && !chosen ? (items.find((p) => p.familyLogoUrl)?.familyLogoUrl ?? null) : null;
   // Per explicit instruction — "do that for all items that have multiple
   // versions of the same product type, such as different games, different
   // console models/editions": when there's no single brand logo to show
@@ -1707,9 +1728,11 @@ function FamilyTile({
   // whichever one happened to be first.
   const previewImages = logo
     ? [logo]
-    : (() => {
+    : meta?.thumbData
+      ? [meta.thumbData]
+      : (() => {
         const images: string[] = [];
-        if (groupThumbnailUrl) images.push(groupThumbnailUrl);
+        if (groupThumbnailUrl && !auto) images.push(groupThumbnailUrl);
         for (const p of items) {
           if (images.length >= 4) break;
           if (p.imageUrl && !images.includes(p.imageUrl)) images.push(p.imageUrl);
@@ -1733,10 +1756,15 @@ function FamilyTile({
         border: "1px solid var(--border-strong)",
         background: "var(--gradient-soft)",
       }}
-      title={`Open ${family} (${items.length} item${items.length === 1 ? "" : "s"})`}
+      title={`Open ${shownName} (${items.length} item${items.length === 1 ? "" : "s"})${pictureNote(meta) ? ` - ${pictureNote(meta)}` : ""}`}
     >
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
         <CollageImage images={previewImages} isLogo={!!logo} />
+        {auto && (
+          <div style={{ position: "absolute", top: 4, left: 4 }}>
+            <AutoFolderMenu category={category!} segments={pathSegments!} items={items} meta={folderMeta!} compact />
+          </div>
+        )}
         <div
           style={{
             position: "absolute",
@@ -1765,7 +1793,7 @@ function FamilyTile({
           borderTop: "1px solid var(--border-strong)",
         }}
       >
-        📁 {family}
+        📁 {shownName}
       </div>
     </div>
   );
@@ -1888,6 +1916,7 @@ function FolderView({
   node,
   librarySize,
   groupThumbnails,
+  folderMeta,
   sortBy,
   avgSoldPriceAcrossLibrary,
   onNavigate,
@@ -1897,6 +1926,7 @@ function FolderView({
   onTogglePrioritized,
   folderActions,
 }: {
+  folderMeta: Map<string, FolderMeta>;
   // Buttons for the person's own folders (new subfolder / rename / delete); absent for the auto-organized ones.
   folderActions?: React.ReactNode;
   category: string;
@@ -1921,7 +1951,7 @@ function FolderView({
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <button className="icon ghost" onClick={() => onNavigate(segments.slice(0, -1))}>
-          ← Back to {segments.length > 1 ? segments[segments.length - 2] : category}
+          ← Back to {segments.length > 1 ? folderLabel(folderMeta, category, segments.slice(0, -1)) : category}
         </button>
         <div style={{ fontSize: 15, color: "var(--text-dim)", display: "flex", alignItems: "center", gap: 4 }}>
           <span style={{ cursor: "pointer" }} onClick={() => onNavigate([])}>
@@ -1934,7 +1964,7 @@ function FolderView({
                 style={{ cursor: i < segments.length - 1 ? "pointer" : "default", color: i === segments.length - 1 ? "var(--text)" : undefined }}
                 onClick={() => i < segments.length - 1 && onNavigate(segments.slice(0, i + 1))}
               >
-                {seg}
+                {category === MY_FOLDERS ? seg : folderLabel(folderMeta, category, segments.slice(0, i + 1))}
               </span>
             </React.Fragment>
           ))}
@@ -1949,6 +1979,8 @@ function FolderView({
             family={child.segment}
             items={collectAllItems(child)}
             groupThumbnailUrl={groupThumbnails[child.path.toLowerCase()] ?? null}
+            category={category}
+            folderMeta={folderMeta}
             pathSegments={[...segments, child.segment]}
             onOpen={() => onNavigate([...segments, child.segment])}
           />

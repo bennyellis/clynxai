@@ -23,6 +23,7 @@ import { IdentityFoundation } from "./identity/foundationStore.js";
 import { IdentitySafeguard, type SafeguardMode } from "./identity/safeguardRuntime.js";
 import type { ReviewInput } from "./identity/reviewFindings.js";
 import type { ProductKnowledge } from "./knowledgeRegistry.js";
+import type { FolderMetaRecord, ThumbSource } from "./folderKeys.js";
 import { applyPlan, undoBatch, type Outcome, type PlanItem } from "./identity/correctionJournal.js";
 
 // What a product is worth on eBay, as the total the BUYER pays (the sold item price plus the shipping they paid): the estimate when
@@ -141,6 +142,7 @@ export class Store {
       ["identity_status", "TEXT"],
       ["suggested_family", "TEXT"],
       ["thumbnail_image_id", "TEXT"],
+      ["placement_locked", "INTEGER NOT NULL DEFAULT 0"],
     ] as const) {
       if (!productCols.includes(column)) this.db.exec(`ALTER TABLE products ADD COLUMN ${column} ${ddl}`);
     }
@@ -193,12 +195,71 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_listing_condition_listing ON listing_condition(listing_id);
       CREATE INDEX IF NOT EXISTS idx_product_images_status ON product_images(product_id, status);
+      CREATE TABLE IF NOT EXISTS folder_meta (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL DEFAULT 'auto',
+        display_name TEXT,
+        thumb_data TEXT,
+        thumb_source TEXT,
+        thumb_meta TEXT,
+        thumb_locked INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS usage_counters (
+        day TEXT NOT NULL,
+        key TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        usd REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, key)
+      );
       CREATE TABLE IF NOT EXISTS product_knowledge (
         key TEXT PRIMARY KEY,
         json TEXT NOT NULL,
         researched_at INTEGER NOT NULL
       );
     `);
+  }
+
+  // --- Settings of the AUTOMATIC folders (rename, thumbnail with provenance) and a small ledger of what research and generation cost.
+  getFolderMeta(id: string): FolderMetaRecord | null {
+    const r = this.db.prepare("SELECT * FROM folder_meta WHERE id = ?").get(id) as any;
+    return r ? rowToFolderMeta(r) : null;
+  }
+  listFolderMeta(): FolderMetaRecord[] {
+    return (this.db.prepare("SELECT * FROM folder_meta").all() as any[]).map(rowToFolderMeta);
+  }
+  /** Sets the given fields of a folder's settings (creating the row on first use). A field left out is kept; null clears it. */
+  setFolderMeta(id: string, patch: { displayName?: string | null; thumbData?: string | null; thumbSource?: ThumbSource | null; thumbMeta?: Record<string, unknown> | null; thumbLocked?: boolean }): void {
+    const now = Date.now();
+    const cur = this.getFolderMeta(id);
+    const next = {
+      displayName: patch.displayName !== undefined ? patch.displayName : cur?.displayName ?? null,
+      thumbData: patch.thumbData !== undefined ? patch.thumbData : cur?.thumbData ?? null,
+      thumbSource: patch.thumbSource !== undefined ? patch.thumbSource : cur?.thumbSource ?? null,
+      thumbMeta: patch.thumbMeta !== undefined ? patch.thumbMeta : cur?.thumbMeta ?? null,
+      thumbLocked: patch.thumbLocked !== undefined ? patch.thumbLocked : cur?.thumbLocked ?? false,
+    };
+    this.db
+      .prepare(
+        "INSERT INTO folder_meta (id, kind, display_name, thumb_data, thumb_source, thumb_meta, thumb_locked, updated_at) VALUES (?, 'auto', ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, thumb_data = excluded.thumb_data, thumb_source = excluded.thumb_source, thumb_meta = excluded.thumb_meta, thumb_locked = excluded.thumb_locked, updated_at = excluded.updated_at"
+      )
+      .run(id, next.displayName, next.thumbData, next.thumbSource, next.thumbMeta ? JSON.stringify(next.thumbMeta) : null, next.thumbLocked ? 1 : 0, now);
+  }
+  /** The automatic folders that exist right now: every (category, family path) with live, unplaced products, and how many products sit directly on it. */
+  listAutoFolderPlacements(): Array<{ category: string; family: string | null; count: number }> {
+    return (this.db.prepare("SELECT category, family, COUNT(*) AS n FROM products WHERE deleted_at IS NULL AND folder_id IS NULL GROUP BY category, family").all() as any[]).map((r) => ({ category: r.category || "Other", family: r.family ?? null, count: Number(r.n) }));
+  }
+  addUsage(key: string, count = 1, usd = 0): void {
+    const day = new Date().toISOString().slice(0, 10);
+    this.db.prepare("INSERT INTO usage_counters (day, key, count, usd) VALUES (?, ?, ?, ?) ON CONFLICT(day, key) DO UPDATE SET count = count + excluded.count, usd = usd + excluded.usd").run(day, key, count, usd);
+  }
+  usageToday(key: string): { count: number; usd: number } {
+    const r = this.db.prepare("SELECT count, usd FROM usage_counters WHERE day = ? AND key = ?").get(new Date().toISOString().slice(0, 10), key) as { count: number; usd: number } | undefined;
+    return { count: Number(r?.count ?? 0), usd: Number(r?.usd ?? 0) };
+  }
+  usageTotal(key: string): { count: number; usd: number } {
+    const r = this.db.prepare("SELECT COALESCE(SUM(count),0) AS count, COALESCE(SUM(usd),0) AS usd FROM usage_counters WHERE key = ?").get(key) as { count: number; usd: number };
+    return { count: Number(r.count), usd: Number(r.usd) };
   }
 
   /** What Clynx learned from the web about a product line (storage options, look-alike models). Additive; see productKnowledge.ts. */
@@ -1507,7 +1568,8 @@ export class Store {
     const now = Date.now();
     this.db
       .prepare(
-        "UPDATE products SET ai_summary = ?, ai_summary_generated_at = ?, category = ?, family = ?, family_logo_url = ?, image_url = ?, loading = 0, updated_at = ? WHERE id = ?"
+        // A product whose place the person chose (placement_locked) keeps its category and family: research refreshes the rest.
+        "UPDATE products SET ai_summary = ?, ai_summary_generated_at = ?, category = CASE WHEN placement_locked = 1 THEN category ELSE ? END, family = CASE WHEN placement_locked = 1 THEN family ELSE ? END, family_logo_url = ?, image_url = ?, loading = 0, updated_at = ? WHERE id = ?"
       )
       .run(data.aiSummary, now, data.category, this.resolveFamilyName(data.family), data.familyLogoUrl ?? null, data.imageUrl, now, id);
   }
@@ -1917,7 +1979,7 @@ export class Store {
       this.db
         .prepare(
           `UPDATE products SET
-            name = ?, ai_summary = ?, ai_summary_generated_at = ?, observed_notes = ?, category = ?, family = ?,
+            name = ?, ai_summary = ?, ai_summary_generated_at = ?, observed_notes = ?, category = CASE WHEN placement_locked = 1 THEN category ELSE ? END, family = CASE WHEN placement_locked = 1 THEN family ELSE ? END,
             resale_price_usd = ?, resale_time_to_sell = ?, lookout_notes = ?, keep_thumbnail = ?,
             desired_price_usd = ?, hard_cap_at_desired_price = ?, prioritized = ?,
             ebay_avg_sold_price_usd = ?, ebay_avg_run_time_days = ?, ebay_avg_shipping_usd = ?,
@@ -3684,6 +3746,10 @@ function rowToWatchMatch(row: any): WatchMatch {
     notified: !!row.wm_notified,
     notifiedAt: row.wm_notified_at ?? null,
   };
+}
+
+function rowToFolderMeta(r: any): FolderMetaRecord {
+  return { id: r.id, displayName: r.display_name ?? null, thumbData: r.thumb_data ?? null, thumbSource: (r.thumb_source ?? null) as ThumbSource | null, thumbLocked: !!r.thumb_locked, thumbMeta: r.thumb_meta ? (safeJson(r.thumb_meta) as Record<string, unknown> | null) : null, updatedAt: Number(r.updated_at) };
 }
 
 function safeJson(text: string): unknown {

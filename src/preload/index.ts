@@ -230,6 +230,10 @@ const api = {
   // Beta 13 Library operations (libraryOps.ts): one backend for the screen and the chat.
   libraryOp: (op: LibraryOp, confirm?: string): Promise<OpResult> => ipcRenderer.invoke("library:op", { op, confirm }),
   libraryFolders: (): Promise<Array<{ id: string; parentId: string | null; name: string; position: number; kind: string }>> => ipcRenderer.invoke("library:folders"),
+  // Automatic folders: renamed labels and pictures with provenance (folderKeys.ts). Uploads are checked and resized in the main process.
+  libraryFolderMeta: (): Promise<Array<{ id: string; displayName: string | null; thumbData: string | null; thumbSource: "ai_generated" | "auto" | "user_upload" | "user_selected" | "placeholder" | null; thumbLocked: boolean }>> => ipcRenderer.invoke("library:folderMeta"),
+  uploadFolderThumbnail: (key: string, dataUri: string, fileName?: string): Promise<OpResult> => ipcRenderer.invoke("library:uploadFolderThumbnail", { key, dataUri, fileName }),
+  generateFolderThumbnail: (key: string): Promise<OpResult> => ipcRenderer.invoke("library:generateFolderThumbnail", { key }),
   libraryHistory: (): Promise<Array<{ id: string; at: number; actor: string; op: string; undone: boolean }>> => ipcRenderer.invoke("library:history"),
   libraryTrash: (): Promise<{ products: Array<{ id: string; name: string; deletedAt: number }>; images: Array<{ id: string; productId: string; productName: string; sourceTitle: string | null; deletedAt: number }>; folders: Array<{ id: string; name: string; deletedAt: number }> }> => ipcRenderer.invoke("library:trash"),
   libraryReview: (): Promise<Array<{ id: string; kind: string; subjectId: string; reasons: string[]; evidence: Record<string, unknown>; createdAt: number; image: string | null; productName: string | null; suggestedName: string | null }>> => ipcRenderer.invoke("library:review"),

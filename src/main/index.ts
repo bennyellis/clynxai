@@ -69,11 +69,15 @@ import { makeThumb, noteDecision } from "./aiDecisionLog.js";
 import { fileImage, setFilingRecorder, type FileImageEvidence } from "./fileImage.js";
 import { createKnowledgeService, type KnowledgeService } from "./knowledgeService.js";
 import { openAiKnowledgeAi } from "./knowledgeAi.js";
+import { createFolderArtService, listAutoFolders } from "./folderArtService.js";
+import { autoFolderId, autoPath } from "./folderKeys.js";
+import { DEFAULT_LIMITS, IMAGE_COST_ESTIMATE_USD, normalizeFolderImage, type ImageGenerator } from "./folderArt.js";
+import { OPENAI_IMAGE_MODEL } from "./openai.js";
 import { describeKnowledge } from "./productKnowledge.js";
 import { familyKey } from "./knowledgeRegistry.js";
 import { selectReferenceImages } from "./referenceSelection.js";
 import { confirmChoice, sanitizeAttachments, validateChoice, type ChatChoice } from "./chatSupport.js";
-import { LibraryOps, TRASH_RETENTION_MS, folderPathList as folderPathsOf, type LibraryOp } from "./libraryOps.js";
+import { LibraryOps, TRASH_RETENTION_MS, folderPathList as folderPathsOf, toLibraryOp, type LibraryOp } from "./libraryOps.js";
 import { buyerTotalUsd, estimateMarketValue } from "./marketValue.js";
 import { compMatchesSpecs, modelLettersConflict, titleLooksLikeProduct } from "./compFilter.js";
 import { focalProductName } from "./dealSummary.js";
@@ -883,28 +887,6 @@ function rememberChoice(id: string, run?: () => { ok: boolean; summary: string; 
   pendingChoices.set(id, { run, expires: Date.now() + 10 * 60_000 });
 }
 
-function toLibraryOp(args: Record<string, unknown>): LibraryOp | { error: string } {
-  const text = (k: string) => String(args[k] ?? "").trim();
-  const orNull = (k: string) => text(k) || null;
-  const need = (...keys: string[]) => keys.find((k) => !text(k));
-  switch (text("op")) {
-    case "createFolder": return need("name") ? { error: "createFolder needs a name." } : { op: "createFolder", parentId: orNull("parentId"), name: text("name") };
-    case "renameFolder": return need("id", "name") ? { error: "renameFolder needs the folder id and a name." } : { op: "renameFolder", id: text("id"), name: text("name") };
-    case "moveFolder": return need("id") ? { error: "moveFolder needs the folder id." } : { op: "moveFolder", id: text("id"), newParentId: orNull("parentId") };
-    case "deleteFolder": return need("id") ? { error: "deleteFolder needs the folder id." } : { op: "deleteFolder", id: text("id"), mode: args.deleteContents === true ? "trash_with_contents" : "move_contents_up" };
-    case "moveProduct": return need("productId") ? { error: "moveProduct needs the product id." } : { op: "moveProduct", productId: text("productId"), folderId: orNull("folderId") };
-    case "renameProduct": return need("id", "name") ? { error: "renameProduct needs the product id and a name." } : { op: "renameProduct", id: text("id"), name: text("name") };
-    case "trashProduct": return need("id") ? { error: "trashProduct needs the product id." } : { op: "trashProduct", id: text("id") };
-    case "restoreProduct": return need("id") ? { error: "restoreProduct needs the product id." } : { op: "restoreProduct", id: text("id") };
-    case "removeImage": return need("imageId") ? { error: "removeImage needs the photo id." } : { op: "removeImage", imageId: text("imageId") };
-    case "restoreImage": return need("imageId") ? { error: "restoreImage needs the photo id." } : { op: "restoreImage", imageId: text("imageId") };
-    case "setPrimaryImage": return need("productId", "imageId") ? { error: "setPrimaryImage needs the product id and the photo id." } : { op: "setPrimaryImage", productId: text("productId"), imageId: text("imageId") };
-    case "setThumbnail": return need("productId") ? { error: "setThumbnail needs the product id." } : { op: "setThumbnail", productId: text("productId"), imageId: orNull("imageId") };
-    case "reassignImage": return need("imageId", "toProductId") ? { error: "reassignImage needs the photo id and the id of the product it belongs to." } : { op: "reassignImage", imageId: text("imageId"), toProductId: text("toProductId") };
-    default: return { error: `Unknown operation "${text("op")}".` };
-  }
-}
-
 async function executeChatTool(
   call: ToolCall,
   context: ChatContext,
@@ -928,7 +910,25 @@ async function executeChatTool(
       const t = store.listTrash();
       return JSON.stringify({ products: t.products.slice(0, 30), folders: t.folders.slice(0, 30), photos: t.images.length });
     }
+    if (String(call.args.what ?? "folders") === "history") return JSON.stringify(libraryOps().recent(10).filter((o) => !o.undone));
+    if (String(call.args.what ?? "folders") === "autoFolders") {
+      // Clynx's own automatic folders, with the label a person may have given them: the key is the path to pass to the folder operations
+      const meta = new Map(store.listFolderMeta().map((m) => [m.id, m]));
+      return JSON.stringify(
+        listAutoFolders(store.listAutoFolderPlacements()).map((f) => {
+          const id = autoFolderId(f.category, f.segments);
+          return { key: autoPath(f.category, f.segments), label: meta.get(id)?.displayName ?? f.segments[f.segments.length - 1], picture: meta.get(id)?.thumbSource ?? "none" };
+        })
+      );
+    }
     return JSON.stringify(folderPathsOf(store.listFolders()));
+  }
+  if (call.name === "library_op" && String(call.args.op ?? "") === "generateFolderThumbnail") {
+    // a person asked in chat for a new picture: same service and limits as the button; the result is reported as it really was
+    const key = String(call.args.key ?? "").trim();
+    if (!key) return "Failed: generateFolderThumbnail needs the folder path (key).";
+    const r = await folderArt().generate(key, true);
+    return r.ok ? `Done: ${r.message} It is decorative artwork and is kept until the user changes it.` : `Failed: ${r.message}`;
   }
   if (call.name === "library_op") {
     const op = toLibraryOp(call.args);
@@ -1487,33 +1487,11 @@ async function narrate(ctx: NarrationContext): Promise<void> {
 // by its caller, since a folder thumbnail finishing a few seconds late is
 // harmless — the folder just shows its placeholder until the live
 // groupThumbnails:updated push lands.
-const groupThumbnailsInFlight = new Set<string>();
+// The old fetch of a web photo for a sub-folder is retired: it searched the folder's words ("Nintendo Consoles") and could keep a game's artwork as the picture of a console
+// folder. Folder pictures now come from folderArtService.ts (a generated decorative picture, or a photo of a fitting member product, or the person's own choice).
 function ensureGroupThumbnail(segments: string[]): void {
-  if (segments.length < 2) return; // the top-level brand itself uses familyLogoUrl, not this
-  const path = segments.join(" > ");
-  const key = path.toLowerCase();
-  if (groupThumbnailsInFlight.has(key) || store.getGroupThumbnail(path)) return;
-  groupThumbnailsInFlight.add(key);
-  (async () => {
-    try {
-      // "Xbox > Games" -> "Xbox Games"; "Xbox > Games > Xbox 360" -> "Xbox
-      // 360 Games" (the specific generation first, since it's the more
-      // useful search term, followed by the bucket word).
-      const bucket = segments[1];
-      const query = segments.length === 2 ? `${segments[0]} ${bucket}` : `${segments[segments.length - 1]} ${bucket}`;
-      // findGroupImage now vision-verifies each candidate itself and
-      // returns an already-downloaded data: URI, not a remote URL.
-      const imageData = await findGroupImage(query);
-      if (imageData) {
-        store.setGroupThumbnail(path, imageData);
-        sendToRenderer("groupThumbnails:updated", { path, imageData });
-      }
-    } catch (err) {
-      console.error(`[group-thumbnail] failed for "${path}": ${(err as Error).message}`);
-    } finally {
-      groupThumbnailsInFlight.delete(key);
-    }
-  })();
+  if (segments.length < 2) return;
+  scheduleFolderArt();
 }
 
 // Per explicit instruction — Library's home-screen CATEGORY tiles (see
@@ -3115,6 +3093,56 @@ function mergeDuplicateProductEntries(): void {
 
 // Beta 13: the one-time, non-destructive suspect pass over existing photos (store.markSuspectImages): a photo whose own source title contradicts the entry it is filed
 // under is set aside for review (not deleted). A verified backup is taken first; the pass runs in small steps a little after start so it never blocks the app.
+// Library folder pictures: decorative generated pictures (never product evidence) or a fitting member photo; see folderArtService.ts.
+function openAiImageGenerator(): ImageGenerator | null {
+  if (!hasOpenAIAccess()) return null;
+  return {
+    async draw(prompt) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 60_000);
+      try {
+        const res = await callOpenAI("images", { model: OPENAI_IMAGE_MODEL, prompt, size: "1024x1024", n: 1 }, controller.signal, "library folder picture");
+        if (!res.ok) throw new Error(`the image service answered ${res.status}`);
+        const data = (await res.json()) as { data?: Array<{ b64_json?: string }> };
+        const b64 = data.data?.[0]?.b64_json;
+        if (!b64) throw new Error("no image came back");
+        return { dataUri: `data:image/png;base64,${b64}`, costUsd: IMAGE_COST_ESTIMATE_USD };
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
+let folderArtFor: { store: Store; svc: ReturnType<typeof createFolderArtService> } | null = null;
+function folderArt() {
+  if (!folderArtFor || folderArtFor.store !== store) {
+    folderArtFor = {
+      store,
+      svc: createFolderArtService({
+        store,
+        ops: () => libraryOps(),
+        generator: () => openAiImageGenerator(),
+        // automatic generation costs credits: off in Save-credits mode and when switched off in config.json
+        autoGenerate: () => config.folderArt?.generate !== false && !isLowAiMode(),
+        limits: () => ({ perDay: config.folderArt?.perDay ?? DEFAULT_LIMITS.perDay, perDayManual: config.folderArt?.perDayManual ?? DEFAULT_LIMITS.perDayManual }),
+        changed: () => sendToRenderer("library:changed", { folders: true, review: false }),
+      }),
+    };
+  }
+  return folderArtFor.svc;
+}
+let folderArtTimer: ReturnType<typeof setTimeout> | null = null;
+/** Looks over the automatic folders soon (debounced): called after research and at start-up, never because the Library was opened. */
+function scheduleFolderArt(delayMs = 15_000): void {
+  if (folderArtTimer) clearTimeout(folderArtTimer);
+  const target = store;
+  folderArtTimer = setTimeout(() => {
+    folderArtTimer = null;
+    if (store !== target || !target) return;
+    void folderArt().refresh().catch((err) => console.error(`[folder-art] ${(err as Error).message}`));
+  }, delayMs);
+}
+
 function scheduleSuspectPass(): void {
   const target = store;
   // the Trash empties itself after 30 days (and nothing else ever purges)
@@ -3339,6 +3367,7 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   store = dbOpen.store;
   applyIdentitySafeguard();
   scheduleSuspectPass();
+  scheduleFolderArt(45_000);
   if (dbOpen.recovered) {
     const kept = dbOpen.recovered.damagedCopy ? ` The old database was kept as ${path.basename(dbOpen.recovered.damagedCopy)} in your Clynx data folder.` : "";
     notices.set({
@@ -4724,6 +4753,17 @@ app.whenReady().then(() => {
     return result;
   });
   ipcMain.handle("library:folders", () => store.listFolders());
+  // The automatic folders' own settings: renamed labels and pictures with where each came from.
+  ipcMain.handle("library:folderMeta", () => store.listFolderMeta());
+  ipcMain.handle("library:uploadFolderThumbnail", async (_e, args: { key: string; dataUri: string; fileName?: string }) => {
+    const norm = await normalizeFolderImage(String(args?.dataUri ?? ""));
+    if (!norm.ok) return { ok: false, summary: "", error: norm.error };
+    return libraryOps().run({ op: "setFolderThumbnail", key: String(args.key ?? ""), imageData: norm.dataUri, fileName: args.fileName }, { actor: "ui" });
+  });
+  ipcMain.handle("library:generateFolderThumbnail", async (_e, args: { key: string }) => {
+    const r = await folderArt().generate(String(args?.key ?? ""), true);
+    return { ok: r.ok, summary: r.ok ? r.message : "", error: r.ok ? undefined : r.message };
+  });
   ipcMain.handle("library:history", () => libraryOps().recent(30));
   ipcMain.handle("library:trash", () => store.listTrash());
   ipcMain.handle("library:review", async () => {
