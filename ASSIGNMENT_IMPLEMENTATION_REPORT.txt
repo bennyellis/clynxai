@@ -89,4 +89,5 @@ VALIDATION MATRIX (I=implemented, U=unit-tested, G=integration-tested on a real 
  git pull origin master-wveebf ; npm install ; npm test ; npm run typecheck
  node scripts\reference-fetch.cjs                 (downloads and verifies the Commons images; needs internet, no key)
  $env:OPENAI_API_KEY="..." ; node scripts\visual-eval.cjs --web      (real-image evaluation; prints accuracy, false exact matches, cost)
+   or, to use the shared AI your owner console serves instead of a key of your own: $env:CLYNX_CLOUD_URL="https://..." ; $env:CLYNX_CLOUD_EMAIL="..." ; $env:CLYNX_CLOUD_PASSWORD="..." ; node scripts\visual-eval.cjs --web
  Then in the app: Database > Library > open a folder tile menu (...) > Rename / Make a picture with Clynx / Upload / Choose / Delete; ask the chat "rename Nintendo Consoles to Nintendo Hardware", "undo", "is the RTX 4080 Ti a real model?"; Activity > AI Activity for the shadow-mode decisions.

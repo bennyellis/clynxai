@@ -1,5 +1,7 @@
 // REAL-IMAGE evaluation of Clynx's visual identification. Sends the cached reference/regression images to the actual vision model and scores the answers against the manifest.
-// This is the check a mocked test cannot be: it needs an OpenAI key (OPENAI_API_KEY in the environment, or in your .env) and the images from scripts/reference-fetch.cjs.
+// This is the check a mocked test cannot be: it needs working AI access and the images from scripts/reference-fetch.cjs. It uses THE SAME ROUTE AS THE APP: your own key when
+// OPENAI_API_KEY is set, otherwise Clynx Cloud's shared AI (what your owner console runs) when you give it a Clynx account: CLYNX_CLOUD_URL, CLYNX_CLOUD_EMAIL, CLYNX_CLOUD_PASSWORD.
+// The login makes one extra "device" in that account, like any sign-in, and is never saved to disk.
 //   node scripts/visual-eval.cjs                  image cases only (photos -> the model; no web search)
 //   node scripts/visual-eval.cjs --web            also let identification search the web (DuckDuckGo/Bing, no key) and run claim checks
 // It reports, per case and in total: correct family / model, false exact matches, appropriate uncertainty, claim-check verdicts, calls made and the estimated cost. It never
@@ -14,6 +16,9 @@ import { openAiObserver, openAiThemeClassifier } from "../../src/main/visualObse
 import { challengeModelClaim } from "../../src/main/claimChallenge.js";
 import { createEvidenceDeps, DEFAULT_BACKENDS } from "../../src/main/webEvidence.js";
 import { apiActivity } from "../../src/main/apiActivity.js";
+import { CloudClient } from "../../src/main/cloudClient.js";
+import { initOpenAIProxy, setApiSource } from "../../src/main/openai.js";
+import os from "node:os";
 import type { Manifest, ManifestImage } from "../../src/main/referenceManifest.js";
 
 const root = process.cwd();
@@ -29,10 +34,28 @@ function dataUri(img: ManifestImage): string | null {
 }
 
 async function main() {
-  if (!process.env.OPENAI_API_KEY || /^(test-key|audit-no-network)/.test(process.env.OPENAI_API_KEY)) {
-    console.log("No OPENAI_API_KEY in the environment, so no real-image evaluation was run. Nothing is verified by this run.");
-    process.exit(2);
+  const ownKey = process.env.OPENAI_API_KEY && !/^(test-key|audit-no-network)/.test(process.env.OPENAI_API_KEY);
+  let route = "";
+  if (ownKey) {
+    setApiSource(() => "own");
+    route = "your own OpenAI key";
+  } else {
+    const url = process.env.CLYNX_CLOUD_URL, email = process.env.CLYNX_CLOUD_EMAIL, password = process.env.CLYNX_CLOUD_PASSWORD;
+    if (!url || !email || !password) {
+      console.log("No AI access: set OPENAI_API_KEY, or sign in to Clynx Cloud with CLYNX_CLOUD_URL, CLYNX_CLOUD_EMAIL and CLYNX_CLOUD_PASSWORD (the same shared AI your owner console serves). Nothing was verified by this run.");
+      process.exit(2);
+    }
+    const client = new CloudClient(() => ({ cloud: { apiUrl: url } }) as never, path.join(os.tmpdir(), `clynx-eval-session-${process.pid}.json`));
+    const login = await client.login(url, email, password);
+    if (!login.ok) {
+      console.log(`Could not sign in to Clynx Cloud: ${login.error}. Nothing was verified by this run.`);
+      process.exit(2);
+    }
+    initOpenAIProxy(client);
+    setApiSource(() => "shared");
+    route = "Clynx Cloud (shared AI)";
   }
+  console.log(`AI route: ${route}.`);
   const resolvedPath = path.join(dir, "manifest.resolved.json");
   if (!fs.existsSync(resolvedPath)) {
     console.log("Run scripts/reference-fetch.cjs first (it downloads and verifies the images).");
@@ -97,13 +120,14 @@ async function main() {
     }
   }
   const snap = apiActivity.snapshot().providers.openai;
-  const report = { when: new Date().toISOString(), web: useWeb, tally, rows, openai: { requests: snap.attempted, tokens: snap.tokens, costUsdEstimate: snap.costUsdEst, costComplete: snap.costUsdEstComplete } };
+  const report = { when: new Date().toISOString(), aiRoute: route, web: useWeb, tally, rows, openai: { requests: snap.attempted, tokens: snap.tokens, costUsdEstimate: snap.costUsdEst, costComplete: snap.costUsdEstComplete } };
   for (const r of rows) console.log(`${String(r.id).padEnd(28)} ${String(r.result)}${r.detail ? "  " + JSON.stringify(r.detail) : ""}${r.got ? `  got ${r.got}, expected ${r.expected}` : ""}`);
   console.log(`\nCases run ${tally.cases}, skipped ${tally.skipped}. Targeted answers: ${tally.answersRight} right, ${tally.answersWrong} wrong, ${tally.answersUncertain} uncertain. Family ${tally.familyRight}/${tally.familyAsked}, model ${tally.modelRight}/${tally.modelAsked}, false exact matches ${tally.falseExact}. Claim checks ${tally.claimRight}/${tally.claimAsked}.`);
   console.log(`OpenAI: ${snap.attempted} request(s), ${snap.tokens.total} tokens, estimated cost ${snap.costUsdEstComplete ? "~" : "at least ~"}$${snap.costUsdEst.toFixed(3)}.`);
   const file = path.join(dir, `eval-report-${Date.now()}.json`);
   fs.writeFileSync(file, JSON.stringify(report, null, 2));
   console.log(`Report: ${file}`);
+  process.exit(0); // the Clynx Cloud sign-in keeps a refresh timer alive
 }
 main().catch((e) => {
   console.error(e);
