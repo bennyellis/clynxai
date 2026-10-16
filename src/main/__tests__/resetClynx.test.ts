@@ -69,6 +69,8 @@ run(async () => {
   check("settings, instructions, Search For and the tour are back to the defaults", f1.customInstructions === "" && f1.searchItems.length === 0 && f1.dealThresholdPercent === DEFAULT_CONFIG.dealThresholdPercent && f1.theme === DEFAULT_CONFIG.theme && f1.onboarding === undefined);
   check("the connection to Clynx Cloud is kept", f1.cloud?.apiUrl === "https://my.server" && f1.cloud?.enabled === true);
   check("the Facebook accounts (and so their logins) are kept unless asked", f1.accounts.length === 1 && f1.accounts[0].id === "acc-1");
+  const withFlags = freshConfig({ ...used, beta13: { openaiSearch: true }, openaiSearchPerHour: 20 } as Config, { keepFacebook: true });
+  check("owner switches (OpenAI search flag and its limit) survive a reset", withFlags.beta13?.openaiSearch === true && withFlags.openaiSearchPerHour === 20);
   const f2 = freshConfig(used, { keepFacebook: false });
   check("asked to remove them, a single default account comes back", f2.accounts.length === 1 && f2.accounts[0].id === "default");
   check("the defaults object itself is never changed", DEFAULT_CONFIG.customInstructions === "" && DEFAULT_CONFIG.accounts[0].id === "default" && f1 !== DEFAULT_CONFIG && f1.accounts !== used.accounts);

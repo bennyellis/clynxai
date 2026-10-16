@@ -3749,7 +3749,11 @@ app.whenReady().then(() => {
   ipcMain.handle("config:get", () => config);
   ipcMain.handle("config:save", (_e, next: Config) => {
     // The checklist state is owned by the main process (the Config screen has no control for it and may hold an older copy).
-    config = { ...DEFAULT_CONFIG, ...next, onboarding: config.onboarding ?? next.onboarding ?? DEFAULT_CONFIG.onboarding };
+    // Switches the Config screen has no control for are owned by the main process: a copy held by the screen must never erase them (a hand-set beta13 flag was lost this way).
+    const owned: Partial<Config> = {};
+    if (config.beta13) owned.beta13 = { ...config.beta13, ...(next.beta13 ?? {}) };
+    if (config.openaiSearchPerHour != null && next.openaiSearchPerHour == null) owned.openaiSearchPerHour = config.openaiSearchPerHour;
+    config = { ...DEFAULT_CONFIG, ...next, ...owned, onboarding: config.onboarding ?? next.onboarding ?? DEFAULT_CONFIG.onboarding };
     saveConfig(CONFIG_PATH, config);
     applyIdentitySafeguard(); // a changed matching-safeguard mode takes effect at once
     // Safety net for the general save path — the dedicated accounts:*

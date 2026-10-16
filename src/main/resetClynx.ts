@@ -9,6 +9,9 @@ export { RESET_CONFIRM_WORD, RESET_ERASES, RESET_KEEPS } from "./resetText.js";
 export function freshConfig(current: Config, opts: { keepFacebook: boolean }): Config {
   const base: Config = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
   if (current.cloud) base.cloud = { ...current.cloud };
+  // owner/test switches are not learned data: they stay (a reset must not turn OpenAI search off)
+  if (current.beta13) base.beta13 = { ...current.beta13 };
+  if (current.openaiSearchPerHour != null) base.openaiSearchPerHour = current.openaiSearchPerHour;
   if (opts.keepFacebook && current.accounts?.length) {
     // the same accounts and locations, so their saved logins (browser profiles) still belong to them
     base.accounts = JSON.parse(JSON.stringify(current.accounts));
