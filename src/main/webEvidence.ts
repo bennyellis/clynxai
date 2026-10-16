@@ -12,12 +12,19 @@
 
 // What the web layer is doing right now, for whoever asked (the chat shows it as it happens). The listener belongs to the async call chain that set it, so two chats never see each other's steps.
 import { AsyncLocalStorage } from "node:async_hooks";
-const activityListener = new AsyncLocalStorage<(line: string, ok: boolean) => void>();
+const activityListener = new AsyncLocalStorage<{ fn: (line: string, ok: boolean) => void; skipsShown: Set<string> }>();
 export function withWebActivity<T>(listener: (line: string, ok: boolean) => void, fn: () => Promise<T>): Promise<T> {
-  return activityListener.run(listener, fn);
+  return activityListener.run({ fn: listener, skipsShown: new Set() }, fn);
 }
-function announceWebActivity(line: string, ok: boolean): void {
-  try { activityListener.getStore()?.(line, ok); } catch { /* a display problem never stops a search */ }
+function announceWebActivity(line: string, ok: boolean, skipKey?: string): void {
+  try {
+    const st = activityListener.getStore();
+    if (skipKey) {
+      if (!st || st.skipsShown.has(skipKey)) return;
+      st.skipsShown.add(skipKey); // an engine that is not being used is said once per task, with its reason
+    }
+    st?.fn(line, ok);
+  } catch { /* a display problem never stops a search */ }
 }
 
 import type { EvidenceTrace, PageTrace, SearchTrace, VerifyDeps } from "./variantEvidence.js";
@@ -294,7 +301,10 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
   let trace: EvidenceTrace = { searches: [], pages: [] };
   const pushSearch = (e: EvidenceTrace["searches"][number]) => {
     trace.searches.push(e);
-    if (/^skipped/.test(e.detail ?? "")) return; // an engine that was simply not used is not news
+    if (/^skipped/.test(e.detail ?? "")) {
+      announceWebActivity(`${e.backend} not used: ${(e.detail ?? "").replace(/^skipped:\s*/, "").slice(0, 100)}`, true, `${e.backend}|${e.detail}`);
+      return;
+    }
     announceWebActivity(
       e.outcome === "ok" ? `Searched ${e.backend} for "${e.query.slice(0, 80)}": ${e.results} result${e.results === 1 ? "" : "s"}` : `${e.backend} ${e.outcome === "blocked" ? "refused" : e.outcome === "empty" ? "found nothing" : "failed"} for "${e.query.slice(0, 60)}"${e.detail ? ` (${e.detail.slice(0, 80)})` : ""}`,
       e.outcome === "ok"

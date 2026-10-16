@@ -56,6 +56,6 @@ run(async () => {
   check("the activity says the first engine's results were unrelated", lines2.some((l) => /none were about the search/.test(l)) && lines2.some((l) => /Searched wikipedia/.test(l)), lines2);
   const skipped: string[] = [];
   const d4 = createEvidenceDeps({ fetchImpl: f2, searchGapMs: 0, backends: [{ name: "off", skip: () => "switched off", run: async () => [] }, wikipediaBackend()] });
-  await withWebActivity((l) => skipped.push(l), () => d4.search(q, 5));
-  check("an engine that was simply skipped is not shown as a failure", skipped.length === 1 && /wikipedia/.test(skipped[0]), skipped);
+  await withWebActivity((l) => skipped.push(l), async () => { await d4.search(q, 5); await d4.search(q + " again", 5); });
+  check("a skipped engine is named once with its reason, not as a failure", skipped.filter((l) => /off not used: switched off/.test(l)).length === 1, skipped);
 });
