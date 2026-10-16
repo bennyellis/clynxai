@@ -24,6 +24,7 @@ import { IdentitySafeguard, type SafeguardMode } from "./identity/safeguardRunti
 import type { ReviewInput } from "./identity/reviewFindings.js";
 import type { ProductKnowledge } from "./knowledgeRegistry.js";
 import type { FolderMetaRecord, ThumbSource } from "./folderKeys.js";
+import { KnowledgeGraph } from "./knowledgeGraph.js";
 import { applyPlan, undoBatch, type Outcome, type PlanItem } from "./identity/correctionJournal.js";
 
 // What a product is worth on eBay, as the total the BUYER pays (the sold item price plus the shipping they paid): the estimate when
@@ -218,6 +219,13 @@ export class Store {
         researched_at INTEGER NOT NULL
       );
     `);
+  }
+
+  /** Clynx's product knowledge (what exists in the world, with sources). Separate from the Library: nothing researched here becomes a product. */
+  private kg: KnowledgeGraph | null = null;
+  knowledgeGraph(): KnowledgeGraph {
+    this.kg ??= new KnowledgeGraph(this.db);
+    return this.kg;
   }
 
   // --- Settings of the AUTOMATIC folders (rename, thumbnail with provenance) and a small ledger of what research and generation cost.
