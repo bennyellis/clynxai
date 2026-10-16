@@ -381,6 +381,8 @@ export interface Config {
   folderArt?: { generate?: boolean; perDay?: number; perDayManual?: number };
   /** OpenAI web search for hard research (beta13.openaiSearch turns it on): searches per hour (default 12). */
   openaiSearchPerHour?: number;
+  /** DuckDuckGo and Bing as search sources: OFF unless this is true in config.json (OpenAI web search, a Brave key and Wikipedia are used instead). */
+  freeSearchEngines?: boolean;
   beta13?: { identityGate?: "off" | "shadow" | "enforce"; resolver?: "off" | "shadow" | "enforce"; conditionEvidence?: "off" | "shadow" | "enforce"; webKnowledge?: "off" | "shadow" | "enforce"; visualResearch?: "off" | "shadow" | "enforce"; openaiSearch?: boolean; libraryTree?: boolean; chatStatus?: boolean; chatChoices?: boolean; chatAttachments?: boolean; replyStyle?: boolean };
   // Chat improvements, each on unless set to false in config.json (a rollback without a new build): followUpHints reads short answers ("both", "do it") and repeated
   // or frustrated instructions in code; promiseGuard re-runs a reply that promised an action without calling a tool; leanContext lists only the relevant products

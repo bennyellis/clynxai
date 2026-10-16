@@ -96,7 +96,7 @@ function decodeDuckDuckGoUrl(href: string): string {
 let evidenceDeps: EvidenceDeps | null = null;
 function getEvidenceDeps(): EvidenceDeps {
   // Official search APIs first when the owner configured a key (see searchApis.ts), then the keyless engines.
-  evidenceDeps ??= createEvidenceDeps({ render: renderPageText, relevance: true, backends: [...apiBackends(), ...DEFAULT_BACKENDS(), wikipediaBackend()] });
+  evidenceDeps ??= createEvidenceDeps({ render: renderPageText, relevance: true, backends: [...apiBackends(), ...freeEngines(), wikipediaBackend()] });
   return evidenceDeps;
 }
 
@@ -215,8 +215,20 @@ export function configureOpenAiSearch(policy: Omit<OpenAiSearchPolicy, "search">
 }
 /** The search and page reader for hard research: OpenAI web search first when the owner enabled it, then the usual engines. */
 export function webHardDeps(): EvidenceDeps {
-  hardDeps ??= createEvidenceDeps({ render: renderPageText, relevance: true, backends: [...(openAiBackend ? [openAiBackend] : []), ...apiBackends(), ...DEFAULT_BACKENDS(), wikipediaBackend()] });
+  hardDeps ??= createEvidenceDeps({ render: renderPageText, relevance: true, backends: [...(openAiBackend ? [openAiBackend] : []), ...apiBackends(), ...freeEngines(), wikipediaBackend()] });
   return hardDeps;
+}
+
+// DuckDuckGo and Bing answer automated requests with bot checks or unrelated pages, so they are off unless config.json says freeSearchEngines: true. They stay in the chain as engines that
+// name why they were not used, so the Web activity list says so.
+let freeEnginesOn: () => boolean = () => true;
+export function configureFreeEngines(enabled: () => boolean): void {
+  freeEnginesOn = enabled;
+  evidenceDeps = null;
+  hardDeps = null;
+}
+function freeEngines() {
+  return DEFAULT_BACKENDS().map((b) => ({ ...b, skip: () => (freeEnginesOn() ? null : "switched off; OpenAI search is used instead") }));
 }
 
 /** The real search and page reader, in the shape the evidence check wants (traces what it asks and what comes back). */

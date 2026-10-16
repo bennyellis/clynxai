@@ -42,7 +42,7 @@ import {
 } from "./chat.js";
 import { randomUUID } from "node:crypto";
 import { lookupProduct, expandSearchKeywords } from "./products.js";
-import { downloadImageAsDataUri, shrinkImageDataUri, findBrandLogoImage, findGroupImage, findPoorConditionProductImage, findReferencePhotos, findFreeReferencePhotos, buildImageCollage, generateCategoryImage, lookUpOnWeb, webVerifyDeps, webHardDeps, configureOpenAiSearch } from "./webResearch.js";
+import { downloadImageAsDataUri, shrinkImageDataUri, findBrandLogoImage, findGroupImage, findPoorConditionProductImage, findReferencePhotos, findFreeReferencePhotos, buildImageCollage, generateCategoryImage, lookUpOnWeb, webVerifyDeps, webHardDeps, configureOpenAiSearch, configureFreeEngines } from "./webResearch.js";
 import { verifyVariant, reconcileVerdict, type VariantVerdict } from "./variantEvidence.js";
 import { createVerdictMemory, makeClaimVerifier, publicHttpUrls } from "./variantResearch.js";
 import { runResearchProductTool } from "./researchTool.js";
@@ -2326,6 +2326,7 @@ function applyIdentitySafeguard(): void {
   if (!openAiSearchConfigured) {
     openAiSearchConfigured = true;
     // read live: switching beta13.openaiSearch in config.json takes effect without a restart of this wiring
+    configureFreeEngines(() => config.freeSearchEngines === true);
     configureOpenAiSearch({ enabled: () => beta13Flags(config).openaiSearch && hasOpenAIAccess(), lowAi: () => isLowAiMode(), perHour: Math.max(1, config.openaiSearchPerHour ?? 12) });
   }
   getKnowledgeService().install();

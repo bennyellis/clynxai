@@ -1195,6 +1195,7 @@ export async function streamChat(
   };
   let promiseGuardUsed = false;
   let variantsGuardUsed = false;
+  const toolNamesRun = new Set<string>();
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const lenBefore = fullContent.length;
@@ -1204,14 +1205,14 @@ export async function streamChat(
     // this guards against: one more round, told to call the tool now or say plainly that it cannot.
     if (!result.toolCalls.length) {
       // Asked about editions or variants but nothing was searched: the answer would come from memory or an old saved profile, and a model will even claim it "refreshed" it.
-      if (!variantsGuardUsed && toolsRunThisTurn === 0 && asksAboutVariants(userMessage) && tools.some((t: any) => t?.function?.name === "research_variants")) {
+      if (!variantsGuardUsed && !toolNamesRun.has("research_variants") && asksAboutVariants(userMessage) && tools.some((t: any) => t?.function?.name === "research_variants")) {
         variantsGuardUsed = true;
         guards.push("variants-guard");
         fullContent = fullContent.slice(0, lenBefore);
         messages.push({ role: "assistant", content: result.content });
         messages.push({
           role: "system",
-          content: "The user asked about variants or special editions, and no research was run, so do not answer from memory or from an older saved profile. Call research_variants NOW with the product being discussed (use the product from the conversation or the open product; pass `edition` if they named one). Do not ask first. Report only what the tool returns.",
+          content: "The user asked about variants or special editions, and the variants research has not been run this turn (a product refresh is not that), so do not answer from memory or from an older saved profile. Call research_variants NOW with the product being discussed (use the product from the conversation or the open product; pass `edition` if they named one). Do not ask first. Report only what the tool returns.",
         });
         continue;
       }
@@ -1262,6 +1263,7 @@ export async function streamChat(
       }
       hooks.onStatus?.({ stepId: tc.id || `${tc.name}-${started}`, kind: "tool", label, state: "end", startedAt: started, ok: !toolResult.startsWith("Failed:"), detail: toolResult.startsWith("Failed:") ? toolResult.slice(0, 160) : undefined });
       toolsRunThisTurn++;
+      toolNamesRun.add(tc.name);
       trace?.tools.push({ name: tc.name, ms: Date.now() - started, parallel });
       return { id: tc.id, content: toolResult };
     };

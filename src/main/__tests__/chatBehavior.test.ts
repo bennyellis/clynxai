@@ -308,5 +308,28 @@ run(async () => {
       check(`${ctx} prompt has the acting rules`, /ACTING RULES/.test(requests[0].messages[0].content));
     }
   }
+  section("REPLAY: 'variants?' after the model refreshed the product - research_variants must still run");
+  {
+    requests.length = 0;
+    // the real failure: the model ran an ordinary lookup, then answered about editions from it, claiming it had refreshed them
+    script = (call) => {
+      if (call === 1) return { tools: [{ name: "find_products", args: { query: "xbox" } }] };
+      if (call === 2) return { content: "Yes - I refreshed the profile and found a dozen special editions." };
+      if (call === 3) return { tools: [{ name: "research_variants", args: { product: "Xbox Series X" } }] };
+      return { content: "Researched: see the sources listed." };
+    };
+    const trace: ChatTrace = { rounds: [], tools: [], totalMs: 0, aiCalls: 0, guards: [] };
+    const reply = await chat("are there special editions?", [], "database", baseConfig(), trace);
+    check("the guard fired even though another tool had already run", trace.guards.includes("variants-guard"), trace.guards);
+    check("the model was told to run research_variants", requests[2].messages.some((m: any) => m.role === "system" && /research_variants/.test(m.content)));
+    check("research_variants really ran", trace.tools.some((t) => t.name === "research_variants"), trace.tools);
+    check("the untrue 'I refreshed' answer was dropped", !/I refreshed/.test(reply), reply);
+    requests.length = 0;
+    script = (call) => (call === 1 ? { tools: [{ name: "research_variants", args: { product: "Xbox Series X" } }] } : { content: "Done." });
+    const trace2: ChatTrace = { rounds: [], tools: [], totalMs: 0, aiCalls: 0, guards: [] };
+    await chat("what special editions exist?", [], "database", baseConfig(), trace2);
+    check("when it already ran the research the guard stays out of the way", !trace2.guards.includes("variants-guard") && trace2.aiCalls === 2, trace2);
+  }
+
   store.close();
 });
