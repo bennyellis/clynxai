@@ -1,0 +1,3 @@
+Clynx Beta 16 - the Library folder menu is now easy to see
+* Fixed: the new folder menu in Database > Library was almost invisible. It is now a solid "..." button on every folder tile (and a "... Folder options" button in an open folder), and the menu opens on top of the page with a solid background instead of being hidden behind the sidebar. Use it to rename a folder, make or upload a picture, choose a photo from the folder, or delete the folder safely.
+* Everything else is as in Beta 15.

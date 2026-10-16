@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { api } from "../lib/api.js";
 import type { ProductImage, ProductProfile } from "../lib/api.js";
 import { Modal } from "./Modal.js";
@@ -74,6 +75,25 @@ export function AutoFolderMenu({
   const [dialog, setDialog] = useState<Dialog>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  // The menu is drawn on the page itself (not inside the tile): a tile clips what overflows it, and its entrance animation would anchor a fixed menu to the tile.
+  function toggle() {
+    if (open) return setOpen(false);
+    const r = btnRef.current?.getBoundingClientRect();
+    if (r) setPos({ left: Math.max(8, Math.min(r.left, window.innerWidth - 250)), top: Math.min(r.bottom + 4, window.innerHeight - 330) });
+    setOpen(true);
+  }
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [open]);
   const key = autoPath(category, segments);
   const m = folderMetaFor(meta, category, segments);
   const label = folderLabel(meta, category, segments);
@@ -119,19 +139,32 @@ export function AutoFolderMenu({
 
   return (
     <span style={{ position: "relative", display: "inline-block" }} onClick={(e) => e.stopPropagation()}>
-      <button className="icon ghost" title="Rename, picture and delete" disabled={!!busy} style={compact ? { padding: "0 6px", minWidth: 0 } : undefined} onClick={() => setOpen((v) => !v)}>
-        {busy ?? "⋯"}
+      <button
+        className={compact ? "" : "icon ghost"}
+        title="Rename, picture and delete"
+        aria-label="Folder options: rename, picture, delete"
+        disabled={!!busy}
+        // on a tile the button sits over a picture, so it is a solid dark pill like the item-count badge (a bare "..." vanished on light pictures)
+        style={compact ? { background: "#14121c", border: "1px solid rgba(255,255,255,0.6)", borderRadius: 999, padding: "0 10px 3px", fontSize: 20, fontWeight: 900, lineHeight: 1.2, color: "white", cursor: "pointer", minWidth: 0 } : undefined}
+        ref={btnRef}
+        onClick={toggle}
+      >
+        {busy ?? (compact ? "⋯" : "⋯ Folder options")}
       </button>
-      {open && (
-        <div className="card" style={{ position: "absolute", right: 0, top: "100%", zIndex: 30, minWidth: 230, padding: 6, display: "flex", flexDirection: "column", gap: 2 }}>
-          {item("✏️ Rename folder…", () => setDialog("rename"))}
-          {item("✨ Make a picture with Clynx", generate)}
-          {item("🖼 Upload a picture…", () => fileRef.current?.click())}
-          {item("📷 Choose from this folder's photos…", () => setDialog("pick"))}
-          {m?.thumbData && item("↺ Use automatic pictures again", () => void doLibraryOp({ op: "restoreFolderThumbnail", key }))}
-          {item("🗑 Delete folder…", () => setDialog("delete"), true)}
-          {pictureNote(m) && <div style={{ fontSize: 12.5, color: "var(--text-dim)", padding: "4px 8px" }}>{pictureNote(m)}</div>}
-        </div>
+      {open && pos && createPortal(
+        <>
+          <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={(e) => { e.stopPropagation(); setOpen(false); }} />
+          <div className="card" style={{ position: "fixed", left: pos.left, top: pos.top, zIndex: 1000, minWidth: 230, padding: 6, display: "flex", flexDirection: "column", gap: 2, background: "#1a1730", border: "1px solid var(--border-strong)", boxShadow: "0 12px 32px rgba(0,0,0,0.55)" }} onClick={(e) => e.stopPropagation()}>
+            {item("✏️ Rename folder…", () => setDialog("rename"))}
+            {item("✨ Make a picture with Clynx", generate)}
+            {item("🖼 Upload a picture…", () => fileRef.current?.click())}
+            {item("📷 Choose from this folder's photos…", () => setDialog("pick"))}
+            {m?.thumbData && item("↺ Use automatic pictures again", () => void doLibraryOp({ op: "restoreFolderThumbnail", key }))}
+            {item("🗑 Delete folder…", () => setDialog("delete"), true)}
+            {pictureNote(m) && <div style={{ fontSize: 12.5, color: "var(--text-dim)", padding: "4px 8px" }}>{pictureNote(m)}</div>}
+          </div>
+        </>,
+        document.body
       )}
       <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" style={{ display: "none" }} onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = ""; }} />
       {dialog === "rename" && <RenameDialog keyPath={key} current={label} onClose={() => setDialog(null)} />}
