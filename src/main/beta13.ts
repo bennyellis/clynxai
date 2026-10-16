@@ -11,6 +11,8 @@ export interface Beta13Flags {
   conditionEvidence: Beta13Mode;
   /** Clynx researching products it is unsure about on the web (Google/Brave API or the free engines) and using what it learned. "shadow" = research and record, change no decision. */
   webKnowledge: Beta13Mode;
+  /** Observation-first identification with web research for listings whose identity is in doubt (identityResearch.ts). "shadow" (default) records what it would conclude; it never changes a decision yet. */
+  visualResearch: Beta13Mode;
   libraryTree: boolean;
   chatStatus: boolean;
   chatChoices: boolean;
@@ -23,6 +25,7 @@ export const BETA13_DEFAULTS: Beta13Flags = {
   resolver: "shadow",
   conditionEvidence: "shadow",
   webKnowledge: "shadow",
+  visualResearch: "shadow",
   libraryTree: true,
   chatStatus: true,
   chatChoices: true,
@@ -40,6 +43,7 @@ export function beta13Flags(config: { beta13?: Partial<Record<keyof Beta13Flags,
     resolver: mode(raw.resolver, BETA13_DEFAULTS.resolver),
     conditionEvidence: mode(raw.conditionEvidence, BETA13_DEFAULTS.conditionEvidence),
     webKnowledge: mode(raw.webKnowledge, BETA13_DEFAULTS.webKnowledge),
+    visualResearch: mode(raw.visualResearch, BETA13_DEFAULTS.visualResearch),
     libraryTree: flag(raw.libraryTree, BETA13_DEFAULTS.libraryTree),
     chatStatus: flag(raw.chatStatus, BETA13_DEFAULTS.chatStatus),
     chatChoices: flag(raw.chatChoices, BETA13_DEFAULTS.chatChoices),

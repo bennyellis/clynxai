@@ -38,6 +38,7 @@ export interface ToolCall {
     | "find_products"
     | "web_research"
     | "research_variants"
+    | "check_model_name"
     | "add_product_watch_note"
     | "add_blacklist_term"
     | "remove_blacklist_term"
@@ -111,15 +112,15 @@ const DASHBOARD_TOOL_NAMES = new Set<ToolCall["name"]>([
   "ask_choice",
 ]);
 
-const DATABASE_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "research_variants", "add_blacklist_term", "remove_blacklist_term", "ask_choice", "library_op", "library_list"]);
+const DATABASE_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "research_variants", "check_model_name", "add_blacklist_term", "remove_blacklist_term", "ask_choice", "library_op", "library_list"]);
 
-const PRODUCT_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "research_variants", "add_product_watch_note", "ask_choice", "library_op", "library_list"]);
+const PRODUCT_TOOL_NAMES = new Set<ToolCall["name"]>(["research_product", "add_reference_photos", "find_products", "web_research", "research_variants", "check_model_name", "add_product_watch_note", "ask_choice", "library_op", "library_list"]);
 
 // Per explicit instruction — everything Dashboard can do, plus
 // research_product (Database's own product-research tool). Deliberately
 // NOT add_product_watch_note — that tool only makes sense already scoped
 // to one specific product's own page, which this bar never is.
-const GLOBAL_TOOL_NAMES = new Set<ToolCall["name"]>([...DASHBOARD_TOOL_NAMES, "research_product", "add_reference_photos", "find_products", "research_variants", "library_op", "library_list"]);
+const GLOBAL_TOOL_NAMES = new Set<ToolCall["name"]>([...DASHBOARD_TOOL_NAMES, "research_product", "add_reference_photos", "find_products", "research_variants", "check_model_name", "library_op", "library_list"]);
 
 export function allowedToolNames(context: ChatContext): Set<ToolCall["name"]> {
   if (context === "dashboard") return DASHBOARD_TOOL_NAMES;
@@ -312,6 +313,15 @@ const TOOLS = [
           url: { type: "string", description: "A search-results link the user pasted (Google Images, Bing...): its search words are used as the image search." },
         },
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "check_model_name",
+      description:
+        "Check whether a product name a seller used is a real model by reading the maker's own lineup (for example 'NVIDIA GeForce RTX 4080 Ti' or 'iPhone 15 Pro Plus'). Only a lineup actually read can say a name is NOT in it, and the real models it lists are offered as alternatives. When no official page can be read the answer is 'unverified', which is not 'fake'. Use it when a listing or the user names a model that may not exist, before pricing it.",
+      parameters: { type: "object", properties: { name: { type: "string", description: "The model name as the seller wrote it." } }, required: ["name"] },
     },
   },
   {

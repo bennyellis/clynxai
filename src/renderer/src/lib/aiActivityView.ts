@@ -116,6 +116,9 @@ export function kindLabel(kind: string): string {
     condition_check: "Looked for damage",
     library_op: "Changed the Library",
     web_knowledge: "Researched a product on the web",
+    visual_identity: "Worked out what an item is from its photos",
+    model_claim_check: "Checked a model name against the maker's lineup",
+    folder_art: "Made a Library folder picture",
   };
   return map[kind] ?? kind.replace(/_/g, " ");
 }

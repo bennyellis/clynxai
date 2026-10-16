@@ -343,7 +343,7 @@ export interface ScrapeEngineOptions {
   // research is never allowed to overwrite; null means no listing photo was
   // available, so the normal generic web-image search is the only source.
   // Beta 14: a check was not sure which product/version a listing is. Lets Clynx research the product on the web in the background (never waits, never throws).
-  onIdentityDoubt?: (name: string, signals: import("./productKnowledge.js").DoubtSignals) => void;
+  onIdentityDoubt?: (name: string, signals: import("./productKnowledge.js").DoubtSignals, evidence?: { listingId: string; title: string; description: string | null; images: string[] }) => void;
   onNewProductFound: (
     name: string,
     imageDataUri: string | null,
@@ -2874,7 +2874,7 @@ export class ScrapeEngine {
         if (this.opts.onIdentityDoubt) {
           try {
             const codes = classifyComparable({ name: existingProduct.name }, listing.title).reasons.map((r) => r.code);
-            this.opts.onIdentityDoubt(existingProduct.name, { identityConfidence: verdict?.confidence ?? null, reasonCodes: codes });
+            this.opts.onIdentityDoubt(existingProduct.name, { identityConfidence: verdict?.confidence ?? null, reasonCodes: codes }, { listingId: listing.id, title: listing.title, description: detail.description ?? null, images: subjectImageDataUri ? [subjectImageDataUri] : [] });
           } catch {
             /* research is optional */
           }
@@ -2932,6 +2932,12 @@ export class ScrapeEngine {
           }
         }
       } else if (specificSubjects.has(subject) && config.autoResearchListings) {
+        // An item the Library has never seen: let Clynx research it from what is visible (background, rationed; shadow mode records only).
+        try {
+          this.opts.onIdentityDoubt?.(subject, { identityConfidence: "low", resolver: "unresolved" }, { listingId: listing.id, title: listing.title, description: detail.description ?? null, images: subjectImageDataUri ? [subjectImageDataUri] : [] });
+        } catch {
+          /* research is optional */
+        }
         // Beta 13: a name that only the PICTURE gave (not the Search For item, not the listing's words) never becomes a product on its own.
         const fromText = subject === scored.extraction.matchedItem;
         const corroborated = judgeCandidateByText(subject, listing.title);

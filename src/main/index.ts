@@ -69,6 +69,9 @@ import { makeThumb, noteDecision } from "./aiDecisionLog.js";
 import { fileImage, setFilingRecorder, type FileImageEvidence } from "./fileImage.js";
 import { createKnowledgeService, type KnowledgeService } from "./knowledgeService.js";
 import { openAiKnowledgeAi } from "./knowledgeAi.js";
+import { createVisualService, describeChallenge, rememberLineup } from "./visualService.js";
+import { challengeModelClaim } from "./claimChallenge.js";
+import { openAiObserver, openAiThemeClassifier } from "./visualObserver.js";
 import { createFolderArtService, listAutoFolders } from "./folderArtService.js";
 import { autoFolderId, autoPath } from "./folderKeys.js";
 import { DEFAULT_LIMITS, IMAGE_COST_ESTIMATE_USD, normalizeFolderImage, type ImageGenerator } from "./folderArt.js";
@@ -1040,6 +1043,15 @@ async function executeChatTool(
     return await lookUpOnWeb(query, url);
   }
 
+  // Is a seller's model name real? Reads the maker's lineup; only a lineup it read can say a name is not in it.
+  if (call.name === "check_model_name") {
+    const name = String(call.args.name ?? "").trim();
+    if (!name) return "Failed: no model name given.";
+    const result = await challengeModelClaim(name, webVerifyDeps());
+    store.addUsage("claim_check");
+    rememberLineup(store.knowledgeGraph(), result);
+    return `${describeChallenge(result)} ${result.sources.length ? `Sources read: ${result.sources.slice(0, 3).map((s) => s.url).join(", ")}.` : ""}`.trim();
+  }
   // Clynx learning how the versions of a product line differ (storage sizes, look-alike models), remembered for later comparisons.
   if (call.name === "research_variants") {
     const name = String(call.args.product ?? "").trim();
@@ -2269,6 +2281,20 @@ function getKnowledgeService(): KnowledgeService {
   return knowledgeService;
 }
 
+let visualService: ReturnType<typeof createVisualService> | null = null;
+function getVisualService() {
+  visualService ??= createVisualService({
+    graph: () => store.knowledgeGraph(),
+    web: () => webVerifyDeps(),
+    observer: () => (hasOpenAIAccess() ? openAiObserver() : null),
+    themes: () => (hasOpenAIAccess() ? openAiThemeClassifier() : undefined),
+    mode: () => (beta13Flags(config).visualResearch === "off" ? "off" : "shadow"),
+    usage: (key, count) => store.addUsage(key, count ?? 1),
+    lowAi: () => isLowAiMode(),
+  });
+  return visualService;
+}
+
 function applyIdentitySafeguard(): void {
   setFilingRecorder((d) => noteDecision(d));
   getKnowledgeService().install();
@@ -2748,7 +2774,10 @@ function createEngineForAccount(accountId: string): ScrapeEngine {
   }
 
   const eng = new ScrapeEngine({
-    onIdentityDoubt: (name, signals) => getKnowledgeService().consider(name, signals),
+    onIdentityDoubt: (name, signals, evidence) => {
+      getKnowledgeService().consider(name, signals);
+      if (evidence) getVisualService().consider({ key: evidence.listingId, title: evidence.title, images: evidence.images, description: evidence.description });
+    },
     checkMarket: checkMarketBeforeAlert,
     ensureBrokenVariant,
     valueBundle: valueListingBundle,
