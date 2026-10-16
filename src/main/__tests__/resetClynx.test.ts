@@ -6,7 +6,7 @@ import sharp from "sharp";
 import { Store } from "../store.js";
 import { LibraryOps } from "../libraryOps.js";
 import { fileImage } from "../fileImage.js";
-import { DEFAULT_CONFIG } from "../config.js";
+import { DEFAULT_CONFIG, saveConfig, loadConfig } from "../config.js";
 import { freshConfig, RESET_CONFIRM_WORD, RESET_ERASES, RESET_KEEPS } from "../resetClynx.js";
 import { RESET_KEEPS_TABLES } from "../resetText.js";
 import { scoredListing } from "./_fixtures.js";
@@ -71,6 +71,16 @@ run(async () => {
   check("the Facebook accounts (and so their logins) are kept unless asked", f1.accounts.length === 1 && f1.accounts[0].id === "acc-1");
   const withFlags = freshConfig({ ...used, beta13: { openaiSearch: true }, openaiSearchPerHour: 20 } as Config, { keepFacebook: true });
   check("owner switches (OpenAI search flag and its limit) survive a reset", withFlags.beta13?.openaiSearch === true && withFlags.openaiSearchPerHour === 20);
+  {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), "clynx-cfgsave-"));
+    const file = path.join(d, "config.json");
+    fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(JSON.stringify(DEFAULT_CONFIG)), beta13: { openaiSearch: true }, openaiSearchPerHour: 20 }));
+    saveConfig(file, { ...JSON.parse(JSON.stringify(DEFAULT_CONFIG)), dealThresholdPercent: 41 } as Config); // a writer that knows nothing about the switches
+    const back = loadConfig(file);
+    check("saving a config that lacks the owner switches keeps the ones already on disk", back.beta13?.openaiSearch === true && back.openaiSearchPerHour === 20 && back.dealThresholdPercent === 41, { b: back.beta13, p: back.openaiSearchPerHour });
+    saveConfig(file, { ...back, beta13: { openaiSearch: false } } as Config);
+    check("a writer that does set the switch still wins", loadConfig(file).beta13?.openaiSearch === false);
+  }
   const f2 = freshConfig(used, { keepFacebook: false });
   check("asked to remove them, a single default account comes back", f2.accounts.length === 1 && f2.accounts[0].id === "default");
   check("the defaults object itself is never changed", DEFAULT_CONFIG.customInstructions === "" && DEFAULT_CONFIG.accounts[0].id === "default" && f1 !== DEFAULT_CONFIG && f1.accounts !== used.accounts);

@@ -461,7 +461,23 @@ export function normalizeSearchItems(raw: unknown): SearchItem[] {
   return out;
 }
 
+/** Owner switches that no screen shows: whoever writes the config, a switch already on disk is carried over instead of silently erased (a hand-set beta13 flag kept disappearing). */
+const KEPT_ON_SAVE = ["beta13", "openaiSearchPerHour", "freeSearchEngines"] as const;
+function carryOverOwnerSwitches(configPath: string, config: Config): Config {
+  try {
+    const onDisk = readJsonFileSafe<any>(configPath);
+    const prior = onDisk.status === "ok" || onDisk.status === "restored" ? onDisk.value : null;
+    if (!prior || typeof prior !== "object") return config;
+    const out: any = { ...config };
+    for (const key of KEPT_ON_SAVE) if (out[key] === undefined && prior[key] !== undefined) out[key] = prior[key];
+    return out;
+  } catch {
+    return config;
+  }
+}
+
 export function saveConfig(configPath: string, config: Config): void {
+  config = carryOverOwnerSwitches(configPath, config);
   // Atomic (temp file, then replace) and the previous good file is kept as config.json.bak.
   writeFileAtomicWithBackup(configPath, JSON.stringify(config, null, 2));
 }
