@@ -4,12 +4,16 @@ import { capacitiesIn, familyKey, setKnowledgeProvider, type KnowledgeMode, type
 import { createResearchLimiter, describeKnowledge, doubtReasons, ensureKnowledge, type DoubtSignals, type KnowledgeAi, type KnowledgeStore, type ResearchOutcome } from "./productKnowledge.js";
 import type { VerifyDeps } from "./variantEvidence.js";
 import { noteDecision } from "./aiDecisionLog.js";
+import { researchEditions, type EditionResearch } from "./editionResearch.js";
+import type { KnowledgeGraph } from "./knowledgeGraph.js";
 
 export interface KnowledgeServiceDeps {
   store: KnowledgeStore & { listSiblingNames?(name: string): string[] };
   mode(): KnowledgeMode;
   web(): VerifyDeps;
   ai?(): KnowledgeAi | undefined;
+  /** The knowledge graph editions are remembered in (optional). */
+  graph?(): KnowledgeGraph;
   /** Researches per hour. */
   perHour?: number;
   log?(message: string, productName: string): void;
@@ -24,6 +28,8 @@ export interface KnowledgeService {
   /** Researches now (the chat's tool, or a person pressing the button) and returns the outcome. */
   research(name: string, force?: boolean): Promise<ResearchOutcome | { ok: true; knowledge: ProductKnowledge; cached: true }>;
   cached(name: string): ProductKnowledge | null;
+  /** The chat's "research all the special editions of X" (or one named edition): searches, reads, remembers what it found as knowledge (never as Library products). */
+  researchEditions(name: string, hint?: string | null): Promise<EditionResearch>;
 }
 
 export function createKnowledgeService(d: KnowledgeServiceDeps): KnowledgeService {
@@ -45,7 +51,7 @@ export function createKnowledgeService(d: KnowledgeServiceDeps): KnowledgeServic
 
   async function run(name: string, signals: DoubtSignals | null, force: boolean) {
     const reasons = signals ? doubtReasons(signals) : ["you asked"];
-    const outcome = await ensureKnowledge(name, d.store, d.web(), { ai: d.ai?.(), force, limiter, context: { reasons, siblingCapacities: signals?.siblingCapacities } });
+    const outcome = await ensureKnowledge(name, d.store, d.web(), { ai: d.ai?.(), force, limiter: signals ? limiter : undefined, context: { reasons, siblingCapacities: signals?.siblingCapacities } });
     memo.delete(familyKey(name));
     if (outcome.ok) d.usage?.("cached" in outcome ? "knowledge_cache_hit" : "research_run");
     if (!outcome.ok) failedAt.set(familyKey(name), Date.now());
@@ -80,6 +86,25 @@ export function createKnowledgeService(d: KnowledgeServiceDeps): KnowledgeServic
       void run(name, merged, false).catch(() => undefined);
     },
     research: (name, force) => run(name, null, !!force),
+    async researchEditions(name, hint) {
+      const r = await researchEditions(name, d.web(), { hint });
+      d.usage?.("edition_research");
+      // remembered as knowledge: the editions under the product's entry, each with the sources that name it
+      const graph = d.graph?.();
+      if (graph && r.findings.length) {
+        try {
+          const parent = graph.find(name, ["model", "family"])[0] ?? graph.upsert({ kind: "model", name, itemKind: "hardware" });
+          for (const f of r.findings) {
+            const e = graph.upsert({ kind: "edition", name: f.name, parentId: parent.id, itemKind: parent.itemKind ?? "hardware" });
+            for (const s of f.sources) graph.addClaim(e.id, { claim: `${f.name} exists for ${name}`, url: s.url, quality: s.quality, quote: s.quote });
+          }
+        } catch {
+          /* remembering is best effort */
+        }
+      }
+      noteDecision({ kind: "web_knowledge", subject: `${name} editions`, verdict: r.findings.length ? `found ${r.findings.length} edition name(s)` : r.blocked ? "search blocked" : "none found", thought: `${r.searches.length} search(es); read ${r.pagesRead.length} page(s)${r.hint ? `; asked about "${r.hint.text}": ${r.hint.matches.length ? "named by the sources" : "not named in what was read"}` : ""}.` });
+      return r;
+    },
     cached: lookup,
   };
 }

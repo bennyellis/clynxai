@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { AccountSection } from "./AccountSection.js";
 import { BackupsSection } from "./BackupsSection.js";
+import { ResetClynxSection } from "./ResetClynxSection.js";
 import { UpdatesSection } from "./UpdatesSection.js";
 import { AboutBlock, BrowserBlock, CloudApisBlock, KeyProtectionBlock, KeysBlock, LocalLogoutSection, useBetaInfo } from "./BetaSection.js";
 import { SupportReportButton } from "./SupportReportButton.js";
@@ -762,6 +763,11 @@ export function ConfigScreen({
       {tab === "account" && (
         <Section title="Database backups" subtitle="Clynx keeps safety copies of your Database on this computer. If something ever goes wrong you can go back to one.">
           <BackupsSection enabled={cfg.backups?.enabled !== false} onToggle={(v) => update("backups", { enabled: v })} />
+        </Section>
+      )}
+      {tab === "account" && (
+        <Section title="Reset Clynx" subtitle="Start over from a freshly installed state.">
+          <ResetClynxSection cloudSignedIn={!!betaInfo && !betaInfo.localMode} />
         </Section>
       )}
       {tab === "account" && (

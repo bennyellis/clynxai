@@ -18,6 +18,8 @@ const api = {
   getConfig: (): Promise<Config> => ipcRenderer.invoke("config:get"),
   saveConfig: (config: Config): Promise<void> => ipcRenderer.invoke("config:save", config),
   resetConfig: (): Promise<Config> => ipcRenderer.invoke("config:reset"),
+  // Config > Reset Clynx: back to a freshly installed state (the sign-in stays). Needs the word RESET.
+  resetClynx: (opts: { confirm: string; alsoFacebook: boolean; alsoCloud: boolean }): Promise<{ ok: boolean; error?: string; backupFolder?: string }> => ipcRenderer.invoke("app:resetClynx", opts),
   // Per explicit instruction — closing the app with unsaved Config changes
   // needs a real chance to save first (see index.ts's "close" listener).
   onCloseRequested: (cb: () => void) => {

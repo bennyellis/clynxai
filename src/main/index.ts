@@ -70,6 +70,7 @@ import { fileImage, setFilingRecorder, type FileImageEvidence } from "./fileImag
 import { createKnowledgeService, type KnowledgeService } from "./knowledgeService.js";
 import { openAiKnowledgeAi } from "./knowledgeAi.js";
 import { createVisualService, describeChallenge, rememberLineup } from "./visualService.js";
+import { RESET_CONFIRM_WORD, freshConfig } from "./resetClynx.js";
 import { challengeModelClaim } from "./claimChallenge.js";
 import { openAiObserver, openAiThemeClassifier } from "./visualObserver.js";
 import { createFolderArtService, listAutoFolders } from "./folderArtService.js";
@@ -77,6 +78,7 @@ import { autoFolderId, autoPath } from "./folderKeys.js";
 import { DEFAULT_LIMITS, IMAGE_COST_ESTIMATE_USD, normalizeFolderImage, type ImageGenerator } from "./folderArt.js";
 import { OPENAI_IMAGE_MODEL } from "./openai.js";
 import { describeKnowledge } from "./productKnowledge.js";
+import { describeEditionResearch } from "./editionResearch.js";
 import { familyKey } from "./knowledgeRegistry.js";
 import { selectReferenceImages } from "./referenceSelection.js";
 import { confirmChoice, sanitizeAttachments, validateChoice, type ChatChoice } from "./chatSupport.js";
@@ -1057,10 +1059,17 @@ async function executeChatTool(
     const name = String(call.args.product ?? "").trim();
     if (!name) return "Failed: no product named.";
     if (beta13Flags(config).webKnowledge === "off") return "Failed: product research on the web is switched off (config.json beta13.webKnowledge).";
-    const outcome = await getKnowledgeService().research(name, call.args.refresh === true);
-    if (!outcome.ok) return `Could not research it: ${outcome.reason}.`;
-    const k = outcome.knowledge;
-    return `${describeKnowledge(k)}${k.summary ? ` ${k.summary}` : ""} Sources: ${k.sources.slice(0, 3).map((s) => s.url).join(", ")}.${"cached" in outcome ? " (already known from an earlier look)" : ""}`;
+    const edition = String(call.args.edition ?? "").trim() || null;
+    // sizes and look-alike models, AND the special editions: both are what "variants" means to the person asking
+    const svc = getKnowledgeService();
+    const [outcome, editions] = await Promise.all([svc.research(name, call.args.refresh === true), svc.researchEditions(name, edition)]);
+    const parts: string[] = [];
+    if (outcome.ok) {
+      const k = outcome.knowledge;
+      parts.push(`${describeKnowledge(k)}${k.summary ? ` ${k.summary}` : ""}`);
+    } else parts.push(`Sizes and look-alike models: ${outcome.reason}.`);
+    parts.push(describeEditionResearch(editions));
+    return parts.join(" ");
   }
 
   if (call.name === "add_reference_photos") return await runAddReferencePhotosTool(call.args, call.userMessage, currentProductId);
@@ -2271,6 +2280,7 @@ function getKnowledgeService(): KnowledgeService {
     },
     mode: () => beta13Flags(config).webKnowledge,
     usage: (key, count) => store.addUsage(key, count ?? 1),
+    graph: () => store.knowledgeGraph(),
     web: () => webHardDeps(),
     ai: () => (hasOpenAIAccess() ? openAiKnowledgeAi() : undefined),
     log: (message, productName) => {
@@ -4004,6 +4014,68 @@ app.whenReady().then(() => {
     app.relaunch();
     app.quit();
     return { ok: true };
+  });
+  // Config > Reset Clynx: back to a freshly installed state for THIS user on THIS computer (the sign-in stays). A safety backup is made first and the reset stops if it cannot be.
+  // The steps, in this order, each only after the one before succeeded: backup -> stop everything -> (tell Clynx Cloud to forget the synced data) -> empty the Database -> default
+  // Config (-> remove the Facebook logins) -> restart. Nothing is erased if the backup fails.
+  ipcMain.handle("app:resetClynx", async (_e, args: { confirm?: string; alsoFacebook?: boolean; alsoCloud?: boolean }) => {
+    if (args?.confirm !== RESET_CONFIRM_WORD) return { ok: false, error: `Type ${RESET_CONFIRM_WORD} to confirm.` };
+    if (!hasActiveUserSession || !store) return { ok: false, error: "Sign in first." };
+    const alsoFacebook = args.alsoFacebook === true;
+    const alsoCloud = args.alsoCloud === true && cloudClient.isAuthenticated();
+    try {
+      // 1. safety copies: the normal backup (restorable in Config > Account > Database backups) and a dedicated folder with the database and the Config
+      const normal = await runDatabaseBackup(true);
+      if (!normal || (!normal.ok && !normal.skipped)) return { ok: false, error: `Nothing was erased: the safety backup could not be made (${normal && !normal.ok ? normal.reason : "another backup is running, try again in a moment"}).` };
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const keepDir = path.join(path.dirname(DB_PATH), "reset-backups", stamp);
+      mkdirSync(keepDir, { recursive: true });
+      await store.backupDatabaseAsync(path.join(keepDir, "scout.db"));
+      if (existsSync(CONFIG_PATH)) copyFileSync(CONFIG_PATH, path.join(keepDir, "config.json"));
+      // 2. stop everything that writes
+      for (const eng of engines.values()) await eng.stop().catch(() => undefined);
+      watchScheduler.stop();
+      ebayEngine.stop();
+      watchSyncService.stop();
+      listingIngestSyncService.stop();
+      feedbackSyncService.stop();
+      productSyncService.stop();
+      // 3. Clynx Cloud keeps synced copies; without this the next sync would bring everything back
+      if (alsoCloud) {
+        const ids = store.listIdsForCloudReset();
+        for (const id of ids.products) store.addPendingCloudDelete("product", id);
+        for (const id of ids.watches) store.addPendingCloudDelete("watch", id);
+        for (const id of ids.feedback) store.addPendingCloudDelete("feedback", id);
+      }
+      // 4. the Database
+      store.resetAllData();
+      try {
+        rmSync(path.join(app.getPath("userData"), "identity-review"), { recursive: true, force: true });
+      } catch {
+        /* nothing to remove */
+      }
+      // 5. the Config (and, only when asked, the Facebook logins)
+      if (alsoFacebook) {
+        for (const eng of engines.values()) await eng.shutdown().catch(() => undefined);
+        try {
+          rmSync(PROFILES_ROOT, { recursive: true, force: true });
+        } catch (err) {
+          console.error(`[reset] could not remove the Facebook logins: ${(err as Error).message}`);
+        }
+      }
+      config = freshConfig(config, { keepFacebook: !alsoFacebook });
+      saveConfig(CONFIG_PATH, config);
+      diagnostics.record("reset-clynx", { alsoFacebook, alsoCloud });
+      // 6. start again from the saved state, so nothing in memory outlives the reset
+      setTimeout(() => {
+        allowClose = true;
+        app.relaunch();
+        app.quit();
+      }, 600);
+      return { ok: true, backupFolder: keepDir };
+    } catch (err) {
+      return { ok: false, error: `The reset stopped part-way: ${err instanceof Error ? err.message : String(err)}. Restart Clynx; your safety backup was made first (Config > Account > Database backups).` };
+    }
   });
   // "Back up and start fresh": the open database cannot be renamed, so mark it and restart; the next start moves it aside.
   ipcMain.handle("db:recover", () => {

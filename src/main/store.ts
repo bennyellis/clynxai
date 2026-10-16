@@ -25,6 +25,7 @@ import type { ReviewInput } from "./identity/reviewFindings.js";
 import type { ProductKnowledge } from "./knowledgeRegistry.js";
 import type { FolderMetaRecord, ThumbSource } from "./folderKeys.js";
 import { KnowledgeGraph } from "./knowledgeGraph.js";
+import { RESET_KEEPS_TABLES } from "./resetText.js";
 import { applyPlan, undoBatch, type Outcome, type PlanItem } from "./identity/correctionJournal.js";
 
 // What a product is worth on eBay, as the total the BUYER pays (the sold item price plus the shipping they paid): the estimate when
@@ -268,6 +269,40 @@ export class Store {
   usageTotal(key: string): { count: number; usd: number } {
     const r = this.db.prepare("SELECT COALESCE(SUM(count),0) AS count, COALESCE(SUM(usd),0) AS usd FROM usage_counters WHERE key = ?").get(key) as { count: number; usd: number };
     return { count: Number(r.count), usd: Number(r.usd) };
+  }
+
+  /** Every id the cloud sync knows about, so a reset can tell Clynx Cloud to forget them too (otherwise the next sync would bring them straight back). */
+  listIdsForCloudReset(): { products: string[]; watches: string[]; feedback: string[] } {
+    const ids = (sql: string) => (this.db.prepare(sql).all() as Array<{ id: string }>).map((r) => r.id);
+    return { products: ids("SELECT id FROM products"), watches: ids("SELECT id FROM watches"), feedback: ids("SELECT listing_id AS id FROM feedback") };
+  }
+
+  /**
+   * Empties every table of the user's data (Library, knowledge, listings, corrections, watches, caches) in one transaction and leaves the structure. Only the record of deletes still to
+   * be sent to Clynx Cloud and the schema markers are kept. The caller makes a backup first and restarts the app afterwards.
+   */
+  resetAllData(): { tables: number } {
+    const keep = new Set<string>(RESET_KEEPS_TABLES);
+    const tables = (this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string }>).map((r) => r.name).filter((n) => !keep.has(n));
+    // children go before parents otherwise; with foreign keys off the order does not matter, and they are switched back on whatever happens
+    this.db.exec("PRAGMA foreign_keys = OFF");
+    try {
+      this.transaction(() => {
+        for (const t of tables) this.db.exec(`DELETE FROM "${t.replace(/"/g, '""')}"`);
+      });
+    } finally {
+      this.db.exec("PRAGMA foreign_keys = ON");
+    }
+    this.safeguard.invalidate();
+    this.invalidateFolders();
+    this.ebayValueCache = null;
+    this.identity?.forgetAllProducts();
+    try {
+      this.db.exec("VACUUM");
+    } catch {
+      /* the space is reclaimed later */
+    }
+    return { tables: tables.length };
   }
 
   /** What Clynx learned from the web about a product line (storage options, look-alike models). Additive; see productKnowledge.ts. */

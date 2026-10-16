@@ -329,11 +329,12 @@ const TOOLS = [
     function: {
       name: "research_variants",
       description:
-        "Work out how the versions of a product line differ by searching the web the way a person would: which storage sizes it really comes in and which look-alike models are a DIFFERENT product (e.g. Meta Quest 3 vs Quest 3S, 128GB vs 512GB). The answer is remembered, so later price checks and photo filing use it. Use it when you or the user are unsure whether two listings or Database entries are the same product, or when a product has several sizes or editions. It saves nothing to the product's profile; research_product does that.",
+        "Research a product line's variants on the web the way a person would: which storage sizes it really comes in, which look-alike models are a DIFFERENT product (e.g. Meta Quest 3 vs Quest 3S, 128GB vs 512GB), and every SPECIAL EDITION the sources name (e.g. the Pikachu, Hyrule or Galaxy editions of a New Nintendo 3DS XL), each labelled confirmed or reported with where it was found. Pass `edition` to check one the user names ('SNES', 'Galaxy'). If nothing is found it says why (search blocked, not mentioned in the pages read); relay that exactly. Use this when the user asks about variants, editions, special editions, colours or versions. The answer is remembered, so later price checks and photo filing use it. Use it when you or the user are unsure whether two listings or Database entries are the same product, or when a product has several sizes or editions. It saves nothing to the product's profile; research_product does that.",
       parameters: {
         type: "object",
         properties: {
           product: { type: "string", description: "The product line, e.g. 'Meta Quest 3 128GB'." },
+          edition: { type: "string", description: "A specific special edition or variant the user named, e.g. 'SNES' or 'Galaxy'. It is looked for by name in the sources." },
           refresh: { type: "boolean", description: "True to look again even if it was researched recently." },
         },
         required: ["product"],

@@ -28,7 +28,7 @@ const STOP_THEME = new Set(["Edition", "Limited", "Special", "Console", "Handhel
 const sentencesOf = (text: string): string[] => text.split(/(?<=[.!?])\s+|\n+/).map((s) => s.trim()).filter((s) => s.length > 10 && s.length < 500);
 
 /** "Pikachu Edition", "Majora's Mask Special Edition" -> the words before "Edition", capitalised like a name. */
-const EDITION_RE = /\b((?:[A-Z][\w'’.&:!\-]*)(?:\s+(?:of|the|and|&|[A-Z][\w'’.&:!\-]*)){0,4})\s+(?:(?:Limited|Special|Collector['’]?s)\s+)?Edition\b/g;
+const EDITION_RE = /\b((?:[A-Z][\w'’.&:!\-]*)(?:\s+(?:of|the|and|&|[A-Z][\w'’.&:!\-]*)){0,4})\s+(?:(?:Limited|Special|Collector['’]?s)\s+)?(Edition|Style)\b/g;
 
 /** The product names (longest match wins: "New Nintendo 3DS XL" hides "New Nintendo 3DS") that a sentence names. */
 function modelsNamedIn(names: string[], sentence: string): string[] {
@@ -50,7 +50,7 @@ export function extractEditions(familyNames: string[], pages: EditionPage[], bra
         // drop family words that lead the capture ("New Nintendo 3DS XL Pikachu" -> "Pikachu")
         while (words.length && famWords.has(words[0].toLowerCase())) words.shift();
         if (!words.length) continue;
-        const name = `${words.join(" ")} Edition`;
+        const name = `${words.join(" ")} ${m[2]}`;
         const k = name.toLowerCase();
         const hit = byName.get(k) ?? { name, quotes: [], themeTerms: [], sourceUrls: [], bestQuality: "other" as SourceQuality, models: [] };
         for (const mname of modelsNamedIn(familyNames, s)) if (!hit.models.includes(mname)) hit.models.push(mname);
@@ -100,4 +100,57 @@ export function matchEditions(obs: Observation, editions: EditionHit[]): Edition
     out.push({ edition: e.name, matched, score, strength });
   }
   return out.sort((a, b) => b.matched.length - a.matched.length || b.score - a.score);
+}
+
+// ---- discovery for "what special editions exist?" (a person asked), as opposed to deciding what one photographed item is ------------------------------------------------
+export interface EditionFinding {
+  name: string;
+  /** confirmed: an official or specialist source, or two independent ones. reported: one collector catalogue or one source only (said, not proven). */
+  support: "confirmed" | "reported";
+  sources: Array<{ url: string; quality: SourceQuality; quote: string }>;
+  models: string[];
+  themeTerms: string[];
+}
+
+const hostOf = (u: string) => {
+  try {
+    return new URL(u).hostname.replace(/^www\./, "");
+  } catch {
+    return u;
+  }
+};
+
+/**
+ * Every named edition the pages mention next to the product line, with how well each is supported. Unlike extractEditions (which decides what a photo shows and so insists on two
+ * sources), this lists what the sources SAY and labels how strong that is: a catalogue page that lists thirty editions is exactly the source for "what exists". It reads the whole page,
+ * not sentence by sentence, because catalogues are lists, not prose.
+ */
+export function discoverEditions(familyNames: string[], pages: EditionPage[], brandHints: string[] = []): EditionFinding[] {
+  const family = familyNames.map((f) => f.toLowerCase());
+  const famWords = new Set(familyNames.flatMap((f) => f.toLowerCase().split(/\s+/)));
+  const byName = new Map<string, EditionFinding>();
+  for (const page of pages) {
+    const lower = page.text.toLowerCase();
+    if (!family.some((f) => lower.includes(f)) && !family.some((f) => f.split(" ").filter((w) => w.length > 2).every((w) => lower.includes(w)))) continue;
+    const quality = sourceQuality(page.url, familyNames[0] ?? "", brandHints);
+    for (const m of page.text.matchAll(EDITION_RE)) {
+      const words = m[1].split(/\s+/).filter((w) => !GENERIC_EDITION.has(w.toLowerCase()));
+      while (words.length && famWords.has(words[0].toLowerCase())) words.shift();
+      if (!words.length) continue;
+      const name = `${words.join(" ")} ${m[2]}`;
+      const at = m.index ?? 0;
+      const quote = page.text.slice(Math.max(0, at - 90), Math.min(page.text.length, at + m[0].length + 140)).replace(/\s+/g, " ").trim();
+      const f = byName.get(name.toLowerCase()) ?? { name, support: "reported" as const, sources: [], models: [], themeTerms: [] };
+      if (!f.sources.some((x) => x.url === page.url)) f.sources.push({ url: page.url, quality, quote });
+      for (const mname of modelsNamedIn(familyNames, quote)) if (!f.models.includes(mname)) f.models.push(mname);
+      for (const t of quote.match(/\b[A-ZÉ][\wé'’\-]{2,}\b/g) ?? []) if (!STOP_THEME.has(t) && !famWords.has(t.toLowerCase()) && !f.themeTerms.includes(t) && f.themeTerms.length < 6) f.themeTerms.push(t);
+      byName.set(name.toLowerCase(), f);
+    }
+  }
+  const out = [...byName.values()].map((f) => {
+    const hosts = new Set(f.sources.filter((s) => s.quality !== "marketplace").map((s) => hostOf(s.url)));
+    const strong = f.sources.some((s) => s.quality === "official" || s.quality === "specialist");
+    return { ...f, support: strong || hosts.size >= 2 ? ("confirmed" as const) : ("reported" as const) };
+  });
+  return out.sort((a, b) => (a.support === b.support ? b.sources.length - a.sources.length : a.support === "confirmed" ? -1 : 1));
 }
