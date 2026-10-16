@@ -61,3 +61,60 @@ run(() => {
   check("the explanation states the numbers are assumptions", adjustForCondition(450, defectsFromText("screen cracked"), { productName: "iPhone" }).explanation.some((e) => /assumption/i.test(e)));
   check("product classes", productClassOf("iPhone 13") === "phone" && productClassOf("Xbox Series X") === "console" && productClassOf("MSI RTX 2070 SUPER") === "gpu" && productClassOf("Dyson V7") === "default");
 });
+
+// ---- Assignment Part 5: universal damage recognition, honest states, no double counting (the merge and valuation logic; whether a real model SEES the damage is in scripts/visual-eval.cjs)
+import { appearanceNote, expectedAreasFor } from "../conditionEvidence.js";
+import { NOT_DAMAGE_RULES, conditionReferenceBlock, normalReferenceText } from "../conditionReference.js";
+import { KnowledgeGraph } from "../knowledgeGraph.js";
+import { seedNintendoHandhelds } from "../knowledgeSeeds.js";
+import { DatabaseSync } from "node:sqlite";
+
+run(() => {
+  const v = (cls: string, description: string, confidence = "high", severity = "functional") => defectsFromVision([{ class: cls, description, confidence, severity, photoNumber: 1 }]);
+  const phone = expectedAreasFor("phone");
+  section("Part 5: damage the seller never mentioned");
+  const cracked = mergeCondition(defectsFromText("iPhone 15 Pro 256GB unlocked, works great"), v("cracked_back_glass", "branching fracture lines across the rear glass"), { shown: ["back", "screen"], noVisibleDamage: false }, 3, phone);
+  check("cracked back glass the title and description never mention is flagged UNDISCLOSED_DAMAGE", cracked.flags.some((f) => f.flag === "UNDISCLOSED_DAMAGE" && f.cls === "cracked_back_glass") && cracked.defects.length === 1);
+  const chipped = mergeCondition([], v("damaged_frame", "the lower corner looks chipped and truncated"), { shown: ["body", "screen", "back"], noVisibleDamage: false }, 2, phone);
+  check("a chipped or crushed corner (a geometry problem, no crack lines) is recorded as frame damage", chipped.defects[0]?.cls === "damaged_frame" && chipped.flags.some((f) => f.flag === "UNDISCLOSED_DAMAGE"));
+  check("broken hinge and scratched handheld are recorded the same way", mergeCondition([], v("hinge_damage", "the hinge has separated from the shell"), null, 2).defects[0].cls === "hinge_damage" && mergeCondition([], v("scratches", "deep scratches across the shell", "high", "cosmetic"), null, 2).defects[0].cls === "scratches");
+  check("a damaged graphics card (bent fins, broken fan blade) is recorded", mergeCondition([], v("bent_hardware", "fins bent and a fan blade is broken"), null, 2).defects[0].cls === "bent_hardware");
+
+  section("Part 5: reflections and uncertainty are not damage");
+  const glare = mergeCondition([], v("cracked_screen", "a bright streak that might be a reflection", "low"), { shown: ["screen"], noVisibleDamage: false }, 2, phone);
+  check("a possible reflection reported at low confidence is 'possible damage', not undisclosed damage", glare.flags.some((f) => f.flag === "DAMAGE_UNCERTAIN") && !glare.flags.some((f) => f.flag === "UNDISCLOSED_DAMAGE") && /might show/.test(glare.flags[0].text));
+  check("the vision instructions list glare, reflections, protectors, shadows, seams and patterns as not damage", /glare|reflection/.test(NOT_DAMAGE_RULES) && /screen protector/.test(NOT_DAMAGE_RULES) && /seams/.test(NOT_DAMAGE_RULES) && /decorative/.test(NOT_DAMAGE_RULES));
+  check("a problem that needs testing is never asserted from a photo", defectsFromVision([{ class: "nonvisual_fault", description: "does not power on", confidence: "high" }]).length === 0);
+
+  section("Part 5: seller words and photos disagree");
+  const sellerOnly = mergeCondition(defectsFromText("iPhone 14 with a cracked screen"), [], { shown: ["screen", "back"], noVisibleDamage: true }, 3, phone);
+  check("a seller-described crack the photos do not show: flagged, and the seller's report still counts", sellerOnly.flags.some((f) => f.flag === "SELLER_REPORT_NOT_VISIBLE") && sellerOnly.defects.some((d) => d.cls === "cracked_screen"));
+  const contradict = mergeCondition(defectsFromText("Mint condition, no damage at all"), v("cracked_screen", "spiderweb cracks"), { shown: ["screen"], noVisibleDamage: false }, 2, phone);
+  check("visual damage that contradicts a 'mint' description is flagged against it", contradict.flags.some((f) => f.flag === "UNDISCLOSED_DAMAGE") && contradict.defects.length === 1);
+
+  section("Part 5: one defect is deducted once");
+  const textD = defectsFromText("iPhone 15 Pro screen is cracked");
+  const visD = v("cracked_screen", "cracked screen", "high");
+  const both = mergeCondition(textD, visD, { shown: ["screen"], noVisibleDamage: false }, 2, phone);
+  const onlyText = mergeCondition(textD, [], null, 0);
+  const a1 = adjustForCondition(800, both.defects, { productName: "iPhone 15 Pro", photoCount: 2 });
+  const a2 = adjustForCondition(800, onlyText.defects, { productName: "iPhone 15 Pro", photoCount: 0 });
+  check("the same cracked screen in the text AND the photos is ONE defect", both.defects.length === 1 && both.defects[0].source === "text+vision");
+  check("so the deduction is the same as when only one of them reported it", a1.deductionUsd === a2.deductionUsd && a1.deductionUsd > 0, { a1: a1.deductionUsd, a2: a2.deductionUsd });
+
+  section("Part 5: appearance is not function; unphotographed areas are not 'fine'");
+  const noBack = mergeCondition([], [], { shown: ["screen"], noVisibleDamage: true }, 2, phone);
+  check("a phone photographed only from the front says the back was not photographed", noBack.flags.some((f) => f.flag === "AREA_NOT_PHOTOGRAPHED" && /back/.test(f.text)) && noBack.statements.some((x) => /Not photographed: back/.test(x)));
+  check("no visible damage is never worded as 'works' or 'good'", noBack.statements.every((x) => !/\b(works|working|mint|perfect|good condition)\b/i.test(x)));
+  check("the standard note says photos cannot show working order, activation lock or carrier status", /not whether it works/.test(appearanceNote("phone")) && /activation lock/.test(appearanceNote("phone")) && /carrier status/.test(appearanceNote("phone")));
+  check("expected areas depend on the kind of item", expectedAreasFor("phone").includes("back") && expectedAreasFor("laptop").includes("keyboard") && expectedAreasFor("default").length === 0);
+
+  section("Part 5: comparing with what the product normally looks like");
+  const kg = new KnowledgeGraph(new DatabaseSync(":memory:"));
+  seedNintendoHandhelds(kg);
+  const ref = normalReferenceText(kg, "New Nintendo 3DS XL");
+  check("an established description of the product is passed on (here the owner's)", !!ref && /single HOME button/.test(ref));
+  check("nothing is passed for a product with no established description", normalReferenceText(kg, "Mystery Gadget 9") === null && conditionReferenceBlock(null) === "");
+  check("the block tells the model a departure from normal shape may be damage even without crack lines", /may be damage even where no crack lines/.test(conditionReferenceBlock(ref)));
+  check("an inferred-only description is not used as a standard", (() => { const e = kg.upsert({ kind: "model", name: "Inferred Phone 1" }); kg.setCharacteristic(e.id, { text: "round everything", kind: "inferred", sources: [] }); return normalReferenceText(kg, "Inferred Phone 1") === null; })());
+});

@@ -2270,6 +2270,7 @@ function getKnowledgeService(): KnowledgeService {
       listSiblingNames: (name) => store.listProductIndex().filter((p) => familyKey(p.name) === familyKey(name)).map((p) => p.name),
     },
     mode: () => beta13Flags(config).webKnowledge,
+    usage: (key, count) => store.addUsage(key, count ?? 1),
     web: () => webVerifyDeps(),
     ai: () => (hasOpenAIAccess() ? openAiKnowledgeAi() : undefined),
     log: (message, productName) => {

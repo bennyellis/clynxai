@@ -13,6 +13,8 @@ export interface KnowledgeServiceDeps {
   /** Researches per hour. */
   perHour?: number;
   log?(message: string, productName: string): void;
+  /** Counters for cost control: research_run, knowledge_cache_hit. */
+  usage?(key: string, count?: number): void;
 }
 
 export interface KnowledgeService {
@@ -45,6 +47,7 @@ export function createKnowledgeService(d: KnowledgeServiceDeps): KnowledgeServic
     const reasons = signals ? doubtReasons(signals) : ["you asked"];
     const outcome = await ensureKnowledge(name, d.store, d.web(), { ai: d.ai?.(), force, limiter, context: { reasons, siblingCapacities: signals?.siblingCapacities } });
     memo.delete(familyKey(name));
+    if (outcome.ok) d.usage?.("cached" in outcome ? "knowledge_cache_hit" : "research_run");
     if (!outcome.ok) failedAt.set(familyKey(name), Date.now());
     if (outcome.ok && !("cached" in outcome)) {
       noteDecision({ kind: "web_knowledge", subject: name, verdict: outcome.knowledge.distinctModels.length || outcome.knowledge.capacities.length ? "learned something" : "nothing new found", thought: `${describeKnowledge(outcome.knowledge)} Searched: ${outcome.knowledge.queries.join(" | ")}. Via ${outcome.knowledge.backends.join(", ") || "no search engine answered"}. Why: ${reasons.join("; ")}.` });

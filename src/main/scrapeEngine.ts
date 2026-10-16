@@ -174,8 +174,9 @@ import { apiActivity } from "./apiActivity.js";
 import { judgeCandidateByText } from "./photoIdentity.js";
 import { fileImage } from "./fileImage.js";
 import { selectReferenceImages } from "./referenceSelection.js";
-import { defectsFromText, defectsFromVision, mergeCondition } from "./conditionEvidence.js";
-import { adjustForCondition } from "./conditionAdjust.js";
+import { defectsFromText, defectsFromVision, expectedAreasFor, mergeCondition } from "./conditionEvidence.js";
+import { normalReferenceText } from "./conditionReference.js";
+import { adjustForCondition, productClassOf } from "./conditionAdjust.js";
 import type { GateInput } from "./dealGate.js";
 import type { ConditionAssessmentRecord } from "./types.js";
 import { beta13Flags } from "./beta13.js";
@@ -1249,6 +1250,14 @@ export class ScrapeEngine {
       claimedItemReferenceImages,
       hasVideo,
       detectFlaws: config.researchCondition || beta13Flags(config as never).conditionEvidence !== "off",
+      // what an undamaged example normally looks like, only when Clynx's product knowledge has it established
+      normalReference: (() => {
+        try {
+          return normalReferenceText(this.opts.store.knowledgeGraph(), claimedItem ?? title);
+        } catch {
+          return null;
+        }
+      })(),
       // Read fresh per listing, same posture as watchFor above — not
       // cached, so a just-submitted confirm/deny is reflected on the very
       // next listing evaluated, not just after a restart.
@@ -3028,7 +3037,8 @@ export class ScrapeEngine {
         defectsFromText(conditionTextOf({ ...detail, title: listing.title })),
         photoResult && !photoResult.error ? defectsFromVision(photoResult.flaws as never) : [],
         photoResult?.conditionCoverage ? { shown: photoResult.conditionCoverage.shown, noVisibleDamage: photoResult.conditionCoverage.noVisibleDamage } : null,
-        photoCount
+        photoCount,
+        expectedAreasFor(productClassOf(scored.extraction.matchedItem ?? listing.title))
       );
       const legacy = scored.extraction.conditionImpact;
       const productName = scored.extraction.matchedItem ?? listing.title;

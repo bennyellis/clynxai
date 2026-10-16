@@ -116,13 +116,30 @@ export function defectsFromVision(flaws: VisionDefectInput[]): DefectEvidence[] 
   return out;
 }
 
-export type ConditionFlag = "UNDISCLOSED_DAMAGE" | "SELLER_REPORT_NOT_VISIBLE" | "DAMAGE_UNCERTAIN" | "NO_VISIBLE_DAMAGE_DETECTED";
+export type ConditionFlag = "UNDISCLOSED_DAMAGE" | "SELLER_REPORT_NOT_VISIBLE" | "DAMAGE_UNCERTAIN" | "NO_VISIBLE_DAMAGE_DETECTED" | "AREA_NOT_PHOTOGRAPHED";
 
 export interface PhotoCoverage {
   /** What the photos actually showed: "screen", "back", "body"... (unknown = the model did not say). */
   shown: string[] | null;
   /** The model's statement that it looked and saw no damage. */
   noVisibleDamage: boolean;
+}
+
+/** The sides of a kind of item a buyer would want to see: damage there cannot be ruled out when it was not photographed. */
+export function expectedAreasFor(productClass: "phone" | "console" | "laptop" | "gpu" | "default"): string[] {
+  switch (productClass) {
+    case "phone": return ["screen", "back"];
+    case "laptop": return ["screen", "keyboard", "body"];
+    case "console": return ["body"];
+    case "gpu": return ["body"];
+    default: return [];
+  }
+}
+
+/** What photographs can never show, said plainly with every condition judgement: appearance is not function. */
+export function appearanceNote(productClass: "phone" | "console" | "laptop" | "gpu" | "default"): string {
+  const base = "Photos show appearance only, not whether it works.";
+  return productClass === "phone" ? `${base} They cannot show activation lock, carrier status or battery health.` : `${base} Faults that need testing are invisible.`;
 }
 
 export interface MergedCondition {
@@ -137,7 +154,7 @@ const SAME_AREA = (a: DefectEvidence, b: DefectEvidence) => !a.area || !b.area |
 const MATERIAL = (d: DefectEvidence) => d.severity !== "cosmetic" || d.confidence !== "low";
 
 /** One defect, counted once: text and photos that agree confirm each other; a photo-only defect is flagged; a seller-only defect stays as reported. */
-export function mergeCondition(text: DefectEvidence[], vision: DefectEvidence[], coverage: PhotoCoverage | null, photoCount: number): MergedCondition {
+export function mergeCondition(text: DefectEvidence[], vision: DefectEvidence[], coverage: PhotoCoverage | null, photoCount: number, expectedAreas: string[] = []): MergedCondition {
   const defects: DefectEvidence[] = [];
   const flags: MergedCondition["flags"] = [];
   const usedVision = new Set<DefectEvidence>();
@@ -160,6 +177,12 @@ export function mergeCondition(text: DefectEvidence[], vision: DefectEvidence[],
     if (MATERIAL(v)) flags.push({ flag: v.confidence === "low" ? "DAMAGE_UNCERTAIN" : "UNDISCLOSED_DAMAGE", cls: v.cls, text: v.confidence === "low" ? `A photo might show ${v.cls.replace(/_/g, " ")} (${v.quote ?? "unclear"}); not sure.` : `The photos show ${v.cls.replace(/_/g, " ")} that the listing does not mention (${v.quote ?? "see photo"}).` });
   }
   const statements: string[] = [];
+  // an area a buyer would want to see that no photo shows: damage there is neither seen nor ruled out
+  const missing = coverage?.shown && photoCount > 0 ? expectedAreas.filter((a) => !coverage.shown!.includes(a)) : [];
+  if (missing.length) {
+    flags.push({ flag: "AREA_NOT_PHOTOGRAPHED", text: `Not photographed: ${missing.join(", ")}. Damage there cannot be ruled out.` });
+    statements.push(`Not photographed: ${missing.join(", ")}. Damage there cannot be ruled out.`);
+  }
   const nonvisual = defects.filter((d) => d.cls === "nonvisual_fault");
   if (defects.length === 0) {
     if (coverage?.noVisibleDamage) {

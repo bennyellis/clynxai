@@ -9,6 +9,7 @@ import sharp from "sharp";
 import { CLYNX_VOICE } from "./voice.js";
 import { colorsIn } from "./colors.js";
 import { isLowAiMode } from "./aiMode.js";
+import { NOT_DAMAGE_RULES, conditionReferenceBlock } from "./conditionReference.js";
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 import type { FlawFeedbackExample, PhotoFlaw } from "./types.js";
 
@@ -325,6 +326,8 @@ export async function analyzeListingPhotos(
     // when false/omitted, the prompt doesn't ask for flaws at all and the
     // response always has flaws: [], at zero extra cost either way.
     detectFlaws?: boolean;
+    /** What an undamaged example of the identified product normally looks like (conditionReference.ts), when established. */
+    normalReference?: string | null;
     // Past flaw flags this exact user confirmed or denied (see store.ts's
     // getFlawFeedbackExamples), fetched fresh per-listing by the caller —
     // same "look up live, not cached" posture as watchFor above. Only
@@ -388,7 +391,7 @@ ${
       : ""
   }${
     detectFlaws
-      ? `\nAlso look for visible CONDITION: damage a buyer would care about, whether or not the listing's own text mentions it (sellers routinely under-describe it). For each defect you can actually make out give the photo number, a short plain description, a tight boundingBox (same fractional 0-1, top-left-origin convention as identifiedProducts' own boundingBox above), a "class" from this list: cracked_screen, cracked_back_glass, damaged_frame, scratches, dents, broken_display, missing_parts, damaged_ports, bent_hardware, hinge_damage, corrosion, broken_housing, liquid_damage, other; a "severity" ("cosmetic" = looks bad but works; "functional" = affects use; "unknown"), and your confidence. RULES: report only what you can SEE. Never report that something does not power on, has no signal, is locked or otherwise needs testing - a photo cannot show that. A light scratch or scuff that is normal wear is "cosmetic" with low confidence. Absence of evidence is not evidence of damage: do not infer a defect from the price or from a vague listing. Then say which parts of the item the photos actually SHOW ("conditionCoverage.shown": e.g. screen, back, body, ports, keyboard) and set "noVisibleDamage" true ONLY if you looked at those parts and saw no damage; if the photos are too few, dark or blurry to tell, set it false. A perfectly normal-looking item has an empty flaws array.${buildFlawFeedbackExamplesBlock(flawFeedbackExamples)}\n`
+      ? `\nAlso look for visible CONDITION: damage a buyer would care about, whether or not the listing's own text mentions it (sellers routinely under-describe it). For each defect you can actually make out give the photo number, a short plain description, a tight boundingBox (same fractional 0-1, top-left-origin convention as identifiedProducts' own boundingBox above), a "class" from this list: cracked_screen, cracked_back_glass, damaged_frame, scratches, dents, broken_display, missing_parts, damaged_ports, bent_hardware, hinge_damage, corrosion, broken_housing, liquid_damage, other; a "severity" ("cosmetic" = looks bad but works; "functional" = affects use; "unknown"), and your confidence. RULES: report only what you can SEE. Never report that something does not power on, has no signal, is locked or otherwise needs testing - a photo cannot show that. A light scratch or scuff that is normal wear is "cosmetic" with low confidence. ${NOT_DAMAGE_RULES}${conditionReferenceBlock(opts?.normalReference ?? null)} Absence of evidence is not evidence of damage: do not infer a defect from the price or from a vague listing. Then say which parts of the item the photos actually SHOW ("conditionCoverage.shown": e.g. screen, back, body, ports, keyboard) and set "noVisibleDamage" true ONLY if you looked at those parts and saw no damage; if the photos are too few, dark or blurry to tell, set it false. A perfectly normal-looking item has an empty flaws array.${buildFlawFeedbackExamplesBlock(flawFeedbackExamples)}\n`
       : ""
   }
 Be concrete and specific — list what you actually see, don't guess at things you can't make out. If a photo is too blurry/small to read something, say so rather than inventing it.
