@@ -189,6 +189,34 @@ export function parseBing(html: string): SearchHit[] {
   return hits;
 }
 
+const STOP = new Set(["the", "a", "an", "of", "and", "or", "to", "for", "in", "on", "vs", "how", "tell", "which", "one", "should", "buy", "all", "list", "what", "is", "are"]);
+const stem = (w: string) => w.replace(/(?:es|s)$/, "");
+/** Whether a result is plausibly about the query: enough of the query's meaningful words appear in its title, snippet or address. */
+export function relevantHit(query: string, hit: SearchHit): boolean {
+  const words = [...new Set(query.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 1 && !STOP.has(w)).map(stem))];
+  if (words.length < 3) return true;
+  const hay = `${hit.title} ${hit.snippet} ${hit.url}`.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+  const found = words.filter((w) => hay.includes(w)).length;
+  return found >= Math.max(2, Math.ceil(words.length * 0.4));
+}
+
+/** Wikipedia's own search API: free, open to programs, never a bot check. A reference source, used when the engines fail or answer with unrelated pages. */
+export function wikipediaBackend(base = "https://en.wikipedia.org/w/api.php"): SearchBackend {
+  return {
+    name: "wikipedia",
+    request: (q) => ({ url: `${base}?action=query&list=search&srlimit=8&format=json&srsearch=${encodeURIComponent(q)}`, headers: { "Api-User-Agent": "Clynx/0.3 (resale research)" } }),
+    parse: (body) => {
+      try {
+        const list = (JSON.parse(body)?.query?.search ?? []) as Array<{ title: string; snippet?: string }>;
+        return list.map((r) => ({ title: r.title, url: `https://en.wikipedia.org/wiki/${encodeURIComponent(r.title.replace(/ /g, "_"))}`, snippet: stripTags(r.snippet ?? "") }));
+      } catch {
+        return [];
+      }
+    },
+    isBlocked: (status) => status === 403 || status === 429,
+  };
+}
+
 const BLOCK_MARKERS = /(anomaly|unusual traffic|are you a (?:robot|human)|bots use duckduckgo|captcha|verify you are (?:a )?human|access denied|temporarily blocked|too many requests|challenge-form|please complete the security check)/i;
 
 export const DEFAULT_BACKENDS = (bases: { ddgHtml?: string; ddgLite?: string; bing?: string } = {}): SearchBackend[] => [
@@ -215,6 +243,8 @@ export const DEFAULT_BACKENDS = (bases: { ddgHtml?: string; ddgLite?: string; bi
 // ------------------------------------------------------------------ the dependencies the evidence check uses
 
 export interface EvidenceDepsOptions {
+  /** Drop results that have nothing to do with the query (an engine serving unrelated news to an automated request) and try the next engine. */
+  relevance?: boolean;
   fetchImpl?: typeof fetch;
   backends?: SearchBackend[];
   /** Renders a page in a browser and returns its text, or null. Used only when a page read plainly shows nothing useful. */
@@ -264,6 +294,7 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
   let trace: EvidenceTrace = { searches: [], pages: [] };
   const pushSearch = (e: EvidenceTrace["searches"][number]) => {
     trace.searches.push(e);
+    if (/^skipped/.test(e.detail ?? "")) return; // an engine that was simply not used is not news
     announceWebActivity(
       e.outcome === "ok" ? `Searched ${e.backend} for "${e.query.slice(0, 80)}": ${e.results} result${e.results === 1 ? "" : "s"}` : `${e.backend} ${e.outcome === "blocked" ? "refused" : e.outcome === "empty" ? "found nothing" : "failed"} for "${e.query.slice(0, 60)}"${e.detail ? ` (${e.detail.slice(0, 80)})` : ""}`,
       e.outcome === "ok"
@@ -295,7 +326,7 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
       }
       if (backend.run) {
         try {
-          const hits = (await backend.run(query, maxResults)).slice(0, maxResults);
+          const hits = (await backend.run(query, maxResults)).filter((h) => !opts.relevance || relevantHit(query, h)).slice(0, maxResults);
           pushSearch({ query, backend: backend.name, outcome: hits.length ? "ok" : "empty", results: hits.length, detail: hits.length ? undefined : "no cited pages came back" });
           if (hits.length) return hits;
         } catch (err) {
@@ -320,7 +351,12 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
           pushSearch({ query, backend: backend.name, outcome: "blocked", results: 0, detail: `HTTP ${res.status}: the search engine answered with a bot check or refusal` });
           continue;
         }
-        const hits = backend.parse(body).slice(0, maxResults);
+        const all = backend.parse(body);
+        const hits = all.filter((h) => !opts.relevance || relevantHit(query, h)).slice(0, maxResults);
+        if (all.length && !hits.length) {
+          pushSearch({ query, backend: backend.name, outcome: "empty", results: 0, detail: `${all.length} results came back but none were about the search` });
+          continue;
+        }
         pushSearch({ query, backend: backend.name, outcome: hits.length ? "ok" : "empty", results: hits.length, detail: hits.length ? undefined : `HTTP ${res.status}: no results in the answer` });
         if (hits.length) return hits;
       } catch (err) {

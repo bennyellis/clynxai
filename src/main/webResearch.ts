@@ -21,7 +21,7 @@ import { assessEvidence, describeVerdictForAi, verifyVariant, type VariantVerdic
 import { extractVariantAttributes } from "./variantIdentity.js";
 import { isPublicHttpUrl } from "./variantResearch.js";
 import { queryFromSearchUrl } from "./searchLinks.js";
-import { DEFAULT_BACKENDS, createEvidenceDeps, extractEvidenceText, searchWasUnavailable, type EvidenceDeps } from "./webEvidence.js";
+import { DEFAULT_BACKENDS, wikipediaBackend, createEvidenceDeps, extractEvidenceText, searchWasUnavailable, type EvidenceDeps } from "./webEvidence.js";
 import { apiBackends } from "./searchApis.js";
 import { openAiWebBackend, type OpenAiSearchPolicy } from "./openaiSearch.js";
 import { checkBrowsers } from "./browserCheck.js";
@@ -96,7 +96,7 @@ function decodeDuckDuckGoUrl(href: string): string {
 let evidenceDeps: EvidenceDeps | null = null;
 function getEvidenceDeps(): EvidenceDeps {
   // Official search APIs first when the owner configured a key (see searchApis.ts), then the keyless engines.
-  evidenceDeps ??= createEvidenceDeps({ render: renderPageText, backends: [...apiBackends(), ...DEFAULT_BACKENDS()] });
+  evidenceDeps ??= createEvidenceDeps({ render: renderPageText, relevance: true, backends: [...apiBackends(), ...DEFAULT_BACKENDS(), wikipediaBackend()] });
   return evidenceDeps;
 }
 
@@ -215,7 +215,7 @@ export function configureOpenAiSearch(policy: Omit<OpenAiSearchPolicy, "search">
 }
 /** The search and page reader for hard research: OpenAI web search first when the owner enabled it, then the usual engines. */
 export function webHardDeps(): EvidenceDeps {
-  hardDeps ??= createEvidenceDeps({ render: renderPageText, backends: [...(openAiBackend ? [openAiBackend] : []), ...apiBackends(), ...DEFAULT_BACKENDS()] });
+  hardDeps ??= createEvidenceDeps({ render: renderPageText, relevance: true, backends: [...(openAiBackend ? [openAiBackend] : []), ...apiBackends(), ...DEFAULT_BACKENDS(), wikipediaBackend()] });
   return hardDeps;
 }
 

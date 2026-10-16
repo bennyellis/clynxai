@@ -32,7 +32,7 @@ export function runningSteps(steps: StepState[] | undefined): StepState[] {
   return (steps ?? []).filter((s) => s.endedAt === undefined && s.kind !== "notice");
 }
 export function problemSteps(steps: StepState[] | undefined): StepState[] {
-  return (steps ?? []).filter((s) => s.endedAt !== undefined && s.ok === false);
+  return (steps ?? []).filter((s) => s.kind !== "notice" && s.endedAt !== undefined && s.ok === false);
 }
 
 export function formatElapsed(ms: number): string {

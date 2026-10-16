@@ -1,0 +1,5 @@
+Clynx Beta 19 - Search results that are actually about your search
+* Fixed: when Bing answered Clynx's automated search with unrelated news pages (Fox, CNN, NBC, NYT), Clynx read them as if they were research. Results that have nothing to do with the search are now dropped and the next search source is tried.
+* New: Wikipedia is now a search source Clynx can fall back on. It is free and never shows a bot check, so edition and variant research still finds something when DuckDuckGo and Bing fail. For the best results add a Brave Search key (Config).
+* Fixed: the Web activity list no longer repeats every skipped or failed step as a warning above the answer, and a search source that was simply switched off is not listed as a failure.
+* Unchanged: everything in Beta 18.
