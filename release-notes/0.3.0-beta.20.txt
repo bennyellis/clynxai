@@ -1,0 +1,3 @@
+Clynx Beta 20 - Say why a search source was not used
+* Changed: the Web activity list now names any search source that was not used and the reason, once per task (for example "openai-web not used: Save OpenAI credits mode is on", or "...: OpenAI web search is switched off"). Beta 19 hid these, which made it hard to see why OpenAI search was not running.
+* Unchanged: everything in Beta 19.
