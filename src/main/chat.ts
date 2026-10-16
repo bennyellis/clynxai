@@ -1041,6 +1041,11 @@ export interface ChatTrace {
 }
 
 // Tools that only read, or that touch one product's photos: several of them in one round run at the same time instead of one after another.
+/** Whether the person is asking about versions of a product: its special or limited editions, variants, colours. */
+export function asksAboutVariants(message: string): boolean {
+  return /\b(variants?|special editions?|limited editions?|editions?|versions? of)\b/i.test(message || "");
+}
+
 const PARALLEL_SAFE_TOOLS = new Set<string>(["web_research", "find_products", "add_reference_photos"]);
 
 type EffortSetting = "minimal" | "low" | "medium" | "high";
@@ -1189,6 +1194,7 @@ export async function streamChat(
     return withResoldPrompt(shortStyle ? tightenReply(content) : content);
   };
   let promiseGuardUsed = false;
+  let variantsGuardUsed = false;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const lenBefore = fullContent.length;
@@ -1197,6 +1203,18 @@ export async function streamChat(
     // No tool call this round: that was the answer, unless it PROMISED an action that no tool performed. A promise with nothing behind it is the failure
     // this guards against: one more round, told to call the tool now or say plainly that it cannot.
     if (!result.toolCalls.length) {
+      // Asked about editions or variants but nothing was searched: the answer would come from memory or an old saved profile, and a model will even claim it "refreshed" it.
+      if (!variantsGuardUsed && toolsRunThisTurn === 0 && asksAboutVariants(userMessage) && tools.some((t: any) => t?.function?.name === "research_variants")) {
+        variantsGuardUsed = true;
+        guards.push("variants-guard");
+        fullContent = fullContent.slice(0, lenBefore);
+        messages.push({ role: "assistant", content: result.content });
+        messages.push({
+          role: "system",
+          content: "The user asked about variants or special editions, and no research was run, so do not answer from memory or from an older saved profile. Call research_variants NOW with the product being discussed (use the product from the conversation or the open product; pass `edition` if they named one). Do not ask first. Report only what the tool returns.",
+        });
+        continue;
+      }
       if (flags.promiseGuard && !promiseGuardUsed && tools.length > 0 && toolsRunThisTurn === 0 && promisesAction(result.content)) {
         promiseGuardUsed = true;
         guards.push("promise-guard");

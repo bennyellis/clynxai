@@ -3,6 +3,7 @@ import { apiBackends } from "../searchApis.js";
 import { createEvidenceDeps, relevantHit, wikipediaBackend, withWebActivity } from "../webEvidence.js";
 import { describeIdentification } from "../visualService.js";
 import { toolStatusLabel } from "../chatSupport.js";
+import { asksAboutVariants } from "../chat.js";
 import { applyStatusEvent } from "../../renderer/src/lib/chatStatus.js";
 import type { IdentityDecision } from "../identityResearch.js";
 import { check, run, section } from "./_testkit.js";
@@ -58,4 +59,8 @@ run(async () => {
   const d4 = createEvidenceDeps({ fetchImpl: f2, searchGapMs: 0, backends: [{ name: "off", skip: () => "switched off", run: async () => [] }, wikipediaBackend()] });
   await withWebActivity((l) => skipped.push(l), async () => { await d4.search(q, 5); await d4.search(q + " again", 5); });
   check("a skipped engine is named once with its reason, not as a failure", skipped.filter((l) => /off not used: switched off/.test(l)).length === 1, skipped);
+
+  section("a question about editions must run the research");
+  check("variant and edition questions are recognised", ["variants?", "research all special editions", "look up the SNES variant", "is there a limited edition", "what versions of it exist"].every(asksAboutVariants));
+  check("ordinary questions are not", !["research new nintendo 3ds xl", "what is it worth", "add ps5 to search"].some(asksAboutVariants));
 });
