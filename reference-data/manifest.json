@@ -1,0 +1,242 @@
+{
+  "version": 1,
+  "images": [
+    {
+      "id": "n3dsxl-open",
+      "role": "reference",
+      "family": "Nintendo 3DS family",
+      "model": "New Nintendo 3DS XL",
+      "variant": null,
+      "edition": null,
+      "sourcePageUrl": "https://commons.wikimedia.org/wiki/File:New_Nintendo_3DS_XL_-_open.jpg",
+      "imageUrl": "https://commons.wikimedia.org/wiki/Special:Redirect/file/New_Nintendo_3DS_XL_-_open.jpg",
+      "license": null,
+      "attribution": null,
+      "licenseUrl": null,
+      "expectedFeatures": [
+        "a New Nintendo 3DS XL opened to show both screens and the controls",
+        "single HOME button under the bottom screen (owner-described layout)",
+        "C Stick present (owner-described layout)"
+      ],
+      "expectedAnswers": {
+        "home_button_layout": "single_home_below_screen",
+        "c_stick": "present"
+      },
+      "cameraAngle": "open, front",
+      "reliability": "reference_photo",
+      "knownLookalikes": [
+        "Nintendo 3DS XL",
+        "New Nintendo 3DS"
+      ],
+      "checksum": null,
+      "width": null,
+      "height": null,
+      "mime": null,
+      "bytes": null,
+      "validation": {
+        "status": "pending"
+      },
+      "suppliedBy": "owner (build assignment, Part 3.2)"
+    },
+    {
+      "id": "n3dsxl-home",
+      "role": "reference",
+      "family": "Nintendo 3DS family",
+      "model": "New Nintendo 3DS XL",
+      "variant": null,
+      "edition": null,
+      "sourcePageUrl": "https://commons.wikimedia.org/wiki/File:New_Nintendo_3DS_XL_-_home_button.jpg",
+      "imageUrl": "https://commons.wikimedia.org/wiki/Special:Redirect/file/New_Nintendo_3DS_XL_-_home_button.jpg",
+      "license": null,
+      "attribution": null,
+      "licenseUrl": null,
+      "expectedFeatures": [
+        "close-up of the HOME button of a New Nintendo 3DS XL"
+      ],
+      "expectedAnswers": {
+        "home_button_layout": "single_home_below_screen"
+      },
+      "cameraAngle": "close-up of the HOME button",
+      "reliability": "reference_photo",
+      "knownLookalikes": [
+        "Nintendo 3DS XL",
+        "New Nintendo 3DS"
+      ],
+      "checksum": null,
+      "width": null,
+      "height": null,
+      "mime": null,
+      "bytes": null,
+      "validation": {
+        "status": "pending"
+      },
+      "suppliedBy": "owner (build assignment, Part 3.2)"
+    },
+    {
+      "id": "n3dsxl-buttons",
+      "role": "reference",
+      "family": "Nintendo 3DS family",
+      "model": "New Nintendo 3DS XL",
+      "variant": null,
+      "edition": null,
+      "sourcePageUrl": "https://commons.wikimedia.org/wiki/File:New_Nintendo_3DS_XL_-_main_buttons_1.jpg",
+      "imageUrl": "https://commons.wikimedia.org/wiki/Special:Redirect/file/New_Nintendo_3DS_XL_-_main_buttons_1.jpg",
+      "license": null,
+      "attribution": null,
+      "licenseUrl": null,
+      "expectedFeatures": [
+        "ABXY buttons and the C Stick of a New Nintendo 3DS XL"
+      ],
+      "expectedAnswers": {
+        "c_stick": "present"
+      },
+      "cameraAngle": "close-up of ABXY and C Stick",
+      "reliability": "reference_photo",
+      "knownLookalikes": [
+        "Nintendo 3DS XL",
+        "New Nintendo 3DS"
+      ],
+      "checksum": null,
+      "width": null,
+      "height": null,
+      "mime": null,
+      "bytes": null,
+      "validation": {
+        "status": "pending"
+      },
+      "suppliedBy": "owner (build assignment, Part 3.2)"
+    },
+    {
+      "id": "3dsxl-vs-new-front",
+      "role": "regression",
+      "family": "Nintendo 3DS family",
+      "model": null,
+      "variant": null,
+      "edition": null,
+      "sourcePageUrl": "https://commons.wikimedia.org/wiki/File:3DS_XL_and_New_3DS_XL_-_front.jpg",
+      "imageUrl": "https://commons.wikimedia.org/wiki/Special:Redirect/file/3DS_XL_and_New_3DS_XL_-_front.jpg",
+      "license": null,
+      "attribution": null,
+      "licenseUrl": null,
+      "expectedFeatures": [
+        "an original 3DS XL and a New 3DS XL side by side",
+        "the two layouts differ (three buttons vs a single HOME button)"
+      ],
+      "expectedAnswers": {},
+      "cameraAngle": "front, two devices side by side",
+      "reliability": "reference_photo",
+      "knownLookalikes": [
+        "Nintendo 3DS XL",
+        "New Nintendo 3DS"
+      ],
+      "multipleProducts": true,
+      "checksum": null,
+      "width": null,
+      "height": null,
+      "mime": null,
+      "bytes": null,
+      "validation": {
+        "status": "pending"
+      },
+      "suppliedBy": "owner (build assignment, Part 3.2)"
+    }
+  ],
+  "documents": [
+    {
+      "id": "nintendo-manuals",
+      "family": "Nintendo 3DS family",
+      "url": "https://en-americas-support.nintendo.com/app/answers/detail/a_id/16903",
+      "purpose": "documented hardware layout differences across Nintendo 3DS-family systems",
+      "quality": "manufacturer"
+    },
+    {
+      "id": "consolevariations-n3dsxl",
+      "family": "Nintendo 3DS family",
+      "url": "https://consolevariations.com/database/new-nintendo-3ds-xl",
+      "purpose": "discovery of New Nintendo 3DS XL special editions (Majora's Mask, Hyrule, Pikachu, Galaxy Style, Samus, Fire Emblem Fates, SNES, Monster Hunter, standard colours, regional LL)",
+      "quality": "collector",
+      "notes": "Collector catalogue: use for discovery, corroborate with the maker; rarity ratings are not facts; do not store its images without permission."
+    },
+    {
+      "id": "commons-n3dsxl-category",
+      "family": "Nintendo 3DS family",
+      "url": "https://commons.wikimedia.org/wiki/Category:New_Nintendo_3DS_XL",
+      "purpose": "more alternate-angle photographs (candidates; run the fetch script with --discover and review)",
+      "quality": "reference"
+    },
+    {
+      "id": "xbox-series-x",
+      "family": "Xbox Series X",
+      "url": "https://www.xbox.com/en-US/consoles/xbox-series-x",
+      "purpose": "official configurations and imagery",
+      "quality": "manufacturer"
+    },
+    {
+      "id": "xbox-galaxy-black",
+      "family": "Xbox Series X",
+      "url": "https://www.microsoft.com/en-us/d/Xbox-Series-X-2TB-galaxy-black-special-edition/8SMBRT7WMFP9",
+      "purpose": "Galaxy Black Special Edition (official product page)",
+      "quality": "manufacturer"
+    },
+    {
+      "id": "iphone-14-plus",
+      "family": "Apple iPhone",
+      "url": "https://support.apple.com/en-us/111854",
+      "purpose": "official iPhone 14 Plus specifications and images",
+      "quality": "manufacturer"
+    },
+    {
+      "id": "iphone-15-pro",
+      "family": "Apple iPhone",
+      "url": "https://support.apple.com/en-us/111829",
+      "purpose": "official iPhone 15 Pro page (resolve the current canonical page if redirected)",
+      "quality": "manufacturer"
+    },
+    {
+      "id": "iphone-16-pro-max",
+      "family": "Apple iPhone",
+      "url": "https://support.apple.com/en-us/121032",
+      "purpose": "official iPhone 16 Pro Max specifications and images",
+      "quality": "manufacturer"
+    },
+    {
+      "id": "nvidia-40-series",
+      "family": "NVIDIA GeForce RTX 40 series",
+      "url": "https://www.nvidia.com/en-us/geforce/graphics-cards/40-series/",
+      "purpose": "official RTX 40-series lineup; there is no official RTX 4080 Ti (negative regression example)",
+      "quality": "manufacturer"
+    }
+  ],
+  "coverageTargets": [
+    {
+      "family": "Nintendo 3DS family",
+      "wantImages": 20,
+      "note": "4 supplied (3 reference, 1 regression); run 'node scripts/reference-fetch.cjs --discover New_Nintendo_3DS_XL' for candidates, and add photographs of original 3DS/3DS XL, 2DS and the special-edition shells (Pikachu, Majora's Mask, Hyrule)"
+    },
+    {
+      "family": "Xbox Series X / S",
+      "wantImages": 15,
+      "note": "none supplied as image files yet: official pages listed as documents; add Series S, Series X, Robot White All-Digital, Galaxy Black, Halo Infinite photographs with licences"
+    },
+    {
+      "family": "Apple iPhone (14 Plus, 15 Pro, 16 Pro Max and neighbours)",
+      "wantImages": 15,
+      "note": "none supplied as image files yet; official pages listed as documents"
+    },
+    {
+      "family": "NVIDIA / partner graphics cards (MSI and others)",
+      "wantImages": 15,
+      "note": "none supplied; need board-design photographs from several makers"
+    },
+    {
+      "family": "Damage vs reflections",
+      "wantImages": 15,
+      "note": "none supplied; need cracked glass, chipped corner, scratched handheld, broken hinge, damaged card, and glare that is NOT damage"
+    },
+    {
+      "family": "Mislabelled Marketplace products",
+      "wantImages": 10,
+      "note": "none supplied; need real listings where the title is wrong"
+    }
+  ]
+}

@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "note": "Cases for scripts/visual-eval.cjs. Image cases need the cached images (run scripts/reference-fetch.cjs first). 'needsImages' cases are planned but cannot run until images are supplied.",
+  "cases": [
+    {
+      "id": "layout-home",
+      "kind": "targeted_answers",
+      "imageIds": [
+        "n3dsxl-home"
+      ],
+      "family": "Nintendo 3DS family"
+    },
+    {
+      "id": "layout-buttons",
+      "kind": "targeted_answers",
+      "imageIds": [
+        "n3dsxl-buttons"
+      ],
+      "family": "Nintendo 3DS family"
+    },
+    {
+      "id": "layout-open",
+      "kind": "targeted_answers",
+      "imageIds": [
+        "n3dsxl-open"
+      ],
+      "family": "Nintendo 3DS family"
+    },
+    {
+      "id": "identify-open-vague-title",
+      "kind": "identity",
+      "imageIds": [
+        "n3dsxl-open"
+      ],
+      "title": "Nintendo DS",
+      "expected": {
+        "family": "Nintendo 3DS family",
+        "modelOneOf": [
+          "New Nintendo 3DS XL",
+          "New Nintendo 3DS",
+          "New Nintendo 2DS XL"
+        ],
+        "mustNotBe": [
+          "Nintendo 3DS XL",
+          "Nintendo 3DS"
+        ]
+      }
+    },
+    {
+      "id": "two-devices",
+      "kind": "identity",
+      "imageIds": [
+        "3dsxl-vs-new-front"
+      ],
+      "title": "3DS XL",
+      "expected": {
+        "family": "Nintendo 3DS family",
+        "model": null,
+        "note": "two different devices: a confident single model is a false exact match"
+      }
+    },
+    {
+      "id": "rtx-4080-ti",
+      "kind": "claim",
+      "claim": "NVIDIA GeForce RTX 4080 Ti",
+      "expected": {
+        "verdict": "not_in_official_lineup"
+      },
+      "needsLiveSearch": true
+    },
+    {
+      "id": "rtx-4080-super",
+      "kind": "claim",
+      "claim": "NVIDIA GeForce RTX 4080 Super",
+      "expected": {
+        "verdict": "exists_official"
+      },
+      "needsLiveSearch": true
+    },
+    {
+      "id": "pikachu-edition-discovery",
+      "kind": "identity",
+      "needsImages": true,
+      "expected": {
+        "edition": "Pikachu Edition",
+        "note": "needs a photograph of a Pikachu Edition shell"
+      }
+    },
+    {
+      "id": "majora-vs-hyrule",
+      "kind": "identity",
+      "needsImages": true,
+      "expected": {
+        "note": "needs photographs of both shells"
+      }
+    },
+    {
+      "id": "series-x-vs-galaxy",
+      "kind": "identity",
+      "needsImages": true,
+      "expected": {
+        "note": "needs photographs"
+      }
+    },
+    {
+      "id": "iphone-neighbours",
+      "kind": "identity",
+      "needsImages": true,
+      "expected": {
+        "note": "needs photographs of 14 Plus, 15 Pro, 16 Pro Max"
+      }
+    },
+    {
+      "id": "msi-coolers",
+      "kind": "identity",
+      "needsImages": true,
+      "expected": {
+        "note": "needs photographs of MSI board designs"
+      }
+    },
+    {
+      "id": "damage-cracked-back-glass",
+      "kind": "damage",
+      "needsImages": true,
+      "expected": {
+        "damage": "visible"
+      }
+    },
+    {
+      "id": "damage-reflection-not-crack",
+      "kind": "damage",
+      "needsImages": true,
+      "expected": {
+        "damage": "none"
+      }
+    }
+  ]
+}

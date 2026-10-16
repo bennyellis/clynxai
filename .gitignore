@@ -47,3 +47,7 @@ backups/docker/
 backups/lan/
 updates/
 dist-*/
+
+# Downloaded reference images (licensed; fetched on your machine by scripts/reference-fetch.cjs)
+reference-data/cache/
+reference-data/eval-report-*.json
