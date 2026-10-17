@@ -1,0 +1,3 @@
+Clynx Beta 24 - The OpenAI search switch stays on
+* Fixed: several parts of Clynx wrote config.json without the beta13 switches and erased them (including "openaiSearch": true), so OpenAI web search kept turning itself off. Every save now keeps the owner switches already in the file (beta13, openaiSearchPerHour, freeSearchEngines).
+* Unchanged: everything in Beta 23 (edition questions always run the research; DuckDuckGo and Bing are off; OpenAI web search first, then Brave, then Wikipedia).
