@@ -13,7 +13,7 @@ export interface Beta13Flags {
   webKnowledge: Beta13Mode;
   /** Observation-first identification with web research for listings whose identity is in doubt (identityResearch.ts). "shadow" (default) records what it would conclude; it never changes a decision yet. */
   visualResearch: Beta13Mode;
-  /** OpenAI's web search as one more search engine for hard product research (openaiSearch.ts). Off by default: each search is a paid call, and through Clynx Cloud the owner must also enable it on the server. */
+  /** OpenAI's web search as one more search engine for hard product research (openaiSearch.ts). On by default (nothing ever searched while it was off and no screen could turn it on); it still never runs in Save-credits mode, over the hourly limit, or without AI access, and through Clynx Cloud the owner must also enable it on the server. Set false in config.json to switch it off. */
   openaiSearch: boolean;
   libraryTree: boolean;
   chatStatus: boolean;
@@ -28,7 +28,7 @@ export const BETA13_DEFAULTS: Beta13Flags = {
   conditionEvidence: "shadow",
   webKnowledge: "shadow",
   visualResearch: "shadow",
-  openaiSearch: false,
+  openaiSearch: true,
   libraryTree: true,
   chatStatus: true,
   chatChoices: true,

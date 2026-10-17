@@ -1,0 +1,4 @@
+Clynx Beta 25 - OpenAI web search is on by default
+* Fixed: Clynx never searched with OpenAI because the switch (config.json beta13.openaiSearch) was off unless set by hand, and no screen could turn it on. It is now on by default.
+* It still does not run in Save OpenAI credits mode, past the hourly limit (openaiSearchPerHour, default 12), or when Clynx has no AI access. Set "beta13": { "openaiSearch": false } in config.json to switch it off.
+* Unchanged: everything in Beta 24.

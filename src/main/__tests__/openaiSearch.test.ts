@@ -26,7 +26,7 @@ run(async () => {
   check("a cloud answer is validated the same way", parseCloudSearch({ answer: "x", citations: [{ url: "https://a.example", title: "A", snippet: "s" }, { url: "ftp://bad" }] })?.citations.length === 1 && parseCloudSearch({ nope: 1 }) === null);
   const hits = answerToHits(answer, 5);
   check("results look like any engine's: title, address, snippet", hits.length === 2 && hits[0].title === "Meta Quest 3" && hits[0].snippet.length > 10);
-  check("it is OFF by default", beta13Flags({}).openaiSearch === false && beta13Flags({ beta13: { openaiSearch: true } }).openaiSearch === true);
+  check("it is ON by default and can be switched off", beta13Flags({}).openaiSearch === true && beta13Flags({ beta13: { openaiSearch: false } }).openaiSearch === false);
 
   section("it declines itself, so the next engine answers");
   let enabled = true, low = false, calls = 0, fail = false;

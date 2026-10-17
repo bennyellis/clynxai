@@ -1,5 +1,5 @@
-// OpenAI's web search as one more search engine for Clynx's product research. It is NOT Google (it is OpenAI's own search) and it is OFF unless the owner switches it on
-// (config.json beta13.openaiSearch). It is used only for hard research (unfamiliar items, unclear models, edition and claim checks), never for ordinary lookups, within an hourly
+// OpenAI's web search as one more search engine for Clynx's product research. It is NOT Google (it is OpenAI's own search) and it is ON by default and the owner can switch it off
+// (config.json beta13.openaiSearch = false). It is used only for hard research (unfamiliar items, unclear models, edition and claim checks), never for ordinary lookups, within an hourly
 // limit, and never in Save-credits mode. Its answer is not trusted as a finished conclusion: it is turned into search RESULTS (the cited pages, each with the sentence it was cited
 // for), and Clynx then reads those pages and applies its own rules (two independent sources, or an official one) exactly as for any other engine.
 // The pure request/parse code mirrors cloud/src/ai/search.ts; the network call lives in openai.ts (own key: straight to OpenAI; otherwise Clynx Cloud's POST /ai/search).
