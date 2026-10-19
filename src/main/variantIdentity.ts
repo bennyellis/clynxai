@@ -90,8 +90,15 @@ export function extractVariantAttributes(name: string): VariantAttributes {
     const prev = tokens[i - 1];
     if (!NOISE.has(prev) && !EDITION_MARKERS.has(prev) && !isColorWord(prev) && !CAPACITY.test(prev) && !/^\d+$/.test(prev)) editionTerms.add(prev);
     // "Galaxy Black Edition": the color is part of the edition's name, and the themed word before it ("galaxy") is what makes it a different product from the plain console
-    if (isColorWord(prev) && i >= 2) {
-      const themed = tokens[i - 2];
+    // (also through markers: "Galaxy Black Special Edition" -> galaxy)
+    let j = i - 1;
+    let passedColor = false;
+    while (j >= 0 && (EDITION_MARKERS.has(tokens[j]) || isColorWord(tokens[j]))) {
+      if (isColorWord(tokens[j])) passedColor = true;
+      j--;
+    }
+    if (j >= 0 && j < i - 1 && passedColor) {
+      const themed = tokens[j];
       if (themed.length >= 4 && !NOISE.has(themed) && !EDITION_MARKERS.has(themed) && !isColorWord(themed) && !CAPACITY.test(themed) && !TIER_WORDS.has(themed) && themed !== "series") editionTerms.add(themed);
     }
   }

@@ -73,4 +73,11 @@ run(() => {
   check("a real Galaxy title with the generation late is not turned away", priced("Xbox Series X Galaxy Edition", "Xbox 2TB Galaxy Black Series X Console") && priced("Xbox Series X Galaxy Black Edition", "Xbox 2TB Galaxy Black Series X Console"));
   check("the guard still rejects the wrong generation wherever it sits", !priced(PLAIN, "Xbox 1TB One X Console") && !priced(PLAIN, "Microsoft Xbox Black 360 Console") && !priced("Xbox Series S", "Xbox White Series X 1TB"));
   check("'Day One Edition' is the plain console's launch edition, not a different product", comp(PLAIN, "Xbox Series X Day One Edition").verdict !== "rejected" || !comp(PLAIN, "Xbox Series X Day One Edition").reasons.some((r) => r.code === "EDITION"));
+
+  section("a title with the console words AND the Galaxy word is enough to go on; the photo and price gates agree");
+  for (const t of ["Xbox Series X Galaxy Edition", "Xbox Series X Galaxy Special Edition Console", "Xbox Series X Galaxy Black Edition 2TB", "Xbox 2TB Galaxy Black Series X Console"]) {
+    check(`the official-name entry prices "${t}"`, priced(OFFICIAL, t), comp(OFFICIAL, t));
+    check(`and files it (no photo/price disagreement) "${t}"`, filed(OFFICIAL, t), judgeCandidateByText(OFFICIAL, t));
+  }
+  check("a plain 1TB console with no Galaxy word still needs its capacity (not made compatible)", comp(OFFICIAL, "Xbox Series X Console Black").verdict !== "compatible" && comp(OFFICIAL, "Xbox Series X Console Black").verdict !== "exact");
 });

@@ -227,7 +227,14 @@ function judgeAgainst(reference: string, title: string, requiredTerms: string[],
   const refCaps = capacityTokens(reference);
   const titleCaps = capacityTokens(title);
   if (refCaps.length) {
-    if (titleCaps.length === 0) mark("uncertain", "CAPACITY_NOT_STATED", `the title does not state a capacity (the product is ${refCaps.join("/")})`);
+    if (titleCaps.length === 0) {
+      // When the title carries the product's own themed edition word ("Galaxy") together with its other words, that alone makes it very likely the same product: an edition sold in one
+      // configuration is not made doubtful by a seller leaving out the size. A plain product with no themed word still needs its capacity.
+      const themed = extractVariantAttributes(reference).editionTerms.filter((t) => !["special", "limited", "collector", "collectors", "exclusive", "anniversary", "signature", "founder", "founders", "commemorative", "deluxe"].includes(t));
+      const titleHas = new Set(identityTokens(title));
+      const themedNamed = themed.length > 0 && themed.every((t) => titleHas.has(t));
+      mark(themedNamed ? "compatible" : "uncertain", "CAPACITY_NOT_STATED", `the title does not state a capacity (the product is ${refCaps.join("/")})${themedNamed ? "; it names the edition, which is enough to go on" : ""}`);
+    }
     else if (titleCaps.some((c) => !refCaps.includes(c))) mark("rejected", "CAPACITY", `${titleCaps.join("/")} instead of ${refCaps.join("/")}`);
   } else if (titleCaps.length) {
     // the title is more specific than the product (it names a capacity the product does not): the same product, a narrower one
