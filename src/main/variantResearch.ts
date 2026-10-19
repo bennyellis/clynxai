@@ -31,6 +31,8 @@ export interface DecideDeps {
   listTracked(): TrackedProduct[];
   /** The evidence check for a variant claim (cached/reconciled by the caller). */
   verify(name: string, parent: TrackedProduct): Promise<VariantVerdict>;
+  /** Whether the entry has evidence behind its name (a verified or supported variant verdict). Unknown counts as no. */
+  entryHasEvidence?(entry: TrackedProduct): boolean;
 }
 
 function sameProduct(a: string, b: string): boolean {
@@ -39,10 +41,27 @@ function sameProduct(a: string, b: string): boolean {
   return x.size === y.size && [...x].every((t) => y.has(t));
 }
 
+// Words an entry may carry that do not make it a different product from a plainer typed name: the brand and the console noun ("Apple iPhone 15", "Sony PlayStation 5 Pro Console") and a capacity.
+const HARMLESS_EXTRA = new Set(["apple", "sony", "microsoft", "nintendo", "samsung", "google", "meta", "amazon", "console", "system", "handheld"]);
+const CAPACITY_WORD = /^\d+(?:p\d+)?(?:tb|gb|mb)$/;
+
+/** The entry's name holds every identifying word of the typed phrase and at least one more that matters (not a brand, a console noun or a capacity). */
+export function entryAddsWords(typed: string, entryName: string): boolean {
+  const mine = new Set(identityTokens(typed));
+  const theirs = identityTokens(entryName);
+  if (mine.size === 0 || !theirs.length || ![...mine].every((t) => theirs.includes(t))) return false;
+  return theirs.some((t) => !mine.has(t) && !HARMLESS_EXTRA.has(t) && !CAPACITY_WORD.test(t));
+}
+
 export async function decideResearchTarget(product: string, deps: DecideDeps): Promise<ResearchDecision> {
   const matched = deps.findMatching(product);
-  // Asking again for the same thing, or for a plainer name than the entry's ("Xbox Series X" when the entry is "Xbox Series X Console"), is a refresh.
-  if (matched && (sameProduct(product, matched.name) || !isMoreSpecific(product, matched.name))) return { kind: "refresh_existing", existing: matched };
+  // Asking again for the same thing is a refresh. So is a name that is not a version of the entry at all (another spelling of it). But a typed phrase whose words are all INSIDE the
+  // entry's, while the entry says more ("xbox series x galaxy edition" against an old "Xbox Series X Galaxy/White"), is NOT the entry: the extra words (a color, an edition, a capacity)
+  // make it a different product, so the user's own words are researched as typed instead of silently refreshing the entry.
+  // The extra words only count against the entry when nothing vouches for them: an entry with evidence behind its name (verified or supported) is a real product, and a plainer name for it
+  // is that product; an entry with no evidence, or one named with an invented separator ("Galaxy/White"), may have been made up by an earlier pass.
+  const unproven = !!matched && (matched.name.includes("/") || !(deps.entryHasEvidence?.(matched) ?? false));
+  if (matched && (sameProduct(product, matched.name) || (!isMoreSpecific(product, matched.name) && !(entryAddsWords(product, matched.name) && unproven)))) return { kind: "refresh_existing", existing: matched };
 
   const parent = findParentCandidate(product, deps.listTracked());
   if (!parent || !isMoreSpecific(product, parent.name)) {
@@ -87,7 +106,7 @@ export function notRecordedMessage(product: string, parent: TrackedProduct, v: V
 
 export function createdVariantMessage(product: string, parent: TrackedProduct, v: VariantVerdict): string {
   const named = v.officialName && v.officialName.toLowerCase() !== product.toLowerCase() ? ` The source calls it "${v.officialName}".` : "";
-  return `VERIFIED: ${v.status} (${v.basis})${named} Added "${product}" to the Database as its own entry under "${parent.name}" and started researching it. It is not saved until that research finishes: say it is being researched, not that it is saved. Its value comes only from sales of this exact version; if there are none yet it will show as not enough evidence, never the standard model's price.`;
+  return `VERIFIED: ${v.status} (${v.basis})${named} Added "${product}" to the Database as its own entry under "${parent.name}" and started researching it. It is not saved until that research finishes: say it is being researched, not that it is saved. Do NOT ask the user what to focus on or how to write it up: tell them what you started and what the evidence said, then offer follow-ups. Its value comes only from sales of this exact version; if there are none yet it will show as not enough evidence, never the standard model's price.`;
 }
 
 /** Addresses in the user's message that Clynx may read: http(s) only, and nothing that points back at this computer or a private network. */

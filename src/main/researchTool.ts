@@ -4,6 +4,7 @@ import type { Store } from "./store.js";
 import { nameScore, reconcileVerdict, type VariantVerdict } from "./variantEvidence.js";
 import { identityTokens } from "./variantIdentity.js";
 import { createdVariantMessage, decideResearchTarget, publicHttpUrls, type TrackedProduct } from "./variantResearch.js";
+import { buildVocabulary, describeCorrections, normalizeTypedProduct, placePhrase } from "./typedInput.js";
 
 export interface ResearchStartOptions {
   source: "you";
@@ -66,6 +67,9 @@ function cleanOfficialName(name: string | undefined, claim: string): string | nu
   return nameScore(cleaned, claim) >= 0 && identityTokens(claim).every((t) => have.has(t)) ? cleaned : null;
 }
 
+// Tells the model not to stall: it has just been handed work, so it reports what started and offers follow-ups afterwards (it asked "What should I focus on in the writeup?" before).
+const NO_STALL = " Do NOT ask the user what to focus on or how to write it up: say what you started, then offer follow-ups.";
+
 export async function runResearchProductTool(args: Record<string, unknown>, userMessage: string | undefined, deps: ResearchToolDeps): Promise<string> {
   let product = String(args.product ?? "").trim();
   if (!product) return "Failed: no product name given.";
@@ -73,10 +77,33 @@ export async function runResearchProductTool(args: Record<string, unknown>, user
   const recovered = recoverNamedProduct(product, userMessage);
   if (recovered) product = recovered;
 
+  // The user's own words are the query of record. Only a spelling slip or the word order of a real product title is repaired (typedInput.ts), and the repair is reported.
+  const { store } = deps;
+  const tracked = store.listProductIndex();
+  const vocab = buildVocabulary(tracked.map((p) => p.name));
+  const normalized = normalizeTypedProduct(product, vocab);
+  product = normalized.text;
+  const correction = describeCorrections(normalized);
+  const placement = placePhrase(product, vocab, tracked);
+  if (placement.kind === "gibberish") {
+    return `NOT PLACED: I could not tell what "${product}" is, so nothing was created or changed. Ask the user what they meant (a product name, a model, or a link or photo) and do not guess.`;
+  }
+  if (placement.kind === "choose") {
+    return `NEEDS THE USER'S CHOICE: "${product}" could be more than one kind of thing already in the Database: ${placement.options.map((o) => `"${o}"`).join(" or ")}. Nothing was created or changed. Use ask_choice to ask which one they mean (a game, a console, or something else), then research that one.${correction ? ` ${correction}` : ""}`;
+  }
+  const answer = await researchDecided(product, userUrls, deps);
+  return correction ? `${correction} ${answer}` : answer;
+}
+
+async function researchDecided(product: string, userUrls: string[], deps: ResearchToolDeps): Promise<string> {
   const { store } = deps;
   const decision = await decideResearchTarget(product, {
     findMatching: (name) => store.findMatchingProduct(name),
     listTracked: () => store.listProductIndex(),
+    entryHasEvidence: (entry) => {
+      const status = store.getProductById(entry.id)?.variantEvidence?.status;
+      return status === "verified" || status === "supported";
+    },
     verify: (name, parent) => {
       deps.progress?.(`Checking manufacturer and retailer sources for "${name}"...`);
       return deps.verifyClaim(name, parent, userUrls);
@@ -104,7 +131,7 @@ export async function runResearchProductTool(args: Record<string, unknown>, user
       store.setProductVariantEvidence(id, reconcileVerdict(store.getProductById(id)?.variantEvidence ?? null, decision.verdict));
       deps.notify(id);
       deps.startLookup(id, product, { source: "you", verdict: decision.verdict, skipSiblingDiscovery: true });
-      return `Already have "${product}" in the Database; refreshing it now with the evidence (${decision.verdict.status}: ${decision.verdict.basis}). It is saved when that finishes.`;
+      return `Already have "${product}" in the Database; refreshing it now with the evidence (${decision.verdict.status}: ${decision.verdict.basis}). It is saved when that finishes.${NO_STALL}`;
     }
     store.setProductParent(id, decision.parent.id);
     store.setProductVariantEvidence(id, decision.verdict);
@@ -120,12 +147,12 @@ export async function runResearchProductTool(args: Record<string, unknown>, user
       deps.notify(existing.id);
       // The user's own wording is what gets researched, not the entry's more generic stored name.
       deps.startLookup(existing.id, product, { source: "you" });
-      return `Already have a Database profile for "${existing.name}"; refreshing it with a fresh web search for "${product}" now. It is saved when the research finishes (the Discovery tab shows progress), so don't say it is saved yet.`;
+      return `Already have a Database profile for "${existing.name}"; refreshing it with a fresh web search for "${product}" now. It is saved when the research finishes (the Discovery tab shows progress), so don't say it is saved yet.${NO_STALL}`;
     }
   }
 
   const id = store.addProductStub(deps.newId(), product);
   deps.notify(id);
   deps.startLookup(id, product, { source: "you" });
-  return `Started researching "${product}" and added it to the Database as a new entry. It is saved when the research finishes (the Discovery tab shows progress), so don't say it is saved yet.`;
+  return `Started researching "${product}" and added it to the Database as a new entry. It is saved when the research finishes (the Discovery tab shows progress), so don't say it is saved yet.${NO_STALL}`;
 }

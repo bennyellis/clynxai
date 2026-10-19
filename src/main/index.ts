@@ -2327,7 +2327,7 @@ function applyIdentitySafeguard(): void {
     openAiSearchConfigured = true;
     // read live: switching beta13.openaiSearch in config.json takes effect without a restart of this wiring
     configureFreeEngines(() => config.freeSearchEngines === true);
-    configureOpenAiSearch({ enabled: () => beta13Flags(config).openaiSearch && hasOpenAIAccess(), lowAi: () => isLowAiMode(), perHour: Math.max(1, config.openaiSearchPerHour ?? 12) });
+    configureOpenAiSearch({ enabled: () => beta13Flags(config).openaiSearch && hasOpenAIAccess(), lowAi: () => isLowAiMode(), perHour: Math.max(1, config.openaiSearchPerHour ?? 12) }, { perHour: Math.max(1, config.openaiLookupPerHour ?? 20) });
   }
   getKnowledgeService().install();
   const mode = config.identitySafeguard?.mode === "shadow" || config.identitySafeguard?.mode === "enforce" ? config.identitySafeguard.mode : "off";

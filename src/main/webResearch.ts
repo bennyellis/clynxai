@@ -96,7 +96,7 @@ function decodeDuckDuckGoUrl(href: string): string {
 let evidenceDeps: EvidenceDeps | null = null;
 function getEvidenceDeps(): EvidenceDeps {
   // Official search APIs first when the owner configured a key (see searchApis.ts), then the keyless engines.
-  evidenceDeps ??= createEvidenceDeps({ render: renderPageText, relevance: true, backends: [...apiBackends(), ...freeEngines(), wikipediaBackend()] });
+  evidenceDeps ??= createEvidenceDeps({ render: renderPageText, relevance: true, backends: [...(lookupBackend ? [lookupBackend] : []), ...apiBackends(), ...freeEngines(), wikipediaBackend()] });
   return evidenceDeps;
 }
 
@@ -205,13 +205,18 @@ async function fetchPage(url: string, maxChars = MAX_CHARS_PER_PAGE): Promise<Fe
 
 const EVIDENCE_PAGE_CHARS = 40_000;
 
-// OpenAI web search, as the FIRST engine for hard research only (unfamiliar items, unclear models, edition and claim checks). The ordinary reader above never uses it. It declines
+// OpenAI web search, as the FIRST engine for hard research (unfamiliar items, unclear models, edition and claim checks); the ordinary reader above uses it too, through its own budget. It declines
 // itself (and the next engine answers) when switched off, in Save-credits mode, over its hourly limit, or after a failure. See openaiSearch.ts.
 let hardDeps: EvidenceDeps | null = null;
 let openAiBackend: ReturnType<typeof openAiWebBackend> | null = null;
-export function configureOpenAiSearch(policy: Omit<OpenAiSearchPolicy, "search">): void {
+// The ORDINARY look-up (a typed product, the evidence check for an edition, a chat look-up) asks OpenAI first as well, on a budget of its own so a burst of look-ups cannot use up the
+// hard-research searches (or the other way round): repeats are answered from memory for a week, real searches are spread out, and only a couple run at once.
+let lookupBackend: ReturnType<typeof openAiWebBackend> | null = null;
+export function configureOpenAiSearch(policy: Omit<OpenAiSearchPolicy, "search">, lookup: { perHour: number } = { perHour: 20 }): void {
   openAiBackend = openAiWebBackend({ ...policy, search: callOpenAISearch });
+  lookupBackend = openAiWebBackend({ ...policy, perHour: lookup.perHour, search: callOpenAISearch, cacheMs: 7 * 24 * 3600_000, minGapMs: 1500, maxConcurrent: 2 });
   hardDeps = null;
+  evidenceDeps = null;
 }
 /** The search and page reader for hard research: OpenAI web search first when the owner enabled it, then the usual engines. */
 export function webHardDeps(): EvidenceDeps {

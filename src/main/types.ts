@@ -381,6 +381,8 @@ export interface Config {
   folderArt?: { generate?: boolean; perDay?: number; perDayManual?: number };
   /** OpenAI web search for hard research (beta13.openaiSearch turns it on): searches per hour (default 12). */
   openaiSearchPerHour?: number;
+  /** OpenAI searches per hour for ordinary product look-ups (typed products, edition checks, chat look-ups), separate from openaiSearchPerHour (default 20). */
+  openaiLookupPerHour?: number;
   /** DuckDuckGo and Bing as search sources: OFF unless this is true in config.json (OpenAI web search, a Brave key and Wikipedia are used instead). */
   freeSearchEngines?: boolean;
   beta13?: { identityGate?: "off" | "shadow" | "enforce"; resolver?: "off" | "shadow" | "enforce"; conditionEvidence?: "off" | "shadow" | "enforce"; webKnowledge?: "off" | "shadow" | "enforce"; visualResearch?: "off" | "shadow" | "enforce"; openaiSearch?: boolean; libraryTree?: boolean; chatStatus?: boolean; chatChoices?: boolean; chatAttachments?: boolean; replyStyle?: boolean };

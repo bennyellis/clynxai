@@ -72,12 +72,40 @@ export interface OpenAiSearchPolicy {
   /** The call itself (openai.ts), injected so this file stays testable. */
   search(query: string, signal?: AbortSignal): Promise<SearchAnswer | null>;
   now?: () => number;
+  /** Repeat questions are answered from memory for this long (default: not cached). A search that failed is never cached. */
+  cacheMs?: number;
+  /** Least time between two real searches (burst limit), and how many may be in flight at once. Default: no limit. */
+  minGapMs?: number;
+  maxConcurrent?: number;
+  /** Injected so tests do not wait. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
-/** The backend for the shared search reader: it declines itself (so the next engine is used) when off, in Save-credits mode, over its hourly limit, or after a failure. */
+const normalizedQuery = (q: string, max: number) => `${q.toLowerCase().replace(/\s+/g, " ").trim()}|${max}`;
+
+/**
+ * The backend for the shared search reader: it declines itself (so the next engine is used) when off, in Save-credits mode, over its hourly limit, or after a failure. With the optional
+ * cache and burst limit (used for ordinary product look-ups, which can repeat the same question many times) a repeated question costs nothing and a burst of searches is spread out
+ * instead of arriving at the server all at once.
+ */
 export function openAiWebBackend(p: OpenAiSearchPolicy): SearchBackend {
   const now = p.now ?? (() => Date.now());
+  const sleep = p.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   let stamps: number[] = [];
+  const cache = new Map<string, { at: number; hits: SearchHit[] }>();
+  const inFlight = new Map<string, Promise<SearchHit[]>>();
+  let lastCallAt = 0;
+  let active = 0;
+  const waiters: Array<() => void> = [];
+  const acquire = async (): Promise<void> => {
+    const limit = p.maxConcurrent ?? Infinity;
+    while (active >= limit) await new Promise<void>((r) => waiters.push(r));
+    active++;
+  };
+  const release = (): void => {
+    active--;
+    waiters.shift()?.();
+  };
   return {
     name: "openai-web",
     skip: () => {
@@ -88,14 +116,42 @@ export function openAiWebBackend(p: OpenAiSearchPolicy): SearchBackend {
       return null;
     },
     async run(query, max) {
-      stamps.push(now());
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 45_000);
+      const key = normalizedQuery(query, max);
+      const cached = cache.get(key);
+      if (p.cacheMs && cached && now() - cached.at < p.cacheMs) return cached.hits;
+      const pending = inFlight.get(key);
+      if (pending) return pending;
+      const job = (async () => {
+        await acquire();
+        try {
+          if (p.minGapMs) {
+            const wait = lastCallAt + p.minGapMs - now();
+            if (wait > 0) await sleep(wait);
+          }
+          lastCallAt = now();
+          stamps.push(now());
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 45_000);
+          try {
+            const answer = await p.search(query, controller.signal);
+            const hits = answer ? answerToHits(answer, max) : [];
+            if (p.cacheMs && hits.length > 0) {
+              if (cache.size >= 300) cache.delete(cache.keys().next().value as string);
+              cache.set(key, { at: now(), hits });
+            }
+            return hits;
+          } finally {
+            clearTimeout(timer);
+          }
+        } finally {
+          release();
+        }
+      })();
+      inFlight.set(key, job);
       try {
-        const answer = await p.search(query, controller.signal);
-        return answer ? answerToHits(answer, max) : [];
+        return await job;
       } finally {
-        clearTimeout(timer);
+        inFlight.delete(key);
       }
     },
   };
