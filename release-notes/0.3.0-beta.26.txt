@@ -1,3 +1,5 @@
 Clynx Beta 26 - DRAFT (not published)
 * Fixed: a video game listed for a console could be mistaken for the console. Titles like "Starfield - Xbox Series X - Brand New", "Guardians of the Galaxy Xbox Series X Brand New Factory Sealed" or "... Complete in Box" were treated as an exact match for the Xbox Series X Galaxy entries, both for photos and for sold prices. They are now recognised as games and rejected. A plain "Xbox Series X Brand New" is still a console.
+* Changed: a title that cannot say console or game ("Halo Xbox Series X Brand New", one unfamiliar word before the platform) is no longer an exact match. It is held as uncertain: no photo is filed from it without a picture check and it is not used for a price until a photo can confirm it. Clynx needs both the photos and the words.
+* Not done in this beta: photos do not yet promote held-back titles back into prices; the "Limited Edition" vs "Special Edition" mismatch and the controller/HDMI accessory rule still reject some real consoles' sold prices; descriptions are not yet read for this check.
 * Unchanged: everything in Beta 25 (OpenAI web search is on by default).
