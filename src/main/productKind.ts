@@ -21,6 +21,8 @@ const ACCESSORY_TITLE = /\b(controllers?|gamepad|joy-?cons?|case|skin|decal|cove
 const FILLER_BEFORE_PLATFORM = new Set("a an the new brand sealed factory used open box refurbished renewed microsoft sony nintendo apple console system bundle pre owned preowned like mint black white blue red carbon digital disc slim pro oled lite series edition limited special galaxy authentic genuine official original certified unlocked complete rare modded hacked jailbroken custom customized rgb retro".split(" "));
 const TRAILING_PLATFORM = new RegExp(`^(.+?)${SEPARATORS}+${PLATFORM}\\b${PLATFORM_TAIL}$`, "i");
 
+const TRAILING_BARE_SERIES = new RegExp(`^(.+?)${SEPARATORS}+series [xs]\\b${PLATFORM_TAIL}$`, "i");
+
 /**
  * A title whose words cannot say whether it is the console or a game for it: ONE unfamiliar word, then the platform ("Halo Xbox Series X Brand New", "Starfield/Xbox Series X/Brand New",
  * "Robot White Xbox Series S Brand New"). It may be a special-edition console, the standalone game, or a seller's mistake: only the listing's PHOTOS (and its description) can tell, so the
@@ -29,7 +31,8 @@ const TRAILING_PLATFORM = new RegExp(`^(.+?)${SEPARATORS}+${PLATFORM}\\b${PLATFO
 export function mediaAmbiguity(title: string): string | null {
   const t = String(title ?? "");
   if (!t.trim() || mediaSignal(t) || HARDWARE_NOUNS.test(t) || PLATFORM_BADGE.test(t)) return null;
-  const trailing = TRAILING_PLATFORM.exec(t);
+  // "Halo Series X Brand New": sellers often drop the word "Xbox", so the bare "Series X/S" counts as the platform here too
+  const trailing = TRAILING_PLATFORM.exec(t) ?? (/xbox/i.test(t) ? null : TRAILING_BARE_SERIES.exec(t));
   if (!trailing) return null;
   const words = trailing[1].toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter((w) => w && !FILLER_BEFORE_PLATFORM.has(w) && !/^\d+(?:tb|gb)$/.test(w));
   return words.length === 1 ? words[0] : null;

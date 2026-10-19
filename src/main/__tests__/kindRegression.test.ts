@@ -32,7 +32,7 @@ const GAME_TITLES = [
 const AMBIGUOUS_TITLES = [
   "Starfield Xbox Series X Brand New Factory Sealed", "Starfield Xbox Series X Sealed", "Starfield Xbox Series X", "STARFIELD XBOX SERIES X BRAND NEW",
   "Starfield Xbox Series X Brand New Free Shipping", "Starfield Xbox Series X Brand New Fast Shipping", "Starfield Xbox Series X Brand New US Version", "Starfield Xbox Series X Brand New in Plastic",
-  "Starfield Xbox Series X Case Only", "Starfield/Xbox Series X/Brand New", "Starfield, Xbox Series X, Brand New", "Halo Infinite Xbox One Series X Brand New".replace("Halo Infinite", "Halo"),
+  "Starfield Xbox Series X Case Only", "Starfield/Xbox Series X/Brand New", "Halo Series X Brand New", "Starfield Series X Brand New", "Starfield, Xbox Series X, Brand New", "Halo Infinite Xbox One Series X Brand New".replace("Halo Infinite", "Halo"),
   "Halo Xbox Series X Brand New",
   "Kinect Xbox Series X New",
   "Robot White Xbox Series S Brand New",
@@ -86,6 +86,7 @@ run(() => {
       check(`comp is never exact and never valued   [${product}] <- "${t}"`, comp.verdict !== "exact" && !usableForValuation(comp.verdict), comp.verdict);
     }
   }
+  check("a bare Series X console title is not ambiguous", mediaAmbiguity("Series X Brand New") === null && mediaAmbiguity("Microsoft Series X Brand New") === null && mediaAmbiguity("Halo Series X 1TB Console") === null);
   check("a plain console title is not ambiguous", mediaAmbiguity("Xbox Series X Brand New") === null && mediaAmbiguity("Used Xbox Series X") === null && mediaAmbiguity("Rare Modded Xbox Series X New") === null && mediaAmbiguity("Galaxy Black Xbox Series X Brand New Sealed") === null);
   check("a console title with a model number or capacity is not ambiguous", mediaAmbiguity("Halo Xbox Series X 1TB Console") === null);
 
