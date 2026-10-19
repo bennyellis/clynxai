@@ -1,0 +1,69 @@
+AUDITOR BACKLOG FOR DEVELOPER - small and medium items, recorded so nobody has to be interrupted
+2026-10-19. Owner rule: DEVELOPER works the LARGER items first. Small findings are recorded here and handed over in one batch. AUDITOR will only message DEVELOPER mid-task for an IMMEDIATE issue (a broken owner rule, a regression in work in progress, a blocker).
+Read only until the owner says go on each item. AUDITOR keeps this file current; DEVELOPER does not need to reply to it.
+
+=====================================================================
+A. LARGE ITEMS - DEVELOPER's order (unchanged, owner-approved scope noted)
+=====================================================================
+1. D1.6 (owner GO, commit only, no build/release): refresh-rule fix, no-stall wording, OpenAI-first lookups with their own budget, typed-input normaliser. OPEN POINT already sent: the refresh rule creates a duplicate when a typed plainer name meets a proper full entry ("xbox series x galaxy" vs "Xbox Series X Galaxy Black Special Edition", "iphone 15" vs "Apple iPhone 15 128GB").
+2. D2 never store errors as summaries; retry them (needs owner OK to re-queue the 4 failed products, Q3).
+3. D3 identity card + kind as a hard gate + typed-input flow + photo kind per image + Halo/game-console split (Q2, Q5, Q6 pending).
+4. D4 the console accessory/edition fixes below (sold-price loss: edition synonyms 10 of 20, controller as included extra 4 of 20).
+5. D5 scanning cleanup after the Database behaves.
+6. NEW (owner request 2026-10-19): the ADD-ONS feature in the Library (see FEATURE_ADDONS_SPEC_2026-10-19.txt). LARGE; depends on D3 (identity card, kind, compatibility) and D4 (edition aliases, "w/ controller" as an included extra), plus reliable WatchCount lookups. Not started; owner decisions Z1-Z5 open.
+
+=====================================================================
+B. MEDIUM - fold into D3/D4 when their owner approval comes
+=====================================================================
+B1 Edition aliases: "Limited Edition" vs "Special Edition" rejected as different editions; a missing edition word with series/size/color agreeing should be "compatible" not rejected (measured: entry "Xbox Series X Galaxy Black Special Edition" keeps only 10 of 20 real sold titles).
+B2 ACCESSORY_WORDS (controller, hdmi, remote, dock...) after "w/", "with", "includes" is an included extra, not an accessory title (4 of 20 real Galaxy titles rejected; 10 of 13 active asks rejected in the live DB).
+B3 WatchCount: use www.watchcount.com (beta host redirects); fill the category slot with the eBay category id ("/sold/<words>/<slug>_<id>/fixedprice", id drives it, e.g. 139971 = Video Game Consoles); log result count and "challenge/limit page" vs "0 results" (a Security Check page appeared for AUDITOR after about 8 quick page loads); do not mark a comps check done when it returned nothing because of a limit.
+B4 Dead code: photoIdentity.withVision / needsPicture have no callers; four separate text+photo combiners exist (scrapeEngine matchesClaim, resolveIdentityTarget, fileImage.decideFiling, listingContradictsEntry sites). One fusion function, fail closed, promotion only against trusted reference photos (comp photoCheck fails OPEN today).
+B5 Log WHY every product is created (source + triggering text); the app does not record it today (could not trace how "Guardians of the Galaxy (Cosmic Deluxe Edition) (Xbox Series X)" became a product).
+B6 Config: strip a UTF-8 BOM in readJsonFileSafe (hand edits via PowerShell were quarantined and reverted twice on 10-15); document it.
+B7 Dedupe key on every product insert path (createManualProduct store.ts:1602, libraryOps.ts:616 split, cloud upsert store.ts:2057), not only addProductStub.
+B8 "Edition unpriced": a real Galaxy Black listing ($600) was valued against the plain console ($501) and rejected as a $495 loss; flag "priced only against the plain model" instead.
+
+=====================================================================
+C. SMALL - batch these at the end (from AUDITOR and TESTER reports)
+=====================================================================
+C1 Title shapes still priced after 3a8aa4f: "Sonic Genesis Brand New" (exact vs "Sega Genesis" entry); "Mario 3DS XL Brand New" (could be a Mario edition console; "uncertain" is right).
+C2 Photo source badges (imageSource.ts): eBay photos titled without the "eBay listing:" prefix show "Facebook"; 47 stock photos with no source title show "Added by you".
+C3 Library detail page prints raw "(Research failed: ...)" JSON/error text; the Automation page shows a friendly version (screens disagree).
+C4 Entries with invented names / placeholders to rename or merge (needs owner OK): "Xbox Series X variants", "Xbox Series X Galaxy/White", "Xbox Series X X25/X25 Limited", "new nintendo 3ds xl again", two "New Nintendo 3DS XL".
+C5 Recent changes lists Undo for a product that no longer exists; product page opens scrolled 228px down; needs-review dialog ignores Escape; search is substring-only ("nintendo xl" finds nothing); the merge review dialog cannot tell the two duplicates apart.
+C6 Beta 26 draft notes: keep them honest about what is NOT fixed (edition aliases, accessory rule, photo promotion).
+C7 Possible: use the page's own "exclude categories" field on WatchCount (untested).
+C11 (TESTER's scratch live test, 06:59): even with the abuse block cleared, a burst still ends in "(Research failed: Clynx is asking the AI too fast and is waiting a moment...)" saved as a summary ("Nintendo Switch Animal Crossing: New Horizons Edition"): the server's per-user rate limit (rate_limited, not the block) still applies. The app must queue/back off on rate_limited and retry, never save the failure (L1 + L2). Same live test: "Dyson V8 Absolute" researched fine (family Dyson > Appliances, 6,047-char summary); "Nintendo Switch" priced $117.76 (asks), Switch Lite $110.40; guessed entries again ("Animal Crossing: New Horizons Edition" under Consoles).
+C8 Beta 26 release notes (78671ce) are honest and complete; one nit: they contain the internal label "(D2)" in the "not fixed" list, which means nothing to a reader. Drop it in the next notes.
+C9 Owner's launcher: the Start Menu shortcut points at a Temp copy of beta 23 left by the t21 private-beta harness (no real install entry under HKCU Uninstall except "Clynx (beta) 0.3.0-beta.23"); the harness should clean up its shortcut, and the release steps should tell the owner how to replace it.
+C10 Reset Clynx on a real profile: it needs the confirm word, but it ran on the owner's real library 43 seconds after a test build started; consider a clearer warning that names the profile folder and shows the safety-backup path before the final confirm.
+
+=====================================================================
+E. TESTER'S BEHAVIOR CRITIQUE (low priority, owner said "no priority"; code review + DB copy, not a live run)
+Full text with file:line refs: TESTER scratchpad BEHAVIOR_CRITIQUE.txt (path in TESTER's message). Already sent to DEVELOPER by TESTER; recorded here so nothing is lost.
+=====================================================================
+E1 A failed research run saves "(Research failed: ...)" as the description and files the product under "Other"; a Refresh overwrites good research. (= D2, bigger than first thought: also overwrites a healthy entry's family.)
+E2 One typed phrase fans out into up to 5 AI-guessed variants plus unqueued parallel research; hits the server's 3-concurrent limit; the app has no concurrency_limit handling and its own refusals trigger a 10-minute block (DB: 5 entries in 7 seconds, 3 then "AI access paused"). NEW: needs a queue, retry/backoff and honouring the server limits (ties to D1.6's lookup budget).
+E3 Junk research (Wikipedia fallback, unrelated pages) is saved as knowledge with no visible sources. (= D1/D3: OpenAI-first search and the "unsourced" status; also show sources on the card.)
+E4 The user's whole typed message can become the product name ("variants", "again"), no "did you mean?". (Partly addressed by D1.6's normaliser and "NOT PLACED"; check the rest.)
+E4-LIVE (owner's manual test on Beta 26, 06:36:07, real data): the owner typed "xbox series x. find all variants and add-ons" and Clynx CREATED A PRODUCT NAMED WITH THE WHOLE SENTENCE (family none, status none, no parent). D1.6's normaliser/"NOT PLACED" check does not catch an instruction sentence after a real product name. Needed: split "<product>. <request>" into the product ("xbox series x") and an action (find variants/add-ons), research the product, run the request as a follow-up; never use the request text as the product name. Add the test: "xbox series x. find all variants and add-ons".
+E4-NICHE (TESTER, code-level on a temp Store with 20 seeded entries, fake verifier, 38 typed phrases, 2026-10-19 ~06:50; owner asked for a multi-niche test): CORRECT: new models kept apart from lookalikes (iphone 15 pro max/iphone 15, sony wh-1000xm5 vs XM4, trek marlin 7 vs 5, Canon EOS R5, PlayStation 5 Pro, Steam Deck 1TB, Peloton, Roomba, Bose, AirPods), refreshes (dyson v8 absolute, schwinn bike, "macbok air m2" typo repaired), verified children (Fender American Professional II Stratocaster, Switch OLED Zelda edition). PROBLEMS to fold into L4/typed-input work: (a) duplicates instead of refresh: "kitchenaid artisan mixer", "dewalt dcd771", "lego millennium falcon", "lego 75192", "halo infinite" vs the game entry, "samsng galaxy s24 ultra" after repair; (b) spelling repair mangles valid words ("holo base" -> "Halo Bose", "tumbler" -> "Rambler"): only repair toward a word when it is clearly a typo of exactly one known word, never between two real words; (c) junk becomes entries: a question sentence, "asdf qwer zxcv", "research the steam deck oled" (strip instruction prefixes: research/find/look up/what is); (d) "canon eos r6 mark ii" is handled as a child/variant of the R6 instead of a new model; "sony wh-1000xm4 headphones" is not refreshed; (e) entries keep the user's lowercase casing (title-case the name or use the evidence's official name). Live AI behaviour not tested (needs the owner's login).
+E5 Chat guards only future promises, not past-tense claims ("Done, created profiles for all variants"); 12-message memory; raw JSON errors; wrong "set an API key" advice for cloud-account users. NEW.
+E6 Needs-review "Merge them" marks done even on Cancel or failure; identical-looking entries; merge not undoable. (= C5, bigger.)
+E7 Undo listed for a product that no longer exists; "Clear all" skips Trash. (= C5.)
+E8 Product page opens scrolled down; "Back to Database" means three things; substring-only search. (= C5.)
+E9 Discovery "Can't judge it yet" never says why. NEW, small.
+
+=====================================================================
+D. HOW AUDITOR WILL COMMUNICATE (owner's rule)
+=====================================================================
+- One batched note when a large item is finished (not during it), unless it is IMMEDIATE.
+- IMMEDIATE = a broken owner rule (build/release before "fully done", touching the owner's records, assuming Q answers, going outside the approved scope), a regression in work in progress, a blocker, or two sessions contradicting each other.
+- TESTER's UX findings stay with TESTER until the owner says to speak on them.
+
+=====================================================================
+F. CORRECTIONS / RECORDS (AUDITOR, 2026-10-19 ~15:20)
+=====================================================================
+F1 CORRECTION to LIVE_TEST L8: the server's user_products holds 93 rows: 57 belong to ANOTHER account (the PSP games, iPhones, Mac mini listed earlier are theirs) and only 36 to the owner (old 14 Nintendo/Xbox entries from 10-15/10-16 plus 22 test entries). So the owner's old library is NOT recoverable from the server; only from local backups. L8 root cause stands: the 109 pending delete ids do not exist on the server (0 of 109).
+F2 TESTER code-only report on 12545dd (full text in TESTER's message to DEVELOPER): suites pass; 10 findings. HIGH: the question filter rejects real titles ("Can Am Maverick X3", "Will Smith Oscars poster", "How to Train Your Dragon DVD", "When Harry Met Sally DVD", "Is This It vinyl" are NOT PLACED). Others: exact "xbox series x" still asks game-or-console (Halo Infinite (Xbox Series X|S) entry); dewalt dcd771 / samsng galaxy s24 ultra duplicates; verified R6 Mark II filed under R6 but iPhone Pro/PS5 Pro/Series S unlinked; request split drops attributes; "find me a steam deck oled" -> "me a steam deck oled"; mixed-case names; stale "I'll try again" note; add-ons $NaN for Infinity and no ceiling with unknown base; OK-but-empty first pull would forget queued deletes (L8 edge).

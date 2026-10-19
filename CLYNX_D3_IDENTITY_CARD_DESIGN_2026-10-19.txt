@@ -1,0 +1,297 @@
+CLYNX D3 IDENTITY CARD - CATEGORY-AGNOSTIC DESIGN (DEVELOPER, 2026-10-19)
+Design only. No code has been changed. Builds on AUDITOR's CLYNX_PRODUCT_IDENTITY_AUDIT_2026-10-19.txt (D1-D3).
+Trigger: the owner reminded us Clynx is for ANY resalable item, e.g. a rare $500 band poster listed at $75, not just consoles and phones.
+
+=====================================================================
+1. WHAT CLYNX DOES TODAY FOR A POSTER (traced in code, NOT run live)
+=====================================================================
+ 1. Surfacing. A listing is only looked at if a Search For item / Watch / Database product search brings it up. Otherwise it goes down
+    the "general" path (scorer.ts extractGeneralDeal): a text-only AI guess of the typical value ("estimatedValueRangeUsd", "your best
+    general estimate, not a fact"). Nothing identifies WHICH poster it is, so a rare print is guessed like a typical $20-50 poster and is
+    usually not flagged.
+ 2. Identity. A product is created only when the listing's own words confirm the photo's name (scrapeEngine.ts ~2943-2965); otherwise it
+    waits in Review. The lookup then writes a resale blurb (lookupProduct). There is no place for artist/event/date/printing/edition size/
+    signed/numbered/original-vs-reprint. kindOfName() knows only hardware / game / accessory.
+ 3. Value. Sold comps + eBay asking prices by PRODUCT NAME (marketValue.ts, WatchCount). Comp identity filters (compFilter/compIdentity)
+    are built around model numbers, capacity and colour. $25 reprints and $500 originals share most words, so they mix (mean falls) or
+    the filter finds nothing. WatchCount anonymous cap (I9) can silently return nothing.
+ 4. Gate (dealGate.ts), the ONLY place a verdict is made:
+      - no resale numbers -> "worth_a_look" (NO_EVIDENCE / AI_UNVERIFIED), Feed only. notifyWorthALook defaults to false, so NO push.
+      - 1-2 sold comps = "weak"; if the margin is >= 2x the minimum (a $75 vs $500 gap is) it stays qualified as "RARE_FIND",
+        "DEAL (limited sales data)", confidence low, stars capped at 3, and IS pushed.
+      - 3+ comps, <90 days old = moderate/strong: a normal deal.
+      - the 15% negotiation limit is not a problem here ($75 vs ~$500 is far under).
+ 5. Condition. Flaw detection and the value discount are tuned to electronics (cracks, water damage). Folds, tears, pinholes, tape, fading,
+    trimmed margins are NOT modelled (not verified in detail).
+ Likely outcomes: (best) comps exist and match -> pushed low-confidence deal; (typical) no comps -> "Worth a look" in the Feed, no push;
+ (worst) the general AI guesses a typical poster price -> skipped, never seen.
+
+=====================================================================
+2. THE CARD: CORE FIELDS + CATEGORY ATTRIBUTES
+=====================================================================
+Stored in products.identity_json (column exists) with products.identity_status. One OpenAI web-search call + one structuring call
+(see AUDITOR/DEVELOPER thread; no server change for Stage A).
+
+CORE (every product, every category)
+  officialName       the name a collector/seller would use
+  kind               one of: electronics | game | print_poster | apparel | collectible | tool | vehicle_part | furniture | other
+                     (AI chooses; unknown -> other)
+  creator            maker / brand / artist / band / publisher
+  line               product line / series / tour / collection
+  identifiers[]      {type, value}: SKU, model no., UPC, ISBN, catalog no., print ref (for example "AP-123", "Flatstock 7")
+  edition            edition / variant / printing name ("Galaxy Black Special Edition", "first printing", "AP")
+  year               release or event year (date when known)
+  originalPriceUsd   MSRP / original retail when known (null otherwise)
+  differsFromBase    one sentence: what makes it different from the common version
+  howToRecognize     visual marks a photo can show (edition stamp, number, signature, printer's mark, colourway)
+  authenticityTells  how fakes / reprints / restrikes differ
+  valueDrivers[]     what moves the price for THIS kind of thing (see templates)
+  compsQuery         the title string to search sold comps with (built from the card, not the raw name)
+  compsExclude[]     words that mean "not the same thing" (reprint, replica, digital, case, poster frame, ...)
+  sources[]          {url, title, quote, field}: every claim carries the page that supports it
+  attributes{}       category-specific, see below; each attribute: {value, defining: bool, status: verified|supported|unverified, sourceIdx[]}
+  status             verified | supported | unverified | unsourced   (overall; rules below)
+  checkedAt, model   when and by what
+
+DEFINING attributes = the ones that change the price. They drive (a) the dedupe key, (b) base/variant placement (parent_product_id),
+(c) the comps must-match / must-not filter, (d) listing matching. Non-defining attributes are shown but never split two products.
+
+KIND TEMPLATES (the AI is given the template for the kind it picked; "other" uses a free list where the AI proposes keys and marks which are defining)
+  electronics / game : storage, colour/edition finish, region, disc/digital, model no., bundle contents, locked/unlocked   (today's logic)
+  print_poster (WORKED EXAMPLE)
+      defining : artistOrBand, eventOrTitle, venue/city, date, printer/studio, technique (screenprint/offset/litho/giclee),
+                 edition (AP, variant colour, "first printing"), editionSize, editionNumber, signed (by whom), numbered,
+                 originalVsReprint (original / official reprint / restrike / bootleg / modern digital print)
+      informative : dimensions, paper stock, framed, rolled/flat
+      valueDrivers : originalVsReprint, signed/numbered, editionSize, artist, event significance, condition grade
+      conditionFactors : folds, creases, tears, pinholes, tape, fading, foxing/stains, trimmed margins, ink smudges
+      compsExclude : reprint, repro, reproduction, 24x36 print (modern), digital, canvas, frame only, replica
+  apparel : brand, model/collab, colourway, size, year, authenticity tells, deadstock/used
+  collectible : maker, line, character/subject, release year, edition size, boxed/loose, authenticity
+  other : AI-proposed attributes with a defining flag
+
+STATUS RULES (reuse reconcileVerdict):
+  verified    = an official/maker source, OR two independent sources agree; never downgraded by a weaker later card
+  supported   = one credible source
+  unverified  = claims found but not corroborated
+  unsourced   = search unavailable/blocked: stored as "could not check", NEVER as "doesn't exist" and never as an AI-memory blurb
+  A single marketplace listing is never a source for identity of itself.
+
+=====================================================================
+3. HOW EACH PART READS THE CARD (D3 consumers)
+=====================================================================
+  naming/dedupe   officialName + edition + defining attributes (not word soup); junk entities like "and Edition" are impossible because
+                  the card comes from a structured answer, not EDITION_RE.
+  tree            creator > line > edition -> parent_product_id; a poster print run under the artist/tour line.
+  comps           compsQuery + defining attributes as must-match, compsExclude as must-not; originals and reprints stop mixing.
+  listing match   howToRecognize + defining attributes decide "this listing is that product"; missing defining facts -> "worth a look",
+                  not a confident match (reuses IDENTITY_UNCONFIRMED).
+  value evidence  PROPOSED (needs owner OK, changes the gate): when there are NO sold comps but the card's search found cited reference sales
+                  (auction results, dealer pages), expose them as basis "reference": weak evidence, always shown with the URLs. It would let
+                  a one-of-a-kind item be "Worth a look: references show about $480-520" instead of "no numbers". It must never become
+                  "profitable now" by itself.
+  condition       a per-kind condition template from the card (poster: folds, tears, pinholes...) feeds the condition reader; unknown kinds
+                  fall back to the current generic behaviour.
+
+=====================================================================
+4. TEST PLAN ADDITIONS (poster scenario) - all scripted, no network
+=====================================================================
+Unit (pure, npm test style):
+  P1  card parse: a scripted print_poster answer yields kind=print_poster, defining attributes marked, originalVsReprint="original",
+      sources attached; garbage JSON / missing fields -> status unverified, never throws.
+  P2  status: one marketplace-only source -> unverified; two independent -> verified; a later weaker card never downgrades.
+  P3  junk: "and Edition", navigation text, "Wikipedia:Manual of Style" can never become an edition/entity.
+  P4  comps: with compsExclude=[reprint,repro,...], fixtures {$480 original, $520 original, $25 reprint, $30 "modern print 24x36"} keep
+      two originals, value about $500, sample 2.
+  P5  gate with that value: price $75, sample 2 -> weak + big gap -> qualified RARE_FIND, confidence low, stars <= 3, text names the
+      limited sales data.
+  P6  gate with NO comps and NO references -> worth_a_look NO_EVIDENCE, not pushed (notifyWorthALook off), reason says what is missing.
+  P7  (if "reference" basis is approved) no comps + 2 cited reference sales -> worth_a_look, NEVER qualified; URLs shown.
+  P8  negative: "Concert poster print 24x36 reprint" at $75 -> must not qualify (originalVsReprint = reprint/unknown, exclude words).
+  P9  identity gate: listing "Grateful Dead poster" (no year/venue) with defining attributes missing -> worth_a_look, not a confident match.
+  P10 condition: poster text "creased, pinholes, tape on back" lowers the value range and cannot make a worse listing look better.
+  P11 AI-error safety: search blocked / AI paused -> status unsourced, no error text in any summary, queued for retry (D2).
+  P12 regression: electronics/games cards (Xbox Series X Galaxy Black Special Edition, 2TB, ~$599.99, parent Series X) unchanged by the generalisation.
+Integration (scripted AI + fixed search answer, virtual clock like scripts/discovery-bench.cjs): one poster listing and one console listing
+  through scan -> product -> comps -> gate -> alert; assert the same code path handles both and the poster is not special-cased.
+Live (TESTER, after the owner builds): fresh profile, type "<band> <year> tour poster original" in the Library/chat; expect a card with
+  creator, event, date, printer, edition size, original-vs-reprint, sources, and the reprint excluded from comps; Web activity shows the
+  search; server shows a kind='search' row with status 200. Use an owner-supplied real listing URL or a hand-made test listing; do not
+  spend on live scans of unrelated items.
+
+=====================================================================
+5. OPEN QUESTIONS FOR THE OWNER
+=====================================================================
+  Q1  APPROVED by the owner 2026-10-19: add the "reference" evidence basis (weak, cited, never a deal alone), and mark the estimated-profit
+      section with a weak-confidence warning that says WHY. Details in section 6.
+  Q2  Stage A (search then structure, no server rebuild) vs Stage B (server "identity" mode)? Default: A.
+  Q3  OK to re-queue the 4 products whose summary is "(Research failed: ...)" (edits the owner's records)?
+  Q4  Should "Worth a look" for a high-gap, no-comps item be pushed quietly by default? Today it is Feed-only (notifyWorthALook=false).
+
+=====================================================================
+6. REFERENCE SALES + "WEAK CONFIDENCE" ON THE ESTIMATED-PROFIT SECTION (owner-approved design, no code yet)
+=====================================================================
+Where the profit estimate is shown today (verified in code):
+  (a) Listing card (renderer/components/ListingCard.tsx ~725-760, text from lib/dealNumbers.ts describeDealNumbers): "Sells ~$X / Keep ~$Y /
+      Profit +$Z (n%)" plus ONE support line, orange when weak ("Rough estimate: only 2 sales to go on." / "asking prices only, no confirmed sales").
+  (b) Library product page (renderer/screens/Database.tsx ~196-280, the "eBay VALUE" panel): big "$X estimated sale price - <basis>", Asking
+      median / Sold average / You'd keep tiles. Its basis label knows only sold / blend / active.
+  Neither knows about reference sales, and neither shows a clear "weak confidence" badge: the warning is only a coloured sentence.
+
+What changes:
+  1. New evidence basis "reference" next to sold | blend | active | user: types.ts GateFactsSnapshot.basis, dealGate.ts ValueEvidence.basis,
+     evidenceLevel() => always "weak" (never moderate/strong), product signals/store column for the product-level estimate (ebay_est_basis
+     gets the value "reference").
+  2. Where the numbers come from: the identity card's cited reference sales (auction results, dealer pages, price guides) - each with
+     {url, title, price, date if known, kind: sold|asking|appraisal}. Estimate = median of the cited prices after dropping outliers and anything
+     the card's compsExclude / defining-attribute filter rejects. Needs >= 2 independent sources (different sites); 1 source is shown as
+     "one reference" but gives NO value.
+  3. Hard rules in the gate: a "reference" value can produce "worth_a_look" (with figures) but NEVER "profitable_now" or "negotiation" by
+     itself. If real sold comps appear later (>=1 matching sale) they replace it. P7 in the test plan locks this.
+  4. Weak-confidence marking, both places, with the reason in plain words:
+       - A visible pill "WEAK CONFIDENCE" (orange, same colour token as the existing warn tone) next to the profit/estimate line, never only
+         tooltip text, and the Profit figure itself is shown as "~+$X (estimate)" not a bare number.
+       - The WHY line, built from facts, one sentence each, most important first (max two lines on the card, all in the tooltip / panel):
+           * no sold sales found on eBay for this exact item;
+           * value comes from N cited reference prices ($a-$b) from N different sites - not from sales Clynx could confirm;
+           * the item is rare or unique, so comparable sales are scarce;
+           * what would raise confidence: "one matching eBay sale" / "verify the edition and printing in the photos".
+         The panel lists the reference sources as links (title + price + site) so the owner can check them.
+       - Existing weak cases get the same pill and a reason (only N sales / asking prices only / identity unconfirmed), so the wording is
+         consistent. Strong/moderate evidence shows no pill.
+  5. Card file changes (when the owner says go): dealNumbers.ts (support text + new field "confidence": "weak" | ok, "whyWeak": string[]),
+     ListingCard.tsx (pill + lines), Database.tsx EbayValuePanel (pill, basisLabel "from N cited reference prices", reference list),
+     dealGate.ts + types.ts (basis "reference", level weak), store/products (persist the reference list in identity_json sources; ebay_est_basis),
+     identityCard.ts (reference extraction), tests: dealNumbers.test (new), dealGate.test (reference never qualifies), identityCard tests P4-P7.
+  6. Not changed: alerts. A weak-confidence "Worth a look" is still Feed-only unless Config > notifyWorthALook is on (Q4 still open).
+
+=====================================================================
+7. CHANGES AFTER THE GUARDIANS AUDIT (AUDITOR's five gaps; design only, no code)
+=====================================================================
+I checked productKind.ts against CLYNX_GUARDIANS_AUDIT: mediaSignal() accepts a platform only in brackets, as " - <platform>" at the very END, after
+"for", before "game(s)/version", or at the end followed by only {brand new,new,sealed,used,cib,complete,physical,disc,ntsc,us}. "Factory Sealed",
+"Complete in Box" and "- Brand New" after the platform therefore escape it. I agree with the findings; I did not rerun them myself.
+
+G1 KIND IS A HARD GATE, NOT A TITLE PATTERN (card kind = console|game|accessory|... is a core field and is stored on the product)
+   Order of authority for "what kind of thing is this": (1) the eBay/WatchCount category of the sold comp or listing, (2) the Facebook
+   category / the AI's kind for a scanner listing, (3) the card's kind, (4) title wording (kindOfName/mediaSignal) - only as a veto or when
+   nothing above exists. Rules: kind mismatch => the photo is rejected / the comp is dropped, whatever the title says; unknown kind => at most
+   "compatible", never "exact", and it cannot add a value until confirmed. A game entry never takes console prices and vice versa.
+   WatchCount's empty category slot ("/sold/<words>/-/fixedprice", watchcount.ts:47): fill it with the eBay category for consoles. UNVERIFIED:
+   whether WatchCount accepts an eBay category id there and which id; TESTER or the built-in browser must load one page to confirm before code.
+G2 FIXED ATTRIBUTE VOCABULARY (the "other" kind cannot drift)
+   Each kind has a CLOSED list of attribute keys (section 2 templates); "other" uses a small fixed generic set (creator, line, edition, year,
+   size, colour, material, identifiers). Keys the AI invents are kept only as non-defining notes, never in the dedupe key. Values are normalised
+   (case, punctuation, units like 1TB/1000GB, a synonym table such as "limited"="special"), and the dedupe key is computed ONLY from
+   kind + normalised creator + line + edition + the sorted normalised DEFINING values. The card stores vocabularyVersion; a vocabulary change is a migration.
+G3 A CARD FROM A SCANNER LISTING (not a typed name)
+   Listing -> candidate name from the title and the photo observation (identifyFromObservation / visualResearch; still shadow) -> three results:
+     a) clean and corroborated by the title words -> one card search is allowed (budget below); the card records origin {source, listing id, triggering text}.
+     b) ambiguous ("old concert poster") -> NO card and NO product. The listing stays "identity uncertain" (gate level weak, at most Worth a look
+        with the WEAK CONFIDENCE pill and the reason "Clynx could not tell which poster this is"), and a Review item is queued. A name that only
+        the photo gave never becomes a product (existing rule, scrapeEngine ~2950, unchanged).
+     c) the owner can press "Identify" on that listing to spend one budgeted photo+search identification.
+   Product creation logs WHY: created_by (typed | chat | scanner | variant discovery | sibling discovery | Database sweep), the triggering text/listing.
+   A product whose kind is game/accessory is never created from a console search without the kind matching the triggering search's kind.
+G4 COST AND BURST CONTROL (its own budget; the generic perHour search limit is not reused)
+   identityCardsPerHour (default 6) + identityCardsPerDay (default 40), config.json. Cache by key = kind + normalised name (positive 30 days; a
+   failed/blocked search is cached 30 min; "nothing found" 24 h). One in flight at a time, minimum gap between calls, queue persisted so a restart
+   does not re-burst. Honours the existing AI breakers (429 / planLimit / abuse-block pause) and stops the queue when one trips. Save-credits mode
+   (default ON for most users): no automatic card creation from the scanner; cards are made only when the user types a name, asks in chat or presses
+   Research/Identify (consistent with scrapeEngine ~2851). Open: should a user-typed name build a card in Save-credits mode? (owner decision, Q5)
+G5 REGRESSION SET (P13) - AUDITOR's matrix, currently passing the wrong way, to be written FIRST so it fails on today's code:
+   titles: the 3 Guardians console-style titles and 5 Guardians variants from the Guardians audit section 1, "Starfield - Xbox Series X - Brand New",
+   "Starfield Xbox Series X Brand New Factory Sealed", "Halo Infinite Xbox Series X Xbox One Brand New Factory Sealed".
+   products: "Xbox Series X Galaxy Edition", "Xbox Series X Galaxy Black Edition", "Xbox Series X Starfield", "Xbox Series X Halo Infinite".
+   expect: every game title is kind=game and is never photo "match" / comp "exact" / "compatible"-and-counted for the console entries; the game
+   entries only take game comps; the real console titles still match; "Xbox Series X Galaxy Black Edition" $600 is NOT valued at the plain
+   console's $501 (see below).
+   Cheap safety net that does not need the card: extend mediaSignal (platform after a dash or followed by any condition words) and add this
+   suite. I suggest shipping that FIRST as "D1.5" - pure code, no AI, no cost.
+EDITION UNPRICED (agreed): when a listing's title claims an edition/defining attribute and only a generic parent has a value, the gate returns
+   Worth a look with the WEAK CONFIDENCE pill and the reason "priced only against the plain model; this edition has no price of its own yet",
+   never a loss/pass from the parent's price (extends the existing IDENTITY_UNCONFIRMED path in dealGate.ts).
+Q5 (new, for the owner): Save-credits mode and user-typed names (see G4).
+
+G1 UPDATE (reported by AUDITOR, read-only page loads in the built-in browser; I have not loaded it myself):
+   WatchCount URL pattern: https://www.watchcount.com/sold/<keywords>/<slug>_<ebayCategoryId>/<fixedprice|all>?site=EBAY_US&sortBy=bestmatch
+   The category goes in the slot watchcount.ts:47 fills with "-". The numeric id drives it (the slug text is ignored). 139971 = Video Game Consoles
+   (a sub-category, accepted); top-level ids seen: 1249 Video Games & Consoles, 1 Collectibles, 550 Art. Sub-category ids need the eBay
+   category tree (the page loads them dynamically), so poster-type items use their own eBay category id. beta.watchcount.com now redirects to
+   www.watchcount.com, so the URL builder should use www. A missing id was not tested. Page 1 for "xbox series x galaxy (edition)" was all consoles
+   with or without the category, so the category is a safety net, not the cause. An "exclude categories" field exists on the form (untested).
+   Implementation note for later: take the category id from the identity card's kind (console -> 139971), never from title words.
+
+D1.5 FOLLOW-UP (TESTER probe, 2026-10-19): the first mediaSignal change (404d7a8) called nine real special-edition console titles a game
+("Robot White Xbox Series S Brand New", "Daystar ...", "Halo/Kinect/Cosmic/Modded/Rare Xbox Series X ... New", "Starfield Limited Edition Xbox
+Series X Brand New") because it treated ONE unfamiliar word before the platform as a game title. Backed out in 3331249 (two words or a dash are
+required). Lesson for D3: edition/colour words and game titles look identical in a title; only the entry's kind (card / eBay category) can decide.
+Still open from TESTER: entry "Xbox Series S Robot White Limited Edition" rejects the real "Microsoft Xbox Series S 512GB Robot White Console Brand New"
+as "a different edition" because Robot White is a normal colour of the Series S, not a Limited Edition. This is an entry-naming problem for the
+D3 card: official name + edition + defining attributes (colour is a defining attribute of the Series S, "Limited Edition" is not).
+Known remaining holes (kind decided by title words): lone-word game titles ("Starfield Xbox Series X Brand New Factory Sealed"), and bare
+"Starfield Xbox Series X".
+
+=====================================================================
+8. PHOTOS-AND-WORDS FUSION: AUDITOR'S CHECK AGAINST THE CODE (2026-10-19, e5cd78e)
+=====================================================================
+Owner rule: Clynx needs BOTH the listing's images and its words (title + description). Words alone never decide an ambiguous title either way.
+Done in e5cd78e: mediaAmbiguity() (one unfamiliar word before the platform) => comp "uncertain" (KIND_AMBIGUOUS), photo "insufficient", not fileable without a picture.
+AUDITOR's findings (verified at e5cd78e), and what they change in the plan:
+ a) There are FOUR combiners of text and photo verdicts, not one: (1) scrapeEngine ~2400-2710 vision matchesClaim flags, (2) productIdentity.ts resolveIdentityTarget
+    (the only one that already takes title + description + image), (3) fileImage.ts decideFiling (the single writer for images; best choke point for photos),
+    (4) text-only guards: store.ts listingContradictsEntry at 6 sites + index.ts titleIsOtherProduct. photoIdentity.withVision()/needsPicture() have NO callers (tests only).
+    => the fusion must be ONE function that sits in front of all four; wire or delete withVision/needsPicture.
+ b) Comp photos are available (WatchCount imageUrl; eBay Browse imageUrl, upsizable), BUT classifyComparable runs first and drops uncertain/rejected before photoCheck sees them,
+    so uncertain comps never reach a picture today. Blockers for promotion: makePhotoCheck returns null without reference photos and fails OPEN (promotion must fail CLOSED);
+    reference photos can be polluted (game art under the Starfield/Halo console entries) so promote only against trusted references; comps carry no description (photo is the
+    only extra evidence for comps).
+ c) The ambiguity flag is not what costs comps. Measured on 20 real Galaxy Black sold titles ($836-$1,549): entry "...Galaxy Black Special Edition" lost 10 of 20 (EDITION "Limited"
+    vs "Special" wording, and ACCESSORY on "w/ Controller"); entry "...Galaxy Edition" lost 4 of 20 (ACCESSORY only). The official name keeps FEWER comps. Both rules predate this work.
+    => D3: an edition ALIAS family (special/limited/collector's/exclusive = one family unless two different ones are stated); a missing edition word is "compatible", not rejected, when series,
+    size and color agree; controller/hdmi after "w/", "with", "includes" are included extras, not an accessory listing (this is also audit finding F2, D4).
+ d) Fusion rules to add: fail CLOSED everywhere (no photo / no AI = uncertain, never exact); cap and group Review items, show "N held for a photo check" in the AI Activity summary;
+    ask the photo "kind first" question ONCE per listing and cache it on the listing for the scanner, the filing gate and the card; keep compPhotoCheck's 14-per-call batching for promotion.
+ e) WatchCount showed a "Security Check" page during AUDITOR's loads (not bypassed): more evidence that lookups can silently return nothing (D4: log it, never stamp "checked").
+
+=====================================================================
+9. OWNER REQUESTS FROM THE MANUAL TEST (Halo game/console collision; "trust what I typed") - DEVELOPER's reply (design only)
+=====================================================================
+Source: OWNER_REQUESTS_HALO_AND_TYPED_INPUT_2026-10-19.txt (AUDITOR). Both fit the card design; they need the card kind and OpenAI-first search, plus two changes I found in the code.
+
+ROOT CAUSE OF "typed words replaced by Galaxy/White" (reproduced with the real tokenizer, read-only):
+  variantResearch.ts:45 decideResearchTarget: `matched && (sameProduct || !isMoreSpecific(typed, matched.name))` => refresh_existing.
+  identityTokens("xbox series x galaxy edition") = [xbox, series, x, galaxy]; identityTokens("Xbox Series X Galaxy/White") = [xbox, series, x, galaxy, white].
+  The typed phrase is a SUBSET of the old invented entry ("edition" is dropped as filler), so it is judged "a plainer name than the entry's" and the entry is refreshed.
+  That rule was written for "Xbox Series X" vs "Xbox Series X Console"; it wrongly treats an entry's extra DEFINING words (white, a colour, an edition, a capacity) as filler.
+  Fix: refresh only when the typed phrase equals the entry, or the entry's extra words are all generic (console, system, bundle...). Otherwise the typed words are the query of record.
+  Where the "What should I focus on in the writeup?" question comes from: the refresh_existing tool result nudges the model to ask first. The fix is in the tool result wording ("research first, report, then offer follow-ups; ask only for real ambiguity").
+
+REQUEST 2 (typed input, "D3-T") - what changes in my plan
+  - New first step before any Database lookup: normalise the typed phrase. Deterministic only: (a) typo repair by edit distance <= 2 per word against a vocabulary built from Database names, knowledge-graph entities and a small brand/line list; (b) word-order repair by matching the token SET against known product titles ("Xbox X series" -> "Xbox Series X"). AI confirms only when the deterministic pass is unsure. Show the correction ("I read that as ..."), keep the original as an alias. Never change a word that is in the vocabulary.
+  - Then ONE OpenAI web-search card call with the phrase AND its keywords (typed input is the highest-priority caller; same budget family but reserved headroom so scanner bursts cannot starve it).
+  - Resolve against the Database AFTER the card exists: official name + defining attributes decide attach / create child / ask. A loose word match never decides.
+  - Answer in Clynx's voice from the card (what it is, price if known, what it saved, what it could not confirm, sources in Web activity). A blocked or over-budget search says exactly that and stores nothing as fact. Ask with the existing choice buttons only for real ambiguity (game vs console, unverified/unsourced, matches nothing).
+  - Q5 recommendation (not assumed): a typed name IS the owner asking for research, so allow ONE card call per typed phrase even in Save-credits mode, with a small hourly cap. The owner decides.
+  - PROPOSED SPLIT so the owner's example works early: "D1.6" = (1) the refresh rule above, (2) the research tool's wording, (3) route the chat research/look-up through the OpenAI-first search (D1), (4) the deterministic normaliser with the correction shown. It needs no card store and no schema. The card, storage and naming follow in D3.
+
+REQUEST 1 (game vs console collisions) - what changes in my plan
+  - Per-photo kind: the "kind first" vision question (console / game / accessory / other + confidence), asked ONCE per photo and cached in product_images.verdict_json (column exists, no new column), reused by the filing gate (fileImage.ts decideFiling, the single image writer), the scanner and the card.
+  - Collision rule at fileImage: photo kind vs the entry's kind (card kind, else the majority of its trusted photos). Same => attach. Different => never file there; use or create the sibling of the other kind. Unsure => Review with both photos; nothing filed, nothing priced.
+  - Mixed-kind gallery detector: an entry whose photos disagree on kind is not priced, gets no new comps and queues ONE grouped Review item.
+  - "Research both images": a single same/different/cannot-tell comparison of the two photos plus each listing's words, run only on a collision (not across the whole library), batched like compPhotoCheck (14 per call).
+  - Naming: game "Halo Infinite (Xbox Series X|S)" (platform in brackets, existing convention), console by its official card name; two entries linked in the franchise family, never merged. Values never cross kinds.
+  - Split of existing mixed galleries (Q6): an owner-approved Review action, with a database backup first (dbBackups exists) and an undo; it edits the owner's records, so nothing runs without the owner's OK.
+  - Cost: the kind question runs only for photos being filed from ambiguous/collision cases and for galleries the owner asks to check; not on the whole library.
+
+ADDED TESTS (P-series)
+  P20 typed "xbox series x galaxy edition" with an old entry "Xbox Series X Galaxy/White" on file: decision is NOT refresh_existing; the query of record is the typed words; first Web activity line shows them as typed.
+  P21 "Xbox X series galaxy edition" => read as "Xbox Series X Galaxy Edition", the correction is shown, the original is kept as an alias.
+  P22 "xbox seris x galxy edition" => corrected, shown; a vocabulary word is never altered ("galaxy", "series").
+  P23 "halo infinite" => buttons: game / console / Halo Infinite Limited Edition console; nothing created before the answer.
+  P24 gibberish/unknown => says it cannot place it, asks, creates nothing.
+  P25 search blocked/over budget => says so, nothing stored, retry queued.
+  P26 refresh rule: "Xbox Series X" vs entry "Xbox Series X Console" still refreshes; vs "Xbox Series X Galaxy/White" does not.
+  P27 tool wording: the research reply never asks "what should I focus on" before researching.
+  P28 three real Halo titles (two games, one console) => two entries, no mixed gallery, own comps each; a game photo offered to the console entry is not filed and the sibling is used or created; unsure => Review with both photos; Starfield and Forza Horizon 5 repeat it.
+  P29 values never cross kinds (game entry takes no console comps and vice versa).

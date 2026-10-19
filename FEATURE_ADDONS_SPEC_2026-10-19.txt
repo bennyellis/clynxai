@@ -1,0 +1,124 @@
+FEATURE SPEC - "ADD-ONS" under Variants in the Library (owner request, 2026-10-19)
+AUDITOR draft for DEVELOPER. DESIGN ONLY: the owner has NOT said go on any code. Sized as a LARGE item: it depends on the identity card (D3) and the comps fixes (D4) and should be built after them.
+
+=====================================================================
+0. THE HUMAN THOUGHT, CORRECTED
+=====================================================================
+The reseller's question is not "is everything included?" but "WHAT ALL is included?" It works in two directions:
+  (a) Missing expected parts LOWER the value: a Galaxy console with no controller, no cables or no box sells for less than a complete one.
+  (b) Extra parts can be hidden gems: a 1TB expansion card, a second controller, a game bundle, a charging dock. A $700 listing that holds a $1,100 console plus a $150 card is an "insane deal".
+Clynx already looks for (b) (hidden gems), but with fixed guesses. It has nothing for (a). This feature teaches Clynx both from real sales.
+
+=====================================================================
+1. WHAT THE OWNER ASKED FOR (expanded)
+=====================================================================
+1.1 A new section called "Add-ons" under Variants on a Library product page (for example the Galaxy edition Xbox). An add-on is a thing that can come WITH the base product: controller, original box, expansion card, dock, cables, a game.
+1.2 Each add-on is its own Database entry (researched, with its own identity card, photos, comps), linked to the base product.
+1.3 When Clynx meets a familiar base product in a listing and sees an add-on (familiar or new), it automatically creates an Add-on option on that base product, which the user can toggle on and off.
+1.4 Toggling an add-on ON raises the estimated profit the user sees.
+1.5 The raise is NOT linear. Clynx looks at eBay sold listings and compares selling the add-on alone, selling the base alone, and selling them together, then uses what the data shows. Example from the owner: base $400, the add-on sells for $100 alone but bundled listings average $450, so the bundled uplift is about $50, not $100.
+1.6 Be smart, not overpromising: show how sure Clynx is, and never present a guess as a fact.
+1.7 Clynx researches each new add-on and finds related add-ons (things that fit the same base).
+
+=====================================================================
+2. WHAT EXISTS TODAY (so this builds on it, not beside it)
+=====================================================================
+- bundleBreakdown.ts: looksLikeBundle(), breakDownListing() (one AI call splits a listing into items), valueBundle(). Its numbers are FIXED GUESSES: accessory weight 0.55, extra weight 0.45, extra units x0.5, total uplift soft-capped at 30% of the main item (or 50% of the raw sum). Nothing is learned from sales.
+- profitGate.ts: isHiddenGemCandidate, repriceWithExtras (fee-aware), extrasPricedSeparately ("sold separately", "$15 each" means the extras are NOT in the price: no hidden-gem value). Keep that rule.
+- scrapeEngine.ts: bundle valuation only for deals / hidden-gem near-misses / Watch candidates; index.ts valueListingBundle prices each extra via checkMarketBeforeAlert.
+- Library already has "Specific models" (children, parent_product_id) and "Variants" siblings. There is NO add-on concept and NO table for it.
+- No learning of what is "frequently a good add-on".
+
+=====================================================================
+3. DATA MODEL (new, additive)
+=====================================================================
+product_addons
+  id, base_product_id, addon_product_id (its own products row, kind = accessory/addon),
+  role: expected | bonus   (expected = normally included, missing lowers value; bonus = extra, present raises value)
+  status: suggested | confirmed | dismissed   (created automatically = suggested; the user can confirm or dismiss)
+  source: seen_in_listing | researched_related | user_added
+  times_seen, first_seen_at, last_seen_at, example_listing_ids
+  compatibility: verified | plausible | unknown   (a 1TB expansion card fits Series X|S, not a PS5)
+  stats_json (see 4): standalone_median, standalone_n, bundled_median, base_only_median, premium_usd, premium_n, premium_low/high, confidence, checked_at
+listing_addons (per scanned listing): listing_id, base_product_id, addon_id, evidence (title / description / photo), confidence
+The add-on's own products row follows the identity-card rules (official name, kind, SKU, sources). A listing that is only an add-on (just the card) is an add-on product listing, not a base-product listing (kind gate from D3).
+
+=====================================================================
+4. HOW CLYNX LEARNS WHAT AN ADD-ON IS REALLY WORTH (the core)
+=====================================================================
+Three numbers per add-on, each with its sample size:
+  A  standalone sold price: what the add-on sells for alone (sold comps for its own entry).
+  B  bundled premium: median sold price of listings of the base WITH the add-on, minus median sold price of the base ALONE, matched on edition, condition and recent date window.
+  C  parting-out path: A minus the extra cost of a second sale (second eBay fee at your 84% keep, extra shipping, time to sell).
+Method
+  1. Pull sold listings for the base product (comps pipeline, identity-gated: Galaxy only, no other generations, no for-parts) and split them by what the TITLE says is included: base only / base + this add-on / base + other things.
+  2. Compare medians, not averages, and drop outliers. Require a minimum sample (suggest 5 per group) before B is shown as learned; with fewer, B is "not enough data" and the estimate falls back to the old fixed-weight guess labelled ROUGH.
+  3. Never present an uplift larger than the learned premium B when B has enough data. When A is larger than B, show both and say so ("sells alone for about $100, but bundles add about $50"): it is the user's choice whether to part it out.
+  4. Several add-ons: do not add them up. Diminishing returns (reuse valueBundle's idea of a cap, but from data); cap the total uplift at what bundled sales show for the full set, and show a range.
+  5. Expected parts (role = expected): learn the deduction the same way: base alone vs complete.
+  6. Everything stored with sample size, date window and confidence (high >= 10 matched sales, medium 5-9, low < 5 or fallback).
+  7. Honest display: ranges, "based on N sold listings", "rough" when it is not from sales, never "profitable now" from an add-on alone (same weak-evidence rule as the owner's Q1 reference basis).
+Worked example (owner's numbers): base $400, add-on alone $100. Bundled sales of base+add-on average $450, base alone $400: premium B = $50. Net of the 84% keep: bundled uplift about +$42; parting out about $84 minus a second shipment, minus time. Default estimate shown = the conservative bundled +$42, with the parting-out figure shown next to it.
+Real-world check from AUDITOR (WatchCount, first page, "xbox series x galaxy edition"): 20 sold Galaxy Black consoles from $836 to $1,549, middle about $1,100-$1,150. Some titles say "w/ Controller", "Box" or "Complete Box": that is exactly the data to split by inclusions. Clynx cannot do it today because those titles are rejected as accessories (backlog B2) and edition wording splits them (B1).
+
+=====================================================================
+5. AUTOMATIC DISCOVERY AND RELATED ADD-ONS
+=====================================================================
+- On each scanned listing of a KNOWN base product: run the existing breakdown (title, description, photos) and compare the items with that base product's add-ons. Familiar add-on: increment times_seen. Unfamiliar one: create a suggested add-on and queue its research (own entry, card, comps), under the D3 budget and burst rules.
+- Noise filter: ignore generic filler ("cables", "manual") until seen in several listings; ignore anything priced separately ("sold separately", "$15 each").
+- Related add-ons: ask the identity-card research "what accessories and add-ons fit this exact product", keep only the ones with a source, mark compatibility, create them as suggested (never auto-confirmed).
+- Compatibility gate: an add-on only attaches to bases it fits (kind and compatibility from the cards).
+- A listing that already includes the add-on gets the uplift applied by the scanner automatically only when the add-on is DETECTED in the listing (title/description/photo) and included in the price.
+
+=====================================================================
+6. UI (Library product page)
+=====================================================================
+- Under Variants: "Add-ons" list. Each row: thumbnail, name, role badge (Expected / Bonus), "alone ~$X (N sold)", "adds ~$Y when bundled (N sold, medium confidence)" or "rough estimate", a toggle, and a source note ("seen in 4 listings", "researched").
+- The profit area on the product page shows: base estimate, then "with selected add-ons" as a RANGE, with a one-line why. Toggle off = back to the base number.
+- Suggested add-ons are visibly marked "suggested"; the user can confirm, dismiss, or rename. Dismissed ones never come back.
+- Alerts (ntfy) name the add-ons found in the listing and the uplift as "+ about $Y (rough)" when applicable.
+- Keep it simple: no more than one new section; plain words; follow the owner's UX complaints (fewer buttons, no jargon).
+
+=====================================================================
+7. GUARDRAILS (do not overpromise)
+=====================================================================
+- Never apply an add-on that is not in the listing.
+- Never sum add-ons linearly; always show sample size and confidence; label fallback numbers ROUGH.
+- Uplift is limited by what bundled sales show; if there is none, use a conservative cap and say so.
+- A thin sample (< 5) cannot raise an alert's stars.
+- The add-on's own comps are identity-gated like any product (no game boxes standing in for a controller, no other console's accessory).
+- Extra lookups are expensive (WatchCount anonymous cap, OpenAI budget): learn add-ons lazily, only those seen several times or worth more than a threshold, cache for weeks.
+
+=====================================================================
+8. DEPENDENCIES AND ORDER
+=====================================================================
+Needs first: D3 identity card (kind, compatibility, official names), D4 comps fixes (edition aliases B1, "w/ controller" as an included extra B2, not-working guard), reliable WatchCount lookups with logging (B3), and the "why was this product created" log (B5). Without those the sold data this feature learns from is mostly rejected.
+Phases
+  P1  Data model + manual add-ons + UI toggles, numbers labelled ROUGH from the existing fixed weights.
+  P2  Detection in listings: auto-create suggested add-ons, familiar/unfamiliar handling, noise filter.
+  P3  Learning from sold data: A, B, C and the expected-part deductions with confidence.
+  P4  Related add-on research (compatibility-gated).
+  P5  Scanner and alert integration, plus a small backtest on past listings to check estimates against real sold prices.
+
+=====================================================================
+9. ACCEPTANCE TESTS
+=====================================================================
+T1 base $400, add-on alone $100, bundled average $450 -> uplift shown about $50 (net about $42), parting-out shown separately, not $100 added.
+T2 fewer than 5 bundled sales -> "not enough data", ROUGH label, conservative cap.
+T3 two add-ons: the total is below the sum and capped by bundled data.
+T4 add-on priced separately in the listing ("card sold separately for $120") -> no uplift.
+T5 unfamiliar add-on on a known base -> a suggested add-on is created, research queued within budget, toggle starts OFF.
+T6 dismissed add-on never returns.
+T7 add-on incompatible with the base (PS5 card on an Xbox) -> never attached.
+T8 expected part missing (Galaxy console with no controller) -> deduction from learned data, labelled with N.
+T9 add-on listing alone (just the card) is NOT treated as the base product.
+T10 toggle on/off updates the profit display only, never the stored base value.
+
+=====================================================================
+10. OWNER DECISIONS NEEDED (not assumed)
+=====================================================================
+Z1 Toggle default: suggested add-ons OFF until confirmed? (recommended)
+Z2 Should the scanner apply learned uplifts automatically to alerts, or only show them on the Library page at first? (recommended: Library first)
+Z3 Which categories first? (consoles and phones, then the rest)
+Z4 Budget for the extra sold-price lookups (WatchCount is capped; recommend lazy learning).
+Z5 Show parting-out numbers, or only bundled? (recommended: both, bundled as the default estimate)

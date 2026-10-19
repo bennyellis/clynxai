@@ -1,0 +1,86 @@
+CLYNX AUDIT - how "xbox series x galaxy edition" pulls in "Guardians of the Galaxy"
+2026-10-19. Auditor session. Read-only: no repo or user data changed. I ran the app's own matching code (bundled into the scratchpad,
+not the repo) on real titles, queried the pre-reset database read-only, and loaded one WatchCount page in the built-in browser.
+VERIFIED = I ran it or saw it. INFERRED = follows from it.
+
+SHORT ANSWER
+The game shares three words with the console name ("Galaxy", "Edition", "Xbox Series X"). Clynx tries to tell a game from a console
+by reading the TITLE FORMAT with pattern rules. That was patched in Beta 12 for one exact title shape, and it breaks on the next one.
+For the name you typed, "Xbox Series X Galaxy Edition", a Guardians game title is scored an EXACT match, as a photo and as a sold price.
+
+
+1. THE FIVE WAYS IT GETS IN
+
+W1  The title test only recognises a few title shapes                                                  VERIFIED (ran the real code)
+    Product "Xbox Series X Galaxy Edition" (what you typed):
+      "Guardians of the Galaxy (Xbox Series X) ..."  platform in brackets            -> rejected   (the Beta 12 fix)
+      "Marvel's Guardians ... Cosmic Deluxe Edition Xbox Series X"                    -> rejected
+      "Guardians of the Galaxy Xbox Series X Brand New Factory Sealed"                -> photo MATCH, sold-price EXACT
+      "Guardians of the Galaxy - Xbox Series X - Brand New"                           -> photo MATCH, sold-price EXACT
+      "Marvel Guardians ... Cosmic Deluxe Edition Xbox Series X Complete in Box"      -> photo MATCH, sold-price EXACT
+    Product "Xbox Series X Galaxy Black Edition": the same three titles come out "insufficient" (photo) and "compatible" (price).
+    "Compatible" means nothing contradicts it; those prices can be counted. The old word-count test also says yes to all of them.
+    Why: mediaSignal() (productKind.ts) spots a game only when the platform is in brackets, or at the very end followed by a short list
+    of words (new, sealed, used...). A dash before "Brand New", or "Factory Sealed", or "Complete in Box" slips past it.
+
+W2  Other game titles pass the same way (this is TESTER's wrong-photo finding)                         VERIFIED
+    Product "Xbox Series X Starfield":  "Starfield - Xbox Series X - Brand New" -> MATCH; "Starfield Xbox Series X Brand New Factory
+    Sealed" -> MATCH. Product "Xbox Series X Halo Infinite": "Halo Infinite Xbox Series X Xbox One Brand New Factory Sealed" -> MATCH.
+    Those are the exact eBay titles saved on the Starfield and Halo Infinite entries, which is why their photos are game box art.
+    A product NAME that contains the game word makes every game word in the title agree, so the title looks like an exact match.
+
+W3  Save-credits mode lets the "compatible" ones file without a picture check                          VERIFIED (code, photoIdentity.ts)
+    fileableWithoutPicture() accepts "match" or "insufficient + compatible". Your lowAiMode is off now, so a picture check should run,
+    but anyone with Save-credits on (the default) gets game photos filed under console entries.
+
+W4  The product record itself gets created for the game                                                VERIFIED (data) / INFERRED (cause)
+    Pre-reset database: "Guardians of the Galaxy (Cosmic Deluxe Edition) (Xbox Series X)" was created 10-15 00:55:36, 5 minutes after
+    "Xbox Series X Galaxy Edition" (00:50:30), filed under Xbox > Games > Xbox Series X. No listing is linked to it. Its sold average
+    was $26 from 10 comps (a game's price, fine for a game, wrong for the console). Its stored research summary says the sources
+    checked were the Cleveland Guardians baseball site, MLB.com, ESPN and Wikipedia: the follow-up web search for the game's name
+    wandered off to baseball. I could not find which of the 7 creation paths made it (the app does not store why a product was
+    created). The Beta 12 gate protects photos and comps; it does NOT stop a game from becoming a Database product.
+
+W5  A real Galaxy Black listing was priced against the plain console                                   VERIFIED
+    Facebook listing "Xbox Series X Galaxy Black Edition" $600 (seen 10-15 00:19, 2 hours old) was matched to the generic "xbox" search,
+    given a reference value of $501 (a plain Series X), a "major condition" penalty, and rejected as a $495 loss.
+    Right now on WatchCount the same phrase's first 20 sold results (Best Match, fixed price) are all Galaxy Black consoles, from $836
+    to $1,549, middle about $1,100-$1,150. No game appears in those 20. So the page works when queried; Clynx's own lookup for the
+    "Xbox Series X Galaxy Edition" product stored 0 comps (see database audit F1). That listing may or may not have been a real
+    deal (the seller could be fake, or the console incomplete), but it was never given a fair chance.
+    The second listing, "Xbox Series X 2TB Galaxy Black Edition" $660, was skipped as 3 days old.
+
+
+2. WHAT THIS TELLS US
+- The sold search is not the main polluter for this phrase: WatchCount's own ranking returns the right consoles. The pollution comes
+  from what Clynx does around it: name matching, title format guessing, the research that follows, and product creation.
+- "Is this a game, a console or an accessory?" is decided by title wording. Titles are written by hundreds of different sellers, so
+  any pattern list will keep missing shapes. This is the same weakness behind the console accessory filter (hdmi / controller
+  rejecting real consoles, database audit F2): one rule set trying to guess kind from words.
+- The game and console problems are two ends of one issue: Clynx has no stored fact for "what kind of thing is this entry, and what
+  edition is it". The identity card in CLYNX_PRODUCT_IDENTITY_AUDIT (D3) is the missing piece.
+
+
+3. RECOMMENDED FIXES (design only, for DEVELOPER; nothing done)
+G1  Decide kind from structure, not wording. Use the eBay category the listing already carries (Video Game Consoles vs Video Games vs
+    Accessories) for comps and photos, and the Facebook category/AI kind for listings. Only fall back to title patterns when there is no
+    category. WatchCount's search URL has an empty category slot ("/sold/<words>/-/fixedprice"); fill it for consoles.
+G2  Store the kind on the product (console / game / accessory) in the identity card; then a game can never be "exact" for a console entry,
+    whatever its title looks like, and a game entry can never take console prices.
+G3  Make "compatible" not enough to file a photo or count a price when the name carries an edition word or the title names a different
+    franchise. At minimum: a title with extra distinctive words not in the product name (Guardians, Marvel, Cosmic Deluxe, Starfield) is
+    "uncertain", not exact, when the product name is a console.
+G4  Extend mediaSignal: platform name preceded by a dash or followed by any condition words (Factory Sealed, Complete in Box, CIB, Brand New);
+    add the tests above as regression cases (they currently pass the wrong way).
+G5  Stop product creation from names that look like games when the trigger was a console search. Log WHY each product was created
+    (source and triggering text) so this can be traced next time.
+G6  Match listings to the most specific product (Galaxy Black) and, when only a generic parent has a value, flag the listing as
+    "edition unpriced" instead of rejecting it as a loss. Never apply a plain-console value to a special edition.
+G7  Regression suite: the real titles from this audit (7 console titles, 5 Guardians variants, Starfield, Halo) against the product names
+    "Xbox Series X Galaxy Edition", "...Galaxy Black Edition", "...Starfield", "...Halo Infinite".
+
+
+4. NOT CHECKED
+- Page 2+ of WatchCount, or eBay Browse results for this phrase (only page 1 of sold results).
+- Which of the 7 creation paths made the Guardians product.
+- Whether the live app in lowAiMode=false actually runs the picture check on "insufficient" candidates today.

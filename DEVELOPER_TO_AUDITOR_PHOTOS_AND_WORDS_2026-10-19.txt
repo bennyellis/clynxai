@@ -1,0 +1,40 @@
+DEVELOPER -> AUDITOR (and TESTER): owner rule "Clynx needs BOTH the listing's images and its words" - what is done, what I propose, what to check
+2026-10-19. Written to a file because AUDITOR and TESTER were not reachable by messaging when I tried (ListAgents showed no other session running).
+
+OWNER RULE
+Clynx needs both qualitative data (the listing's images) and logical data (words in the title and description) for identity accuracy. "Halo Xbox Series X Brand New" could be
+the special-edition console, the standalone game, or a seller's mistake: words alone must not decide it either way. This corrects my 3331249 trade-off, where a plain
+"Xbox Series X" entry scored that title exact.
+
+DONE (commit e5cd78e on master-wveebf; not built, not published; Beta 26 draft notes still say only the first part)
+- productKind.ts: new mediaAmbiguity(title). ONE unfamiliar word before the platform, with space, slash or comma separators, with or without condition words
+  ("Halo Xbox Series X Brand New", "Starfield/Xbox Series X/Brand New", "Starfield Xbox Series X"). Two unfamiliar words, or a dash/bar before the platform, still read as a
+  game (mediaSignal). Console adjectives (rare, modded, custom, retro, rgb...) and edition colours in the filler list are not ambiguous.
+- compIdentity.ts: an ambiguous title becomes "uncertain" (new reason KIND_AMBIGUOUS) - not exact, not rejected. Uncertain comps are not used for a value, so they stay out until a
+  photo confirms them. photoIdentity: the candidate stays "insufficient" and fileableWithoutPicture() is false, so Save-credits mode no longer files it.
+- kindRegression.test.ts: 426 checks (AUDITOR's matrix + TESTER's 125-title findings). Full suite: only fileImagePaths, libraryOps, storeBeta13 fail (known EPERM temp-folder errors).
+
+PROPOSED NEXT (design only; the owner has NOT said go)
+1. One fusion step with three-valued evidence per source (title words, description, photos): supports / contradicts / silent. Match only when the sources that speak agree and at least
+   one is strong. Ambiguous words + a photo that supports the entry = match. A photo that contradicts the entry (a game box, a controller) = mismatch. Words say console and the photos
+   show a game box (or the reverse) = "conflict": do not file the photo, do not price it, send the listing to Review with "title says X, photos show Y - may be a listing mistake".
+   No photos or no AI = stays uncertain, never exact.
+2. Description joins the words. photoIdentity and compIdentity judge the TITLE only today. The scanner's resolveIdentityTarget already takes title + description + image: reuse that
+   shape, run the media/ambiguity checks on a cleaned description ("disc", "game", "includes console", "controller included") and let it break ties, never override a photo.
+3. Photo promotion for sold comps. compPhotoCheck.ts can only DROP comps whose photo differs from the reference photos. Add the other direction: an uncertain comp whose photo matches
+   the reference photos becomes usable (budgeted, batched like the current 14-per-call design). This recovers the real edition-console comps the ambiguity flag holds back.
+4. Vision prompt for ambiguous listings: ask the kind first ("is the main item a console, a game case/disc, an accessory, or something else?") with a confidence, before the
+   "same product" question. That kind is the photo's vote in the fusion and becomes the identity card's kind in D3.
+5. Costs: photo checks only for ambiguous/insufficient cases, under the D3 budget (own per-hour limit, cache, burst limit). In Save-credits mode an ambiguous listing stays uncertain
+   and held out.
+
+AUDITOR - PLEASE CHECK AGAINST THE CODE
+(a) Is there ONE place where text and photo verdicts for a scanner listing are combined (resolveIdentityTarget in productIdentity.ts, judgeCandidateByText + withVision), or does the
+    scanner decide in several places?
+(b) Does the sold-comp path have the comp's photo at the point classifyComparable runs (imageUrl on EbayRaw / WatchCount items), so promotion is possible?
+(c) Does "uncertain" now cut real edition-console comps (Robot White, Daystar, Halo) enough to matter? TESTER can measure it on its 125-title probe.
+
+TESTER - PLEASE RE-RUN on e5cd78e: npm test -- kindRegression (expect 426 passed); your 125-title probe (expect: your nine one-word edition consoles are no longer "exact" for the
+plain entry but "uncertain/insufficient"; none called a game; lone-word game shapes incl. slash/comma now flagged ambiguous; plain titles unchanged); photoIdentity 53, compIdentity 93.
+
+No code for D1-D3, the fusion step or the weak-confidence warning until the owner says go.

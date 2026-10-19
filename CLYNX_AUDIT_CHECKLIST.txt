@@ -1,0 +1,232 @@
+CLYNX AUDIT CHECKLIST
+Written 2026-10-19 from what is known to work, what you have complained about, and what is still open.
+Each item says WHAT to look at and what counts as a RED FLAG. Items marked [REGRESSION] were fixed once and
+must stay fixed. Items marked [OPEN] are known not working / never verified live.
+
+Where the evidence lives
+  - Your data folder:  %APPDATA%\Clynx\data\users\1951a4a6-0b08-4c5b-a2c6-b900ac8843d5\
+      scout.db (listings, products, watches), config.json, backups\, *.corrupt-* files
+  - Audit on a COPY of scout.db only. Never open the live DB for writing and never touch the :8787 dev server.
+  - LAN server: http://10.0.0.81:8788 (containers clynx-lan-api-1 / -postgres-1 / -worker-1)
+  - Re-runnable benchmark: node scripts/discovery-bench.cjs --cases
+  - Leftover audit files in repo root: discovery-audit-results.json, review.csv, review2.csv
+
+
+=====================================================================
+A. DATABASE (products, prices, photos)
+=====================================================================
+A1. Duplicates [REGRESSION]
+  [ ] Two entries with the same name words (case/punctuation ignored). Addition: "New Nintendo 3DS XL" vs
+      "Nintendo 3DS XL" are DIFFERENT consoles and must stay separate.
+A2. Junk / generic names [REGRESSION]
+  [ ] Names like "iPhone (front view)", "Power Adapter", a whole bundle sentence, "Ps5", "xbox".
+      Baseline: 30 of 581 were bad on 2026-10-14. Those 30 are still untouched, pending your OK
+      (Database > Review). Count should not grow.
+A3. Junk values
+  [ ] Generic console entries with tiny values (Ps5 $128, xbox $20) pulled from games/accessories.
+  [ ] Any product whose eBay value is wildly off its siblings (Series S ~$280 vs Series X ~$496;
+      4TB Xbox card must be $1000+, not $172; RTX 3060 Ti EVGA vs Gigabyte not merged).
+  [ ] One sold sale contradicting many asks should give NO estimate, not a blended one.
+A4. Value meaning
+  [ ] eBay value = what the buyer paid IN TOTAL (item + shipping). You keep ~84% of it.
+      Check "avg. sale" on a listing against that, not item price only.
+A5. Estimate basis
+  [ ] ebay_est_basis is sold / blend / active. Flag an entry valued from "active" asks only when sold comps exist.
+  [ ] Sample size (ebay_active_sample_size, sold comps) of 1-2 backing a high-stakes value.
+A6. Blank entries / photos [REGRESSION]
+  [ ] Entries with no thumbnail (was 410 of 450, then 574 blank). Should shrink over time via free paths
+      (eBay title-gated, Wikipedia/Wikidata). Each reference photo should show its source label.
+  [ ] Wrong-color or wrong-variant photo inside an entry (color is a hard difference: Black vs White).
+  [ ] Mixed galleries (EVGA + Gigabyte photos under one generic entry) - known, not auto-split.
+A7. Specific-model children
+  [ ] A listing with >=2 extra title words filed under a generic parent instead of a child model.
+  [ ] A child with no parent link, or a parent+child priced from each other's data.
+A8. Variants
+  [ ] Variant discovery creating siblings in lowAiMode (should not).
+  [ ] "(For Parts / Broken)" children: exist only for Search For items with the checkbox ON; value from eBay
+      condition 7000 asks; no extra searches ever added.
+A9. Stale data
+  [ ] Entries never re-researched after the Series S/X, color, or shipping migrations. Old wrong comps stay
+      until "Research again" (WatchCount cap ~20 lookups/day, so no mass refresh).
+A10. Store linkage
+  [ ] "Your eBay store" panel (my_store_ref) shows only your own listings, kept apart from market numbers.
+A11. Persistence [REGRESSION]
+  [ ] saveScored must NOT wipe photo_analysis / flaws on re-save (was 0 of 27 stored).
+  [ ] research_status / research_code / research_reason present on every listing (4 states + researched).
+A12. Integrity
+  [ ] New *.corrupt-* files or .recover-requested marker next to scout.db / config.json.
+  [ ] backups\ actually getting new files (no scheduled backups existed in Phase 1; DB recovery starts empty).
+
+
+=====================================================================
+B. SCANNING / DISCOVERY BEHAVIOR
+=====================================================================
+B1. Title outranks photos [REGRESSION]
+  [ ] ANY skip whose reason is a bad/dark/cluttered photo while the title names a tracked item
+      (PS5 on a couch was skipped as "furniture"). Only matchesClaim === false may cause a skip.
+  [ ] Thumbnail pre-check should be skipped entirely when the title already names a tracked item.
+B2. Skipped-unresearched [REGRESSION]
+  [ ] Promising listings (e.g. Xbox Series X/S at $71 / $107) skipped without being opened. The price
+      "not ending in 0/5" rule is GONE; it may only order speculative looks.
+  [ ] neverOpened count vs total (baseline 64 of 329). Read the reason on every never-opened one.
+B3. Outcome mix
+  [ ] byOutcome distribution (baseline: TOO_OLD 127, UNPROFITABLE_AT_PRICE 55, OFFICIAL_SHIPPING 26,
+      AI_ESTIMATE 14). A jump in AI_ESTIMATE = deciding without market numbers (see review.csv).
+  [ ] Failed text reads saved as "not a deal" instead of retried (judgeUnavailable should mark, not reject).
+B4. Unknown-to-Database decisions
+  [ ] "rejected / AI_ESTIMATE" on a listing with no Database product, e.g. PS5 disc $475, 3DS XL CIB $350.
+      These were decided without market numbers; check whether they were wrongly rejected.
+  [ ] Listings that "qualify only without the condition discount" (Demon's Souls PS3 $20 vs value $42):
+      is the condition discount too harsh?
+B5. Photos
+  [ ] Listings the text AI liked but never got a photo look (lowAiMode default ON limits this).
+      Photo workers: 2 priority; stillWaitingForPhotos should return to 0.
+  [ ] Speculative looks capped at 3/visit, 30/pass; check the cap is respected, not exhausted early.
+B6. Sleeping / idle [REGRESSION]
+  [ ] "Sleeping" between products, or the blank-entry sweep waiting 5 min after every batch of 10.
+  [ ] Live panel blank during search setup.
+B7. Platform behavior
+  [ ] Facebook login wall / checkpoint: scanner should raise a notice, not silently return 0 results.
+  [ ] 3 failed cycles -> notice; backoff 30 s..10 min. Watch for silent failure loops.
+  [ ] eBay scanner only runs with "Search eBay" ON and EBAY_CLIENT_ID/SECRET present.
+  [ ] eBay has NO photo-based skipping: filter = title + category + text-only AI check.
+B8. Search scope
+  [ ] State mode searches the fixed top-10 cities (Alaska/Hawaii excluded). Any city Facebook does not
+      recognize; any AI-picked leftovers.
+  [ ] Re-resolution after Start: one Facebook location dialog per city, takes a minute or more.
+B9. Placeholder prices [REGRESSION]
+  [ ] $0 / $1 / $1234 listings becoming deals or alerts (main scanner, Watch prefilter, eBay, prepareAlert).
+B10. Seen tracking
+  [ ] The same listing re-evaluated every pass, or a changed price not re-evaluated.
+
+
+=====================================================================
+C. DEAL LOGIC AND ALERTS (ntfy)
+=====================================================================
+C1. Profit rule [REGRESSION]
+  [ ] Every alert must reach your min margin (default 20% after eBay fees, you keep 84%) with a negotiation
+      cut no larger than maxNegotiationPercent (default 15).
+  [ ] "Under the Search For max price" alone must never make a deal (garbage alerts source).
+  [ ] A $260 Series S worth $304 (needs 21% cut) must NOT alert.
+C2. Pre-alert market check
+  [ ] Clynx-found deals that would lose money on fresh numbers are held back. Watches are ALWAYS sent
+      (by design). No sales data = no verdict (check what happens then).
+  [ ] Skips re-check if exact product checked < 3 days ago.
+C3. Alert text
+  [ ] Whole stars only (1-5 emoji); no half-star glyphs.
+  [ ] Says "Clynx" or "I", never "the AI". Every new user-facing string.
+  [ ] Broken items: "Broken ones typically sell for $A-$B after eBay fees".
+  [ ] Correct topic: main "clynxai"; Sam's Watch -> "clynxaisam". An alert on the wrong topic is a leak.
+C4. Hidden gems
+  [ ] Extras valued only if included in the price. "sold separately", "$15 each", "also have X for $120"
+      must add NO value (extrasPricedSeparately).
+C5. Bundles
+  [ ] Lot value is never a straight sum (PS5 Pro $1100 + 2 controllers + HDD is ~$1166, not $1270).
+  [ ] Hard-to-sell items (monitor/TV/printer, run time >= 14 days) left out of lot value.
+  [ ] Breakdown quality and per-item lookups were only stub-tested, never confirmed live.
+C6. Condition
+  [ ] Broken/for-parts listings without includeBroken: old x0.25/x0.6 scaling; not taken seriously.
+
+
+=====================================================================
+D. WATCHES
+=====================================================================
+D1. Platform [REGRESSION]
+  [ ] Old Watches migrated to facebook and no longer search eBay. Confirm the user knows.
+  [ ] eBay Watch with minSellerRatingPercent: unrated seller must FAIL; low-rated listing still saved to Feed
+      but never counts as that Watch's match.
+D2. Facebook Watch checks
+  [ ] Interval respected (5-240 min). Max 12 searches per check, 3 places rotated.
+  [ ] Strict title match, geo area check (Nominatim cache), AI yes/no only on high confidence.
+  [ ] AI outage fallback = title match (could let junk through; read these).
+  [ ] Watch takes priority over a running scan, and the scanner wakes after.
+D3. Editing
+  [ ] Editing terms/location/price clears seen listings and links as designed.
+D4. Cloud gap [OPEN]
+  [ ] Cloud server was NOT taught platform / minSellerRatingPercent / extra terms. Cross-device sync of
+      Watches will lose these.
+
+
+=====================================================================
+E. CHAT / DISCOVERY TAB / CLYNX VOICE
+=====================================================================
+E1. OpenAI web search [OPEN, never seen working live]
+  [ ] config.json has "beta13": {"openaiSearch": true} and "lowAiMode": false. Either missing = no search.
+  [ ] Server check shows rows: SELECT created_at,status FROM ai_usage WHERE kind='search' ORDER BY created_at DESC LIMIT 5;
+      (0 rows ever as of the handoff; status 200 = it ran.)
+  [ ] Ask "are there special editions of the New Nintendo 3DS XL?" and read the Web activity list.
+E2. Known bugs [OPEN]
+  [ ] Web activity lines blank in the Database chat during product research.
+  [ ] "Create database profiles for all variants": model says Done but nothing is created. Verify by
+      counting entries before/after, never trust the reply.
+  [ ] Variants question must run research_variants even if another tool already ran.
+E3. Honesty
+  [ ] Chat claims an action happened that the Database does not show. Always cross-check.
+  [ ] Free search engines (DuckDuckGo/Bing) are OFF unless freeSearchEngines:true.
+E4. Persona
+  [ ] One character everywhere, accurate app knowledge, web_research used when unsure, centered bubble.
+E5. Discovery tab
+  [ ] Live feed, Clynx thoughts and ask box; photo/text-file questions work.
+
+
+=====================================================================
+F. AI SPEND AND RELIABILITY
+=====================================================================
+F1. Credits
+  [ ] OpenAI calls that are not core. In lowAiMode: no per-listing thumbnail screening, no gallery audit,
+      no auto sibling creation, no generated category images. Core only: chat, product research,
+      general-deal judge, Watch verification, identity/color check, keyword expansion, state-city fallback.
+  [ ] Breaker: after a 429 insufficient_quota the app stops calling for 10 min. A call during that window
+      = bug. A 429 loop = bug.
+  [ ] ai_usage rows per hour; spikes while the scanner is idle.
+F2. Server
+  [ ] Rate-limit backoff on rate_limited; "repeated_refusals" block in api_user_blocks (cleared once with
+      DELETE FROM api_user_blocks;).
+  [ ] Company OpenAI / eBay keys present on the real server (were missing: remote testers got 503).
+F3. Free-source limits
+  [ ] WatchCount anonymous cap ~20 lookups/day; Browse API needs eBay keys.
+
+
+=====================================================================
+G. UI AND PERFORMANCE
+=====================================================================
+G1. Intel iGPU at 144 Hz [REGRESSION]
+  [ ] Static backdrop; only transform/opacity animations. Any new animation that janks.
+G2. Color legibility [REGRESSION]
+  [ ] Readable text/artwork for any user-picked colors; Rainbow keeps white button text.
+G3. Sound
+  [ ] FL-style voice ONLY on the start-scanner sound. Click / stop / deal / hover unchanged.
+G4. Database screens
+  [ ] Anything calling listProducts() instead of listProductIndex() for name lookups (loads every
+      base64 thumbnail: slow).
+G5. Notices
+  [ ] NoticesPanel on Dashboard shows needs-attention problems; no silent log-only failures.
+
+
+=====================================================================
+H. RELEASES / SAFETY RAILS
+=====================================================================
+H1. Publishing
+  [ ] Nothing published without your say. Standing consent (2026-10-14) allows auto-publishing BETAS only;
+      confirm Beta 7 draft status, and that the current beta (0.3.0-beta.25) went out as you intended.
+H2. Secrets
+  [ ] No API keys / passwords printed in logs, chat, or reports.
+H3. Edits to your records
+  [ ] No bulk modification of existing products (e.g. the 30 oddly named ones) without approval.
+H4. Removals
+  [ ] After any code cut, IPC channels compared with HEAD (a slice once deleted unrelated handlers).
+  [ ] No scripted open('w') edits on big files (index.ts once got truncated).
+H5. Reports
+  [ ] Deliverable reports as .txt you can paste into ChatGPT.
+
+
+=====================================================================
+SUGGESTED ROUTINE PER AUDIT PASS
+=====================================================================
+1. Copy scout.db to a temp folder; run counts: listings, opened / neverOpened, byOutcome, blank products,
+   duplicate names, products with null value, junk-name matches.
+2. Read every never-opened listing's reason and every AI_ESTIMATE rejection (review.csv format).
+3. Spot check the last N alerts against C1 (margin, cut %, stars, topic).
+4. Read the Notices panel and the last app log for repeated errors.
+5. Check ai_usage on the LAN server for volume, status codes, and search rows.
+6. Report only what changed since the last pass, with evidence paths.

@@ -1,0 +1,155 @@
+CLYNX PRODUCT IDENTITY AUDIT - "why can't Clynx look a product up the way ChatGPT does?"
+2026-10-19. Auditor session. Read-only: nothing was changed. Evidence = your database copy (live + pre-reset), the code in
+src/main, and git history. VERIFIED = seen in data/code. INFERRED = follows from it, not proven live.
+
+THE QUESTION
+You typed "xbox series x galaxy edition" into ChatGPT and got a clean card: official name (Xbox Series X - 2TB Galaxy Black
+Special Edition), what it is, original price, a spec table, current price. Why does Clynx not get that from the same words?
+
+
+=====================================================================
+1. SHORT ANSWER
+=====================================================================
+ChatGPT asks one question and a search-connected model answers it. Clynx never asks that question.
+Instead it (a) runs canned searches through the weakest search engine it has, (b) asks an AI to write a RESALE-ADVICE blurb "using
+ONLY" whatever those searches returned, and (c) stores a free-text blurb, not a structured "this is what the product is" record.
+Three things then break it:
+  A. The normal product lookup does not use OpenAI web search at all. Only a separate "hard research" path does.            VERIFIED
+  B. On your installed app (beta 23) the other engines are off, so the normal lookup is searching Wikipedia only.             VERIFIED
+  C. There is no step that produces an identity card (official name, maker, edition, model/SKU, colors, storage, MSRP, what
+     differs from the base model). The thing stored is a blurb, and the better-built systems run in "shadow" (record only).   VERIFIED
+
+
+=====================================================================
+2. WHAT CLYNX ACTUALLY DOES WHEN A PRODUCT NAME ENTERS THE DATABASE
+=====================================================================
+Entry points: scanner finds an unknown listing; you type it in the Library / ask chat; variant discovery spawns siblings.
+All of them end up in runProductLookup (index.ts:2399), which does this in order:
+
+  1. lookupProduct(name)  (products.ts:152)
+       a. if the name "claims a specific variant" (edition word, region, capacity+color): verifyVariant() - a search ladder
+          (exact title, line + distinctive words, manufacturer site, alternate spellings) that rates the claim
+          verified / supported / unverified / disproven. (variantEvidence.ts:383, webResearch.ts:262)
+       b. one search: "<name> specs variants common problems", read the top pages. (webResearch.ts:266)
+       c. generateProductSummaryFromWeb: the AI is told "Using ONLY this real content (not prior assumptions)" and writes
+          resale bullets (which variants sell for more/less, how to tell them apart, accessories, condition issues). (chat.ts:1548)
+          If there were no sources it falls back to the AI's own memory. If the AI call fails, the error text is stored as the summary.
+       d. find a thumbnail.
+  2. Save summary + category + family + thumbnail on the product row. Nothing else about identity is saved.
+  3. Reference photos, then WatchCount sold comps, then eBay active asks, then sibling discovery.
+
+Separately, a "knowledge" system (productKnowledge.ts / knowledgeService.ts) researches "what models/editions exist" into a graph
+(kg_entities / kg_claims) using the OpenAI-first engine. It runs in SHADOW mode: it records, it does not drive any product decision.
+
+
+=====================================================================
+3. WHY IT FAILS - FINDINGS (worst first)
+=====================================================================
+
+I1  The main lookup never uses OpenAI web search                                                      VERIFIED (code)
+  webResearch.ts has two readers:
+    - webVerifyDeps() = Brave/Google if a key is set, DuckDuckGo, Bing, Wikipedia. Used by lookupProduct, verifyVariant (the
+      edition check), the chat "look it up" tool, and the claim verifier (index.ts:2387, webResearch.ts:258/309).
+    - webHardDeps() = the same list with OpenAI web search FIRST. Used only by the knowledge service, the photo identifier and the
+      model-name challenge (index.ts:1058, 1066, 2298, 2313).
+  So the ChatGPT-style search exists, but it is wired to side systems, not to "what is this product".
+
+I2  On beta 23 the normal lookup effectively searches Wikipedia only                                  VERIFIED
+  - DuckDuckGo/Bing are off unless config.freeSearchEngines = true (commit 1c1194e, in beta 23).
+  - No Brave/Google key is configured.
+  - In beta 23 beta13.openaiSearch defaults to FALSE (git 75c94f9). Your config.json has no beta13 block, so it was off. Beta 25
+    turns it on by default, but you have not installed it, and I1 still keeps it out of the main lookup.
+  - Your own data shows it: the knowledge row for "xbox series x galaxy" (researched 10-16 19:22) used backends ["wikipedia"] and its
+    six "sources" are Wikipedia pages on No Man's Sky, Fallout 76, Steam Deck, Region lock, History of video games. Summary: empty.
+    The 3DS XL "Galaxy Edition" claim was "checked" against Wikipedia pages on Nintendo Direct and the Iwata Asks interviews
+    (all marked "scattered", i.e. words appearing separately), which correctly came out unverified.
+  - Earlier research (10-16 00:05, before the engines were switched off) used duckduckgo-html + bing and found real sources.
+
+I3  The result is a resale blurb, not an identity                                                       VERIFIED
+  products has no columns for official name, manufacturer, line, model/SKU, edition, colors, storage options, release year or MSRP.
+  The identity_json / identity_status columns exist but are NULL on every product (identityFoundation is off in your config).
+  What ChatGPT gave you is exactly that card; Clynx has nowhere to put it.
+  Consequences you have already seen: names are invented by variant discovery, products are not linked to a base model (0 parents),
+  and comps are searched from the product NAME alone, so a wrong name poisons price lookup too.
+
+I4  The evidence that WAS found is not used                                                             VERIFIED
+  The knowledge graph holds correct, "verified" entries: "Galaxy Black Edition" (3 claims), "Galaxy Black Xbox Series X Edition",
+  "Halo Infinite Edition", "X25 Edition", "White Xbox Series X Edition". The Database product created from the same research is named
+  "Xbox Series X Galaxy/White" (a mashup that does not exist) and its blurb says "a white/galaxy-colored finish ... resale driven by
+  rarity". The Halo Infinite blurb says "There are no official color variants of the Series X beyond black and rare themed bundles",
+  which is false (Galaxy Black, Robot White, X25 exist). Two systems saw the facts; the product row never got them.
+
+I5  The edition extractor is a regex over page text, and it creates junk                                VERIFIED
+  editionDiscovery.ts finds "<words> Edition" with a pattern. Your knowledge graph has entries like "and Edition" (verified),
+  "Bundle Includes Edition", "IT Other XBOX Series X25 Edition", "OVERVIEW GAMES SPECS COMPARE X25 Edition", "Wikipedia:Manual of Style",
+  "Windows XP Tablet PC Edition", "Called NES Classic Edition". Navigation text from retailer pages becomes entities, and junk can
+  be marked "verified". An AI reading the page would not do this. This is also where invented product names come from.
+
+I6  AI failures are stored as if they were the answer                                                  VERIFIED
+  Three products (Halo Infinite Limited Edition Console Bundle, Series S Robot White Limited Edition, Forza Horizon 5 Bundle) have
+  ai_summary = "(Research failed: Your AI access is paused for a while because of unusually heavy use...)". That is the server's
+  abuse block (it was cleared with DELETE FROM api_user_blocks per HANDOFF). The error text sits in the summary field, the products
+  count as researched, and nothing retries them. The block itself was probably triggered by Clynx firing many AI calls in a burst.
+
+I7  The query is built for the wrong job                                                                VERIFIED
+  The knowledge queries are canned "identification" searches: "differences between Xbox Series X models storage sizes",
+  "how to tell real X vs fake", "which one should I buy". None is "what is <the thing the user typed>". And they are built from the
+  already-processed name (e.g. "Galaxy/White"), not your original words.
+
+I8  The designed path exists but is mostly switched to shadow/off                                       VERIFIED (config + code)
+  identityFoundation off | identitySafeguard.mode off | beta13.resolver shadow | webKnowledge shadow | visualResearch shadow |
+  identityGate enforce (photos only). In shadow mode results are recorded and change no decision. That matches your memory of
+  "a fixed logic path we built": it was built (Beta 8 verifyVariant, Beta 13 identity attributes + resolver, Beta 14 knowledge,
+  identity foundation stage 3a) but is not what runs when a product is created.
+
+I9  WatchCount: the missing login is a plausible cause of "0 sold comps"                                INFERRED (your point)
+  The app logs in to nothing. watchcount.ts returns an empty list on a challenge or empty page and nothing records why, so a daily
+  anonymous cap would look exactly like "no sales found". It then stamps the product as checked. I cannot prove the cap from here;
+  the app needs to log (a) cards found, (b) whether the page was a challenge/limit page, so it can be seen.
+
+
+=====================================================================
+4. WHAT THE FIX LOOKS LIKE (design only - NOT done, for DEVELOPER)
+=====================================================================
+Goal: typing or finding "xbox series x galaxy edition" produces the same kind of card ChatGPT gave you, and the whole Database
+runs off that card.
+
+Step 1  One identity call (the missing piece).
+  Ask OpenAI with web search ON, using the user's/listing's original words: "What is <name>? Return JSON: official name, manufacturer,
+  product line, model/SKU codes, edition name, release year, colors, storage options, disc/digital, original retail price, what
+  distinguishes it from the base model, how to recognize it in a photo, and the source URLs for each claim." One call, not four.
+  Use the existing OpenAI-search plumbing (openaiSearch.ts, openai.ts callOpenAISearch); do not rely on Wikipedia/DDG/Bing.
+Step 2  Store the card (new fields or identity_json, with sources and a status: verified / supported / unverified).
+  Never overwrite a verified card with a weaker one (reconcileVerdict already has that rule).
+Step 3  Make everything read the card instead of re-guessing from the name:
+  - naming and duplicate detection (official name + edition + SKU, not word soup)
+  - base/variant tree (Series X > Galaxy Black Edition; parent_product_id)
+  - comps query + filter (edition, color, storage, SKU come from the card)
+  - listing matching (the "how to recognize" and distinguishing facts)
+Step 4  Keep the evidence discipline you already have: show sources, keep the "unverified" label, say plainly when the search failed.
+  An empty or blocked search is "could not check", never "doesn't exist".
+Step 5  Guard rails the current code lacks: never store an error string as a summary (mark "needs retry" and retry later); do not
+  mark a comps check done when it found nothing because of a limit; throttle AI bursts so the server's abuse block is not hit;
+  replace the "<words> Edition" regex with the AI's structured list, then confirm each edition by source.
+Step 6  Retire or merge what duplicates this: verifyVariant ladder, knowledge graph and product blurb become one pipeline with one result.
+
+Order the DEVELOPER should work in (your priority: Database first, scanning second):
+  D1  Route lookupProduct / verifyVariant / chat web lookups through the OpenAI-first search (small change, big effect). Also
+      install the beta 25 default for openaiSearch. Verify with the exact phrase "xbox series x galaxy edition".
+  D2  Stop storing AI errors as summaries; retry them. Re-run the 3 failed entries.
+  D3  Build the identity card (Steps 1-3) and show it in the product page.
+  D4  Then the fixes from the earlier audit: console accessory filter, WatchCount logging/cap, BOM config, duplicate insert paths.
+  D5  After the Database behaves, return to the scanning checklist (CLYNX_AUDIT_CHECKLIST.txt section B).
+
+How to confirm it works (TESTER): type "xbox series x galaxy edition" in the Library/chat on a fresh profile; expect official name
+Galaxy Black Special Edition, 2TB, matching controller, original price near $599.99, sources listed, product filed under Series X
+with that edition as a child; expect no "Galaxy/White", no empty summary, no error text in the summary, and comps that are not all rejected.
+
+
+=====================================================================
+5. WHAT I COULD NOT CHECK
+=====================================================================
+  - I did not run the app, so I did not watch the live "Web activity" list for the exact phrase; the findings above come from code
+    and from what the last runs stored.
+  - Whether your OpenAI account/LAN server currently allows search (HANDOFF says 0 search rows ever on the server).
+  - Whether WatchCount's anonymous cap is what blocks Clynx (I9).

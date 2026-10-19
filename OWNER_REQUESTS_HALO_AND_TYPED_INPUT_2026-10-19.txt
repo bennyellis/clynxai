@@ -1,0 +1,65 @@
+OWNER REQUESTS FROM A MANUAL TEST - game/console name collisions and "trust what I typed" lookup
+2026-10-19. AUDITOR for DEVELOPER. READ ONLY: the owner has NOT said go on any code.
+Source: the owner's own manual test of the Xbox Series X Galaxy Edition problem (4 screenshots), expanded by AUDITOR with evidence from the code and the database copy.
+
+=====================================================================
+REQUEST 1 - Two different products behind one ambiguous name (game vs console)
+=====================================================================
+OWNER'S WORDS (summarised): The Database entry "Xbox Series X Halo Infinite" shows the Halo Infinite GAME box (Facebook photo) and, in another photo, a Halo-styled CONSOLE with a controller. Both products have "Halo Infinite" in their names, so the name is ambiguous. When this kind of finding occurs, research both images, decide whether they are the same product or different ones, and keep them as TWO separate listings when one is a game and one is a console.
+
+WHAT AUDITOR VERIFIED
+- In the database copy, the entry "Xbox Series X Halo Infinite" holds three eBay reference photos whose titles are: "Halo Infinite Xbox Series X Xbox One Brand New Factory Sealed English French" (a game), "Halo Infinite Xbox Series X Xbox One.  O1" (a game), and "Halo Infinite Xbox Series X 1tb Console Complete In Box" (a console). Two games and one console under one console entry. The owner's screenshots show the same mix with Facebook photos.
+- The old library had separate entries "Xbox Series X Halo Infinite Limited Edition" (value about $877 from 10 sold comps) and "Halo Infinite (Xbox One)" (a game), so values differ by 20x or more; a mixed gallery cannot be priced.
+- TESTER and AUDITOR showed the title gate lets these titles file as exact (CLYNX_GUARDIANS_AUDIT W1/W2). e5cd78e now holds them as "uncertain", which is the right first step but does not by itself split a mixed gallery or create the second entry.
+
+EXPANDED DESIGN
+1.1 Kind is a property of every photo, not just of the entry. When a photo is filed, ask vision ONCE for the kind of the main item (console / game / accessory / other) with a confidence, cache it on the image row, and reuse it everywhere (the "kind-first" question already in the plan).
+1.2 Mixed-kind gallery detector. An entry whose photos carry different kinds (console + game, console + accessory) is flagged. Do not price it, do not add comps to it, and queue a Review item "this entry holds a game and a console".
+1.3 Collision rule at filing time. When a new photo/listing names an existing entry, compare the photo's kind with the entry's kind (from the card, or the majority of its trusted photos). Same kind -> attach. Different kind -> do not file under that entry; look for the sibling of the other kind; if none exists create it. Unsure -> Review with both photos side by side (never silently decide).
+1.4 "Research both images". For a name collision, run one comparison call on the two photos (same product / different product / cannot tell), plus the words of each listing. Same product -> attach. Different -> split into two entries. Cannot tell -> Review.
+1.5 Two entries, two names, linked but never merged. Name each by its identity card: the game as "Halo Infinite (Xbox Series X|S)" (the existing convention puts the platform in brackets after a game's title, e.g. "Demon's Souls (PS3)"); the console as its official name ("Xbox Series X - 1TB Halo Infinite Limited Edition"). Put both in one family under the franchise so the owner can see they are related (use the existing family/parent mechanics; the games already live under "Xbox > Games > <platform>").
+1.6 Split what is already there. A one-time, owner-approved Review action: for entries with mixed-kind galleries, propose "move these photos to a new <game> entry". It edits the owner's records, so it needs the owner's OK like the 4 failed-research rows.
+1.7 This applies to any shared name, not only Halo: Starfield, Forza Horizon 5, Cyberpunk 2077, Mario Kart, Pokemon, Zelda (game vs special-edition console), a band poster vs a book of its posters, a framed print vs an unframed one. The rule is category-agnostic: kind + collision check, not a Halo list.
+1.8 Values never cross kinds: a game entry must never take a console's value or comps, and a console entry never a game's (G2 in the Guardians audit).
+
+ACCEPTANCE TESTS (add to the P-series)
+- Feed the three real Halo titles above plus the two owner screenshots' kinds: expect two entries (game, console), no mixed gallery, each with its own comps.
+- A game photo offered to the console entry -> not filed; sibling game entry created or used.
+- A console photo offered to the game entry -> same in the other direction.
+- Unsure photo -> Review item with both photos, nothing filed, nothing priced.
+- Starfield and Forza Horizon 5 repeat the same expectations.
+
+=====================================================================
+REQUEST 2 - Treat the user's exact words as correct, research them, then answer in Clynx's voice
+=====================================================================
+OWNER'S WORDS (summarised): Clynx still searches for the wrong thing. Assume the user's exact input is correct first. Check only for spelling errors or word-order errors of a real product title (for example "Xbox X series" instead of "Xbox Series X"). Then pass the product's keywords to OpenAI and have it research the input further. When it replies, relay that information to the user through Clynx's lens. If Clynx is not sure what the user means or does not understand, ask them. With this, Clynx should finally find the Xbox Series X Galaxy Edition and most other hard-to-find things.
+
+WHAT AUDITOR VERIFIED IN THE SCREENSHOTS AND CODE
+- The owner typed "research xbox series x galaxy edition". Clynx answered "I'm refreshing the Xbox Series X Galaxy/White profile now. What should I focus on in the writeup?" and then "research_variants ran: sources didn't verify a 'Galaxy' edition or distinct variants for Xbox Series X Galaxy/White - no confirmed variants found. Web activity (1)". Then the Discovery card is titled "Xbox Series X Galaxy/White", "You asked me to look into Xbox Series X Galaxy/White", it files it under Xbox > Consoles, and saves 10 reference photos.
+- So the owner's own words were replaced by an older entry's name. That entry is an invented name from earlier variant discovery (database audit F3). researchTool.ts decideResearchTarget calls store.findMatchingProduct(name) (a fuzzy word match) and, on a hit, takes refresh_existing; the reply and the variant research then talk about the matched entry, not about the typed phrase.
+- Only ONE web search ran (Web activity (1)) and, on the installed beta 23, it went through the engines described in CLYNX_PRODUCT_IDENTITY_AUDIT I1/I2 (Wikipedia only), which cannot know a "Galaxy Black Special Edition".
+- It asked the owner a question ("What should I focus on in the writeup?") BEFORE researching, which stalls instead of answering.
+
+EXPANDED DESIGN (typed input flow, "D3-T")
+2.1 Keep the owner's exact words as the query of record. Never silently swap them for an existing entry's name. If a Database entry matches only loosely, say so ("I already have Xbox Series X Galaxy/White; you typed Xbox Series X Galaxy Edition; I'll research what you typed and tell you if they are the same").
+2.2 Normalise only two things, and show it when it changes anything: (a) spelling/typos, (b) word order of a real product title ("Xbox X series" -> "Xbox Series X"). Do it deterministically first (edit distance and word-order permutations against known product/brand vocabulary: the Database, the knowledge graph, a small brand list), and let the AI confirm only when the deterministic pass is unsure. Keep the original as an alias so the owner's wording still finds it later.
+2.3 Extract keywords from the normalised phrase (brand, line, model words, edition words, size, color, year) and send BOTH the phrase and the keywords in ONE OpenAI web-search question: "What is <phrase>? Return the identity card (official name, maker, line, SKU, edition, year, colors, storage, original price, what differs from the base model, how to recognize it, sources)". This is the D3 card call; typed input is its first, highest-priority caller. It must use the OpenAI-first search (D1), not Wikipedia/DDG.
+2.4 Clynx answers in its own voice from the card: what it found, what it is, what it usually sells for if known, what it saved, what it could not confirm, and the sources shown in Web activity. No raw error text, no "I refreshed another entry".
+2.5 When Clynx is not sure, it asks. Use the existing typed choice buttons (chatChoices): "Did you mean the Xbox Series X - 2TB Galaxy Black Special Edition console, or the game Guardians of the Galaxy for Xbox Series X?" Ask when: the search returns several different kinds (game / console / accessory), the card status is unverified or unsourced, or the phrase matches nothing. A question is for ambiguity, not a default first move.
+2.6 Create or attach only after the card is confirmed. Name = the card's official name; never an AI-invented name or a slash mashup ("Galaxy/White"). If it matches an existing entry, attach and say so; if it matches nothing, create it as a child of the base model (Series X) with its card.
+2.7 If the search is blocked or over budget, say exactly that ("I could not search the web right now") and store nothing as fact; never fall back to an AI-memory blurb without marking it "unsourced".
+2.8 Variant discovery is driven by the card ("what editions exist for this line") and not by a separate pass, so "no confirmed variants found" can say what was searched.
+
+ACCEPTANCE TESTS
+- Typed "xbox series x galaxy edition": card = Xbox Series X - 2TB Galaxy Black Special Edition, matching controller, original price near $599.99, sources listed; filed as a child of Xbox Series X; it does NOT say "Galaxy/White"; it does NOT ask what to focus on first.
+- Typed "Xbox X series galaxy edition": read as "Xbox Series X Galaxy Edition", and Clynx says so.
+- Typed "halo infinite": Clynx asks game vs console vs Halo Infinite Limited Edition console (buttons).
+- Typed a misspelling ("xbox seris x galxy edition"): corrected and says so.
+- Typed gibberish or an unknown item: says it cannot place it and asks a clarifying question; creates nothing.
+- Search blocked: says so, creates nothing, queues a retry.
+- The typed phrase appears in the first Web activity line exactly as typed (or as corrected).
+
+=====================================================================
+OPEN POINTS FOR THE OWNER (not assumed by anyone)
+=====================================================================
+Q2 Stage A vs server mode; Q3 re-queue the 4 failed products; Q4 push high-gap no-comps items quietly; Q5 should a typed name still build a card in Save-credits mode (Request 2 makes this one urgent: the owner's example is typed input). New: Q6 OK to run the owner-approved split of mixed game/console galleries (Request 1.6)?

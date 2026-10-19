@@ -1,0 +1,155 @@
+CLYNX DATABASE AUDIT - 2026-10-19
+Auditor session. Read-only: I worked on a COPY of scout.db (live file untouched), opened the pre-reset backup read-only,
+read the code, and made one GET to WatchCount in the built-in browser. Nothing was changed, published or deleted.
+
+Evidence base
+  LIVE   scout.db copy   14 products, 0 listings, last write 2026-10-16 19:22 (nothing since; the app only started again 10-19 00:03)
+  OLD    reset-backups\2026-10-16T02-32-07-098Z\scout.db   542 products, 2559 listings (the library before your 10-15 22:32 reset)
+  Code   src/main (store.ts, compFilter.ts, compIdentity.ts, marketValue.ts, watchcount.ts, safeFs.ts)
+  Installed app is 0.3.0-beta.23 (diagnostics.log). The repo is at beta.25, so the beta 24/25 fixes are not running on your machine.
+
+Labels: VERIFIED = I saw it in the data or code. INFERRED = follows from what I saw but I did not prove the cause.
+
+
+=====================================================================
+PART 1 - HOW THE DATABASE WORKS
+=====================================================================
+1. Storage
+   One SQLite file per user: %APPDATA%\Clynx\data\users\<id>\scout.db. Main tables:
+   - products            one row per thing you could buy/sell. Name, category/family (folder path like "Xbox > Consoles"),
+                         thumbnail (a base64 image stored IN the row), AI summary, notes, eBay numbers (see 5), variant status/evidence.
+   - product_images      reference photos, source_kind = stock | ebay | wikipedia (| a Facebook listing photo). content_hash, trust status.
+   - listings            every Facebook/eBay listing the scanner saw, with the decision (research_status/code/reason), photo analysis, product_id link.
+   - product_knowledge + kg_entities/kg_claims   researched facts (distinct models, capacities, sources) used for variant discovery.
+   - review_items        proposals waiting for you (duplicate merges, wrong-variant photos). Nothing applies without you since Beta 13.
+   - library_ops         undo log of Library actions. folder_meta: folder tile art. usage_counters: AI spend per day.
+   - pending_cloud_deletes   deletions that still have to be told to the LAN server.
+   Backups: backups\ keeps the last few daily copies (3 now, newest today). A pre-reset copy sits in reset-backups\ (506 MB).
+
+2. How an entry is born
+   a) Scanner finds a listing -> AI names the product -> matched to an existing entry by name, else a stub is created (addProductStub).
+   b) Chat/Library: "+" button (createManualProduct), "research this", edition/variant research creating siblings.
+   c) Splits from the identity check (a specific model such as an EVGA card becomes its own entry).
+   d) Cloud sync pulling a row from the server.
+   Stubs start "loading", then research fills them.
+
+3. How an entry is matched (identity)
+   findMatchingProduct: exact name, then a loose word-set match (isSimilarProductName). When a listing has >=2 words the entry lacks,
+   the identity check asks the AI whether it is that product, another child, or a new specific model. Color and single letters
+   (Series S vs X) are hard differences. addProductStub refuses a second entry whose words reduce to the same key.
+
+4. How an entry is researched
+   Product lookup (AI summary, category, family) -> reference photos (free sources first: eBay title-gated, Wikipedia, stock; AI only if lowAiMode is off)
+   -> knowledge research (web: what variants/capacities exist) -> variant discovery creates sibling entries with evidence and sources
+   -> comps (below). The live DB shows all of these steps ran on the 14 entries.
+
+5. How a price is made
+   Sold comps: WatchCount scraped by a headless browser -> compFilter.ts (same model number, capacity, tier, color, no parts/lots) ->
+   compIdentity.ts judge (exact / compatible / uncertain / rejected, with a reason code) -> optional photo cross-check -> trimmed mean.
+   Active asks: eBay Browse API, same filters. marketValue.ts then combines them:
+     sold only -> sold mean | no sold -> active median x 0.92 (needs 3+) | both -> sold wins if >=5 sold and asks disagree >40%,
+     with 1 sale vs many conflicting asks -> no estimate | else weighted blend. Value = what the buyer paid IN TOTAL (item + shipping).
+   Results land in ebay_est_value_usd / ebay_est_basis / sample sizes, and comps_validation keeps the per-lookup audit trail.
+   The value feeds: listing "avg. sale", deal scoring (you keep 84%, need 20% margin, <=15% negotiation), Watch reference price, alerts.
+
+6. How listings use it
+   A listing's title is matched to an entry; a value turns it into a deal or not; the outcome is stored as research_status/code
+   (researched, rejected, confirmed_unprofitable, insufficient_evidence, unresearched + a reason code).
+
+7. Housekeeping
+   Duplicates are only PROPOSED (review_items) and merged after approval. Blank entries get photos when seen. A one-time migration
+   list lives in schema_flags. Cloud sync pushes products/watches; deletions queue in pending_cloud_deletes.
+
+
+=====================================================================
+PART 2 - FINDINGS (worst first)
+=====================================================================
+
+F1  HIGH  Nothing in the Database has a price.                                             VERIFIED (symptom) / INFERRED (cause)
+  - LIVE: 0 of 14 products have ebay_est_value_usd, ebay_avg_sold_price_usd or an active median.
+  - LIVE: every lookup logged in comps_validation shows sold retrieved = 0 (all 9 entries that have a recorded validation; the other 5 were checked earlier without one).
+  - OLD: 501 of 542 products have comps sample size 0; only 37 have a sold average and only 3 have an estimate (all "blend").
+  - ebay_comps_checked_at IS set on these entries, so they look "researched" while nothing was found. The pre-alert check skips an
+    entry checked in the last 3 days, so a failed lookup hides itself.
+  - Cause not proven. watchcount.ts is built to return an empty list (no error, no log) if the page is a challenge. diagnostics.log has
+    no comps lines at all. What I saw: the beta host in the code (beta.watchcount.com) now redirects to www.watchcount.com, and
+    in a normal browser "xbox series s" returns 20 parseable sold cards, with junk near the top (an ASUS ROG Ally Xbox, an Ayn Odin).
+    So the page is alive for a human browser; the app's automated browser is probably blocked/redirected or the empty case is
+    swallowed. Needs a live trace from the app, not more guessing.
+  Where to look: searchSoldComps (watchcount.ts:131) result count per call; add a log line + distinguish "challenge" from "0 results".
+
+F2  HIGH  The active-ask filter throws away real consoles.                                 VERIFIED
+  - Galaxy/White lookup 10-16 19:22: 13 asks retrieved, 13 rejected, 10 of them for ACCESSORY.
+  - Rejected example: "Microsoft Xbox Series X 1TB SSD White 4K Wi-Fi HDMI Region Free w Controller" = reason "mentions hdmi".
+    That is the console. ACCESSORY_WORDS (compFilter.ts:135) includes hdmi, controller, remote, dock, cable, battery; a console
+    listing that says "w/ controller" or "HDMI" fails. The only exemption is an accessory word followed by a capacity/model code.
+  - Effect: even when asks are fetched, the 3-ask minimum is never met, so no "active" estimate is made either.
+  - The two COLOR rejections (Galaxy Black 2TB) were correct.
+
+F3  MED  Invented and placeholder names, and no hierarchy.                                  VERIFIED
+  - "Xbox Series X variants" is a placeholder filed as a real product (2711-char summary, 9 photos), and there is NO plain
+    "Xbox Series X" entry for the variants to hang under.
+  - "Xbox Series X Galaxy/White" glues two colors into one name (the real editions are Galaxy Black and Robot White); "Xbox Series X
+    X25/X25 Limited" is marked variant_status = verified although its official name is "XBOX Series X25 Limited Edition".
+  - "new nintendo 3ds xl again" is a test/leftover name.
+  - parent_product_id is empty on all 14 (and on all 542 in the old DB): variants are siblings, not children, so valuation cannot
+    inherit from a base model.
+  - 4 variants have family NULL / category "Other" and 1 (New Nintendo 2DS XL) is category "Other" with family Nintendo > Consoles, so
+    they land in a different folder than their siblings (OLD: 193 of 542 had no family, 151 were "Other").
+
+F4  MED  Duplicates keep appearing.                                                         VERIFIED (symptom) / INFERRED (cause)
+  - LIVE: two entries named exactly "New Nintendo 3DS XL" (created 21 min apart). The merge proposal has been open since 10-16.
+    Also close pairs: "Xbox Series X Halo Infinite" vs "...Halo Infinite Limited Edition Console Bundle".
+  - OLD: 21 duplicate groups covering 47 rows, despite the earlier no-duplicate fix.
+  - Why: the check only runs in addProductStub. Other insert sites do not run it: createManualProduct (store.ts:1602), the
+    Library split (libraryOps.ts:616) and the cloud-sync upsert (store.ts:2057). Beta 13 also stopped auto-merging, so a created
+    duplicate waits for you. I did not trace which path made these two.
+
+F5  MED  Hand-edited config can be wiped.                                                  VERIFIED
+  - Two files config.json.corrupt-1792119594613 / -1792122468375 (10-15 22:59 and 23:45) are valid JSON except for a UTF-8 BOM.
+  - readJsonFileSafe (safeFs.ts:108) reads without removing the BOM, JSON.parse fails, the file is quarantined and the older .bak
+    is restored. Windows PowerShell (Set-Content/Out-File) writes a BOM. So an edit made that way silently reverts. HANDOFF.md tells you
+    to hand-edit this exact file. Fix is one line (strip ﻿ before parsing).
+  - It may also explain why "beta13.openaiSearch" keeps vanishing: it is not in the current config.json.
+
+F6  MED  The profile is in a reset, half-configured state.                                  VERIFIED
+  - config.json: searchItems = [] (scanner has nothing to look for), ntfy.topic = "" (no alert can be pushed), ebay.enabled = false,
+    onboarding.facebookConnected / locationChosen = false even though an account exists, identitySafeguard.mode = "off",
+    identityFoundation off, no beta13 block. lowAiMode is false (good for search/AI features, costs credits).
+  - 0 listings, 0 watches. No scanning evidence exists since the reset, so scan behaviour cannot be audited from this DB.
+  - One unexpected shutdown logged 10-16 23:16.
+
+F7  LOW-MED  Quality drift in the OLD library (this is what a reset was hiding).             VERIFIED
+  - 512 of 542 entries had no thumbnail (94%). 82% of listings (2108 of 2559) had no product link. 208 listings had no research_status.
+  - 121 AI_UNVERIFIED + 24 AI_UNAVAILABLE + 48 WEAK_EVIDENCE = 193 listings decided on thin or missing evidence.
+  - 36 listings marked "researched" with no product. Generic entries "Ps5" and "xbox" (x2) still existed. ~10 sentence-like names
+    ("Craftsman tool chest (two-piece: top chest + bottom rolling cabinet)", the 3DS bundle sentence).
+  - 429 UNPROFITABLE_AT_PRICE and 241 AI_ESTIMATE rejections deserve a sample read (values were mostly missing, see F1).
+
+F8  LOW  Photos.                                                                            VERIFIED
+  - 64 reference photos, none orphaned, all "trusted". 3 content hashes appear twice. No row has is_primary = 1; thumbnails live
+    separately as base64 in products.image_url (up to 138 KB per row), which keeps the Library list heavy.
+  - Most are stock/eBay photos; there are no Facebook listing photos (no listings).
+
+F9  LOW  109 queued cloud deletions.                                                        VERIFIED
+  - Oldest 10-14 20:07, newest 10-15 22:32 (the reset keeps this table on purpose). The LAN server answers /health = 200, so they
+    should drain at the next sync. Not confirmed drained. Check that none of those ghost products reappear.
+
+What looks healthy
+  - integrity_check = ok; backups are being written (latest today); schema migrations all recorded.
+  - Comps validation keeps a per-lookup reason trail (this is how F2 was visible at all).
+  - Variant evidence and knowledge sources are stored with URLs; usage counters show edition research ran 11x with cost tracked.
+  - The color/letter/capacity comparison rules are in code and rejected Galaxy Black correctly.
+
+
+=====================================================================
+PART 3 - RECOMMENDED NEXT STEPS (not done; each needs your OK)
+=====================================================================
+  1. Trace one live WatchCount lookup from the app (count + page type) and log the "challenge vs zero results" difference. [F1]
+  2. Loosen ACCESSORY_WORDS: treat controller/hdmi/remote as included extras on a console title; keep it for standalone accessories. [F2]
+  3. Stop marking a comps check as done when retrieved = 0 and nothing errored; retry sooner. [F1]
+  4. Strip a leading BOM in readJsonFileSafe; mention it in the docs for hand-editing config. [F5]
+  5. Put the dedupe key on every insert path, not just addProductStub. [F4]
+  6. Rename/merge the junk entries (needs your approval): "Xbox Series X variants", "...again", "Galaxy/White", the two 3DS XL duplicates. [F3, F4]
+  7. Before scanning resumes: set a Search For list and the ntfy topic, install beta.25, confirm beta13.openaiSearch is present. [F5, F6]
+  8. After the next scan, re-run this audit (listing outcomes, alert margins) since the DB has no listings to judge yet.
