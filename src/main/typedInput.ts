@@ -68,7 +68,7 @@ function distance(a: string, b: string, max: number): number {
 /** The one known word within one edit (two for long words) of an unknown word, or null when there is none or more than one equally close. */
 function repairWord(word: string, vocab: Vocabulary): string | null {
   if (!/^[a-z]{4,}$/.test(word) || vocab.words.has(word)) return null;
-  const max = word.length >= 8 ? 2 : 1;
+  const max = word.length >= 7 ? 2 : 1;
   let best: string | null = null;
   let bestD = max + 1;
   let tie = false;

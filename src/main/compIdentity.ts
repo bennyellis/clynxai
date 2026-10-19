@@ -107,6 +107,13 @@ function modelLetterWords(text: string): Set<string> {
 }
 
 /** What one reference (the product's name, a search query, the listing it came from) requires of a title. */
+/** Which Xbox a text is about: "series", "one", "360", "unstated" (just "Xbox"), or null when it does not name an Xbox. */
+function xboxGeneration(text: string): "series" | "one" | "360" | "unstated" | null {
+  const m = /\bxbox\s*(series|one|360)?\b/i.exec(text);
+  if (!m) return null;
+  return (m[1]?.toLowerCase() as "series" | "one" | "360" | undefined) ?? "unstated";
+}
+
 function judgeAgainst(reference: string, title: string, requiredTerms: string[], broken: boolean): CompJudgement {
   const reasons: CompJudgement["reasons"] = [];
   let verdict: CompVerdict = "exact";
@@ -119,10 +126,22 @@ function judgeAgainst(reference: string, title: string, requiredTerms: string[],
   const titleSlots = numberSlots(title);
 
   // ---- kind: a part, an accessory, a lot, something that is not working
-  if (!broken && NOT_THE_PRODUCT_WORDS.test(title) && !NOT_THE_PRODUCT_WORDS.test(reference)) {
-    const m = NOT_THE_PRODUCT_WORDS.exec(title);
-    // an edition word is the edition check's business, not a "part"
-    if (m && !/^(limited edition|special edition|collector'?s|steelbook)$/i.test(m[0])) mark("rejected", /lot|bundle/i.test(m[0]) ? "LOT_OR_BUNDLE" : "NOT_WORKING", `the title says "${m[0]}"`);
+  if (!broken) {
+    // EVERY such phrase in the title counts, not only the first ("Special Edition ... For Parts Not Working"), and a phrase the product's own name uses ("Special Edition") only excuses itself
+    const lowRef = reference.toLowerCase();
+    for (const m of title.matchAll(new RegExp(NOT_THE_PRODUCT_WORDS.source, "gi"))) {
+      // an edition word is the edition check's business, not a "part"
+      if (/^(limited edition|special edition|collector'?s|steelbook)$/i.test(m[0]) || lowRef.includes(m[0].toLowerCase())) continue;
+      mark("rejected", /lot|bundle/i.test(m[0]) ? "LOT_OR_BUNDLE" : "NOT_WORKING", `the title says "${m[0]}"`);
+      break;
+    }
+  }
+  // ---- Xbox generation: an Xbox 360 or Xbox One is not a Series X, and a bare "Xbox" does not say which
+  const xboxRef = xboxGeneration(reference);
+  const xboxTitle = xboxGeneration(title);
+  if (xboxRef && xboxRef !== "unstated" && xboxTitle) {
+    if (xboxTitle === "unstated") mark("uncertain", "MODEL_NOT_STATED", `the title says "Xbox" but not which one (the product is the Xbox ${xboxRef})`);
+    else if (xboxTitle !== xboxRef) mark("rejected", "MODEL_NUMBER", `a different Xbox generation: ${xboxTitle} instead of ${xboxRef}`);
   }
   const lowerRef = reference.toLowerCase();
   const scanned = stripDescriptors(title).toLowerCase();

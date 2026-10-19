@@ -124,4 +124,11 @@ run(async () => {
   const t7 = fakeDeps([XBOX, OLD], OLD, { [typed]: blocked });
   const out7 = await runResearchProductTool({ product: typed }, typed, t7.deps);
   check("nothing is created and the old entry is untouched", /NOT SAVED/.test(out7) && t7.log.created.length === 0 && t7.log.lookups.length === 0 && !t7.log.loading.includes("old"), { out7, log: t7.log });
+
+  section("P20b a phrase with its own words never refreshes the old invented 'Galaxy/White' (TESTER's rows)");
+  for (const phrase of ["Xbox Series X Galaxy Edition 2TB", "Xbox Series X Galaxy Edition 1TB", "xbox series x galaxy black", "Xbox Series X Galaxy Black Edition", "Xbox Series X Galaxy Edition Guardians", "xbox series x galaxy edition price?"]) {
+    check(`"${phrase}" is not a refresh of Galaxy/White`, (await decide(phrase, OLD, [XBOX, OLD])).kind !== "refresh_existing");
+  }
+  check("the very same words as the entry are still a refresh", (await decide("Xbox Series X Galaxy Edition White", OLD, [XBOX, OLD])).kind === "refresh_existing");
+  check("a longer misspelling is repaired too ('galaxie')", /galaxy/i.test(normalizeTypedProduct("xbox series x galaxie edition", buildVocabulary([])).text), normalizeTypedProduct("xbox series x galaxie edition", buildVocabulary([])));
 });

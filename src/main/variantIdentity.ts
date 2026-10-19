@@ -14,6 +14,11 @@ const NOISE = new Set([
   "genuine", "authentic", "condition", "great", "excellent", "good", "like", "pack", "set", "kit", "free", "shipping", "fast", "includes", "included",
 ]);
 
+/** Words before "Edition" that do not make a different product ("Standard Edition" is the plain one). */
+const PLAIN_EDITION_WORDS = new Set(["standard", "base", "regular", "original", "basic", "retail", "launch", "console", "full", "complete", "new", "used", "refurbished", "physical", "disc", "digital"]);
+
+const EDITION_ALIASES = new Set(["special", "limited", "collector", "collectors", "exclusive"]);
+
 /** Words that mark an edition rather than name a model: "Special Edition", "Limited", "Collector's", "Anniversary". */
 const EDITION_MARKERS = new Set(["special", "limited", "collector", "collectors", "anniversary", "exclusive", "signature", "founder", "founders", "commemorative", "deluxe"]);
 
@@ -84,6 +89,11 @@ export function extractVariantAttributes(name: string): VariantAttributes {
     if (tokens[i] !== "edition") continue;
     const prev = tokens[i - 1];
     if (!NOISE.has(prev) && !EDITION_MARKERS.has(prev) && !isColorWord(prev) && !CAPACITY.test(prev) && !/^\d+$/.test(prev)) editionTerms.add(prev);
+    // "Galaxy Black Edition": the color is part of the edition's name, and the themed word before it ("galaxy") is what makes it a different product from the plain console
+    if (isColorWord(prev) && i >= 2) {
+      const themed = tokens[i - 2];
+      if (themed.length >= 4 && !NOISE.has(themed) && !EDITION_MARKERS.has(themed) && !isColorWord(themed) && !CAPACITY.test(themed) && !TIER_WORDS.has(themed) && themed !== "series") editionTerms.add(themed);
+    }
   }
   const kind = classifyKind(name);
   return {
@@ -261,7 +271,18 @@ export function editionConflict(reference: string, title: string, required: stri
   const refAttrs = extractVariantAttributes(reference);
   const titleTokens = new Set(identityTokens(title));
   const wanted = new Set<string>([...refAttrs.editionTerms, ...required.map((r) => r.toLowerCase())]);
-  for (const t of wanted) if (!titleTokens.has(t)) return true;
+  // "Special", "Limited", "Collector's" and "Exclusive" are one family: sellers say "Limited Edition" for what Microsoft calls the "Special Edition". The family is required as a whole, and
+  // only when the product has no themed word of its own to go by ("Galaxy" is what separates it; a title that says "Galaxy Black Edition" without the marker is still that edition).
+  const family = [...wanted].filter((t) => EDITION_ALIASES.has(t));
+  const others = [...wanted].filter((t) => !EDITION_ALIASES.has(t));
+  for (const t of others) if (!titleTokens.has(t)) return true;
+  if (family.length > 0 && others.length === 0 && ![...EDITION_ALIASES].some((t) => titleTokens.has(t))) return true;
+  // the title names a themed edition ("Galaxy Edition", "Galaxy Black Edition") that the product does not: the plain console is not that edition
+  const refTokens = new Set(identityTokens(reference));
+  for (const t of extractVariantAttributes(title).editionTerms) {
+    if (EDITION_MARKERS.has(t) || PLAIN_EDITION_WORDS.has(t) || refTokens.has(t) || required.some((r) => r.toLowerCase() === t)) continue;
+    return true;
+  }
   // (a product whose own name says "Edition" - "Galaxy Black Edition" - IS an edition product: "Special Edition" in a title is then the same kind of thing, not a conflict by itself)
   if (EDITION_PHRASE.test(normalizeName(title)) && refAttrs.editionTerms.length === 0 && !EDITION_PHRASE.test(normalizeName(reference)) && !/\bedition\b/.test(normalizeName(reference))) return true;
   return false;

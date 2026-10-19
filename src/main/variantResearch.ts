@@ -7,7 +7,7 @@
 // on the parent so the next turn starts from it. All decisions here are pure; the search and the Database are passed in.
 
 import { reconcileVerdict, type VariantVerdict } from "./variantEvidence.js";
-import { findParentCandidate, identityTokens, isMoreSpecific } from "./variantIdentity.js";
+import { distinguishingTokens, findParentCandidate, identityTokens, isMoreSpecific } from "./variantIdentity.js";
 
 export interface TrackedProduct {
   id: string;
@@ -53,6 +53,12 @@ export function entryAddsWords(typed: string, entryName: string): boolean {
   return theirs.some((t) => !mine.has(t) && !HARMLESS_EXTRA.has(t) && !CAPACITY_WORD.test(t));
 }
 
+/** The entry's name carries a color, an edition word or a region that the typed phrase does not say. */
+export function entryHasOwnDefiningWords(typed: string, entryName: string): boolean {
+  const d = distinguishingTokens(entryName, typed);
+  return d.colors.length + d.editionTerms.length + d.regions.length > 0;
+}
+
 export async function decideResearchTarget(product: string, deps: DecideDeps): Promise<ResearchDecision> {
   const matched = deps.findMatching(product);
   // Asking again for the same thing is a refresh. So is a name that is not a version of the entry at all (another spelling of it). But a typed phrase whose words are all INSIDE the
@@ -61,7 +67,9 @@ export async function decideResearchTarget(product: string, deps: DecideDeps): P
   // The extra words only count against the entry when nothing vouches for them: an entry with evidence behind its name (verified or supported) is a real product, and a plainer name for it
   // is that product; an entry with no evidence, or one named with an invented separator ("Galaxy/White"), may have been made up by an earlier pass.
   const unproven = !!matched && (matched.name.includes("/") || !(deps.entryHasEvidence?.(matched) ?? false));
-  if (matched && (sameProduct(product, matched.name) || (!isMoreSpecific(product, matched.name) && !(entryAddsWords(product, matched.name) && unproven)))) return { kind: "refresh_existing", existing: matched };
+  // (also when the entry carries a color, an edition word or a region the typed phrase does not: "…galaxy black" is not "…Galaxy/White")
+  const different = unproven && !!matched && (entryAddsWords(product, matched.name) || entryHasOwnDefiningWords(product, matched.name) || (matched.name.includes("/") && !sameProduct(product, matched.name)));
+  if (matched && (sameProduct(product, matched.name) || (!isMoreSpecific(product, matched.name) && !different))) return { kind: "refresh_existing", existing: matched };
 
   const parent = findParentCandidate(product, deps.listTracked());
   if (!parent || !isMoreSpecific(product, parent.name)) {
