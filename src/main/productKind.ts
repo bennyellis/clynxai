@@ -80,6 +80,11 @@ export function mediaSignal(title: string): string | null {
   return null;
 }
 
+/** Whether a name is about a game console / handheld (it names a game platform): the machines whose special editions ship in one configuration. A phone or a laptop does not. */
+export function namesGamePlatform(name: string): boolean {
+  return new RegExp(`\\b(?:${PLATFORM}|${BARE_SERIES})\\b`, "i").test(String(name ?? ""));
+}
+
 export function kindOfName(name: string): ItemKind {
   if (mediaSignal(name)) return "game";
   if (accessorySignal(name)) return "accessory";

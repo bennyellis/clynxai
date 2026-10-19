@@ -22,7 +22,7 @@ import {
   tokens,
 } from "./compFilter.js";
 import { colorsIn } from "./colors.js";
-import { hardwareTail, mediaAmbiguity, mediaSignal, stripDescriptors } from "./productKind.js";
+import { hardwareTail, mediaAmbiguity, mediaSignal, namesGamePlatform, stripDescriptors } from "./productKind.js";
 import { editionConflict, extractVariantAttributes, identityTokens } from "./variantIdentity.js";
 import { attributeFindings } from "./identityModel.js";
 import { knowledgeFindings, knowledgeProvider } from "./knowledgeRegistry.js";
@@ -232,7 +232,8 @@ function judgeAgainst(reference: string, title: string, requiredTerms: string[],
       // configuration is not made doubtful by a seller leaving out the size. A plain product with no themed word still needs its capacity.
       const themed = extractVariantAttributes(reference).editionTerms.filter((t) => !["special", "limited", "collector", "collectors", "exclusive", "anniversary", "signature", "founder", "founders", "commemorative", "deluxe"].includes(t));
       const titleHas = new Set(identityTokens(title));
-      const themedNamed = themed.length > 0 && themed.every((t) => titleHas.has(t));
+      // only for game consoles: a limited console edition ships in one configuration, whereas a phone or laptop edition comes in several sizes and the size still matters
+      const themedNamed = themed.length > 0 && themed.every((t) => titleHas.has(t)) && namesGamePlatform(reference);
       mark(themedNamed ? "compatible" : "uncertain", "CAPACITY_NOT_STATED", `the title does not state a capacity (the product is ${refCaps.join("/")})${themedNamed ? "; it names the edition, which is enough to go on" : ""}`);
     }
     else if (titleCaps.some((c) => !refCaps.includes(c))) mark("rejected", "CAPACITY", `${titleCaps.join("/")} instead of ${refCaps.join("/")}`);

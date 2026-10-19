@@ -80,4 +80,13 @@ run(() => {
     check(`and files it (no photo/price disagreement) "${t}"`, filed(OFFICIAL, t), judgeCandidateByText(OFFICIAL, t));
   }
   check("a plain 1TB console with no Galaxy word still needs its capacity (not made compatible)", comp(OFFICIAL, "Xbox Series X Console Black").verdict !== "compatible" && comp(OFFICIAL, "Xbox Series X Console Black").verdict !== "exact");
+
+  section("the missing-capacity relaxation is for game consoles only (TESTER's side effect)");
+  const PHONES: Array<[string, string]> = [
+    ["Apple iPhone 15 Pro 256GB Blue Titanium Edition", "Apple iPhone 15 Pro Blue Titanium Edition"],
+    ["Samsung Galaxy S24 Ultra 256GB Titanium Black Edition", "Samsung Galaxy S24 Ultra Titanium Black Edition"],
+    ["Samsung Galaxy S24 256GB Onyx Black Special Edition", "Samsung Galaxy S24 Onyx Black Special Edition"],
+  ];
+  for (const [entry, title] of PHONES) check(`a phone title without a size is not priced: "${title}"`, !priced(entry, title), comp(entry, title));
+  check("a console edition without a size still is", priced("Nintendo Switch OLED 64GB Zelda Red Edition", "Nintendo Switch OLED Zelda Red Edition"));
 });
