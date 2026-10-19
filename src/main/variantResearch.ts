@@ -68,7 +68,7 @@ export async function decideResearchTarget(product: string, deps: DecideDeps): P
   // is that product; an entry with no evidence, or one named with an invented separator ("Galaxy/White"), may have been made up by an earlier pass.
   const unproven = !!matched && (matched.name.includes("/") || !(deps.entryHasEvidence?.(matched) ?? false));
   // (also when the entry carries a color, an edition word or a region the typed phrase does not: "…galaxy black" is not "…Galaxy/White")
-  const different = unproven && !!matched && (entryAddsWords(product, matched.name) || entryHasOwnDefiningWords(product, matched.name) || (matched.name.includes("/") && !sameProduct(product, matched.name)));
+  const different = unproven && !!matched && (entryHasOwnDefiningWords(product, matched.name) || (matched.name.includes("/") && !sameProduct(product, matched.name)));
   if (matched && (sameProduct(product, matched.name) || (!isMoreSpecific(product, matched.name) && !different))) return { kind: "refresh_existing", existing: matched };
 
   const parent = findParentCandidate(product, deps.listTracked());

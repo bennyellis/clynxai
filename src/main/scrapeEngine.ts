@@ -370,6 +370,8 @@ export interface ScrapeEngineOptions {
   // own and value the lot with the main item as the focal point (see bundleBreakdown.ts and index.ts's valueListingBundle). Null when
   // it turns out to be one product, or the breakdown wasn't possible.
   valueBundle?: (args: { title: string; description: string; mainName: string; mainValueUsd: number }) => Promise<BundleValuation | null>;
+  /** The things a listing of a known product comes with (from the bundle breakdown): they become SUGGESTED add-ons on that product (switched off, shown on its Library page). Never changes a value or an alert. */
+  onAddonsSeen?: (mainName: string, itemNames: string[], listingId: string) => void;
 }
 
 // A readable name for a Marketplace place address ("…/marketplace/richmond/" ->
@@ -2688,6 +2690,11 @@ export class ScrapeEngine {
       try {
         const valuation = await this.opts.valueBundle({ title: listing.title, description: detail.description, mainName: scored.extraction.matchedItem, mainValueUsd: baseValueForLot });
         if (valuation) {
+          try {
+            this.opts.onAddonsSeen?.(scored.extraction.matchedItem, valuation.lines.filter((l) => l.status !== "main").map((l) => l.name), listing.id);
+          } catch {
+            /* add-on suggestions are optional */
+          }
           this.log("info", `Bundle breakdown for "${listing.title}": ${valuation.summary}. The lot is worth about $${valuation.totalValueUsd} (simply adding everything up would say $${valuation.naiveSumUsd}).`, listing.url);
           bundleExtras = { valueUsd: valuation.addedUsd, phrase: valuation.summary };
           gateExtras = gateExtrasFromValuation(valuation);

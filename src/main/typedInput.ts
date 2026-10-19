@@ -53,7 +53,7 @@ function distance(a: string, b: string, max: number): number {
     const cur = [i];
     let best = i;
     for (let j = 1; j <= b.length; j++) {
-      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 3));
       // two neighbouring letters swapped ("swtich") is one slip, not two
       if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) cur[j] = Math.min(cur[j], prev2[j - 2] + 1);
       if (cur[j] < best) best = cur[j];
@@ -68,7 +68,7 @@ function distance(a: string, b: string, max: number): number {
 /** The one known word within one edit (two for long words) of an unknown word, or null when there is none or more than one equally close. */
 function repairWord(word: string, vocab: Vocabulary): string | null {
   if (!/^[a-z]{4,}$/.test(word) || vocab.words.has(word)) return null;
-  const max = word.length >= 7 ? 2 : 1;
+  const max = word.length >= 9 ? 2 : 1; // a missing / extra / swapped letter only: never one word turned into another (holo -> Halo, base -> Bose, tumbler -> Rambler)
   let best: string | null = null;
   let bestD = max + 1;
   let tie = false;
@@ -124,7 +124,7 @@ export function normalizeTypedProduct(phrase: string, vocab: Vocabulary): Normal
 export function describeCorrections(n: NormalizedPhrase): string {
   if (n.corrections.length === 0) return "";
   const how = n.corrections.map((c) => (c.kind === "spelling" ? `spelling "${c.from}" -> "${c.to}"` : `word order "${c.from}" -> "${c.to}"`)).join("; ");
-  return `I read "${n.original}" as "${n.text}" (${how}). Tell the user this correction in one short sentence and keep the original wording as what they typed.`;
+  return `I read "${n.original}" as "${n.text}" (${how}). BEGIN your reply to the user with that first sentence (the one starting "I read"), word for word, and then carry on. Do not leave it out: the user must see what Clynx understood.`;
 }
 
 export type Placement =
@@ -132,8 +132,23 @@ export type Placement =
   | { kind: "gibberish" }
   | { kind: "choose"; options: string[] };
 
+const KEYBOARD_ROWS = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
+/** Letters typed along one keyboard row ("asdf", "qwer", "zxcv", "hjkl"): someone testing the keyboard, not a name. */
+function keyboardMash(token: string): boolean {
+  if (token.length < 4) return false;
+  for (const row of KEYBOARD_ROWS) {
+    const rev = [...row].reverse().join("");
+    for (let i = 0; i + 4 <= token.length; i++) {
+      const part = token.slice(i, i + 4);
+      if (row.includes(part) || rev.includes(part)) return true;
+    }
+  }
+  return false;
+}
+
 function wordLike(token: string, vocab: Vocabulary): boolean {
   if (vocab.words.has(token) || /\d/.test(token) || token.length <= 2) return true;
+  if (keyboardMash(token)) return false;
   if (!/[aeiouy]/.test(token)) return false;
   return !/[^aeiouy]{5,}/.test(token) && !/(.)\1{3,}/.test(token);
 }
@@ -156,4 +171,33 @@ export function placePhrase(phrase: string, vocab: Vocabulary, tracked: Array<{ 
   const machines = inside.filter((p) => kindOfName(p.name) === "hardware");
   if (games.length > 0 && machines.length > 0) return { kind: "choose", options: [...games.slice(0, 2), ...machines.slice(0, 2)].map((p) => p.name) };
   return { kind: "ok" };
+}
+
+/** Words that start a question or a sentence, not a product name ("is a used series s worth flipping?"). */
+const QUESTION_STARTERS = new Set(["is", "are", "was", "were", "should", "can", "could", "would", "how", "why", "what", "which", "who", "when", "does", "do", "did", "will"]);
+
+export function looksLikeQuestion(phrase: string): boolean {
+  const t = phrase.trim();
+  if (/\?/.test(t)) return true;
+  const first = (t.split(/\s+/)[0] ?? "").toLowerCase().replace(/[^a-z]/g, "");
+  return QUESTION_STARTERS.has(first) && t.split(/\s+/).length >= 3;
+}
+
+/** "research the steam deck oled" -> "steam deck oled": a leading command and article are not part of the name. */
+const LEADING_COMMAND = /^(?:please\s+|pls\s+)?(?:(?:can|could|would)\s+you\s+)?(?:go\s+)?(?:research|look\s+up|look\s+into|look\s+at|find|add|check(?:\s+out)?|search(?:\s+for)?|tell\s+me\s+about)\s+/i;
+export function stripCommand(phrase: string): string {
+  return phrase.trim().replace(LEADING_COMMAND, "").replace(/^(?:the|a|an)\s+(?=\S+\s+\S)/i, "").trim();
+}
+
+/**
+ * "xbox series x. find all variants and add-ons" is a product AND a request: the request is never part of the product's name. Splits at the first sentence break, or at a trailing
+ * "and find/show/list ..." clause; returns the request so the answer can honour it.
+ */
+export function splitProductRequest(phrase: string): { product: string; request: string | null } {
+  const t = phrase.trim();
+  const sentence = /^(.{3,}?)[.;!]+\s+(\S[\s\S]*)$/.exec(t);
+  if (sentence && sentence[1].trim().split(/\s+/).length <= 8) return { product: sentence[1].trim(), request: sentence[2].trim() };
+  const trailing = /^(.{3,}?)\s*[,;]?\s+(?:and|then|also)\s+((?:find|show|list|research|check|get|look)\b[\s\S]*)$/i.exec(t);
+  if (trailing && trailing[1].trim().split(/\s+/).length <= 8) return { product: trailing[1].trim(), request: trailing[2].trim() };
+  return { product: t, request: null };
 }

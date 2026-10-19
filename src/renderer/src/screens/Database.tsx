@@ -8,6 +8,7 @@ import { Modal } from "../components/Modal.js";
 import { useLightbox } from "../components/ImageLightbox.js";
 import { ThumbnailSizeSlider, useThumbnailSize } from "../components/ThumbnailSize.js";
 import { WatchFormFlow } from "../components/WatchFormFlow.js";
+import { AddonsSection } from "../components/AddonsSection.js";
 import { DiscoveryTab, resetDiscoveryUi } from "./DiscoveryTab.js";
 import { ReviewTab } from "./ReviewTab.js";
 import { keepRangeUsd } from "../../../main/resaleMath.js";
@@ -2832,10 +2833,15 @@ function ProductDetailPage({
   // just enough to identify the product at a glance without opening chat.
   const briefDescription = useMemo(() => {
     const trimmed = product.aiSummary.trim();
+    // A research that could not run is a state with a plain note, never raw error text (older entries saved "(Research failed: ...)" as their description: those are shown the same way).
+    if (product.researchState === "failed" || trimmed.startsWith("(Research failed")) {
+      return product.researchNote ?? "The research could not finish just now. Clynx will try this one again by itself, or press Research now.";
+    }
     if (!trimmed) return "";
     const firstSentence = trimmed.split(/(?<=[.!?])\s/)[0];
-    return firstSentence.length > 160 ? `${firstSentence.slice(0, 157)}…` : firstSentence;
-  }, [product.aiSummary]);
+    const brief = firstSentence.length > 160 ? `${firstSentence.slice(0, 157)}…` : firstSentence;
+    return product.researchState === "unsourced" ? `${brief} (not confirmed: no web pages were read)` : brief;
+  }, [product.aiSummary, product.researchState, product.researchNote]);
   // Per explicit instruction — "for variants/special editions of products,
   // in the original Library listing, include these variants." See
   // findVariantSiblings' own doc comment above for what actually counts as
@@ -3148,6 +3154,8 @@ function ProductDetailPage({
               </p>
             </div>
           )}
+
+          <AddonsSection product={product} />
 
           {fbPriceStats && (
             <div style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)" }}>

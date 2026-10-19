@@ -1,4 +1,5 @@
 import type { ApiSnapshot } from "../main/apiActivity.js";
+import type { Addon, AddonRole, AddonStatus } from "../main/addons.js";
 import type { SelfTestResult } from "../main/apiSelfTest.js";
 import { contextBridge, ipcRenderer } from "electron";
 import type { DiscoveryEntry } from "../main/discovery.js";
@@ -245,6 +246,13 @@ const api = {
     return () => ipcRenderer.removeListener("library:changed", listener);
   },
   clearAllProducts: (): Promise<void> => ipcRenderer.invoke("products:clearAll"),
+  // Add-ons on a product's Library page (addons.ts). Every call answers with that product's add-ons as they are now.
+  listAddons: (productId: string): Promise<Addon[]> => ipcRenderer.invoke("addons:list", productId),
+  addAddon: (productId: string, input: { name: string; role?: AddonRole; standaloneValueUsd?: number | null; enabled?: boolean }): Promise<Addon[]> => ipcRenderer.invoke("addons:add", productId, input),
+  setAddonEnabled: (id: string, enabled: boolean): Promise<Addon[]> => ipcRenderer.invoke("addons:setEnabled", id, enabled),
+  setAddonStatus: (id: string, status: AddonStatus): Promise<Addon[]> => ipcRenderer.invoke("addons:setStatus", id, status),
+  updateAddon: (id: string, patch: { name?: string; role?: AddonRole; standaloneValueUsd?: number | null }): Promise<Addon[]> => ipcRenderer.invoke("addons:update", id, patch),
+  removeAddon: (id: string): Promise<Addon[]> => ipcRenderer.invoke("addons:remove", id),
   countProductsMissingPhotos: (): Promise<number> => ipcRenderer.invoke("products:countMissingPhotos"),
   backfillProductPhotos: (): Promise<number> => ipcRenderer.invoke("products:backfillPhotos"),
   getPhotoBackfillStatus: (): Promise<{ running: boolean; done: number; total: number }> => ipcRenderer.invoke("products:photoBackfillStatus"),

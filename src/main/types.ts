@@ -1250,6 +1250,10 @@ export interface ProductProfile {
   // and the variant claims checked against THIS product that were not confirmed enough to become entries. Local-only. null / empty until checked.
   variantEvidence: import("./variantEvidence.js").VariantVerdict | null;
   variantClaims: import("./variantEvidence.js").VariantVerdict[];
+  // "failed": the last research could not run (search blocked, AI paused...) and nothing was saved as a description: Clynx retries later. "unsourced": the write-up came from the AI's memory,
+  // no pages were read. null: researched normally. researchNote is a plain-words explanation for the product page. Local-only.
+  researchState: "failed" | "unsourced" | null;
+  researchNote: string | null;
   // How the latest eBay / WatchCount results were judged against this product's identity before any price was used (compIdentity.ts). Local-only.
   compsValidation: { at: number; sold: import("./compIdentity.js").ValidationSummary | null; active: import("./compIdentity.js").ValidationSummary | null } | null;
   loading: boolean;

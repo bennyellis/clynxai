@@ -2,7 +2,7 @@
 // invented "Xbox Series X Galaxy/White"), only a spelling slip or a real product title's word order is repaired (and said), a phrase that is a game AND a console is put to the user, a phrase
 // that is not a product name is not filed, and the research reply never stalls with "what should I focus on". Fakes stand in for the Database and the web.
 import { decideResearchTarget, entryAddsWords, notRecordedMessage, type DecideDeps, type TrackedProduct } from "../variantResearch.js";
-import { buildVocabulary, describeCorrections, normalizeTypedProduct, placePhrase } from "../typedInput.js";
+import { buildVocabulary, describeCorrections, looksLikeQuestion, normalizeTypedProduct, placePhrase, splitProductRequest, stripCommand } from "../typedInput.js";
 import { runResearchProductTool, type ResearchToolDeps } from "../researchTool.js";
 import type { VariantVerdict } from "../variantEvidence.js";
 import { check, run, section } from "./_testkit.js";
@@ -130,5 +130,38 @@ run(async () => {
     check(`"${phrase}" is not a refresh of Galaxy/White`, (await decide(phrase, OLD, [XBOX, OLD])).kind !== "refresh_existing");
   }
   check("the very same words as the entry are still a refresh", (await decide("Xbox Series X Galaxy Edition White", OLD, [XBOX, OLD])).kind === "refresh_existing");
-  check("a longer misspelling is repaired too ('galaxie')", /galaxy/i.test(normalizeTypedProduct("xbox series x galaxie edition", buildVocabulary([])).text), normalizeTypedProduct("xbox series x galaxie edition", buildVocabulary([])));
+  // TESTER's niche run: a real word is never turned into another real word (a substitution), only a missing / extra / swapped letter is repaired
+  const niche = buildVocabulary(["Xbox Series X Halo Infinite", "Yeti Rambler 20oz", "Bose QuietComfort 45", "Samsung Galaxy S24 Ultra 256GB", "Apple MacBook Air M2"]);
+  check("holo is not Halo, base is not Bose", normalizeTypedProduct("Pokemon Charizard holo 1999 base set", niche).corrections.length === 0, normalizeTypedProduct("Pokemon Charizard holo 1999 base set", niche));
+  check("tumbler is not Rambler", normalizeTypedProduct("yeti tumbler 30oz", niche).corrections.length === 0);
+  check("a missing letter is still repaired (samsng, macbok)", /Samsung/.test(normalizeTypedProduct("samsng galaxy s24 ultra", niche).text) && /MacBook/.test(normalizeTypedProduct("macbok air m2", niche).text));
+
+  section("L4 a request is never the product's name");
+  check("'xbox series x. find all variants and add-ons' -> product + request", JSON.stringify(splitProductRequest("xbox series x. find all variants and add-ons")) === JSON.stringify({ product: "xbox series x", request: "find all variants and add-ons" }), splitProductRequest("xbox series x. find all variants and add-ons"));
+  check("'xbox series x and look up variants' splits", splitProductRequest("xbox series x and look up variants").product === "xbox series x" && /^look up variants/.test(splitProductRequest("xbox series x and look up variants").request ?? ""), splitProductRequest("xbox series x and look up variants"));
+  check("'xbox series x, then find add-ons' splits", splitProductRequest("xbox series x, then find add-ons").product === "xbox series x", splitProductRequest("xbox series x, then find add-ons"));
+  check("a plain product name is untouched", splitProductRequest("Sony WH-1000XM4").request === null && splitProductRequest("Sony WH-1000XM4").product === "Sony WH-1000XM4");
+  check("a name with a period inside a model is untouched", splitProductRequest("Nikon Z6 II 24.5MP body").request === null);
+  const tSplit = fakeDeps([XBOX], null);
+  const outSplit = await runResearchProductTool({ product: "xbox series x. find all variants and add-ons" }, "xbox series x. find all variants and add-ons", tSplit.deps);
+  check("the tool never creates an entry named with the whole sentence", !tSplit.log.created.some((n) => /find all variants/i.test(n)) && !tSplit.log.lookups.some((l) => /find all variants/i.test(l.name)), tSplit.log);
+  check("and it hands the request back to the model", /Their message also asked: "find all variants and add-ons"/.test(outSplit), outSplit);
+
+  section("junk is not filed (TESTER's niche run)");
+  check("a question is a question", looksLikeQuestion("is a used series s worth flipping?") && !looksLikeQuestion("Sony WH-1000XM4"));
+  const tQ = fakeDeps([XBOX], null);
+  const outQ = await runResearchProductTool({ product: "is a used series s worth flipping?" }, "is a used series s worth flipping?", tQ.deps);
+  check("a question creates nothing", /^NOT PLACED/.test(outQ) && tQ.log.created.length === 0 && tQ.log.lookups.length === 0, { outQ, log: tQ.log });
+  const tK = fakeDeps([XBOX], null);
+  const outK = await runResearchProductTool({ product: "asdf qwer zxcv" }, "asdf qwer zxcv", tK.deps);
+  check("keyboard mashing creates nothing", /^NOT PLACED/.test(outK) && tK.log.created.length === 0, { outK, log: tK.log });
+  check("'research the steam deck oled' loses the command and the article", stripCommand("research the steam deck oled") === "steam deck oled", stripCommand("research the steam deck oled"));
+
+  section("a plainer name for an entry that just has a fuller name is that entry (no duplicate)");
+  const FULL = (id: string, name: string): TrackedProduct => ({ id, name });
+  for (const [typedName, entry] of [["kitchenaid artisan mixer", "KitchenAid Artisan Stand Mixer"], ["dewalt dcd771", "DeWalt DCD771C2 20V Drill"], ["lego millennium falcon", "LEGO Millennium Falcon 75192"], ["halo infinite", "Halo Infinite (Xbox Series X|S)"], ["samsung galaxy s24 ultra", "Samsung Galaxy S24 Ultra 256GB"]] as const) {
+    const e = FULL("e", entry);
+    check(`"${typedName}" refreshes "${entry}"`, (await decide(typedName, e, [e])).kind === "refresh_existing");
+  }
+  check("but a plain entry still never takes a typed edition with its own color", (await decide("xbox series x galaxy black", OLD, [XBOX, OLD])).kind !== "refresh_existing");
 });

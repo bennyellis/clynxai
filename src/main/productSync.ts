@@ -35,6 +35,7 @@
 import type { Config, ProductProfile, SyncStatus } from "./types.js";
 import type { Store } from "./store.js";
 import { CloudClient, productToCloud, type CloudProduct } from "./cloudClient.js";
+import { staleQueuedDeletes } from "./cloudDeletes.js";
 
 const SYNC_INTERVAL_MS = 2 * 60_000;
 const STARTUP_DELAY_MS = 15_000;
@@ -77,6 +78,8 @@ function cloudProductToLocal(cp: CloudProduct): ProductProfile {
     parentProductId: null,
     variantEvidence: null,
     variantClaims: [],
+    researchState: null,
+    researchNote: null,
     compsValidation: null,
     loading: false,
     createdAt: cp.createdAt,
@@ -97,6 +100,9 @@ export class ProductSyncService {
   // local product id -> cloud row's own server id, needed for the delete
   // route. Rebuilt from pull/push responses; empty after a restart is fine.
   private cloudIdByLocalId = new Map<string, string>();
+  // Every product id the server listed on the last COMPLETE pull (the first pull of a run, from revision 0, with no error); null until one succeeded. A queued delete for an id that is
+  // not in it needs nothing sent (cloudDeletes.ts), so it is dropped instead of waiting forever.
+  private serverLocalIds: Set<string> | null = null;
   // First UI status readout (see index.ts's cloud:getStatus) — same
   // posture as watchSync.ts's own lastSyncAt/lastSyncError.
   private lastSyncAt: number | null = null;
@@ -175,6 +181,8 @@ export class ProductSyncService {
         return;
       }
       let maxRevision = this.lastPulledRevision;
+      // only a pull from revision 0 lists everything the server has
+      if (this.lastPulledRevision === 0) this.serverLocalIds = new Set(result.data.products.map((p) => p.localId));
       for (const remote of result.data.products) {
         if (remote.id) this.cloudIdByLocalId.set(remote.localId, remote.id);
         if (typeof remote.revision === "number") maxRevision = Math.max(maxRevision, remote.revision);
@@ -208,7 +216,11 @@ export class ProductSyncService {
   private async pushPendingDeletes(): Promise<void> {
     try {
       const pending = this.store.listPendingCloudDeletes("product");
-      for (const localId of pending) {
+      // a queued delete for something the server does not list is already done: forget it (nothing is sent anywhere)
+      for (const gone of staleQueuedDeletes(pending, this.serverLocalIds)) {
+        if (!this.cloudIdByLocalId.has(gone)) this.store.removePendingCloudDelete("product", gone);
+      }
+      for (const localId of this.store.listPendingCloudDeletes("product")) {
         const cloudId = this.cloudIdByLocalId.get(localId);
         if (!cloudId) continue; // never synced to cloud (or not resolved yet this session) — retried next tick
         const result = await this.cloudClient.deleteProduct(cloudId);

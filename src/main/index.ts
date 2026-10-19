@@ -50,7 +50,7 @@ import { settleLateMarketCheck } from "./marketCheckSettle.js";
 import { apiActivity } from "./apiActivity.js";
 import { runApiSelfTest, type SelfTestDeps } from "./apiSelfTest.js";
 import { describeSummary, emptySummary, listingContradictsEntry } from "./compIdentity.js";
-import { distinguishingTokens } from "./variantIdentity.js";
+import { distinguishingTokens, isMoreSpecific } from "./variantIdentity.js";
 import {
   answerImageQuestion,
   reconsiderImageFeedback,
@@ -65,6 +65,11 @@ import { IdentityReview } from "./identityReview.js";
 import { fetchActiveAsks } from "./ebayActive.js";
 import { resolveIdentityTarget } from "./productIdentity.js";
 import { beta13Flags } from "./beta13.js";
+import { runVariantFanout } from "./variantFanout.js";
+import { friendlyPriceCheckFailure, friendlyResearchFailure } from "./researchFailure.js";
+import { adoptOfficialName, planParentLinks } from "./variantLinking.js";
+import { idsToQueueOnReset } from "./cloudDeletes.js";
+import { estimateAddonUplift, isNoiseAddon, type AddonRole, type AddonStatus } from "./addons.js";
 import { makeThumb, noteDecision } from "./aiDecisionLog.js";
 import { fileImage, setFilingRecorder, type FileImageEvidence } from "./fileImage.js";
 import { createKnowledgeService, type KnowledgeService } from "./knowledgeService.js";
@@ -1702,7 +1707,9 @@ async function fetchAndStoreEbayComps(id: string, fallbackName: string, currentL
     discovery.finish(id);
     return result;
   } catch (err) {
-    discovery.note(id, "warn", `The eBay check didn't work out: ${(err as Error).message}`);
+    // The raw reason (a browser launch timeout can be thousands of characters of Chromium flags) goes to the log, never the page or the chat.
+    console.error(`[ebay-comps] check for "${fallbackName}" failed: ${(err as Error).message.slice(0, 500)}`);
+    discovery.note(id, "warn", friendlyPriceCheckFailure((err as Error).message));
     discovery.finish(id, "failed");
     throw err;
   }
@@ -2454,6 +2461,8 @@ async function runProductLookupInner(
   let researchFailed = false;
   try {
     const result = await lookupProduct(name, { verdict: opts.verdict ?? before?.variantEvidence ?? null });
+    // Nothing usable came back (search blocked, AI paused...): never saved as the description. The catch below marks the product "needs retry" and leaves what it already has alone.
+    if (result.failed) throw new Error(result.failed.reason);
     // Reaction is available as soon as the main research call resolves —
     // broadcast it right away rather than waiting for the remaining steps
     // below (eBay comps, sibling discovery) to also finish, so the
@@ -2550,12 +2559,23 @@ async function runProductLookupInner(
       familyLogoUrl,
       imageUrl,
     });
+    // a write-up from the AI's memory (no page was read) is marked as such; a normal research clears an earlier failure
+    store.setResearchState(id, result.sourced ? null : "unsourced", result.sourced ? null : "No web pages could be read for this one, so the description comes from the AI's own knowledge and is not confirmed. Press Research again to look once more.");
     // What the evidence check found about a specific edition/configuration is kept with the product (never replacing a stronger earlier finding
     // with a weaker one), and said on the Discovery feed in plain words.
     if (result.evidence) {
       const kept = reconcileVerdict(store.getProductById(id)?.variantEvidence ?? null, result.evidence);
       store.setProductVariantEvidence(id, kept);
       discovery.note(id, "step", `Evidence check: ${kept.status}. ${kept.basis}`);
+      // A confirmed edition carries the name its sources give it ("XBOX Series X 2TB Galaxy Black Special Edition" for "Xbox Series X Galaxy Edition"), unless the person named it themself.
+      if (kept.status === "verified" || kept.status === "supported") {
+        const adopted = adoptOfficialName(name, kept.officialName, store.getProductById(id)?.nameLocked ?? false, (n) => !!store.getProductByName(n));
+        if (adopted) {
+          store.editProductProfile(id, { name: adopted });
+          discovery.note(id, "step", `The sources call it "${adopted}", so that is its name now.`);
+          name = adopted;
+        }
+      }
     }
 
     // Stock photos + a reference gallery (see fillReferencePhotos). A brand-
@@ -2632,7 +2652,7 @@ async function runProductLookupInner(
     // discoverAndCreateSiblingProducts below. Fire-and-forget: this
     // shouldn't make the listing evaluation that triggered it wait on
     // researching a whole batch of unrelated games.
-    if (!opts.skipSiblingDiscovery && !hadFamilyBefore && resolvedFamily && config.autoResearchListings) {
+    if (!opts.skipSiblingDiscovery && !hadFamilyBefore && resolvedFamily && config.autoResearchListings && result.sourced) {
       const segments = resolvedFamily.split(">").map((s) => s.trim());
       if (segments.length >= 3 && segments[1].toLowerCase() === "games") {
         discoverAndCreateSiblingProducts(segments[0], segments[2], result.category, resolvedFamily, id).catch((err) =>
@@ -2652,23 +2672,33 @@ async function runProductLookupInner(
     // not this code guessing from category. Fire-and-forget, same reasoning
     // as the sibling discovery above.
     if (!opts.skipSiblingDiscovery && !hadFamilyBefore && config.autoResearchListings) {
-      discoverAndCreateProductVariants(name, result.category, resolvedFamily, id).catch((err) =>
+      discoverAndCreateProductVariants(name, result.category, resolvedFamily, id, result.sourced).catch((err) =>
         console.error(`[variants] discovery failed for "${name}": ${(err as Error).message}`)
       );
     }
   } catch (err) {
     researchFailed = true;
-    discovery.note(id, "warn", `I hit a snag researching this one: ${(err as Error).message}`);
-    store.updateProductProfile(id, {
-      aiSummary: `(Research failed: ${(err as Error).message})`,
-      category: "Other",
-      family: before?.family ?? null,
-      familyLogoUrl: before?.familyLogoUrl ?? null,
-      imageUrl: before?.imageUrl ?? null,
-    });
+    // The raw error stays in the log; the person sees a plain note, and the product keeps its description, category and place. It is retried later with growing waits.
+    const friendly = friendlyResearchFailure((err as Error).message);
+    console.error(`[research] "${name}" could not be researched: ${(err as Error).message}`);
+    discovery.note(id, "warn", friendly);
+    store.markResearchFailed(id, friendly);
   }
   activeResearch.delete(id);
   broadcastResearchStatus();
+  // confirmed editions go under their base product, whichever of the two was researched last
+  try {
+    for (const link of planParentLinks(store.listVariantLinkRows())) {
+      store.setProductParent(link.childId, link.parentId);
+      const linked = store.getProductById(link.childId);
+      if (linked) {
+        sendToRenderer("products:updated", linked);
+        discovery.note(link.childId, "step", `Filed under "${store.getProductById(link.parentId)?.name ?? "its base product"}".`);
+      }
+    }
+  } catch (err) {
+    console.error(`[variants] could not link editions under their base: ${(err as Error).message}`);
+  }
   discovery.finish(id, researchFailed ? "failed" : "done");
   const updated = store.getProductById(id);
   if (updated) sendToRenderer("products:updated", updated);
@@ -2685,7 +2715,7 @@ async function runProductLookupInner(
 // each one is a full research pass (an AI call, a web image search), and
 // an unbounded "add every game ever made for this console" would be both
 // expensive and a good way to flood the Database from one single listing.
-const SIBLING_DISCOVERY_COUNT = 6;
+const SIBLING_DISCOVERY_COUNT = 3;
 // Related products (sibling games, variants) used to be researched strictly one after another: with a lookup taking a minute or more, the Discovery tab
 // showed one product at a time and the rest of the list waited. Two at a time is the same total work (the same AI and WatchCount calls) in about half the
 // time, and finding an existing entry and creating a missing one are a single synchronous step, so two lookups cannot create the same product.
@@ -2752,25 +2782,48 @@ async function discoverAndCreateSiblingProducts(brand: string, generation: strin
 // same-base-name products regardless of family.
 const VARIANT_DISCOVERY_COUNT = 5;
 
-async function discoverAndCreateProductVariants(productName: string, category: string, familyPath: string | null, parentId?: string): Promise<void> {
+// What the model suggests from memory is only a CANDIDATE (see variantFanout.ts): it becomes a product after the evidence check confirms it from sources, a few per typed phrase,
+// started a moment apart and two at a time, and the run stops when the AI is paused. Nothing is created from the model's memory alone, and a failed research is never saved as text.
+async function discoverAndCreateProductVariants(productName: string, category: string, familyPath: string | null, parentId?: string, sourced = true): Promise<void> {
+  if (!parentId) return; // the confirmed variants are filed under this product
+  if (!sourced) {
+    discovery.note(parentId, "finding", "I could not read real sources for this one yet, so I am not guessing at other versions from memory.");
+    return;
+  }
   const alreadyTracked = store.listProductIndex().map((p) => p.name);
-  const variantNames = await discoverProductVariants({ productName, category, alreadyTracked, count: VARIANT_DISCOVERY_COUNT });
+  const suggested = await discoverProductVariants({ productName, category, alreadyTracked, count: VARIANT_DISCOVERY_COUNT });
+  // A version of THIS product says more than the product does ("iPhone 13" -> "iPhone 13 Pro"); a different model of the same maker is not a version of it (a "Canon EOS R6 Mark II" has no
+  // "Canon EOS R5" or "R3" as versions: live test, six products from one phrase).
+  const variantNames = suggested.filter((n) => isMoreSpecific(n, productName));
   if (!variantNames.length) return;
-  if (parentId) discovery.note(parentId, "finding", `It comes in other versions I should know about: ${variantNames.join(", ")}. Looking into those next.`);
-
-  await forEachLimited(variantNames, RELATED_RESEARCH_CONCURRENCY, async (title) => {
-    // Skip anything already tracked ANYWHERE in the Database — relies on
-    // isSimilarProductName's own variant-aware check (store.ts) correctly
-    // keeping "iPhone 13" and "iPhone 13 Pro" as distinct, non-matching
-    // names, so a genuine variant here is never mistaken for a duplicate of
-    // the base product that triggered this.
-    if (store.findMatchingProduct(title)) return;
-    const candidateId = randomUUID();
-    const id = store.addProductStub(candidateId, title);
-    if (id !== candidateId) return; // already in the Database under this name
-    sendToRenderer("products:updated", store.getProductById(id));
-    await runProductLookup(id, title, { skipSiblingDiscovery: true, forcedFamily: familyPath ?? undefined, source: "related" });
-  });
+  const parent = { id: parentId, name: productName };
+  const outcome = await runVariantFanout(
+    variantNames,
+    {
+      alreadyTracked: (name) => !!store.findMatchingProduct(name),
+      verify: (name) => verifyClaim(name, parent, []),
+      create: async (name, verdict) => {
+        const candidateId = randomUUID();
+        const id = store.addProductStub(candidateId, name);
+        if (id !== candidateId) return; // already in the Database under this name
+        store.setProductParent(id, parentId);
+        store.setProductVariantEvidence(id, verdict);
+        sendToRenderer("products:updated", store.getProductById(id));
+        await runProductLookup(id, name, { skipSiblingDiscovery: true, forcedFamily: familyPath ?? undefined, source: "related", verdict });
+      },
+      rememberClaim: (verdict) => {
+        store.recordVariantClaim(parentId, verdict);
+      },
+      paused: () => !hasOpenAIAccess() || isLowAiMode(),
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      note: (message) => discovery.note(parentId, "warn", message),
+    }
+  );
+  const parts: string[] = [];
+  if (outcome.created.length) parts.push(`confirmed from sources and added: ${outcome.created.join(", ")}`);
+  if (outcome.unverified.length) parts.push(`could not confirm yet, so not added: ${outcome.unverified.join(", ")}`);
+  if (outcome.stopped) parts.push(`stopped early because ${outcome.stopped}`);
+  if (parts.length) discovery.note(parentId, "finding", `Other versions I looked into: ${parts.join("; ")}.`);
 }
 
 // Per explicit instruction — multiple Facebook accounts: the live status
@@ -2813,6 +2866,14 @@ function createEngineForAccount(accountId: string): ScrapeEngine {
     checkMarket: checkMarketBeforeAlert,
     ensureBrokenVariant,
     valueBundle: valueListingBundle,
+    onAddonsSeen: (mainName, itemNames, listingId) => {
+      const base = store.findMatchingProduct(mainName);
+      if (!base) return;
+      for (const itemName of itemNames) {
+        if (isNoiseAddon(itemName)) continue;
+        store.noteAddonSeen(base.id, itemName, listingId);
+      }
+    },
     profileDir: path.join(PROFILES_ROOT, accountId),
     getConfig: (): EngineConfig => ({ ...config, ...currentAccount() }),
     store,
@@ -3083,6 +3144,19 @@ function ensureThumbnailsFor(ids: string[]): number {
   pumpThumbnailQueue();
   return queued;
 }
+// A research that could not run (search blocked, AI paused) is marked "failed" with a due time (Store.markResearchFailed: 10 min, 30 min, 2 h, 6 h, then it is left alone). This looks
+// every few minutes for products that are due and tries them again one at a time, only while the AI is reachable, so a pause that ends fixes itself without a burst.
+let researchRetryTimer: ReturnType<typeof setInterval> | null = null;
+function scheduleResearchRetries(): void {
+  if (researchRetryTimer) clearInterval(researchRetryTimer);
+  const startStore = store;
+  researchRetryTimer = setInterval(() => {
+    if (store !== startStore || !hasOpenAIAccess() || researchActive > 0) return;
+    const due = startStore.listResearchRetriesDue(Date.now(), 1);
+    for (const p of due) void runProductLookup(p.id, p.name, { source: "refresh", skipSiblingDiscovery: true });
+  }, 5 * 60_000);
+}
+
 async function sweepBlankProducts(): Promise<void> {
   if (blankSweepRunning) return;
   blankSweepRunning = true;
@@ -3463,6 +3537,7 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   scheduleIdentityBackfill();
   // A little after startup, so the app is up and the first scan isn't competing with it.
   setTimeout(() => void sweepBlankProducts(), 8000);
+  scheduleResearchRetries();
   watchSyncService = new WatchSyncService(store, cloudClient, () => config);
   scheduleListingPhotoShrink(store);
   listingIngestSyncService = new ListingIngestSyncService(store, cloudClient, () => config);
@@ -4062,7 +4137,15 @@ app.whenReady().then(() => {
       // 3. Clynx Cloud keeps synced copies; without this the next sync would bring everything back
       if (alsoCloud) {
         const ids = store.listIdsForCloudReset();
-        for (const id of ids.products) store.addPendingCloudDelete("product", id);
+        // also what the server lists: a copy that only the server holds (an older library, another device) would otherwise be pulled straight back after the restart
+        let serverProductIds: string[] = [];
+        try {
+          const listed = await cloudClient.listProducts();
+          if (listed.ok && listed.data) serverProductIds = listed.data.products.map((p) => p.localId);
+        } catch {
+          /* the local reset still goes ahead; the server copies are then left as they were */
+        }
+        for (const id of idsToQueueOnReset(ids.products, serverProductIds)) store.addPendingCloudDelete("product", id);
         for (const id of ids.watches) store.addPendingCloudDelete("watch", id);
         for (const id of ids.feedback) store.addPendingCloudDelete("feedback", id);
       }
@@ -4914,6 +4997,33 @@ app.whenReady().then(() => {
     return out;
   });
   ipcMain.handle("products:clearAll", () => store.clearAllProducts());
+  // Add-ons (addons.ts): the toggles and the list on a product's Library page. Nothing here changes the base product's value, an alert or a scan.
+  const addonsAnswer = (baseId: string | undefined) => (baseId ? store.listAddons(baseId) : []);
+  ipcMain.handle("addons:list", (_e, productId: string) => addonsAnswer(String(productId ?? "")));
+  ipcMain.handle("addons:add", (_e, productId: string, input: { name?: string; role?: AddonRole; standaloneValueUsd?: number | null; enabled?: boolean }) => {
+    store.addAddon(String(productId ?? ""), { name: String(input?.name ?? ""), role: input?.role === "expected" ? "expected" : "bonus", standaloneValueUsd: typeof input?.standaloneValueUsd === "number" ? input.standaloneValueUsd : null, enabled: input?.enabled === true });
+    return addonsAnswer(String(productId ?? ""));
+  });
+  ipcMain.handle("addons:setEnabled", (_e, id: string, enabled: boolean) => {
+    const base = store.getAddon(String(id ?? ""))?.baseProductId;
+    store.setAddonEnabled(String(id ?? ""), enabled === true);
+    return addonsAnswer(base);
+  });
+  ipcMain.handle("addons:setStatus", (_e, id: string, status: AddonStatus) => {
+    const base = store.getAddon(String(id ?? ""))?.baseProductId;
+    if (status === "confirmed" || status === "dismissed" || status === "suggested") store.setAddonStatus(String(id ?? ""), status);
+    return addonsAnswer(base);
+  });
+  ipcMain.handle("addons:update", (_e, id: string, patch: { name?: string; role?: AddonRole; standaloneValueUsd?: number | null }) => {
+    const base = store.getAddon(String(id ?? ""))?.baseProductId;
+    store.setAddonDetails(String(id ?? ""), { name: typeof patch?.name === "string" ? patch.name : undefined, role: patch?.role === "expected" || patch?.role === "bonus" ? patch.role : undefined, standaloneValueUsd: patch?.standaloneValueUsd === null ? null : typeof patch?.standaloneValueUsd === "number" ? patch.standaloneValueUsd : undefined });
+    return addonsAnswer(base);
+  });
+  ipcMain.handle("addons:remove", (_e, id: string) => {
+    const base = store.getAddon(String(id ?? ""))?.baseProductId;
+    store.removeAddon(String(id ?? ""));
+    return addonsAnswer(base);
+  });
   ipcMain.handle("products:countMissingPhotos", () => productsNeedingPhotos().length);
   ipcMain.handle("products:backfillPhotos", () => runPhotoBackfill());
   ipcMain.handle("products:photoBackfillStatus", () => ({

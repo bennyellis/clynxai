@@ -10,6 +10,7 @@ import type { ProductSignals } from "./dealSummary.js";
 import path from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { addonKey, type Addon, type AddonRole, type AddonStatus } from "./addons.js";
 import { timedSync, recordEvent } from "./metrics.js";
 import type { BlacklistedImage, BlacklistTerm, FeedbackExample, FeedbackVerdict, FlawFeedbackExample, GateFactsSnapshot, GateReasonRecord, ListingRecord, MyStoreReference, PhotoFlaw, ProductImage, ProductProfile, ScoredListing, SellerRiskResult, Watch, WatchMatch, WatchPlatform, WatchSearchLink, WatchTerm } from "./types.js";
 import { REFERENCE_STATUSES } from "./types.js";
@@ -120,6 +121,40 @@ export class Store {
 
   // Beta 13: additive columns and tables only (nothing is dropped or rewritten here). Older builds ignore them. Every existing photo starts as status 'legacy': still used
   // as a reference, until the one-time suspect pass (markSuspectImages) proves its own title contradicts the entry it is filed under.
+  // Add-ons (addons.ts): additive tables only, nothing existing is touched. A base product's add-ons, and which add-ons each scanned listing was seen with.
+  private migrateAddons(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS product_addons (
+        id TEXT PRIMARY KEY,
+        base_product_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        name_key TEXT NOT NULL,
+        addon_product_id TEXT,
+        role TEXT NOT NULL DEFAULT 'bonus',
+        status TEXT NOT NULL DEFAULT 'suggested',
+        source TEXT NOT NULL DEFAULT 'user_added',
+        compatibility TEXT NOT NULL DEFAULT 'unknown',
+        enabled INTEGER NOT NULL DEFAULT 0,
+        standalone_value_usd REAL,
+        times_seen INTEGER NOT NULL DEFAULT 0,
+        example_listing_ids TEXT NOT NULL DEFAULT '[]',
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        UNIQUE (base_product_id, name_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_product_addons_base ON product_addons (base_product_id);
+      CREATE TABLE IF NOT EXISTS listing_addons (
+        listing_id TEXT NOT NULL,
+        base_product_id TEXT NOT NULL,
+        addon_id TEXT NOT NULL,
+        evidence TEXT NOT NULL DEFAULT 'title',
+        confidence TEXT NOT NULL DEFAULT 'low',
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (listing_id, addon_id)
+      );
+    `);
+  }
+
   private migrateBeta13(): void {
     const imageCols = (this.db.prepare("PRAGMA table_info(product_images)").all() as any[]).map((c) => c.name);
     for (const [column, ddl] of [
@@ -145,6 +180,11 @@ export class Store {
       ["suggested_family", "TEXT"],
       ["thumbnail_image_id", "TEXT"],
       ["placement_locked", "INTEGER NOT NULL DEFAULT 0"],
+      // research that could not run is a state, never description text: failed / unsourced, a plain-words note, how many tries, and when the next one is due
+      ["research_state", "TEXT"],
+      ["research_note", "TEXT"],
+      ["research_attempts", "INTEGER NOT NULL DEFAULT 0"],
+      ["research_retry_at", "INTEGER"],
     ] as const) {
       if (!productCols.includes(column)) this.db.exec(`ALTER TABLE products ADD COLUMN ${column} ${ddl}`);
     }
@@ -785,6 +825,7 @@ export class Store {
       if (!productCols.includes(column)) this.db.exec(`ALTER TABLE products ADD COLUMN ${column} ${type}`);
     }
     this.migrateBeta13();
+    this.migrateAddons();
     // A covering index for name lookups. A product row carries its photo (~90 KB of text) in the middle of the row, and SQLite has
     // to read past that photo to reach any column stored after it (created_at, family, the eBay prices), so even a query for just
     // names sorted by date read every photo. These columns, all together in a small index, are answered without touching the rows
@@ -1701,6 +1742,42 @@ export class Store {
    * Keeps the evidence verdict on a product (what the evidence check found about this being a real variant). Never overwrites a stronger earlier
    * verdict with a weaker one without the caller reconciling them first (see variantEvidence.ts's reconcileVerdict). Returns whether it was written.
    */
+  /** Waits before the next try after the nth failed research: 10 minutes, 30 minutes, 2 hours, 6 hours; then Clynx stops retrying on its own (the person can press Research again). */
+  static readonly RESEARCH_RETRY_DELAYS_MS = [10 * 60_000, 30 * 60_000, 2 * 3600_000, 6 * 3600_000];
+
+  /** The research could not run: remember that (and when to try again) WITHOUT touching the description, category or place the product already has. */
+  markResearchFailed(id: string, note: string, now: number = Date.now()): void {
+    const row = this.db.prepare("SELECT research_attempts n FROM products WHERE id = ?").get(id) as { n: number } | undefined;
+    if (!row) return;
+    const attempts = (row.n ?? 0) + 1;
+    const delay = Store.RESEARCH_RETRY_DELAYS_MS[attempts - 1];
+    this.db
+      .prepare("UPDATE products SET research_state = 'failed', research_note = ?, research_attempts = ?, research_retry_at = ?, loading = 0, updated_at = ? WHERE id = ?")
+      .run(note.slice(0, 300), attempts, delay === undefined ? null : now + delay, now, id);
+  }
+
+  /** Every live product with its parent and the status of its evidence, for linking confirmed editions under their base (variantLinking.planParentLinks). */
+  listVariantLinkRows(): Array<{ id: string; name: string; parentId: string | null; evidenceStatus: string | null }> {
+    return (this.db.prepare("SELECT id, name, parent_product_id p, variant_status s FROM products WHERE deleted_at IS NULL").all() as Array<{ id: string; name: string; p: string | null; s: string | null }>).map((r) => ({
+      id: r.id,
+      name: r.name,
+      parentId: r.p ?? null,
+      evidenceStatus: r.s ?? null,
+    }));
+  }
+
+  /** A research finished: clear a failure, or mark that the write-up had no pages behind it. */
+  setResearchState(id: string, state: "unsourced" | null, note: string | null = null): void {
+    this.db.prepare("UPDATE products SET research_state = ?, research_note = ?, research_attempts = 0, research_retry_at = NULL WHERE id = ?").run(state, note, id);
+  }
+
+  /** Products whose research failed and whose next try is due. */
+  listResearchRetriesDue(now: number = Date.now(), limit = 3): Array<{ id: string; name: string }> {
+    return this.db
+      .prepare("SELECT id, name FROM products WHERE research_state = 'failed' AND deleted_at IS NULL AND research_retry_at IS NOT NULL AND research_retry_at <= ? ORDER BY research_retry_at LIMIT ?")
+      .all(now, limit) as Array<{ id: string; name: string }>;
+  }
+
   setProductVariantEvidence(id: string, verdict: VariantVerdict | null): boolean {
     const res = this.db
       .prepare("UPDATE products SET variant_status = ?, variant_evidence = ?, updated_at = ? WHERE id = ?")
@@ -2094,6 +2171,8 @@ export class Store {
   deleteProduct(id: string): void {
     this.transaction(() => {
       this.db.prepare("DELETE FROM product_images WHERE product_id = ?").run(id);
+      this.db.prepare("DELETE FROM listing_addons WHERE base_product_id = ?").run(id);
+      this.db.prepare("DELETE FROM product_addons WHERE base_product_id = ?").run(id);
       this.db.prepare("UPDATE products SET parent_product_id = NULL WHERE parent_product_id = ?").run(id);
       this.db.prepare("UPDATE listings SET product_id = NULL WHERE product_id = ?").run(id);
       this.db.prepare("UPDATE watches SET linked_product_id = NULL WHERE linked_product_id = ?").run(id);
@@ -2152,7 +2231,9 @@ export class Store {
   // Images sections are separate data and untouched by this, same as
   // Feed's clear-all never touches the Blacklist either.
   clearAllProducts(): void {
-    this.db.exec("DELETE FROM product_images; DELETE FROM products;");
+    // the server keeps a copy of every synced product: queue a cloud delete for each (productSync sends them), or the next pull brings every one of them back
+    for (const r of this.db.prepare("SELECT id FROM products").all() as Array<{ id: string }>) this.addPendingCloudDelete("product", r.id);
+    this.db.exec("DELETE FROM product_images; DELETE FROM listing_addons; DELETE FROM product_addons; DELETE FROM products;");
     this.safeguard.invalidate();
     this.identity?.forgetAllProducts();
   }
@@ -2322,6 +2403,118 @@ export class Store {
   // row), so cloud sync and any UI keyed off updatedAt still notice them.
   touchProduct(id: string): void {
     this.db.prepare("UPDATE products SET updated_at = ? WHERE id = ?").run(Date.now(), id);
+  }
+
+  // ---- Add-ons (addons.ts). Suggested ones start OFF; a dismissed one never comes back; nothing here touches the base product's own value.
+  private addonFromRow(r: any): Addon {
+    let examples: string[] = [];
+    try {
+      const parsed = JSON.parse(r.example_listing_ids ?? "[]");
+      if (Array.isArray(parsed)) examples = parsed.filter((x) => typeof x === "string");
+    } catch {
+      /* keep empty */
+    }
+    return {
+      id: r.id,
+      baseProductId: r.base_product_id,
+      name: r.name,
+      addonProductId: r.addon_product_id ?? null,
+      role: r.role === "expected" ? "expected" : "bonus",
+      status: r.status === "confirmed" || r.status === "dismissed" ? r.status : "suggested",
+      source: r.source === "seen_in_listing" || r.source === "researched_related" ? r.source : "user_added",
+      compatibility: r.compatibility === "verified" || r.compatibility === "plausible" ? r.compatibility : "unknown",
+      enabled: !!r.enabled,
+      standaloneValueUsd: typeof r.standalone_value_usd === "number" ? r.standalone_value_usd : null,
+      timesSeen: r.times_seen ?? 0,
+      exampleListingIds: examples,
+      firstSeenAt: r.first_seen_at,
+      lastSeenAt: r.last_seen_at,
+    };
+  }
+
+  listAddons(baseProductId: string): Addon[] {
+    return (this.db.prepare("SELECT * FROM product_addons WHERE base_product_id = ? ORDER BY CASE status WHEN 'confirmed' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END, first_seen_at").all(baseProductId) as any[]).map((r) => this.addonFromRow(r));
+  }
+
+  /** The person adds one by hand: confirmed straight away, and switched on only if they say so. A name they dismissed earlier is revived (they asked for it again). */
+  addAddon(baseProductId: string, input: { name: string; role?: AddonRole; standaloneValueUsd?: number | null; addonProductId?: string | null; enabled?: boolean }, now: number = Date.now()): Addon | null {
+    const name = input.name.replace(/\s+/g, " ").trim().slice(0, 120);
+    const key = addonKey(name);
+    if (!name || !key || !this.db.prepare("SELECT 1 FROM products WHERE id = ?").get(baseProductId)) return null;
+    const existing = this.db.prepare("SELECT id FROM product_addons WHERE base_product_id = ? AND name_key = ?").get(baseProductId, key) as { id: string } | undefined;
+    const value = typeof input.standaloneValueUsd === "number" && Number.isFinite(input.standaloneValueUsd) && input.standaloneValueUsd >= 0 ? input.standaloneValueUsd : null;
+    if (existing) {
+      this.db
+        .prepare("UPDATE product_addons SET status = 'confirmed', role = ?, standalone_value_usd = COALESCE(?, standalone_value_usd), addon_product_id = COALESCE(?, addon_product_id), enabled = ?, last_seen_at = ? WHERE id = ?")
+        .run(input.role ?? "bonus", value, input.addonProductId ?? null, input.enabled ? 1 : 0, now, existing.id);
+      return this.getAddon(existing.id);
+    }
+    const id = randomUUID();
+    this.db
+      .prepare("INSERT INTO product_addons (id, base_product_id, name, name_key, addon_product_id, role, status, source, enabled, standalone_value_usd, times_seen, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, 'confirmed', 'user_added', ?, ?, 0, ?, ?)")
+      .run(id, baseProductId, name, key, input.addonProductId ?? null, input.role ?? "bonus", input.enabled ? 1 : 0, value, now, now);
+    return this.getAddon(id);
+  }
+
+  getAddon(id: string): Addon | null {
+    const r = this.db.prepare("SELECT * FROM product_addons WHERE id = ?").get(id);
+    return r ? this.addonFromRow(r) : null;
+  }
+
+  /**
+   * Clynx saw this add-on in a listing of the base product: counted, and created as a SUGGESTION (switched off) the first time. Never revives a dismissed one, never switches anything on,
+   * never creates a second row for the same name.
+   */
+  noteAddonSeen(baseProductId: string, name: string, listingId: string | null, now: number = Date.now()): Addon | null {
+    const clean = name.replace(/\s+/g, " ").trim().slice(0, 120);
+    const key = addonKey(clean);
+    if (!clean || !key || !this.db.prepare("SELECT 1 FROM products WHERE id = ?").get(baseProductId)) return null;
+    const existing = this.db.prepare("SELECT * FROM product_addons WHERE base_product_id = ? AND name_key = ?").get(baseProductId, key) as any | undefined;
+    if (existing) {
+      if (existing.status === "dismissed") return this.addonFromRow(existing);
+      const examples: string[] = this.addonFromRow(existing).exampleListingIds;
+      if (listingId && !examples.includes(listingId)) examples.push(listingId);
+      this.db.prepare("UPDATE product_addons SET times_seen = times_seen + 1, example_listing_ids = ?, last_seen_at = ? WHERE id = ?").run(JSON.stringify(examples.slice(-5)), now, existing.id);
+      return this.getAddon(existing.id);
+    }
+    const id = randomUUID();
+    this.db
+      .prepare("INSERT INTO product_addons (id, base_product_id, name, name_key, role, status, source, enabled, times_seen, example_listing_ids, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, 'bonus', 'suggested', 'seen_in_listing', 0, 1, ?, ?, ?)")
+      .run(id, baseProductId, clean, key, JSON.stringify(listingId ? [listingId] : []), now, now);
+    if (listingId) this.db.prepare("INSERT OR IGNORE INTO listing_addons (listing_id, base_product_id, addon_id, evidence, confidence, created_at) VALUES (?, ?, ?, 'title', 'low', ?)").run(listingId, baseProductId, id, now);
+    return this.getAddon(id);
+  }
+
+  /** The toggle. Only changes whether the add-on counts on the page: the base product's stored value is never touched. */
+  setAddonEnabled(id: string, enabled: boolean): boolean {
+    const row = this.getAddon(id);
+    if (!row || row.status === "dismissed") return false;
+    // switching one on is the person confirming it
+    this.db.prepare("UPDATE product_addons SET enabled = ?, status = CASE WHEN ? = 1 THEN 'confirmed' ELSE status END WHERE id = ?").run(enabled ? 1 : 0, enabled ? 1 : 0, id);
+    return true;
+  }
+
+  setAddonStatus(id: string, status: AddonStatus): boolean {
+    if (!this.getAddon(id)) return false;
+    // dismissed = never counts and never comes back (noteAddonSeen leaves it alone)
+    this.db.prepare("UPDATE product_addons SET status = ?, enabled = CASE WHEN ? = 'dismissed' THEN 0 ELSE enabled END WHERE id = ?").run(status, status, id);
+    return true;
+  }
+
+  setAddonDetails(id: string, patch: { name?: string; role?: AddonRole; standaloneValueUsd?: number | null }): boolean {
+    const row = this.getAddon(id);
+    if (!row) return false;
+    const name = patch.name !== undefined ? patch.name.replace(/\s+/g, " ").trim().slice(0, 120) : row.name;
+    if (!name) return false;
+    const value = patch.standaloneValueUsd === undefined ? row.standaloneValueUsd : patch.standaloneValueUsd === null ? null : Number.isFinite(patch.standaloneValueUsd) && patch.standaloneValueUsd >= 0 ? patch.standaloneValueUsd : row.standaloneValueUsd;
+    this.db.prepare("UPDATE product_addons SET name = ?, name_key = ?, role = ?, standalone_value_usd = ? WHERE id = ?").run(name, addonKey(name), patch.role ?? row.role, value, id);
+    return true;
+  }
+
+  removeAddon(id: string): boolean {
+    const res = this.db.prepare("DELETE FROM product_addons WHERE id = ?").run(id);
+    this.db.prepare("DELETE FROM listing_addons WHERE addon_id = ?").run(id);
+    return Number(res.changes) > 0;
   }
 
   deleteProductImage(id: string): void {
@@ -3638,6 +3831,8 @@ function rowToProduct(row: any): ProductProfile {
     parentProductId: row.parent_product_id ?? null,
     variantEvidence: parseVerdict(row.variant_evidence),
     variantClaims: parseVerdictList(row.variant_claims),
+    researchState: row.research_state === "failed" || row.research_state === "unsourced" ? row.research_state : null,
+    researchNote: row.research_note ?? null,
     compsValidation: parseCompsValidation(row.comps_validation),
     loading: !!row.loading,
     createdAt: row.created_at,

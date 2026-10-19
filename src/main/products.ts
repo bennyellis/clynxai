@@ -121,6 +121,10 @@ export interface ProductLookupResult {
   reaction: string;
   // What the evidence check found when the name claims a specific edition/configuration (null for a plain product name): see variantEvidence.ts.
   evidence: VariantVerdict | null;
+  /** True when the write-up was built from pages that were actually read; false when it came from the AI's own memory or the research failed. Related products are only suggested from a sourced result. */
+  sourced: boolean;
+  /** Set when the research failed outright: nothing usable to save (the caller marks the product "needs retry" instead of saving an error as its description). */
+  failed?: { reason: string };
 }
 
 // findProductImage now handles everything itself: downloading candidate
@@ -154,21 +158,24 @@ export async function lookupProduct(name: string, opts: { verdict?: VariantVerdi
     const research = await researchProductOnWeb(name, undefined, { verdict: opts.verdict ?? null, brandHints: opts.brandHints });
     const { summary, category, family, isBrandFamily, reaction } = await generateProductSummaryFromWeb(name, research.sources, research.evidence);
     const imageUrl = await resolveImage(research.imageUrl, name);
-    return { aiSummary: summary, category, family, isBrandFamily, imageUrl, reaction, evidence: research.evidence };
+    return { aiSummary: summary, category, family, isBrandFamily, imageUrl, reaction, evidence: research.evidence, sourced: research.sources.length > 0 };
   } catch (err) {
     try {
       const { summary, category, family, isBrandFamily, reaction } = await generateProductSummary(name, opts.verdict ?? null);
       const imageUrl = await resolveImage(null, name);
-      return { aiSummary: summary, category, family, isBrandFamily, imageUrl, reaction, evidence: opts.verdict ?? null };
+      return { aiSummary: summary, category, family, isBrandFamily, imageUrl, reaction, evidence: opts.verdict ?? null, sourced: false };
     } catch {
+      // Nothing usable came back. The error is NOT saved as the product's description (it used to be: "(Research failed: ...)"); the caller marks the product "needs retry" instead.
       return {
-        aiSummary: `(Research failed: ${(err as Error).message})`,
+        aiSummary: "",
         category: "Other",
         family: null,
         isBrandFamily: false,
         imageUrl: null,
-        reaction: "Hit a snag researching this one — couldn't pull anything useful.",
+        reaction: "Hit a snag researching this one — I'll try again in a little while.",
         evidence: opts.verdict ?? null,
+        sourced: false,
+        failed: { reason: (err as Error).message },
       };
     }
   }

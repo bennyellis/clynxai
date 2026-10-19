@@ -1,10 +1,11 @@
 // The research_product chat tool, with everything it touches passed in so the whole path (chat -> tool -> evidence check -> Database write) can be
 // run end to end in a test. index.ts supplies the real Database, the real web evidence check and the real research starter.
 import type { Store } from "./store.js";
-import { nameScore, reconcileVerdict, type VariantVerdict } from "./variantEvidence.js";
+import { reconcileVerdict, type VariantVerdict } from "./variantEvidence.js";
+import { cleanOfficialName } from "./variantLinking.js";
 import { identityTokens } from "./variantIdentity.js";
 import { createdVariantMessage, decideResearchTarget, publicHttpUrls, type TrackedProduct } from "./variantResearch.js";
-import { buildVocabulary, describeCorrections, normalizeTypedProduct, placePhrase } from "./typedInput.js";
+import { buildVocabulary, describeCorrections, looksLikeQuestion, normalizeTypedProduct, placePhrase, splitProductRequest, stripCommand } from "./typedInput.js";
 
 export interface ResearchStartOptions {
   source: "you";
@@ -47,7 +48,7 @@ const SENTENCE_WORDS = new Set(["is", "are", "was", "were", "worth", "should", "
 export function recoverNamedProduct(product: string, userMessage: string | undefined): string | null {
   if (!userMessage) return null;
   const firstLine = userMessage.split(/\r?\n/).find((l) => l.trim()) ?? "";
-  let phrase = firstLine.trim().replace(COMMAND_PREFIX, "").replace(/\b(?:please|pls|for me|thanks|thank you)\b[\s.!]*$/i, "").replace(/[\s.!]+$/, "").trim();
+  let phrase = splitProductRequest(firstLine.trim().replace(COMMAND_PREFIX, "")).product.replace(/\b(?:please|pls|for me|thanks|thank you)\b[\s.!]*$/i, "").replace(/[\s.!]+$/, "").trim();
   if (!phrase || /[?]/.test(phrase)) return null;
   const words = phrase.split(/\s+/);
   if (words.length > 12 || words.some((w) => SENTENCE_WORDS.has(w.toLowerCase().replace(/[^a-z']/g, "")))) return null;
@@ -58,14 +59,6 @@ export function recoverNamedProduct(product: string, userMessage: string | undef
   return phrase;
 }
 
-function cleanOfficialName(name: string | undefined, claim: string): string | null {
-  if (!name) return null;
-  const cleaned = name.replace(/\s+/g, " ").replace(/^[\W_]+|[\W_]+$/g, "").trim();
-  if (cleaned.length < claim.length - 2 || cleaned.length > 90 || /[<>{}\[\]]/.test(cleaned)) return null;
-  const have = new Set(identityTokens(cleaned));
-  // It has to read like a product name (not a caption or a button) and hold every word of the claim.
-  return nameScore(cleaned, claim) >= 0 && identityTokens(claim).every((t) => have.has(t)) ? cleaned : null;
-}
 
 // Tells the model not to stall: it has just been handed work, so it reports what started and offers follow-ups afterwards (it asked "What should I focus on in the writeup?" before).
 const NO_STALL = " Do NOT ask the user what to focus on or how to write it up: say what you started, then offer follow-ups.";
@@ -76,6 +69,14 @@ export async function runResearchProductTool(args: Record<string, unknown>, user
   const userUrls = publicHttpUrls(`${String(args.url ?? "")} ${userMessage ?? ""} ${product}`);
   const recovered = recoverNamedProduct(product, userMessage);
   if (recovered) product = recovered;
+  // a leading "research ..." is a command, and "<product>. <request>" is two things: only the product is researched (the request is handed back to the model below)
+  product = stripCommand(product);
+  if (looksLikeQuestion(product)) {
+    return `NOT PLACED: "${product}" reads as a question, not a product name, so nothing was created or changed. Answer the question in chat (use web_research if facts matter), or ask which product they mean.`;
+  }
+  const split = splitProductRequest(product);
+  product = split.product;
+  const requestNote = split.request ? ` Their message also asked: "${split.request}". Only "${product}" was researched; do that part yourself now (for editions and versions call research_variants; add-ons are not built yet, say so plainly).` : "";
 
   // The user's own words are the query of record. Only a spelling slip or the word order of a real product title is repaired (typedInput.ts), and the repair is reported.
   const { store } = deps;
@@ -92,7 +93,7 @@ export async function runResearchProductTool(args: Record<string, unknown>, user
     return `NEEDS THE USER'S CHOICE: "${product}" could be more than one kind of thing already in the Database: ${placement.options.map((o) => `"${o}"`).join(" or ")}. Nothing was created or changed. Use ask_choice to ask which one they mean (a game, a console, or something else), then research that one.${correction ? ` ${correction}` : ""}`;
   }
   const answer = await researchDecided(product, userUrls, deps);
-  return correction ? `${correction} ${answer}` : answer;
+  return `${correction ? `${correction} ` : ""}${answer}${requestNote}`;
 }
 
 async function researchDecided(product: string, userUrls: string[], deps: ResearchToolDeps): Promise<string> {
