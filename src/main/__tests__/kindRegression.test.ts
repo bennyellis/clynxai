@@ -15,13 +15,21 @@ const GAME_TITLES = [
   "Guardians of the Galaxy - Xbox Series X - Brand New",
   "Marvel Guardians of the Galaxy Cosmic Deluxe Edition Xbox Series X Complete in Box",
   "Starfield - Xbox Series X - Brand New",
-  "Starfield Xbox Series X Brand New Factory Sealed",
   "Halo Infinite Xbox Series X Xbox One Brand New Factory Sealed",
   "Guardians of the Galaxy Xbox Series X CIB",
   "Guardians of the Galaxy | Xbox Series X | Sealed",
-  "Starfield Xbox Series X Sealed",
   "Starfield – Xbox Series X – Brand New Sealed",
+  "Guardians of the Galaxy Xbox Series X Brand New Free Shipping",
+  "Guardians of the Galaxy Xbox Series X Brand New Fast Shipping",
+  "Guardians of the Galaxy Xbox Series X Brand New US Version",
+  "Guardians of the Galaxy Xbox Series X Brand New in Plastic",
+  "Cyberpunk 2077 Xbox Series X Brand New Sealed Fast Ship",
 ];
+
+// KNOWN GAP (not asserted as rejected): ONE unfamiliar word before the platform and no dash. It is as likely a console's edition name ("Robot White Xbox Series S Brand New") as a
+// game's, so title wording cannot decide it; the entry's kind from the identity card / the eBay category (D1/D3 of the audit) must. These must at least not be called a game by
+// mediaSignal alone: wrongly rejecting a real special-edition console is worse than letting a game through to the later picture / category checks.
+const LONE_WORD_TITLES = ["Starfield Xbox Series X Brand New Factory Sealed", "Starfield Xbox Series X Sealed", "Starfield Xbox Series X"];
 
 // Real consoles / console bundles: none of these may read as a game.
 const CONSOLE_TITLES = [
@@ -39,6 +47,18 @@ const CONSOLE_TITLES = [
   "Limited Edition Halo Infinite Xbox Series X Console Bundle",
   "Xbox Series X Starfield Limited Edition Console Bundle",
   "Used Xbox Series X",
+  // real special-edition consoles with ONE edition word before the platform (found by TESTER; the first version of this fix called them games)
+  "Halo Xbox Series X Brand New",
+  "Kinect Xbox Series X New",
+  "Robot White Xbox Series S Brand New",
+  "Daystar Xbox Series S Brand New",
+  "Daystar Xbox Series S New",
+  "Cosmic Xbox Series X Brand New",
+  "Starfield Limited Edition Xbox Series X Brand New",
+  "Modded Xbox Series X Brand New",
+  "Rare Xbox Series X Brand New",
+  "Rare Modded Xbox Series X New",
+  "Galaxy Black Xbox Series X Brand New Sealed",
 ];
 
 run(() => {
@@ -47,6 +67,9 @@ run(() => {
 
   section("no console title reads as a game");
   for (const t of CONSOLE_TITLES) check(`not media: "${t}"`, mediaSignal(t) === null, mediaSignal(t));
+
+  section("the known gap is documented, not hidden");
+  for (const t of LONE_WORD_TITLES) check(`lone-word title is left to the kind gate, not guessed from words: "${t}"`, mediaSignal(t) === null, mediaSignal(t));
 
   section("a game title is rejected for every console entry, as a photo and as a sold comparable");
   for (const product of CONSOLES) {
