@@ -1,8 +1,9 @@
 // P13 (Guardians audit, 2026-10-19): a GAME title can never pass for a CONSOLE entry, whatever shape its title has. Beta 12 only caught the bracketed shape
 // ("Guardians of the Galaxy (Xbox Series X)"); a dash before "Brand New", "Factory Sealed", "Complete in Box", or a second platform slipped past mediaSignal
 // and was scored EXACT as a photo and as a sold comparable. Real titles, pure code (no AI, no network).
-import { judgeCandidateByText, mediaSignal, kindOfName } from "../photoIdentity.js";
-import { classifyComparable } from "../compIdentity.js";
+import { judgeCandidateByText, mediaSignal, kindOfName, fileableWithoutPicture } from "../photoIdentity.js";
+import { mediaAmbiguity } from "../productKind.js";
+import { classifyComparable, usableForValuation } from "../compIdentity.js";
 import { check, run, section } from "./_testkit.js";
 
 const CONSOLES = ["Xbox Series X Galaxy Edition", "Xbox Series X Galaxy Black Edition", "Xbox Series X Starfield", "Xbox Series X Halo Infinite"];
@@ -26,10 +27,22 @@ const GAME_TITLES = [
   "Cyberpunk 2077 Xbox Series X Brand New Sealed Fast Ship",
 ];
 
-// KNOWN GAP (not asserted as rejected): ONE unfamiliar word before the platform and no dash. It is as likely a console's edition name ("Robot White Xbox Series S Brand New") as a
-// game's, so title wording cannot decide it; the entry's kind from the identity card / the eBay category (D1/D3 of the audit) must. These must at least not be called a game by
-// mediaSignal alone: wrongly rejecting a real special-edition console is worse than letting a game through to the later picture / category checks.
-const LONE_WORD_TITLES = ["Starfield Xbox Series X Brand New Factory Sealed", "Starfield Xbox Series X Sealed", "Starfield Xbox Series X"];
+// AMBIGUOUS BY WORDS (owner rule: Clynx needs BOTH the listing's photos and its words): ONE unfamiliar word before the platform, no dash. "Halo Xbox Series X Brand New" is a special-edition
+// console, the standalone game, or a seller's mistake: the words alone must never make it an exact match (no price, no photo filed) and must never reject it either; the photos decide.
+const AMBIGUOUS_TITLES = [
+  "Starfield Xbox Series X Brand New Factory Sealed", "Starfield Xbox Series X Sealed", "Starfield Xbox Series X", "STARFIELD XBOX SERIES X BRAND NEW",
+  "Starfield Xbox Series X Brand New Free Shipping", "Starfield Xbox Series X Brand New Fast Shipping", "Starfield Xbox Series X Brand New US Version", "Starfield Xbox Series X Brand New in Plastic",
+  "Starfield Xbox Series X Case Only", "Starfield/Xbox Series X/Brand New", "Starfield, Xbox Series X, Brand New", "Halo Infinite Xbox One Series X Brand New".replace("Halo Infinite", "Halo"),
+  "Halo Xbox Series X Brand New",
+  "Kinect Xbox Series X New",
+  "Robot White Xbox Series S Brand New",
+  "Daystar Xbox Series S Brand New",
+  "Daystar Xbox Series S New",
+  "Cosmic Xbox Series X Brand New",
+  "Starfield Limited Edition Xbox Series X Brand New",
+  
+  
+];
 
 // Real consoles / console bundles: none of these may read as a game.
 const CONSOLE_TITLES = [
@@ -47,17 +60,8 @@ const CONSOLE_TITLES = [
   "Limited Edition Halo Infinite Xbox Series X Console Bundle",
   "Xbox Series X Starfield Limited Edition Console Bundle",
   "Used Xbox Series X",
-  // real special-edition consoles with ONE edition word before the platform (found by TESTER; the first version of this fix called them games)
-  "Halo Xbox Series X Brand New",
-  "Kinect Xbox Series X New",
-  "Robot White Xbox Series S Brand New",
-  "Daystar Xbox Series S Brand New",
-  "Daystar Xbox Series S New",
-  "Cosmic Xbox Series X Brand New",
-  "Starfield Limited Edition Xbox Series X Brand New",
   "Modded Xbox Series X Brand New",
   "Rare Xbox Series X Brand New",
-  "Rare Modded Xbox Series X New",
   "Galaxy Black Xbox Series X Brand New Sealed",
 ];
 
@@ -68,8 +72,22 @@ run(() => {
   section("no console title reads as a game");
   for (const t of CONSOLE_TITLES) check(`not media: "${t}"`, mediaSignal(t) === null, mediaSignal(t));
 
-  section("the known gap is documented, not hidden");
-  for (const t of LONE_WORD_TITLES) check(`lone-word title is left to the kind gate, not guessed from words: "${t}"`, mediaSignal(t) === null, mediaSignal(t));
+  section("one unfamiliar word before the platform: neither a game nor an exact console; the photos decide");
+  for (const t of AMBIGUOUS_TITLES) {
+    check(`not called a game by words alone: "${t}"`, mediaSignal(t) === null, mediaSignal(t));
+    check(`flagged as ambiguous: "${t}"`, mediaAmbiguity(t) !== null, mediaAmbiguity(t));
+  }
+  for (const product of ["Xbox Series X", "Xbox Series X Galaxy Black Edition", "Xbox Series X Starfield", "Xbox Series S Daystar"]) {
+    for (const t of AMBIGUOUS_TITLES) {
+      const photo = judgeCandidateByText(product, t);
+      const comp = classifyComparable({ name: product }, t);
+      check(`photo needs the picture, never a match  [${product}] <- "${t}"`, photo.status === "insufficient" || photo.status === "mismatch", photo);
+      check(`not fileable without a picture check   [${product}] <- "${t}"`, !fileableWithoutPicture(photo), photo);
+      check(`comp is never exact and never valued   [${product}] <- "${t}"`, comp.verdict !== "exact" && !usableForValuation(comp.verdict), comp.verdict);
+    }
+  }
+  check("a plain console title is not ambiguous", mediaAmbiguity("Xbox Series X Brand New") === null && mediaAmbiguity("Used Xbox Series X") === null && mediaAmbiguity("Rare Modded Xbox Series X New") === null && mediaAmbiguity("Galaxy Black Xbox Series X Brand New Sealed") === null);
+  check("a console title with a model number or capacity is not ambiguous", mediaAmbiguity("Halo Xbox Series X 1TB Console") === null);
 
   section("a game title is rejected for every console entry, as a photo and as a sold comparable");
   for (const product of CONSOLES) {

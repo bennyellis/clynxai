@@ -9,7 +9,7 @@ const PLATFORM = "(?:xbox(?: series [xs](?:\\s*[|/&]\\s*[xs])?| one(?: [xs])?| 3
 const PLATFORM_BADGE = new RegExp(`\\(\\s*(?:[^)]*\\b)?${PLATFORM}\\b[^)]*\\)|\\bfor ${PLATFORM}\\b|\\b${PLATFORM}\\s*(?:game|games|edition game|version)\\b`, "i");
 // How a seller describes the copy after the platform name: "Xbox Series X - Brand New", "... Factory Sealed", "... Complete in Box", "... CIB", or a second platform ("Xbox One").
 const SEPARATORS = "[\\s\\-–—|,/]";
-const CONDITION_WORDS = "(?:brand|new|sealed|factory|used|cib|complete|in|box|boxed|physical|disc|ntsc|us|pal|region|free|mint|like|good|great|very|excellent|refurbished|renewed|pre-?owned|opened|open|unopened|tested|working|manual|case|with|w|original|authentic|genuine|official|shipping|ship|fast|plastic|version|game|games)";
+const CONDITION_WORDS = "(?:brand|new|sealed|factory|used|cib|complete|in|box|boxed|physical|disc|ntsc|us|pal|region|free|mint|like|good|great|very|excellent|refurbished|renewed|pre-?owned|opened|open|unopened|tested|working|manual|case|with|w|original|authentic|genuine|official|shipping|ship|fast|plastic|version|game|games|only|series|x|s)";
 const PLATFORM_TAIL = `(?:${SEPARATORS}+(?:${CONDITION_WORDS}|${PLATFORM}))*${SEPARATORS}*`;
 // "<title> - <platform> - <condition words>": a dash or bar right before the platform names the game it is for ("Starfield - Xbox Series X - Brand New").
 const DASHED_PLATFORM = new RegExp(`^(.+?)\\s[-–—|]\\s*${PLATFORM}\\b${PLATFORM_TAIL}$`, "i");
@@ -20,6 +20,20 @@ const ACCESSORY_TITLE = /\b(controllers?|gamepad|joy-?cons?|case|skin|decal|cove
 // Words that can precede a platform name in a title for the MACHINE itself ("Brand New Sealed Microsoft Xbox Series X").
 const FILLER_BEFORE_PLATFORM = new Set("a an the new brand sealed factory used open box refurbished renewed microsoft sony nintendo apple console system bundle pre owned preowned like mint black white blue red carbon digital disc slim pro oled lite series edition limited special galaxy authentic genuine official original certified unlocked complete rare modded hacked jailbroken custom customized rgb retro".split(" "));
 const TRAILING_PLATFORM = new RegExp(`^(.+?)${SEPARATORS}+${PLATFORM}\\b${PLATFORM_TAIL}$`, "i");
+
+/**
+ * A title whose words cannot say whether it is the console or a game for it: ONE unfamiliar word, then the platform ("Halo Xbox Series X Brand New", "Starfield/Xbox Series X/Brand New",
+ * "Robot White Xbox Series S Brand New"). It may be a special-edition console, the standalone game, or a seller's mistake: only the listing's PHOTOS (and its description) can tell, so the
+ * words alone never make it an exact match, and never reject it either. Returns the unfamiliar word, or null when the title is not of that shape.
+ */
+export function mediaAmbiguity(title: string): string | null {
+  const t = String(title ?? "");
+  if (!t.trim() || mediaSignal(t) || HARDWARE_NOUNS.test(t) || PLATFORM_BADGE.test(t)) return null;
+  const trailing = TRAILING_PLATFORM.exec(t);
+  if (!trailing) return null;
+  const words = trailing[1].toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter((w) => w && !FILLER_BEFORE_PLATFORM.has(w) && !/^\d+(?:tb|gb)$/.test(w));
+  return words.length === 1 ? words[0] : null;
+}
 
 /** What the TITLE of an image's source says it is, when it says: a game / software for a platform, an accessory, or null (no objection). */
 export function mediaSignal(title: string): string | null {

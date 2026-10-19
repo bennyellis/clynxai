@@ -22,7 +22,7 @@ import {
   tokens,
 } from "./compFilter.js";
 import { colorsIn } from "./colors.js";
-import { hardwareTail, mediaSignal, stripDescriptors } from "./productKind.js";
+import { hardwareTail, mediaAmbiguity, mediaSignal, stripDescriptors } from "./productKind.js";
 import { editionConflict, extractVariantAttributes, identityTokens } from "./variantIdentity.js";
 import { attributeFindings } from "./identityModel.js";
 import { knowledgeFindings, knowledgeProvider } from "./knowledgeRegistry.js";
@@ -39,6 +39,7 @@ export type CompReason =
   | "EDITION"
   | "ACCESSORY"
   | "MEDIA"
+  | "KIND_AMBIGUOUS"
   | "LOT_OR_BUNDLE"
   | "NOT_WORKING"
   | "MODEL_NOT_STATED"
@@ -135,6 +136,11 @@ function judgeAgainst(reference: string, title: string, requiredTerms: string[],
   // A game, disc or other software that merely names the platform or shares a word ("Guardians of the Galaxy (Xbox Series X)") is not the console named "... Galaxy ...".
   const mediaInTitle = mediaSignal(title);
   if (mediaInTitle && !mediaSignal(reference)) mark("rejected", "MEDIA", `the title reads as a game or software for a platform ("${mediaInTitle}"), not the product`);
+  else if (!mediaInTitle) {
+    // "Halo Xbox Series X Brand New": the words cannot tell a special-edition console from the game (or a mislisting); never exact on words alone, the photos decide.
+    const ambiguous = mediaAmbiguity(title);
+    if (ambiguous && !mediaAmbiguity(reference)) mark("uncertain", "KIND_AMBIGUOUS", `the title could be the console or a game for it ("${ambiguous}" before the platform name): the photos have to confirm it`);
+  }
   if (COMPATIBLE_WITH.test(title) && !COMPATIBLE_WITH.test(reference)) mark("rejected", "ACCESSORY", `the title says it is for the product ("${COMPATIBLE_WITH.exec(title)?.[0]}")`);
   if (LOT.test(title) && !LOT.test(reference) && !reasons.some((r) => r.code === "LOT_OR_BUNDLE")) mark("rejected", "LOT_OR_BUNDLE", `the title is a lot, a multi-pack or a bundle`);
 
