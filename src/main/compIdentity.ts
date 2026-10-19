@@ -109,9 +109,12 @@ function modelLetterWords(text: string): Set<string> {
 /** What one reference (the product's name, a search query, the listing it came from) requires of a title. */
 /** Which Xbox a text is about: "series", "one", "360", "unstated" (just "Xbox"), or null when it does not name an Xbox. */
 function xboxGeneration(text: string): "series" | "one" | "360" | "unstated" | null {
-  const m = /\bxbox\s*(series|one|360)?\b/i.exec(text);
-  if (!m) return null;
-  return (m[1]?.toLowerCase() as "series" | "one" | "360" | undefined) ?? "unstated";
+  if (!/\bxbox/i.test(text)) return null;
+  // the generation can be anywhere in the title ("Xbox 1TB Series X", "Xbox White Series S", "Xbox SeriesX", "Xbox, Series X, 1TB"), not just right after the word "Xbox"
+  if (/\bseries\s*-?\s*[xs]\b|\bseries[xs]\b/i.test(text)) return "series";
+  if (/\b360\b/.test(text)) return "360";
+  if (/\bxbox\s*one\b|\bone\s*[xs]\b/i.test(text) || (/\bone\b/i.test(text) && !/\bday\s*one\b/i.test(text))) return "one";
+  return "unstated";
 }
 
 function judgeAgainst(reference: string, title: string, requiredTerms: string[], broken: boolean): CompJudgement {

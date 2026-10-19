@@ -15,7 +15,7 @@ const NOISE = new Set([
 ]);
 
 /** Words before "Edition" that do not make a different product ("Standard Edition" is the plain one). */
-const PLAIN_EDITION_WORDS = new Set(["standard", "base", "regular", "original", "basic", "retail", "launch", "console", "full", "complete", "new", "used", "refurbished", "physical", "disc", "digital"]);
+const PLAIN_EDITION_WORDS = new Set(["standard", "base", "regular", "original", "basic", "retail", "launch", "console", "full", "complete", "new", "used", "refurbished", "physical", "disc", "digital", "one", "day"]);
 
 const EDITION_ALIASES = new Set(["special", "limited", "collector", "collectors", "exclusive"]);
 
