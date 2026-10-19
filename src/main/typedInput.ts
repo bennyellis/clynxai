@@ -161,6 +161,8 @@ export function placePhrase(phrase: string, vocab: Vocabulary, tracked: Array<{ 
   const tokens = wordsOf(phrase);
   if (tokens.length === 0) return { kind: "gibberish" };
   if (tokens.every((t) => !wordLike(t, vocab))) return { kind: "gibberish" };
+  // an entry already named exactly this is what the person means ("xbox series x" is the console even though a game's title contains it): it wins before any question is asked
+  if (tracked.some((p) => wordsOf(p.name).join(" ") === tokens.join(" "))) return { kind: "ok" };
   const mine = identityTokens(phrase);
   if (mine.length === 0) return { kind: "ok" };
   const inside = tracked.filter((p) => {
@@ -176,15 +178,18 @@ export function placePhrase(phrase: string, vocab: Vocabulary, tracked: Array<{ 
 /** Words that start a question or a sentence, not a product name ("is a used series s worth flipping?"). */
 const QUESTION_STARTERS = new Set(["is", "are", "was", "were", "should", "can", "could", "would", "how", "why", "what", "which", "who", "when", "does", "do", "did", "will"]);
 
+/** Words that only appear in a sentence about a product ("worth", "should I"), never in a title: a question-starter alone is not enough ("Can Am Maverick X3", "Is This It vinyl", "How to Train Your Dragon DVD"). */
+const QUESTION_EVIDENCE = new Set(["worth", "worthwhile", "should", "i", "my", "me", "you", "much", "many", "good", "better", "safe", "legit", "flipping", "flip", "buy", "buying", "sell", "selling", "profit", "cost", "price", "priced"]);
+
 export function looksLikeQuestion(phrase: string): boolean {
   const t = phrase.trim();
   if (/\?/.test(t)) return true;
-  const first = (t.split(/\s+/)[0] ?? "").toLowerCase().replace(/[^a-z]/g, "");
-  return QUESTION_STARTERS.has(first) && t.split(/\s+/).length >= 3;
+  const words = t.split(/\s+/).map((w) => w.toLowerCase().replace(/[^a-z]/g, "")).filter(Boolean);
+  return words.length >= 3 && QUESTION_STARTERS.has(words[0]) && words.slice(1).some((w) => QUESTION_EVIDENCE.has(w));
 }
 
 /** "research the steam deck oled" -> "steam deck oled": a leading command and article are not part of the name. */
-const LEADING_COMMAND = /^(?:please\s+|pls\s+)?(?:(?:can|could|would)\s+you\s+)?(?:go\s+)?(?:research|look\s+up|look\s+into|look\s+at|find|add|check(?:\s+out)?|search(?:\s+for)?|tell\s+me\s+about)\s+/i;
+const LEADING_COMMAND = /^(?:please\s+|pls\s+)?(?:(?:can|could|would)\s+you\s+)?(?:go\s+)?(?:research|look\s+up|look\s+into|look\s+at|find|add|check(?:\s+out)?|search(?:\s+for)?|tell\s+me\s+about)\s+(?:(?:for\s+)?me\s+(?=\S+\s+\S))?/i;
 export function stripCommand(phrase: string): string {
   return phrase.trim().replace(LEADING_COMMAND, "").replace(/^(?:the|a|an)\s+(?=\S+\s+\S)/i, "").trim();
 }

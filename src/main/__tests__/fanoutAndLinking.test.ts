@@ -106,6 +106,10 @@ run(async () => {
   store.markResearchFailed(id, "again", 4_000_000);
   store.markResearchFailed(id, "again", 5_000_000);
   check("after four tries Clynx leaves it alone", store.listResearchRetriesDue(5_000_000 + 24 * 3600_000).length === 0);
+  store.markResearchFailed(id, "The web search was blocked. I'll try this one again by myself.", 6_000_000);
+  const stopped = store.getProductById(id)!.researchNote ?? "";
+  check("and the note no longer promises a retry that will not happen", !/try this one again by myself/.test(stopped) && /press Research/i.test(stopped), stopped);
+  check("a rejected API key says it will not fix itself", /will not fix itself/.test(friendlyResearchFailure("401 Incorrect API key provided")) && !/by myself/.test(friendlyResearchFailure("401 Incorrect API key provided")));
   store.setResearchState(id, null);
   check("a normal research clears the failure", store.getProductById(id)!.researchState === null);
   store.setResearchState(id, "unsourced", "No web pages were read.");

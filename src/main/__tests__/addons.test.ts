@@ -30,7 +30,10 @@ run(async () => {
   check("a dismissed one adds nothing even if it was left on", estimateAddonUplift(400, [addon({ status: "dismissed" })]).highUsd === null);
   const noPrice = estimateAddonUplift(400, [addon({ standaloneValueUsd: null })]);
   check("an add-on with no price adds nothing and says why", noPrice.highUsd === null && /no price/.test(noPrice.lines[0].note));
-  check("with no base value it still gives a rough, capped range rather than a guess from nothing", estimateAddonUplift(null, [addon({})]).highUsd !== null);
+  check("with no base value there is no ceiling to cap against, so no range is shown (and it says why)", estimateAddonUplift(null, [addon({})]).highUsd === null && estimateAddonUplift(0, [addon({ standaloneValueUsd: 5000 })]).highUsd === null && /no estimated value/.test(estimateAddonUplift(null, [addon({})]).why));
+  const inf = estimateAddonUplift(400, [addon({ standaloneValueUsd: Infinity }), addon({ id: "n", standaloneValueUsd: NaN })]);
+  check("an infinite or NaN price adds nothing (never '$NaN')", inf.highUsd === null && !/NaN|Infinity/.test(inf.why) && inf.lines.every((l) => !l.counted));
+  check("a USB-C cable is filler like any other cable", isNoiseAddon("USB-C cable") && isNoiseAddon("Type C charging cable"));
 
   section("noise and names");
   check("generic filler is not suggested", ["cables", "Manual", "power cable", "HDMI cable", "box", "original box", "accessories"].every(isNoiseAddon));

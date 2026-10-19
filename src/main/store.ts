@@ -1751,9 +1751,11 @@ export class Store {
     if (!row) return;
     const attempts = (row.n ?? 0) + 1;
     const delay = Store.RESEARCH_RETRY_DELAYS_MS[attempts - 1];
+    // out of automatic tries: do not promise one
+    const shown = delay === undefined ? note.replace(/\s*I'll try this one again[^.]*\./i, "").trim() + " I've stopped retrying on my own; press Research to try again." : note;
     this.db
       .prepare("UPDATE products SET research_state = 'failed', research_note = ?, research_attempts = ?, research_retry_at = ?, loading = 0, updated_at = ? WHERE id = ?")
-      .run(note.slice(0, 300), attempts, delay === undefined ? null : now + delay, now, id);
+      .run(shown.slice(0, 300), attempts, delay === undefined ? null : now + delay, now, id);
   }
 
   /** Every live product with its parent and the status of its evidence, for linking confirmed editions under their base (variantLinking.planParentLinks). */

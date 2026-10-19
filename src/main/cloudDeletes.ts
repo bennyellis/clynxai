@@ -9,7 +9,8 @@
 
 /** Queued deletes the server no longer lists: safe to forget, nothing is deleted anywhere. Needs a complete list from the server (null = no trustworthy list this tick: keep everything). */
 export function staleQueuedDeletes(queued: string[], serverLocalIds: Set<string> | null): string[] {
-  if (!serverLocalIds) return [];
+  // an EMPTY list is as untrustworthy as none (a reset server, the wrong account, a glitch): never forget queued deletes because of it
+  if (!serverLocalIds || serverLocalIds.size === 0) return [];
   return queued.filter((id) => !serverLocalIds.has(id));
 }
 

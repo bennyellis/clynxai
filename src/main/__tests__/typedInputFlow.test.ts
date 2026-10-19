@@ -164,4 +164,19 @@ run(async () => {
     check(`"${typedName}" refreshes "${entry}"`, (await decide(typedName, e, [e])).kind === "refresh_existing");
   }
   check("but a plain entry still never takes a typed edition with its own color", (await decide("xbox series x galaxy black", OLD, [XBOX, OLD])).kind !== "refresh_existing");
+
+  section("TESTER's findings on 12545dd: real titles are not questions, an exact name wins, 'find me' is a command");
+  for (const title of ["Can Am Maverick X3", "Will Smith Oscars poster", "How to Train Your Dragon DVD", "When Harry Met Sally DVD", "Is This It vinyl", "Which Wich shirt", "Do Not Disturb Sign", "Dyson V8 Absolute"]) {
+    check(`"${title}" is a product name, not a question`, !looksLikeQuestion(title));
+  }
+  check("real questions still are", ["is a used series s worth flipping", "should I buy a steam deck", "how much is a ps5 worth", "can you find me a switch", "Xbox Series X?"].every(looksLikeQuestion));
+  const tTitle = fakeDeps([XBOX], null);
+  const outTitle = await runResearchProductTool({ product: "Can Am Maverick X3" }, "Can Am Maverick X3", tTitle.deps);
+  check("a title that starts with a question word is researched", !/^NOT PLACED/.test(outTitle), outTitle);
+  const GAME_X = { id: "gx", name: "Halo Infinite (Xbox Series X|S)" };
+  check("an entry named exactly 'Xbox Series X' wins over a game whose title contains it", placePhrase("xbox series x", buildVocabulary([XBOX.name, GAME_X.name]), [XBOX, GAME_X]).kind === "ok");
+  const tExact = fakeDeps([XBOX, GAME_X], XBOX);
+  const outExact = await runResearchProductTool({ product: "xbox series x. find all variants and add-ons" }, "xbox series x. find all variants and add-ons", tExact.deps);
+  check("the exact name with a request does not ask game-or-console", !/NEEDS THE USER'S CHOICE/.test(outExact) && /Their message also asked/.test(outExact), outExact);
+  check("'find me a steam deck oled' researches 'steam deck oled'", stripCommand("find me a steam deck oled") === "steam deck oled" && stripCommand("look up for me a dyson v8") === "dyson v8", stripCommand("find me a steam deck oled"));
 });

@@ -3,6 +3,9 @@
 
 export function friendlyResearchFailure(message: string): string {
   const m = String(message ?? "");
+  if (/incorrect api key|invalid api key|invalid_api_key|\b401\b|unauthori[sz]ed/i.test(m)) {
+    return "OpenAI did not accept the API key, so this will not fix itself. Check the key in Settings, then press Research.";
+  }
   if (/paused for a while|temporarily_blocked|unusually heavy use|too many ai requests|concurrency|asking the ai too fast/i.test(m)) {
     return "Clynx's AI access is paused for a few minutes. I'll try this one again by myself.";
   }

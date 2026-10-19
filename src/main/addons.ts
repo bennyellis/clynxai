@@ -59,7 +59,7 @@ export const ADDON_HARD_CEILING_OF_BASE = 0.5;
 
 /** Whether an add-on may count towards the estimate: switched on by the person, not dismissed, with a price. */
 export function countsTowardsEstimate(a: Pick<Addon, "enabled" | "status" | "standaloneValueUsd">): boolean {
-  return a.enabled && a.status !== "dismissed" && a.standaloneValueUsd !== null && a.standaloneValueUsd > 0;
+  return a.enabled && a.status !== "dismissed" && a.standaloneValueUsd !== null && Number.isFinite(a.standaloneValueUsd) && a.standaloneValueUsd > 0;
 }
 
 /**
@@ -75,7 +75,7 @@ export function estimateAddonUplift(baseValueUsd: number | null, addons: Addon[]
       lines.push({ id: a.id, name: a.name, roughAddsUsd: 0, counted: false, note: "dismissed" });
     } else if (!a.enabled) {
       lines.push({ id: a.id, name: a.name, roughAddsUsd: 0, counted: false, note: a.status === "suggested" ? "suggested, switched off" : "switched off" });
-    } else if (a.standaloneValueUsd === null || a.standaloneValueUsd <= 0) {
+    } else if (a.standaloneValueUsd === null || !Number.isFinite(a.standaloneValueUsd) || a.standaloneValueUsd <= 0) {
       lines.push({ id: a.id, name: a.name, roughAddsUsd: 0, counted: false, note: "no price yet, so it adds nothing" });
     } else {
       const adds = a.standaloneValueUsd * (a.role === "expected" ? ACCESSORY_WEIGHT : EXTRA_WEIGHT);
@@ -86,7 +86,9 @@ export function estimateAddonUplift(baseValueUsd: number | null, addons: Addon[]
   if (raw <= 0) {
     return { lowUsd: null, highUsd: null, lines, confidence: "rough", sampleSize: null, why: lines.some((l) => !l.counted && l.note !== "dismissed") ? "Switch an add-on on and give it a price to see what it could add." : "No add-ons yet." };
   }
-  const base = Math.max(0, baseValueUsd ?? 0);
+  const base = baseValueUsd !== null && Number.isFinite(baseValueUsd) ? Math.max(0, baseValueUsd) : 0;
+  // With no value for the product there is nothing to cap against, and a range with no ceiling would be a guess from nothing: say so instead of showing one.
+  if (base <= 0) return { lowUsd: null, highUsd: null, lines, confidence: "rough", sampleSize: null, why: "This product has no estimated value yet, so Clynx can't say what add-ons might add. Research it first." };
   // valueBundle's formula: the more pile up, the less each adds, flattening out towards a cap tied to the main item (or half of what they add up to, whichever is more)
   const cap = Math.max(base * UPLIFT_CAP_OF_FOCAL, raw * UPLIFT_CAP_OF_RAW);
   let uplift = cap > 0 ? cap * (1 - Math.exp(-raw / cap)) : 0;
@@ -111,7 +113,7 @@ export function estimateAddonUplift(baseValueUsd: number | null, addons: Addon[]
 /** Generic filler a breakdown lists with almost every listing ("cables", "manual", "box"): not suggested as an add-on (spec: ignore filler until seen in several listings). */
 export function isNoiseAddon(name: string): boolean {
   const k = addonKey(name);
-  return k.length < 3 || /^(?:the )?(?:power |hdmi |usb |charging |ac )?(?:cables?|cords?|adapters?|manuals?|papers?|paperwork|documents?|documentation|box|packaging|original box|stuff|misc|miscellaneous|extras?|accessories|items?|other items?|everything)$/.test(k);
+  return k.length < 3 || /^(?:the )?(?:(?:power|hdmi|usb c|usb|type c|charging|ac) )*(?:cables?|cords?|adapters?|manuals?|papers?|paperwork|documents?|documentation|box|packaging|original box|stuff|misc|miscellaneous|extras?|accessories|items?|other items?|everything)$/.test(k);
 }
 
 /** The key two spellings of the same add-on share ("Second wireless controller" and "second Wireless Controller."). */

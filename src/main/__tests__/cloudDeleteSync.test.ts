@@ -34,6 +34,7 @@ const tick = (svc: ProductSyncService) => (svc as unknown as { runSync(): Promis
 run(async () => {
   section("pure helpers");
   check("queued ids the server does not list are stale; no list means keep everything", staleQueuedDeletes(["a", "b", "c"], new Set(["b"])).join() === "a,c" && staleQueuedDeletes(["a"], null).length === 0);
+  check("an EMPTY list from the server (reset server, wrong account, glitch) forgets nothing", staleQueuedDeletes(["a", "b"], new Set<string>()).length === 0);
   check("a reset queues what the device holds plus what the server lists, once each", idsToQueueOnReset(["a", "b"], ["b", "c"]).join() === "a,b,c");
 
   section("Clear all queues the cloud deletes, and the products do not come back");
