@@ -1,0 +1,3 @@
+Clynx Beta 26 - DRAFT (not published)
+* Fixed: a video game listed for a console could be mistaken for the console. Titles like "Starfield - Xbox Series X - Brand New", "Guardians of the Galaxy Xbox Series X Brand New Factory Sealed" or "... Complete in Box" were treated as an exact match for the Xbox Series X Galaxy entries, both for photos and for sold prices. They are now recognised as games and rejected. A plain "Xbox Series X Brand New" is still a console.
+* Unchanged: everything in Beta 25 (OpenAI web search is on by default).
