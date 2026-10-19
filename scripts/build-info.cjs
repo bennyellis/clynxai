@@ -24,7 +24,7 @@ const info = {
   version: pkg.version,
   channel,
   commit: git("rev-parse --short=12 HEAD") || "unknown",
-  dirty: git("status --porcelain").length > 0,
+  dirty: git("status --porcelain --untracked-files=no").length > 0, // untracked notes/reports never ship, so they must not mark a build "dirty"
   builtAt: new Date().toISOString(),
 };
 // Optional: start this build at one server (the sign-in form is still editable). Without it a distributed build has NO default server and asks for one.
