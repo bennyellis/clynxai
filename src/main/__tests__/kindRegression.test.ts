@@ -90,6 +90,18 @@ run(() => {
   check("a plain console title is not ambiguous", mediaAmbiguity("Xbox Series X Brand New") === null && mediaAmbiguity("Used Xbox Series X") === null && mediaAmbiguity("Rare Modded Xbox Series X New") === null && mediaAmbiguity("Galaxy Black Xbox Series X Brand New Sealed") === null);
   check("a console title with a model number or capacity is not ambiguous", mediaAmbiguity("Halo Xbox Series X 1TB Console") === null);
 
+
+  section("other shapes TESTER found: platform first, bare Series X with two words, older platforms, spelling variants");
+  const GAMES_TOO = ["Halo Infinite Series X Brand New", "Starfield for Series X", "Mario Kart Wii U Brand New", "Mario Kart 64 N64 Brand New", "Gran Turismo PSP Brand New", "Mario Kart Switch 2 Brand New", "Halo Infinite Xbox360 Brand New", "Super Mario World Super Nintendo Brand New"];
+  for (const t of GAMES_TOO) check(`two-word title is a game: "${t}"`, mediaSignal(t) !== null, mediaSignal(t));
+  const AMBIGUOUS_TOO = ["PS5 Spider-Man Brand New", "Switch Mario Kart Brand New", "Series X Halo Brand New", "Xbox One Halo Brand New", "Xbox Halo Brand New", "Xbox Series S Halo Brand New", "PlayStation 5 Spider-Man Brand New", "Steam Deck Halo Brand New", "Zelda N64 Brand New", "Zelda Gamecube Brand New", "Horizon PS-5 Brand New", "Halo Xbox360 Brand New", "Wii Mario Kart Brand New"];
+  for (const t of AMBIGUOUS_TOO) {
+    check(`not a game by words alone: "${t}"`, mediaSignal(t) === null, mediaSignal(t));
+    check(`ambiguous: "${t}"`, mediaAmbiguity(t) !== null, mediaAmbiguity(t));
+  }
+  const STILL_CONSOLES = ["Nintendo Switch Neon Brand New", "Nintendo Switch Lite Turquoise Brand New", "Nintendo Switch Gray Brand New", "PS5 Slim Brand New", "PS5 Digital Edition Brand New Sealed", "PlayStation 5 Pro Brand New", "Xbox Series X Brand New", "Nintendo Switch OLED Model Brand New", "Xbox Series S Carbon Black Brand New", "PS5 DualSense Controller White"];
+  for (const t of STILL_CONSOLES) check(`not ambiguous, not a game: "${t}"`, mediaSignal(t) === null && mediaAmbiguity(t) === null, { m: mediaSignal(t), a: mediaAmbiguity(t) });
+
   section("a game title is rejected for every console entry, as a photo and as a sold comparable");
   for (const product of CONSOLES) {
     for (const title of GAME_TITLES) {

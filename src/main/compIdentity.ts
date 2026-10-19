@@ -139,7 +139,7 @@ function judgeAgainst(reference: string, title: string, requiredTerms: string[],
   else if (!mediaInTitle) {
     // "Halo Xbox Series X Brand New": the words cannot tell a special-edition console from the game (or a mislisting); never exact on words alone, the photos decide.
     const ambiguous = mediaAmbiguity(title);
-    if (ambiguous && !mediaAmbiguity(reference)) mark("uncertain", "KIND_AMBIGUOUS", `the title could be the console or a game for it ("${ambiguous}" before the platform name): the photos have to confirm it`);
+    if (ambiguous) mark("uncertain", "KIND_AMBIGUOUS", `the title could be the console or a game for it ("${ambiguous}" before the platform name): the photos have to confirm it`);
   }
   if (COMPATIBLE_WITH.test(title) && !COMPATIBLE_WITH.test(reference)) mark("rejected", "ACCESSORY", `the title says it is for the product ("${COMPATIBLE_WITH.exec(title)?.[0]}")`);
   if (LOT.test(title) && !LOT.test(reference) && !reasons.some((r) => r.code === "LOT_OR_BUNDLE")) mark("rejected", "LOT_OR_BUNDLE", `the title is a lot, a multi-pack or a bundle`);
