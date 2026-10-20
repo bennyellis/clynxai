@@ -184,7 +184,7 @@ run(async () => {
     const index = w.store.listProductIndex();
     check("a new, separate entry exists", index.length === 2, index);
     const variant = w.store.getProductById(w.started[0].id)!;
-    check("it is the full official name (every word the user typed, plus what the manufacturer calls it), not 'Xbox Series X'", variant.name === "Xbox Series X 2TB Galaxy Black Special Edition", variant.name);
+    check("it has the one simple name for the model, keeps the full official name as an alias, and is not 'Xbox Series X'", variant.name === "Xbox Series X Galaxy Edition" && w.store.listProductAliases(variant.id).some((a) => a.alias === "Xbox Series X 2TB Galaxy Black Special Edition"), variant.name);
     check("it is linked to the parent, not merged into it", variant.parentProductId === w.parentId);
     check("its evidence was saved with it", variant.variantEvidence?.status === "verified" || variant.variantEvidence?.status === "supported", variant.variantEvidence);
     check("research started for the VARIANT, not the parent", w.started[0].id !== w.parentId && w.started[0].opts.verdict?.status !== undefined);

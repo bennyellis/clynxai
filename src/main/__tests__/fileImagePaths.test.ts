@@ -31,8 +31,8 @@ run(async () => {
   section("fileImage on a real Store");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clynx-b13-fi-"));
   const store = new Store(path.join(dir, "scout.db"));
-  const mk = (id: string, name: string) => { store.addProductStub(id, name); return id; };
-  const s = mk("s", "Xbox Series S"), sw = mk("sw", "Nintendo Switch"), gpu = mk("g", "MSI RTX 2070 SUPER");
+  const mk = (id: string, name: string) => store.addProductStub(id, name);
+  const s = mk("s", "Xbox Series S 1TB Black"), sw = mk("sw", "Nintendo Switch"), gpu = mk("g", "MSI RTX 2070 SUPER");
   const r1 = fileImage(store, s, pic("A1"), ev(SRC));
   check("Series X photo into Series S: refused and NOT stored", r1.outcome === "rejected" && store.listProductImages(s).length === 0);
   const r2 = fileImage(store, sw, pic("A2"), ev("Metroid Dread - Nintendo Switch (game case)"));

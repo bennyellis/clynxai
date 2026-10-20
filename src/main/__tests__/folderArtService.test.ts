@@ -66,7 +66,7 @@ run(async () => {
   mk2("k", "Nintendo 3DS XL Console", "Nintendo > Consoles", blue);
   const r3 = await svc2.refresh();
   const pickedMeta = s2.getFolderMeta(autoFolderId(CAT, ["Nintendo", "Consoles"]));
-  check("once a console is in it, the folder takes the console's photo, recorded as 'auto' with its source product", r3.picked >= 1 && pickedMeta?.thumbSource === "auto" && pickedMeta.thumbMeta?.productName === "Nintendo 3DS XL Console" && pickedMeta.thumbData === blue);
+  check("once a console is in it, the folder takes the console's photo, recorded as 'auto' with its source product", r3.picked >= 1 && pickedMeta?.thumbSource === "auto" && pickedMeta.thumbMeta?.productName === "Nintendo 3DS XL" && pickedMeta.thumbData === blue);
   check("an automatic picture is not marked decorative-generated and is not locked", pickedMeta?.thumbMeta?.decorative !== true && !pickedMeta?.thumbLocked);
 
   section("what a person chose is never touched");

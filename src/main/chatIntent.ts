@@ -249,6 +249,8 @@ export interface ProductRef {
   name: string;
   prioritized?: boolean;
   parentProductId?: string | null;
+  /** Other names the entry goes by (its kept aliases): a search by any of them finds it. */
+  aliases?: string[];
 }
 
 /**
@@ -269,7 +271,7 @@ export function relevantProducts<T extends ProductRef>(products: T[], message: s
   const scored = products
     .map((p) => {
       const ws = words(p.name);
-      const hits = ws.filter((w) => wanted.has(w)).length;
+      const hits = Math.max(ws.filter((w) => wanted.has(w)).length, ...(p.aliases ?? []).map((a) => words(a).filter((w) => wanted.has(w)).length));
       return { p, score: ws.length ? hits / Math.sqrt(ws.length) + (hits >= 2 ? 1 : 0) : 0 };
     })
     .filter((x) => x.score > 0.3)
@@ -286,7 +288,7 @@ export function searchProducts<T extends ProductRef>(products: T[], query: strin
   return products
     .map((p) => {
       const ws = words(p.name);
-      const hits = ws.filter((w) => q.has(w)).length;
+      const hits = Math.max(ws.filter((w) => q.has(w)).length, ...(p.aliases ?? []).map((a) => words(a).filter((w) => q.has(w)).length));
       return { p, score: hits ? hits / Math.sqrt(Math.max(1, ws.length)) + hits * 0.1 : 0 };
     })
     .filter((x) => x.score > 0)

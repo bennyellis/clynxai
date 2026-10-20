@@ -68,7 +68,7 @@ run(async () => {
 
     const child = store.addProductStub("child", GALAXY);
     store.setProductParent(child, parent);
-    check("the variant is its own entry", child !== parent && store.getProductById(child)?.name === GALAXY);
+    check("the variant is its own entry", child !== parent && store.getProductById(child)?.name === "Xbox Series X Galaxy Edition" && store.listProductAliases(child).some((a) => a.alias === GALAXY));
     check("the evidence is written", store.setProductVariantEvidence(child, verdict(GALAXY, "verified", "xbox.com lists it")));
     const saved = store.getProductById(child)?.variantEvidence;
     check("status and basis come back", saved?.status === "verified" && saved.basis === "xbox.com lists it", saved);

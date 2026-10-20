@@ -132,7 +132,7 @@ run(async () => {
     const reply = await chat("both", PHOTO_HISTORY.slice(0, 2), "database", baseConfig(), trace);
     check("the model was told what 'both' answers (a system hint reached the request)", requests[0].messages.some((m: any) => m.role === "system" && /BOTH/.test(m.content) && /Do not offer a menu/.test(m.content)));
     check("the broken promise was caught and the model was told to call the tool", requests[1].messages.some((m: any) => m.role === "system" && /called no tool/.test(m.content)));
-    check("the tool really ran for the OPEN product (no product named)", finderCalls.length === 1 && finderCalls[0].name === VARIANT, finderCalls);
+    check("the tool really ran for the OPEN product (no product named)", finderCalls.length === 1 && finderCalls[0].name === "Xbox Series X Galaxy Edition", finderCalls);
     check("it searched official AND real-world photos by default (8 wanted)", finderCalls[0].want === 6 + 2 && finderCalls[0].realWorld === true, finderCalls[0]);
     const after = store.listProductImages("variant").length;
     check("6 photos were actually saved to the right product", after - photosBefore === 6, { before: photosBefore, after });
@@ -238,9 +238,10 @@ run(async () => {
       await chat("what about the playstation 5", [], "database");
       return (requests[0].messages[0].content as string).includes("- PlayStation 5");
     })()));
-    const lean = relevantProducts(store.listProducts().map((p) => ({ id: p.id, name: p.name, parentProductId: p.parentProductId })), "galaxy black", [], null);
-    check("relevant products ranks name matches first", lean[0]?.name === VARIANT, lean.map((p) => p.name));
-    check("find_products searches by words", searchProducts(store.listProductIndex(), "galaxy black")[0]?.name === VARIANT);
+    const aka = store.aliasesByProduct();
+    const lean = relevantProducts(store.listProducts().map((p) => ({ id: p.id, name: p.name, parentProductId: p.parentProductId, aliases: aka.get(p.id) })), "galaxy black", [], null);
+    check("relevant products ranks name matches first (the entry is found by its old long name too)", lean[0]?.name === "Xbox Series X Galaxy Edition", lean.map((p) => p.name));
+    check("find_products searches by words", searchProducts(store.listProductIndex().map((p) => ({ ...p, aliases: store.aliasesByProduct().get(p.id) })), "galaxy black")[0]?.name === "Xbox Series X Galaxy Edition");
     const off = await (async () => {
       requests.length = 0;
       await chat("hello", [], "database", { ...baseConfig(), chatFlags: { leanContext: false } });

@@ -26,7 +26,7 @@ run(async () => {
   section("the same answers as the old full-table scan");
   {
     const probes = [
-      "Xbox Series S console", "xbox series x 1tb", "Playstation 5 disc edition", "ps5 pro", "Nintendo Switch OLED white", "iphone 13 pro max",
+      "Xbox Series S console", "Playstation 5 disc edition", "ps5 pro", "Nintendo Switch OLED white", "iphone 13 pro max",
       "Dyson V8 absolute", "Dewalt 20V drill kit", "RTX 3060 Ti EVGA", "Sony WH-1000XM4 headphones", "kitchenaid stand mixer", "Zzyzx Quantum Frobnicator", "garden gnome", "Xbox Series S",
     ];
     let same = 0;

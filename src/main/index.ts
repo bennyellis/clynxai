@@ -1099,7 +1099,8 @@ async function executeChatTool(
   if (call.name === "add_reference_photos") return await runAddReferencePhotosTool(call.args, call.userMessage, currentProductId);
 
   if (call.name === "find_products") {
-    const hits = searchProducts(store.listProductIndex().map((p) => ({ id: p.id, name: p.name })), String(call.args.query ?? ""));
+    const aliases = store.aliasesByProduct();
+    const hits = searchProducts(store.listProductIndex().map((p) => ({ id: p.id, name: p.name, aliases: aliases.get(p.id) })), String(call.args.query ?? ""));
     if (!hits.length) return `No product in the Database matches "${String(call.args.query ?? "")}".`;
     return hits
       .map((h) => {
@@ -5168,8 +5169,7 @@ app.whenReady().then(() => {
     const name = args.name.trim();
     if (!name) return null;
     const imageDataUri = await pickImageAsDataUri(`Choose a photo for "${name}" (optional)`);
-    const id = randomUUID();
-    store.createManualProduct(id, name, args.category || "Other", imageDataUri);
+    const id = store.createManualProduct(randomUUID(), name, args.category || "Other", imageDataUri);
     if (imageDataUri) {
       fileUserPhoto(id, imageDataUri);
       ensurePhotoDifferenceAnalysis(id);

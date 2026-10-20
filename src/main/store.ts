@@ -1,3 +1,4 @@
+import { namingFacts, resolveName } from "./namingEngine.js";
 import { REQUALIFY_CODES, type SavedListingState } from "./relisting.js";
 import { countLifecycle, type LifecycleCounts } from "./listingLifecycle.js";
 import { DatabaseSync, backup as sqliteBackup } from "node:sqlite";
@@ -1583,18 +1584,50 @@ export class Store {
   // new product at nearly the same moment used to each make their own: two "Xbox Series X" entries.) The check and
   // the insert are one synchronous step, so they can't interleave.
   addProductStub(id: string, name: string): string {
-    const key = this.productDuplicateKey(name);
-    if (key) {
-      const rows = this.db.prepare("SELECT id, name FROM products WHERE deleted_at IS NULL").all() as Array<{ id: string; name: string }>;
-      const existing = rows.find((r) => this.productDuplicateKey(r.name) === key);
-      if (existing) return existing.id;
-    }
+    const named = this.nameForInsert(name);
+    if (named.existingId) return named.existingId;
     const now = Date.now();
     this.db
       .prepare("INSERT INTO products (id, name, loading, created_at, updated_at) VALUES (?, ?, 1, ?, ?)")
-      .run(id, name, now, now);
+      .run(id, named.name, now, now);
+    if (named.alias) this.addProductAlias(id, named.alias, "typed", now);
     this.safeguard.invalidate();
     return id;
+  }
+
+  /**
+   * Phase 2.1: the naming rules and the alias lookup on a creation path. Returns the entry this name already belongs to (by its old duplicate key, the canonical name, a kept alias, or because an
+   * existing entry's name resolves to the same canonical model), else the one simple name the new entry should get, plus the typed name to keep as its alias. When an existing entry is found the
+   * typed name is kept as that entry's alias, so the next lookup by it is exact.
+   */
+  private nameForInsert(typed: string): { name: string; alias: string | null; existingId: string | null } {
+    const trimmed = typed.replace(/\s+/g, " ").trim();
+    const facts = namingFacts(this.listModelFactOverrides());
+    const r = resolveName(trimmed, facts);
+    const canonical = r.canonical || trimmed;
+    const rows = this.db.prepare("SELECT id, name FROM products WHERE deleted_at IS NULL").all() as Array<{ id: string; name: string }>;
+    const keys = [...new Set([this.productDuplicateKey(trimmed), this.productDuplicateKey(canonical)].filter(Boolean))];
+    let existing = rows.find((row) => keys.includes(this.productDuplicateKey(row.name)));
+    existing ??= rows.find((row) => nameKey(row.name) === nameKey(canonical));
+    if (!existing) {
+      const viaAlias = this.findProductIdByAlias(trimmed) ?? this.findProductIdByAlias(canonical);
+      if (viaAlias) existing = rows.find((row) => row.id === viaAlias);
+    }
+    // an older entry that goes by another name for the same known model ("Xbox Series X (1TB)" vs "Xbox Series X"); a name nothing is known about never matches this way
+    if (!existing && r.how !== "unchanged") {
+      existing = rows.find((row) => {
+        const o = resolveName(row.name, facts);
+        return o.how !== "unchanged" && nameKey(o.canonical) === nameKey(canonical);
+      });
+    }
+    if (existing) {
+      if (nameKey(trimmed) !== nameKey(existing.name)) this.addProductAlias(existing.id, trimmed, "typed");
+      return { name: existing.name, alias: null, existingId: existing.id };
+    }
+    // A name that only says the LINE ("Xbox Series X") does not say which model it is: guessing the default model's colour into the name could be wrong, so the entry keeps the line's own name
+    // (a later step asks which model). Matching above still sees it as the default model's name, so a later "Xbox Series X (Black)" finds this entry instead of making another.
+    const name = r.generic && r.line ? r.line : canonical;
+    return { name, alias: nameKey(name) === nameKey(trimmed) ? null : trimmed, existingId: null };
   }
 
   // Folds together entries that are already duplicates of each other (made before the check above existed, or
@@ -1696,12 +1729,16 @@ export class Store {
   // research run on. Inserted already "finished" (loading = 0) rather than
   // going through addProductStub's loading=1 + a later updateProductProfile
   // call, since there's no research pass coming to ever clear it.
-  createManualProduct(id: string, name: string, category: string, imageUrl: string | null): void {
+  createManualProduct(id: string, name: string, category: string, imageUrl: string | null): string {
+    const named = this.nameForInsert(name);
+    if (named.existingId) return named.existingId;
     const now = Date.now();
     this.db
       .prepare("INSERT INTO products (id, name, category, image_url, keep_thumbnail, loading, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)")
-      .run(id, name, category, imageUrl, imageUrl ? 1 : 0, now, now);
+      .run(id, named.name, category, imageUrl, imageUrl ? 1 : 0, now, now);
+    if (named.alias) this.addProductAlias(id, named.alias, "typed", now);
     this.safeguard.invalidate();
+    return id;
   }
 
   updateProductProfile(
@@ -2113,10 +2150,25 @@ export class Store {
   findMatchingProduct(name: string): ProductProfile | null {
     const exact = this.getProductByName(name);
     if (exact) return exact;
+    // a name the entry keeps as an alias, or the canonical name the naming rules give it, is an exact hit too
+    const aliasId = this.findProductIdByAlias(name);
+    const byAlias = aliasId ? this.getProductById(aliasId) : null;
+    if (byAlias) return byAlias;
+    const named = resolveName(name, namingFacts(this.listModelFactOverrides()));
+    if (named.how === "model" && named.canonical) {
+      const byCanonical = this.getProductByName(named.canonical);
+      if (byCanonical) return byCanonical;
+    }
     // Fuzzy: compare against names only, then load just the one product that matched.
     const legacy = (() => {
       const similar = this.listProductIndex().find((p) => isSimilarProductName(name, p.name));
-      return similar ? this.getProductById(similar.id) : null;
+      if (similar) return this.getProductById(similar.id);
+      // a known model whose family entry exists under another name ("xbox series x galaxy" -> the "Xbox Series X" family, kept as "Xbox Series X (Black)"): the family entry is the match
+      if (named.how === "model" && named.parent) {
+        const familyId = this.findProductIdByAlias(named.parent);
+        return (familyId ? this.getProductById(familyId) : null) ?? this.getProductByName(named.parent);
+      }
+      return null;
     })();
     if (this.resolverMode === "off") return legacy;
     const best = this.resolveTarget(name);
@@ -2644,7 +2696,7 @@ export class Store {
     return Number((this.db.prepare("SELECT COUNT(*) n FROM variant_candidates WHERE last_checked_at IS NOT NULL AND last_checked_at >= ?").get(since) as { n: number }).n);
   }
 
-  // ---- aliases and the owner's model-fact edits (namingEngine.ts / modelFacts.ts). Nothing in the app calls these on an insert path yet: that is Phase 2.
+  // ---- aliases and the owner's model-fact edits (namingEngine.ts / modelFacts.ts). Used on the creation paths (addProductStub, createManualProduct) and by findMatchingProduct.
 
   /** Keeps another name for a product. A name that is the product's own name, or one it already has, is not added twice. Returns true when it was added. */
   addProductAlias(productId: string, alias: string, source: string = "rename", now: number = Date.now()): boolean {
@@ -2661,6 +2713,13 @@ export class Store {
   }
 
   /** The product that keeps this name as an alias (null when none, or when two products claim it: an ambiguous alias decides nothing). */
+  /** Every kept alias, by product id (one query), for searches that should find an entry by any of its names. */
+  aliasesByProduct(): Map<string, string[]> {
+    const map = new Map<string, string[]>();
+    for (const r of this.db.prepare("SELECT product_id, alias FROM product_name_aliases ORDER BY created_at").all() as Array<{ product_id: string; alias: string }>) map.set(r.product_id, [...(map.get(r.product_id) ?? []), r.alias]);
+    return map;
+  }
+
   findProductIdByAlias(alias: string): string | null {
     const rows = this.db.prepare("SELECT DISTINCT a.product_id id FROM product_name_aliases a JOIN products p ON p.id = a.product_id WHERE a.alias_key = ?").all(nameKey(alias)) as Array<{ id: string }>;
     return rows.length === 1 ? rows[0].id : null;
