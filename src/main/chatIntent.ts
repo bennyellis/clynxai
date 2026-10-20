@@ -171,6 +171,20 @@ export function actionNotRunMessage(tool: string): string {
   return `Not run: the person only said hello or asked a question, and "${tool}" changes things. Nothing was changed. Answer their message in plain words (use web_research if facts matter) and, if useful, offer to do it when they ask. Do not say you did anything.`;
 }
 
+// ---- what Clynx understood is shown by the app, not left to the model's memory (Beta 28 live test: "I read ... as ..." never reached the chat)
+
+const CORRECTION = /^I read "[^"\n]{1,200}" as "[^"\n]{1,200}" \([^)\n]{1,300}\)\./;
+
+/** The "I read "xbox seris x" as "xbox Series X" (spelling ...)." sentence at the start of a research tool's answer, or null. The app shows it itself so it can never be left out. */
+export function extractCorrectionSentence(toolResult: string): string | null {
+  return CORRECTION.exec(toolResult.trimStart())?.[0] ?? null;
+}
+
+/** The tool answer with the "begin your reply with it" instruction replaced by a note that the user has already seen it. */
+export function markCorrectionShown(toolResult: string): string {
+  return toolResult.replace(/BEGIN your reply to the user with that first sentence[^]*?what Clynx understood\./, "The user has ALREADY been shown that sentence by the app: do not repeat it, just carry on.");
+}
+
 // ---- internal tool names are never shown to the person
 
 const TOOL_PHRASES: Array<[RegExp, string]> = [

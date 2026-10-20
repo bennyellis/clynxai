@@ -38,3 +38,38 @@ export function friendlyPriceCheckFailure(message: string): string {
 
 /** How many failed tries Clynx makes on its own before it leaves a product alone (the waits are Store.RESEARCH_RETRY_DELAYS_MS). */
 export const AUTO_RETRY_ATTEMPTS = 4;
+
+/** The sold-price lookup (a WatchCount tab in a browser) could not be read: a plain note that says what the research falls back to. The raw error stays in the log. */
+export function friendlySoldFailure(message: string): string {
+  const m = String(message ?? "");
+  if (/deadline|took too long/i.test(m)) return "WatchCount took too long to answer, so I'm going by what sellers are asking on eBay right now.";
+  if (/launchPersistentContext|browserType|chrome|chromium|playwright|target closed|browser has been closed/i.test(m)) {
+    return "The browser I use to read sold prices could not start just now, so I'm going by what sellers are asking on eBay right now.";
+  }
+  return "I could not read sold prices just now, so I'm going by what sellers are asking on eBay right now.";
+}
+
+/**
+ * Runs the sold-price lookup but never lets its failure (a browser that will not start, a page that hangs) take the whole price research down with it, and never lets it hang
+ * (Beta 28 live test: a Galaxy research sat on "Looking into it" for 15+ minutes behind overlapping browser launches, and a product with 22 accepted asking prices got no price because
+ * the sold lookup threw first). Returns the comps, or an empty list plus why.
+ */
+export async function softSoldLookup<T>(lookup: () => Promise<T[]>, deadlineMs: number): Promise<{ comps: T[]; failure: string | null }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const comps = await Promise.race([
+      lookup(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`the sold-price lookup passed its deadline (${Math.round(deadlineMs / 1000)}s)`)), deadlineMs);
+      }),
+    ]);
+    return { comps, failure: null };
+  } catch (e) {
+    return { comps: [], failure: (e as Error).message ?? "unknown error" };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** How long the sold-price lookup may take before the research goes on without it. */
+export const SOLD_LOOKUP_DEADLINE_MS = 120_000;

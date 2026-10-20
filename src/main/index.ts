@@ -70,7 +70,7 @@ import { fetchActiveAsks } from "./ebayActive.js";
 import { resolveIdentityTarget } from "./productIdentity.js";
 import { beta13Flags } from "./beta13.js";
 import { runVariantFanout } from "./variantFanout.js";
-import { friendlyPriceCheckFailure, friendlyResearchFailure } from "./researchFailure.js";
+import { friendlyPriceCheckFailure, friendlyResearchFailure, friendlySoldFailure, softSoldLookup, SOLD_LOOKUP_DEADLINE_MS } from "./researchFailure.js";
 import { adoptOfficialName, planParentLinks } from "./variantLinking.js";
 import { idsToQueueOnReset } from "./cloudDeletes.js";
 import { addonKey, estimateAddonUplift, isNoiseAddon, type AddonRole, type AddonStatus } from "./addons.js";
@@ -1746,7 +1746,13 @@ async function researchEbayComps(
   // A "(For Parts / Broken)" variant is researched on its own terms: sold comps and asking prices of BROKEN copies of the base product.
   if (isBrokenVariantName(fallbackName)) return researchBrokenVariantComps(id, fallbackName);
   const query = await deriveWatchCountQuery(fallbackName, sourceTitle, imageDataUri, sourceTitle ? store.credibleCodes(id, fallbackName, sourceTitle) : []);
-  const comps = await timed("ebay_lookup", () => getPrimaryEngine().fetchEbayComps(query));
+  // The sold-price lookup can fail (a browser that will not start) or hang: it must not take the asking-price estimate down with it. Without sold prices the estimate comes from asking prices.
+  const soldAttempt = await softSoldLookup(() => timed("ebay_lookup", () => getPrimaryEngine().fetchEbayComps(query)), SOLD_LOOKUP_DEADLINE_MS);
+  const comps = soldAttempt.comps;
+  if (soldAttempt.failure) {
+    console.error(`[ebay-comps] sold lookup for "${fallbackName}" failed: ${soldAttempt.failure.slice(0, 300)}`);
+    discovery.note(id, "warn", friendlySoldFailure(soldAttempt.failure));
+  }
   // The product's own name backs up the search query for hard facts like capacity (see compFilter.ts).
   // Cross-check every result's photo against this product's reference photos (not the ones that came from eBay: those would
   // only vouch for themselves), falling back to its thumbnail. No photo to compare with = text checks only.
@@ -1775,6 +1781,8 @@ async function researchEbayComps(
   // Say how many results were retrieved, accepted, uncertain and rejected, and why: no price from a result that was not verified as this product.
   const soldLine = describeSummary("Sold results", analysis.validation ?? emptySummary());
   const askLine = describeSummary("Asking results", active.validation ?? emptySummary());
+  // No sold prices AND no asking prices: this is a failed price check, not a finished one (it is reported and retried), never a quiet "nothing found"
+  if (soldAttempt.failure && active.sampleSize === 0 && (active.validation?.retrieved ?? 0) === 0) throw new Error(soldAttempt.failure);
   recordLog({ ts: Date.now(), level: "info", message: `Comparable check for "${fallbackName}": ${soldLine} ${askLine}` });
   discovery.note(id, "step", `${soldLine} ${askLine}`);
   // AI Activity: how many results each provider returned and how many the identity check accepted / rejected / could not tell.

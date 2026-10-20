@@ -6,7 +6,7 @@ import { CLYNX_VOICE } from "./voice.js";
 import { isLowAiMode } from "./aiMode.js";
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 import { describeVerdictForAi, type VariantVerdict } from "./variantEvidence.js";
-import { actionNotRunMessage, followUpHint, isInformationalOnly, plainToolNames, promisesAction, relevantProducts, SIDE_EFFECT_TOOLS, wantsProductPicture } from "./chatIntent.js";
+import { actionNotRunMessage, extractCorrectionSentence, markCorrectionShown, followUpHint, isInformationalOnly, plainToolNames, promisesAction, relevantProducts, SIDE_EFFECT_TOOLS, wantsProductPicture } from "./chatIntent.js";
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -1267,6 +1267,13 @@ export async function streamChat(
           () => executeTool({ name: tc.name as ToolCall["name"], args, userMessage, images: attachments.map((a) => a.dataUri) })
         );
         if (tc.name === "research_product" && /^Started researching|^Added|new entry/.test(toolResult) && !toolResult.startsWith("Failed:")) researchedNewProduct = true;
+        // "I read X as Y": the app says it itself, right away, so it is shown whatever the model writes next
+        const understood = tc.name === "research_product" ? extractCorrectionSentence(toolResult) : null;
+        if (understood && !fullContent.includes(understood)) {
+          onChunk(`${fullContent ? "\n\n" : ""}${understood}`);
+          fullContent += `${fullContent ? "\n\n" : ""}${understood}`;
+          toolResult = markCorrectionShown(toolResult);
+        }
       } catch (err) {
         toolResult = `Failed: ${(err as Error).message}`;
       }

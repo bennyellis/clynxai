@@ -109,7 +109,7 @@ export function AddonsSection({ product }: { product: ProductProfile }) {
         <input placeholder="Add an add-on, e.g. second controller" value={name} onChange={(e) => setName(e.target.value)} style={{ flex: "1 1 220px", minWidth: 0 }} />
         <label style={{ fontSize: 12.5, color: "var(--text-muted)" }}>
           $
-          <input type="number" min="0" step="1" placeholder="sells alone for" value={price} onChange={(e) => setPrice(e.target.value)} style={{ width: 110, marginLeft: 4 }} />
+          <input type="number" min="0" step="1" placeholder="sells alone for" title="What it sells for on its own, in dollars" value={price} onChange={(e) => setPrice(e.target.value)} style={{ width: 150, marginLeft: 4 }} />
         </label>
         <select value={role} onChange={(e) => setRole(e.target.value === "expected" ? "expected" : "bonus")}>
           <option value="bonus">Bonus extra</option>
