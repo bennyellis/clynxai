@@ -12,18 +12,19 @@
 
 // What the web layer is doing right now, for whoever asked (the chat shows it as it happens). The listener belongs to the async call chain that set it, so two chats never see each other's steps.
 import { AsyncLocalStorage } from "node:async_hooks";
-const activityListener = new AsyncLocalStorage<{ fn: (line: string, ok: boolean) => void; skipsShown: Set<string> }>();
-export function withWebActivity<T>(listener: (line: string, ok: boolean) => void, fn: () => Promise<T>): Promise<T> {
+import type { ThinkingItem } from "./thinking.js";
+const activityListener = new AsyncLocalStorage<{ fn: (line: string, ok: boolean, item?: ThinkingItem) => void; skipsShown: Set<string> }>();
+export function withWebActivity<T>(listener: (line: string, ok: boolean, item?: ThinkingItem) => void, fn: () => Promise<T>): Promise<T> {
   return activityListener.run({ fn: listener, skipsShown: new Set() }, fn);
 }
-function announceWebActivity(line: string, ok: boolean, skipKey?: string): void {
+function announceWebActivity(line: string, ok: boolean, skipKey?: string, item?: ThinkingItem): void {
   try {
     const st = activityListener.getStore();
     if (skipKey) {
       if (!st || st.skipsShown.has(skipKey)) return;
       st.skipsShown.add(skipKey); // an engine that is not being used is said once per task, with its reason
     }
-    st?.fn(line, ok);
+    st?.fn(line, ok, item);
   } catch { /* a display problem never stops a search */ }
 }
 
@@ -314,7 +315,7 @@ export function createEvidenceDeps(opts: EvidenceDepsOptions = {}): EvidenceDeps
     trace.pages.push(e);
     let host = e.url;
     try { host = new URL(e.url).hostname.replace(/^www\./, ""); } catch { /* keep the raw text */ }
-    announceWebActivity(e.chars > 0 ? `Read ${host}${e.via === "browser" ? " (opened in a browser)" : ""}: ${e.chars.toLocaleString("en-US")} characters` : `Could not read ${host}${e.note ? ` (${e.note.slice(0, 80)})` : ""}`, e.chars > 0);
+    announceWebActivity(e.chars > 0 ? `Read ${host}${e.via === "browser" ? " (opened in a browser)" : ""}: ${e.chars.toLocaleString("en-US")} characters` : `Could not read ${host}${e.note ? ` (${e.note.slice(0, 80)})` : ""}`, e.chars > 0, undefined, e.chars > 0 ? { type: "page", url: e.url, title: host } : undefined);
   };
   let rendersLeft = opts.maxRenders ?? 2;
   let lastSearchAt = 0;

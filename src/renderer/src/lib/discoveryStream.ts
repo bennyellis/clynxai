@@ -128,11 +128,13 @@ export type StreamItem<M extends StreamMessage, E extends StreamEntry> = ChatIte
  * found disappears from the full picture). Research you asked for stays with your conversation in every view that has the conversation.
  */
 export function buildView<M extends StreamMessage, E extends StreamEntry>(mode: ViewMode, messages: ReadonlyArray<M>, entries: ReadonlyArray<E>, keep: (e: E) => boolean = () => true): Array<StreamItem<M, E>> {
-  if (mode === "chat") return buildChatStream(messages, entries);
   if (mode === "automation") return buildAutomationStream(entries, keep);
-  const merged: Array<StreamItem<M, E>> = [...buildChatStream(messages, entries), ...buildAutomationStream(entries)];
+  const merged: Array<StreamItem<M, E>> = mode === "chat" ? buildChatStream(messages, entries) : [...buildChatStream(messages, entries), ...buildAutomationStream(entries)];
   // stable: equal timestamps keep the order they were added in (conversation first)
-  return merged.sort((a, b) => a.ts - b.ts);
+  const ordered = mode === "chat" ? merged : merged.sort((a, b) => a.ts - b.ts);
+  // A reply that is still being written stays LAST: a card that arrives while Clynx is answering must not bury the answer above the viewport.
+  const answering = (i: StreamItem<M, E>) => i.kind === "turn" && Boolean((i.turn.reply as { streaming?: boolean } | null)?.streaming);
+  return [...ordered.filter((i) => !answering(i)), ...ordered.filter(answering)];
 }
 
 /** Whether the composer should move the person to the full picture after they send: a message sent while looking at Automation alone would otherwise be invisible. */

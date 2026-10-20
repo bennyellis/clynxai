@@ -3,6 +3,7 @@ import type { ChatAttachment, ChatChoice, ChatChoiceOption, ChatMessage, Discove
 import { ChatChoiceButtons, ChatStatusLine } from "../components/ChatExtras.js";
 import { ClynxAvatar, YouLabel } from "../components/ChatAvatar.js";
 import { LiveFeedTile } from "../components/LiveFeedTile.js";
+import { ThinkingBlock } from "../components/ThinkingBlock.js";
 import { agoText, liveTileModel, orderTiles } from "../lib/liveFeed.js";
 import { attachmentHistoryNote, prepareImages } from "../lib/chatAttachments.js";
 import { dismissAllChoices, dismissChoice, forgetSteps } from "../lib/chatExtras.js";
@@ -289,9 +290,14 @@ export function DiscoveryTab({ products, onOpenProduct }: { products: ProductPro
 
   // Changing the view starts at the latest, like a conversation.
   const firstView = useRef(true);
+  const skipModeScroll = useRef(false);
   useEffect(() => {
     if (firstView.current) {
       firstView.current = false;
+      return;
+    }
+    if (skipModeScroll.current) {
+      skipModeScroll.current = false; // a jump to a card is in progress: it scrolls to the card, not the bottom
       return;
     }
     stick.scrollToBottom();
@@ -305,12 +311,16 @@ export function DiscoveryTab({ products, onOpenProduct }: { products: ProductPro
   function jumpTo(entry: DiscoveryEntry) {
     // the card has to be in the current view: a product Clynx found on its own is not in "My chat", and a filtered-out one is not in "Automation"
     const channel = channelOf(entry);
-    if (mode === "chat" && channel === "automation") setMode("everything");
-    if (mode === "automation" && channel === "chat") setMode("everything");
+    const wrongView = (mode === "chat" && channel === "automation") || (mode === "automation" && channel === "chat");
+    // changing the view would normally scroll to the latest; this jump is going to a card instead
+    if (wrongView) {
+      skipModeScroll.current = true;
+      setMode("everything");
+    }
     if (channel === "automation" && mode === "automation" && !matchesFilter(entry)) setFilter("all");
-    stick.release();
-    // After a filter or view change the card needs a moment to exist and be laid out.
+    // After a filter or view change the card needs a moment to exist and be laid out. Letting go of "stick to the latest" happens HERE, after that change, so nothing re-sticks in between.
     setTimeout(() => {
+      stick.release();
       const scroller = stick.element;
       const el = cardRefs.current.get(entry.id);
       if (!scroller || !el) return;
@@ -347,7 +357,8 @@ export function DiscoveryTab({ products, onOpenProduct }: { products: ProductPro
     pass: autoEntries.filter((e) => matchesFilter(e, "pass")).length,
   };
   const researchingAuto = autoEntries.filter((e) => e.status === "researching").length;
-  const busy = messages.some((m) => m.streaming);
+  const answering = [...messages].reverse().find((m) => m.role === "assistant" && m.streaming) ?? null;
+  const busy = Boolean(answering);
 
   const renderCard = (entry: DiscoveryEntry) => (
     <ProductCard
@@ -447,6 +458,19 @@ export function DiscoveryTab({ products, onOpenProduct }: { products: ProductPro
               </button>
             ))}
           </div>
+          {/* A reply that is still being written can be seen and stopped from EVERY view (in Automation the reply itself is not on screen). The text is announced once, politely, not token by token. */}
+          <div aria-live="polite" role="status" style={answering ? { display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: "var(--text-muted)" } : { position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)" }}>
+            {answering && (
+              <>
+                <span>Clynx is answering…</span>
+                {mode === "automation" && (
+                  <button type="button" className="primary" onClick={() => api.cancelChat(answering.id)} style={{ padding: "3px 12px", fontSize: 12.5, borderRadius: 8 }}>
+                    Stop
+                  </button>
+                )}
+              </>
+            )}
+          </div>
           {mode === "automation" && (
             <>
               <div style={{ fontSize: 12.5, color: "var(--text-muted)" }}>What I find and look into on my own: is each product worth flipping, and why.</div>
@@ -488,10 +512,8 @@ export function DiscoveryTab({ products, onOpenProduct }: { products: ProductPro
             onScroll={stick.onScroll}
             data-testid="chat-scroll"
             data-stick-bottom=""
-            role="log"
-            aria-label={mode === "automation" ? "What Clynx found on its own" : mode === "chat" ? "Conversation with Clynx" : "Everything: your conversation and what Clynx found"}
-            aria-live="polite"
-            aria-relevant="additions text"
+            role="tabpanel"
+            aria-labelledby={`discovery-view-${mode}`}
             aria-busy={busy}
             tabIndex={0}
             style={{ flex: 1, overflowY: "auto", padding: "18px 22px", position: "relative" }}
@@ -834,11 +856,12 @@ function MessageRow({ msg }: { msg: ThreadMsg }) {
             ))}
           </div>
         )}
+        {!isUser && <ThinkingBlock requestId={msg.id} working={Boolean(msg.streaming)} />}
         {msg.content}
         {msg.streaming && msg.content && <span className="cursor-blink" />}
         {!isUser && (
           <>
-            <ChatStatusLine requestId={msg.id} waiting={msg.streaming && !msg.content} onStop={msg.streaming ? () => api.cancelChat(msg.id) : undefined} />
+            <ChatStatusLine requestId={msg.id} hideNotices waiting={msg.streaming && !msg.content} onStop={msg.streaming ? () => api.cancelChat(msg.id) : undefined} />
             {!msg.streaming && <ChatChoiceButtons requestId={msg.id} onPick={(c, o) => choiceSender?.(c, o, msg.id)} />}
           </>
         )}

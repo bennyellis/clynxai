@@ -13,6 +13,7 @@ import { EbayEngine } from "./ebayEngine.js";
 import { hasEbayCredentials, searchEbayAspects, searchEbayItems, setEbayTransport } from "./ebayClient.js";
 import { gatherCandidates, runQueueTick } from "./variantQueue.js";
 import { fetchAddonPages } from "./addonPages.js";
+import { THUMB_MAX_CHARS, THUMB_MAX_SIDE } from "./thinking.js";
 import { addonEntryKey, addonFromListing, sameAddonLoosely } from "./variantDiscovery.js";
 import { OPENAI_MODEL, callOpenAI, hasOpenAIAccess, initOpenAIProxy, setApiSource } from "./openai.js";
 import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
@@ -5852,6 +5853,10 @@ app.whenReady().then(() => {
             onStatus: flags.chatStatus ? (e) => send("ai:chatStatus", { requestId: args.requestId, ...e }) : undefined,
             replyStyle: flags.replyStyle,
             notice: notice || undefined,
+            thumbnail: async (dataUri) => {
+              const small = await shrinkImageDataUri(dataUri, THUMB_MAX_SIDE, 70);
+              return small.length <= THUMB_MAX_CHARS ? small : null;
+            },
           }
         );
         // Model and tool timing for every chat turn (Activity > metrics): how long each model round and each tool took, and which safeguards acted.

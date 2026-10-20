@@ -6,6 +6,7 @@ import { CLYNX_VOICE } from "./voice.js";
 import { isLowAiMode } from "./aiMode.js";
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 import { describeVerdictForAi, type VariantVerdict } from "./variantEvidence.js";
+import { ThinkingBudget, thoughtForFailure, thoughtForTool, thoughtFromWebLine, type ThinkingItem } from "./thinking.js";
 import { actionNotRunMessage, extractCorrectionSentence, markCorrectionShown, followUpHint, isInformationalOnly, plainToolNames, promisesAction, relevantProducts, SIDE_EFFECT_TOOLS, wantsProductPicture } from "./chatIntent.js";
 
 export interface ChatMessage {
@@ -1028,6 +1029,8 @@ export interface ChatHooks {
   replyStyle?: boolean;
   /** Said to the model so it tells the user about attachments that could not be used (never silently dropped). */
   notice?: string;
+  /** Shrinks an attached photo to a small thumbnail for the thinking block (null when it cannot). Injected so this file stays free of the image library. */
+  thumbnail?: (dataUri: string) => Promise<string | null>;
 }
 
 /** Timing and decisions of one chat turn: what each model round and each tool cost, and which safeguards stepped in. Filled in by streamChat when given one. */
@@ -1197,9 +1200,26 @@ export async function streamChat(
   };
   // A greeting or a pure question must not run anything that changes the app (Beta 28 live test: a hello started the scanner, a question wrote a watch note).
   const informationalTurn = isInformationalOnly(userMessage);
+  // Clynx's narrated thinking: code-authored facts (a tool started, a page was read, a photo was attached), at most a few per turn, small and without anything personal (thinking.ts).
+  const thinking = new ThinkingBudget();
+  let thinkingNo = 0;
+  const emitThinking = (item: ThinkingItem | null) => {
+    const clean = thinking.admit(item);
+    if (!clean) return;
+    hooks.onStatus?.({ stepId: `think-item-${++thinkingNo}`, kind: "thinking", label: clean.text ?? clean.title ?? "", state: "end", startedAt: Date.now(), ok: true, item: clean });
+  };
   let promiseGuardUsed = false;
   let variantsGuardUsed = false;
   const toolNamesRun = new Set<string>();
+
+  // The photos the person attached are the first things Clynx looks at: a small thumbnail of each (never the full picture), so the thinking block shows what it is going on.
+  if (attachments.length > 0 && hooks.thumbnail) {
+    emitThinking({ type: "thought", text: attachments.length === 1 ? "I'm looking at the photo you sent." : `I'm looking at the ${attachments.length} photos you sent.` });
+    for (const a of attachments.slice(0, 6)) {
+      const thumbnail = await hooks.thumbnail(a.dataUri).catch(() => null);
+      if (thumbnail) emitThinking({ type: "image", thumbnail, text: String(a.name ?? "").slice(0, 60) });
+    }
+  }
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const lenBefore = fullContent.length;
@@ -1262,8 +1282,14 @@ export async function streamChat(
         hooks.onStatus?.({ stepId: tc.id || `${tc.name}-${started}`, kind: "tool", label, state: "start", startedAt: started });
         const stepBase = tc.id || `${tc.name}-${started}`;
         let activityNo = 0;
+        const startThought = thoughtForTool(tc.name, args);
+        if (startThought) emitThinking({ type: "thought", text: startThought });
         toolResult = await withWebActivity(
-          (line, ok) => hooks.onStatus?.({ stepId: `${stepBase}:a${++activityNo}`, kind: "notice", label: line, state: "end", startedAt: Date.now(), ok }),
+          (line, ok, item) => {
+            hooks.onStatus?.({ stepId: `${stepBase}:a${++activityNo}`, kind: "notice", label: line, state: "end", startedAt: Date.now(), ok });
+            // a page that was really read becomes a page item; every other line (a search, a refusal) is a thought
+            emitThinking(item ?? thoughtFromWebLine(line, ok));
+          },
           () => executeTool({ name: tc.name as ToolCall["name"], args, userMessage, images: attachments.map((a) => a.dataUri) })
         );
         if (tc.name === "research_product" && /^Started researching|^Added|new entry/.test(toolResult) && !toolResult.startsWith("Failed:")) researchedNewProduct = true;
@@ -1277,6 +1303,7 @@ export async function streamChat(
       } catch (err) {
         toolResult = `Failed: ${(err as Error).message}`;
       }
+      if (toolResult.startsWith("Failed:")) emitThinking({ type: "thought", text: thoughtForFailure(tc.name) });
       hooks.onStatus?.({ stepId: tc.id || `${tc.name}-${started}`, kind: "tool", label, state: "end", startedAt: started, ok: !toolResult.startsWith("Failed:"), detail: toolResult.startsWith("Failed:") ? toolResult.slice(0, 160) : undefined });
       toolsRunThisTurn++;
       toolNamesRun.add(tc.name);

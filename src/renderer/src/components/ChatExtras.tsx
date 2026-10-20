@@ -9,7 +9,7 @@ import { prepareImages } from "../lib/chatAttachments.js";
 // list and layout; these are dropped into it.
 
 /** "Researching eBay… 8s", ticking locally from the real start time. Shows nothing when nothing is running; a step that failed stays visible in a warning colour. */
-export function ChatStatusLine({ requestId, onStop, waiting }: { requestId: string; onStop?: () => void; /** The reply is on its way but has no words and no step yet: show "Thinking" so the bubble is never empty (this is the ONE set of typing dots). */ waiting?: boolean }) {
+export function ChatStatusLine({ requestId, onStop, waiting, hideNotices }: { requestId: string; onStop?: () => void; /** The chat shows the web pages as a thinking block instead, so the plain "Web activity" list is left out. */ hideNotices?: boolean; /** The reply is on its way but has no words and no step yet: show "Thinking" so the bubble is never empty (this is the ONE set of typing dots). */ waiting?: boolean }) {
   const { steps } = useChatExtras();
   const mine = steps[requestId];
   const running = runningSteps(mine);
@@ -21,7 +21,7 @@ export function ChatStatusLine({ requestId, onStop, waiting }: { requestId: stri
     return () => clearInterval(t);
   }, [running.length]);
   const problems = problemSteps(mine);
-  const notices = (mine ?? []).filter((s) => s.kind === "notice");
+  const notices = hideNotices ? [] : (mine ?? []).filter((s) => s.kind === "notice");
   const showWaiting = Boolean(waiting) && running.length === 0;
   // Stop stays available for as long as the reply is running (onStop is only passed while it streams), including while plain words are arriving and no step is running
   if (!running.length && !problems.length && !notices.length && !showWaiting && !onStop) return null;

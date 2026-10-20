@@ -49,13 +49,16 @@ export function confirmChoice(id: string, question: string, confirmLabel = "Do i
 export interface ChatStatusEvent {
   requestId: string;
   stepId: string;
-  kind: "model" | "tool" | "notice";
+  /** "thinking" carries one item of Clynx's narrated thinking (thinking.ts): a thought line, a page it read, or a photo it looked at. */
+  kind: "model" | "tool" | "notice" | "thinking";
   label: string;
   state: "start" | "update" | "end";
   /** Epoch ms the step really started: the screen ticks the elapsed time itself, so no per-second events are sent. */
   startedAt: number;
   ok?: boolean;
   detail?: string;
+  /** Only for kind "thinking". Already sanitised and capped (thinking.ts). */
+  item?: import("./thinking.js").ThinkingItem;
 }
 
 const str = (v: unknown, max = 40): string => cleanLine(v, max);
