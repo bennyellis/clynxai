@@ -267,36 +267,56 @@ export function addonCandidatesFromPages(base: string, pages: PageText[], max = 
     .map((f) => ({ name: f.name, kind: "addon" as const, sources: ["catalogue" as const], support: f.maker || f.hosts.size >= 2 ? ("confirmed" as const) : ("reported" as const), evidence: [...f.hosts].slice(0, 3) }));
 }
 
-/** Quantity / ordinal / condition words a listing puts in front of an extra ("Second Wireless Controller", "2 extra controllers", "spare battery"): not part of the add-on's name. */
-const QUANTITY_WORDS = /^(?:second|2nd|third|extra|additional|another|spare|bonus|free|original|genuine|official|oem|used|new|\d+x?|two|three|four|a|an|the|1|one)$/i;
+/** Words a listing puts IN FRONT of an extra ("Second Wireless Controller", "2 extra controllers", "spare battery"): a quantity or a condition, not part of the add-on's name. */
+const LEADING_QUANTITY = /^(?:second|2nd|third|extra|additional|another|spare|bonus|free|original|genuine|official|oem|used|new|\d+x?|two|three|four|a|an|the|one)$/i;
+
+/** Words that describe a KIND of accessory without naming one ("wireless controller", "expansion card"): a name made only of these has no brand or model of its own. */
+const GENERIC_ACCESSORY_WORDS = new Set(
+  "wireless stereo rechargeable charging battery pack card expansion storage memory external hard drive ssd remote control media carrying power adapter ac hdmi play charge kit screen protector controller controllers headset headphones dock station stand cable charger case camera keyboard mouse grip skin faceplate backplate thumbstick webcam microphone stylus strap sleeve".split(" ")
+);
+const singular = (w: string) => (w.length > 4 && w.endsWith("s") && !w.endsWith("ss") && !w.endsWith("us") ? w.slice(0, -1) : w);
 
 /**
- * A scanned listing's extra ("Second Wireless Controller") as an add-on candidate for the BASE product: quantity words are dropped, the product line is added when the name lacks it ("Wireless
- * Controller" -> "Xbox Wireless Controller"), and a list ("charger + 2 games", "HDMI cable and power cord") is refused: only one accessory per name. The listing is its source.
+ * A scanned listing's extra ("Second Wireless Controller") as an add-on candidate for the BASE product. A leading quantity / condition word is dropped; the seller's own brand and model words
+ * are KEPT as written (digits inside a name stay: "Elite Series 2 Controller"); the product line is added ONLY when the name is nothing but generic words ("Wireless Controller" -> "Xbox
+ * Wireless Controller"); a single generic noun ("controller", "case") is refused, and so is a list ("charger + 2 games"). The listing is its source.
  */
 export function addonFromListing(name: string, listingId: string | null, baseName?: string): Candidate | null {
   const raw = clean(name);
   if (!raw || /[+,;&]|\band\b|\bwith\b/i.test(raw)) return null; // a list, not a name
-  const words = raw.split(" ").filter((w) => !QUANTITY_WORDS.test(w));
+  const words = raw.split(" ");
+  while (words.length > 1 && LEADING_QUANTITY.test(words[0])) words.shift();
+  if (words.length < 2) return null; // one generic noun is not an accessory's name
+  words[words.length - 1] = singular(words[words.length - 1]);
   let n = words.join(" ");
   const anchor = baseName ? (baseName.match(/[A-Za-z0-9]+/) ?? [""])[0] : "";
-  if (anchor.length >= 3 && n && !new RegExp(`\\b${anchor}`, "i").test(n)) n =`${anchor} ${n}`;
+  const allGeneric = words.every((w) => GENERIC_ACCESSORY_WORDS.has(w.toLowerCase()));
+  if (anchor.length >= 3 && allGeneric && !new RegExp(`\b${anchor}`, "i").test(n)) n = `${anchor} ${n}`;
   n = clean(n);
-  if (n.split(" ").length < 2 || !isPlausibleProductName(n) || kindOfName(n) !== "accessory" || ADDON_BANNED.test(n)) return null;
+  if (!isPlausibleProductName(n) || kindOfName(n) !== "accessory" || ADDON_BANNED.test(n)) return null;
   return { name: n, kind: "addon", sources: ["listing"], evidence: [listingId ? `listing ${listingId}` : "a scanned listing"] };
 }
 
-const LOOSE_STOP = new Set(["microsoft", "official", "the", "for", "new", "genuine", "oem", "a", "an", "of", "with", "and"]);
-const looseTokens = (name: string) => name.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t && !LOOSE_STOP.has(t)).map((t) => (t.length > 3 && t.endsWith("s") ? t.slice(0, -1) : t));
+const LOOSE_STOP = new Set(["microsoft", "xbox", "official", "genuine", "oem", "the", "for", "new", "a", "an", "of", "with", "and", "wireless"]);
+const COLOUR_WORDS = new Set("black white red blue green yellow orange pink purple gray grey silver gold carbon shock robot pulse electric volt".split(" "));
+const looseTokens = (name: string) =>
+  name
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t && !LOOSE_STOP.has(t) && !COLOUR_WORDS.has(t))
+    .map(singular);
+
+/** One key for an accessory's name with brand, "wireless", colours and plurals set aside: "Xbox Wireless Controller", "Xbox Wireless Controllers" and "Microsoft Xbox Controller - Carbon Black" share it. */
+export function addonEntryKey(name: string): string {
+  return looseTokens(name).sort().join(" ");
+}
 
 /**
- * Whether two add-on names are the same accessory said differently ("Xbox Wireless Controller" / "Microsoft Xbox Wireless Controller - Carbon Black" / "Xbox Wireless Controllers" / "Xbox
- * Controller"): one name's words are all inside the other's, with at least two words in common. Used so an add-on the person dismissed does not come back under another spelling.
+ * Whether two add-on names are the same accessory said differently. The distinguishing words (Elite, Adaptive, Stereo, a maker like Seagate) must match on both sides; the product line,
+ * "wireless", colours and plurals do not matter. So dismissing "Xbox Wireless Controller" also blocks "Xbox Controller" and "Microsoft Xbox Wireless Controller - Carbon Black", but NOT
+ * "Xbox Elite Wireless Controller" (a different product).
  */
 export function sameAddonLoosely(a: string, b: string): boolean {
-  const ta = new Set(looseTokens(a));
-  const tb = new Set(looseTokens(b));
-  if (ta.size === 0 || tb.size === 0) return false;
-  const [small, big] = ta.size <= tb.size ? [ta, tb] : [tb, ta];
-  return [...small].every((t) => big.has(t)) && small.size >= 2;
+  const ka = addonEntryKey(a);
+  return ka !== "" && ka === addonEntryKey(b);
 }

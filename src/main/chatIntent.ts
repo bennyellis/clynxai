@@ -161,7 +161,7 @@ export function isInformationalOnly(message: string): boolean {
   if (GREETING.test(whole)) return true;
   // a greeting in front ("hey start the scanner", "hello can you add a Series S") is not part of the request: judge what comes after it
   const m = whole.replace(/^(?:hi|hello|hey|yo|hiya|howdy|good (?:morning|afternoon|evening))\b[\s,!.:;-]*/i, "").trim();
-  if (!m) return true;
+  if (!m || GREETING.test(m)) return true; // "hey thanks"
   const questionLike = /\?/.test(m) || QUESTION_START.test(m);
   if (!questionLike) return false;
   // an imperative clause anywhere ("hi, start the scanner", "what's up? stop it") makes it a request; so does "can you <do something>"

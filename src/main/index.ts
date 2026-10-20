@@ -13,7 +13,7 @@ import { EbayEngine } from "./ebayEngine.js";
 import { hasEbayCredentials, searchEbayAspects, searchEbayItems, setEbayTransport } from "./ebayClient.js";
 import { gatherCandidates, runQueueTick } from "./variantQueue.js";
 import { fetchAddonPages } from "./addonPages.js";
-import { addonFromListing, sameAddonLoosely } from "./variantDiscovery.js";
+import { addonEntryKey, addonFromListing, sameAddonLoosely } from "./variantDiscovery.js";
 import { OPENAI_MODEL, callOpenAI, hasOpenAIAccess, initOpenAIProxy, setApiSource } from "./openai.js";
 import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
 import { writeFileAtomic, writeFileAtomicWithBackup } from "./safeFs.js";
@@ -2862,7 +2862,7 @@ async function runVariantQueueTick(familyHint: string | null = null): Promise<vo
         if (dismissed) return null;
         // The entry is found by its EXACT name (a fuzzy match returns the console itself for "Xbox Series X Case"); the base product or its parent is never an add-on's entry.
         const baseRow = store.getProductById(parent.id);
-        const existing = store.listProductIndex().find((x) => addonKey(x.name) === addonKey(name) && x.id !== parent.id && x.id !== baseRow?.parentProductId);
+        const existing = store.listProductIndex().find((x) => addonEntryKey(x.name) === addonEntryKey(name) && x.id !== parent.id && x.id !== baseRow?.parentProductId);
         let entryId: string | null = existing?.id ?? null;
         let created = false;
         if (!entryId) {

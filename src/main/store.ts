@@ -2630,7 +2630,8 @@ export class Store {
     const row = this.db.prepare("SELECT attempts FROM variant_candidates WHERE parent_id = ? AND kind = ? AND cand_key = ?").get(parentId, kind, key) as { attempts: number } | undefined;
     const attempts = (row?.attempts ?? 0) + 1;
     const delay = Store.CANDIDATE_RETRY_DELAYS_MS[attempts - 1];
-    if (delay === undefined) {
+    // the fourth failed check is the last: three waits, then it is set aside
+    if (delay === undefined || attempts >= Store.CANDIDATE_RETRY_DELAYS_MS.length) {
       this.db.prepare("UPDATE variant_candidates SET status = 'skipped', note = ?, attempts = ?, last_checked_at = ?, next_try_at = NULL WHERE parent_id = ? AND kind = ? AND cand_key = ?").run(`could not be checked after ${attempts} tries (${note}); set aside`, attempts, now, parentId, kind, key);
       return "gave_up";
     }

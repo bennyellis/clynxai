@@ -2,6 +2,8 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncEx
 import type { ChatAttachment, ChatChoice, ChatChoiceOption, ChatMessage, DiscoveryEntry, DiscoveryThought, ProductProfile } from "../lib/api.js";
 import { ChatChoiceButtons, ChatStatusLine } from "../components/ChatExtras.js";
 import { ClynxAvatar, YouLabel } from "../components/ChatAvatar.js";
+import { LiveFeedTile } from "../components/LiveFeedTile.js";
+import { agoText, liveTileModel, orderTiles } from "../lib/liveFeed.js";
 import { attachmentHistoryNote, prepareImages } from "../lib/chatAttachments.js";
 import { dismissAllChoices, dismissChoice, forgetSteps } from "../lib/chatExtras.js";
 import { api } from "../lib/api.js";
@@ -79,16 +81,7 @@ function useThread(): ThreadMsg[] {
 
 // ---------- helpers
 
-function ago(ts: number, now: number): string {
-  const s = Math.max(0, Math.round((now - ts) / 1000));
-  if (s < 45) return "just now";
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m} min ago`;
-  const h = Math.round(m / 60);
-  if (h < 24) return `${h} hr ago`;
-  const d = Math.round(h / 24);
-  return `${d} day${d === 1 ? "" : "s"} ago`;
-}
+const ago = agoText;
 
 function readAsDataUri(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -455,46 +448,17 @@ export function DiscoveryTab({ products, onOpenProduct }: { products: ProductPro
               Nothing yet. As soon as I start looking into a product (while scanning, or when you ask me to) it shows up here with my take on it.
             </div>
           )}
-          {entries.map((entry) => {
-            const p = productById.get(entry.productId);
-            const researching = entry.status === "researching";
-            const value = p?.ebayEstimatedValueUsd ?? null;
-            return (
-              <FeedRow
-                key={entry.id}
-                active={focus?.entryId === entry.id}
-                onClick={() => selectEntry(entry)}
-                thumb={
-                  p?.imageUrl ? (
-                    <img src={p.imageUrl} alt="" loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
-                  ) : (
-                    <span style={{ fontSize: 18 }}>{researching ? "⚙️" : "📦"}</span>
-                  )
-                }
-                title={entry.name}
-                subtitle={
-                  researching ? (
-                    <span style={{ color: "var(--accent-1)" }}>
-                      Looking into it
-                      <span className="typing-dots" style={{ marginLeft: 4 }}>
-                        <span />
-                        <span />
-                        <span />
-                      </span>
-                    </span>
-                  ) : entry.status === "failed" ? (
-                    <span style={{ color: "var(--warn)" }}>Didn't work out · {ago(entry.finishedAt ?? entry.startedAt, now)}</span>
-                  ) : (
-                    <>
-                      {value !== null ? `Worth about ${money(value)} · ` : ""}
-                      {ago(entry.finishedAt ?? entry.startedAt, now)}
-                    </>
-                  )
-                }
-                badge={entry.id.startsWith("earlier-") ? undefined : SOURCE_LABEL[entry.source]}
-              />
-            );
-          })}
+          {orderTiles(entries).map((entry) => (
+            <LiveFeedTile
+              key={entry.id}
+              name={entry.name}
+              photoUrl={productById.get(entry.productId)?.imageUrl ?? null}
+              model={liveTileModel(entry, verdicts.get(entry.id)?.level ?? null, productById.get(entry.productId)?.ebayEstimatedValueUsd ?? null, now)}
+              active={focus?.entryId === entry.id}
+              badge={entry.id.startsWith("earlier-") ? undefined : SOURCE_LABEL[entry.source]}
+              onClick={() => selectEntry(entry)}
+            />
+          ))}
         </div>
       </div>
 

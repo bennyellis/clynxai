@@ -10,6 +10,7 @@ import type { VariantVerdict } from "../variantEvidence.js";
 import {
   addonCandidatesFromPages,
   addonFromListing,
+  addonEntryKey,
   sameAddonLoosely,
   decideVariant,
   findingsToCandidates,
@@ -223,13 +224,16 @@ run(async () => {
 
   section("TESTER's review: a scanned listing's extra becomes ONE clean add-on name for the base product");
   check("'Second Wireless Controller' becomes 'Xbox Wireless Controller'", addonFromListing("Second Wireless Controller", "L1", "Xbox Series X")?.name === "Xbox Wireless Controller");
-  check("'2 extra controllers', 'spare battery' lose the quantity words and gain the product line", addonFromListing("extra Controller", null, "Xbox Series X")?.name === "Xbox Controller" && addonFromListing("spare Battery Pack", null, "Xbox Series X")?.name === "Xbox Battery Pack");
+  check("a leading 'spare' is dropped and a generic name gains the product line; one generic noun is refused", addonFromListing("spare Battery Pack", null, "Xbox Series X")?.name === "Xbox Battery Pack" && addonFromListing("extra Controller", null, "Xbox Series X") === null && addonFromListing("2 controllers", null, "Xbox Series X") === null && addonFromListing("case", null, "Xbox Series X") === null && addonFromListing("headset", null, "Xbox Series X") === null);
+  check("the seller's own brand and model words are kept as written, digits included (nothing is invented)", addonFromListing("Seagate expansion card", null, "Xbox Series X")?.name === "Seagate expansion card" && addonFromListing("Turtle Beach headset", null, "Xbox Series X")?.name === "Turtle Beach headset" && addonFromListing("Elite Series 2 controller", null, "Xbox Series X")?.name === "Elite Series 2 controller");
+  check("a plural becomes singular", addonFromListing("Wireless Controllers", null, "Xbox Series X")?.name === "Xbox Wireless Controller");
   check("lists and non-accessories are refused", ["charger + 2 games", "HDMI cable and power cord", "Xbox Series X Galaxy Black", "controller, headset", "box"].every((n) => addonFromListing(n, null, "Xbox Series X") === null));
   check("a bare 'Controller' with no product line to add stays refused", addonFromListing("Controller", null) === null);
 
   section("TESTER's review: a dismissed add-on stays dismissed under another spelling");
   check("same accessory, said differently", [["Xbox Wireless Controller", "Microsoft Xbox Wireless Controller - Carbon Black"], ["Xbox Wireless Controller", "Xbox Controller"], ["Xbox Wireless Controller", "Xbox Wireless Controllers"], ["Xbox Wireless Controller", "xbox wireless controller"]].every(([a, b]) => sameAddonLoosely(a, b)));
-  check("different accessories are not the same", !sameAddonLoosely("Xbox Wireless Controller", "Xbox Stereo Headset") && !sameAddonLoosely("Xbox Wireless Controller", "Controller") && !sameAddonLoosely("Xbox Elite Wireless Controller", "Xbox Stereo Headset"));
+  check("different accessories are not the same", !sameAddonLoosely("Xbox Wireless Controller", "Xbox Stereo Headset") && !sameAddonLoosely("Xbox Elite Wireless Controller", "Xbox Stereo Headset") && !sameAddonLoosely("Xbox Wireless Controller", "Xbox Elite Wireless Controller") && !sameAddonLoosely("Xbox Wireless Controller", "Xbox Adaptive Controller"));
+  check("plurals and spellings share one entry key, so a second entry is not made", addonEntryKey("Xbox Wireless Controllers") === addonEntryKey("Xbox Wireless Controller") && addonEntryKey("Microsoft Xbox Controller - Carbon Black") === addonEntryKey("Xbox Wireless Controller") && addonEntryKey("Xbox Series X Case") !== addonEntryKey("Xbox Series X"));
 
   section("TESTER's review: accessory entries and device entries do not price each other");
   const ctrl = (title: string) => classifyComparable({ name: "Xbox Wireless Controller" }, title);
