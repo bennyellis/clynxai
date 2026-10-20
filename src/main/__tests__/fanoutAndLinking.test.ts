@@ -126,7 +126,12 @@ run(async () => {
   check("not when the person named it themself", adoptOfficialName("Xbox Series X Galaxy Edition", official, true, () => false) === null);
   check("not when another product already has that name", adoptOfficialName("Xbox Series X Galaxy Edition", official, false, (n) => n === official) === null);
   check("not when it is the same name", adoptOfficialName("Xbox Series X 2TB Galaxy Black Special Edition", official, false, () => false) === null);
-  check("not a caption", cleanOfficialName("Buy now - free shipping - Xbox Series X Galaxy Edition on sale today only while stocks last at the best price online", "Xbox Series X Galaxy Edition") === null);
+  const caption = "Back panel of XBOX Series X 2TB Galaxy Black Special Edition";
+  check("TESTER's live caption is not a name (it holds every word but opens with 'Back panel of')", adoptOfficialName("Xbox Series X Galaxy Edition", caption, false, () => false) === null && cleanOfficialName(caption, "Xbox Series X Galaxy Edition") === null);
+  check("other captions and fragments are not names", ["Photo of XBOX Series X 2TB Galaxy Black Special Edition", "Xbox Series X Galaxy Edition photo of the console", "Xbox Series X Galaxy Edition - see more", "Xbox Series X Galaxy Edition front view"].every((c) => cleanOfficialName(c, "Xbox Series X Galaxy Edition") === null));
+  check("a name that opens with a different word is kept as typed (conservative)", cleanOfficialName("Microsoft Xbox Series X Galaxy Edition", "Xbox Series X Galaxy Edition") === null);
+  check("the real official name still opens the same way and is adopted", cleanOfficialName(official, "Xbox Series X Galaxy Edition") === official);
+  check("not a caption",cleanOfficialName("Buy now - free shipping - Xbox Series X Galaxy Edition on sale today only while stocks last at the best price online", "Xbox Series X Galaxy Edition") === null);
   const rows = [
     { id: "gal", name: "Xbox Series X Galaxy Edition", parentId: null as string | null, evidenceStatus: "verified" as string | null },
     { id: "plain", name: "Xbox Series X", parentId: null as string | null, evidenceStatus: null as string | null },

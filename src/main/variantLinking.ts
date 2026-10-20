@@ -9,6 +9,11 @@ export function cleanOfficialName(name: string | undefined | null, claim: string
   if (!name) return null;
   const cleaned = name.replace(/\s+/g, " ").replace(/^[\W_]+|[\W_]+$/g, "").trim();
   if (cleaned.length < claim.length - 2 || cleaned.length > 90 || /[<>{}\[\]]/.test(cleaned)) return null;
+  // A picture caption or a page fragment is not a product name ("Back panel of XBOX Series X 2TB Galaxy Black Special Edition" was adopted in the Beta 27 live test): a name must open with the
+  // same word the typed name opens with (the brand or product line), and must not describe a photo or a part of the product.
+  const firstWord = (s: string) => (s.split(/\s+/)[0] ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!firstWord(cleaned) || firstWord(cleaned) !== firstWord(claim)) return null;
+  if (/\b(?:photo|image|picture|screenshot|view|pic)\s+of\b|\b(?:back|front|side|top|bottom|rear|inside|close-?up)\s+(?:panel|view|side|shot|of)\b|\bsee\s+(?:more|all)\b|\bclick\b|\bshop\b|\bbuy\b/i.test(cleaned)) return null;
   const have = new Set(identityTokens(cleaned));
   // It has to read like a product name (not a caption or a button) and hold every word of the claim.
   return nameScore(cleaned, claim) >= 0 && identityTokens(claim).every((t) => have.has(t)) ? cleaned : null;
