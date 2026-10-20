@@ -19,3 +19,7 @@ title,price,sold date,condition,shipping,item id,label
 "Lot of 2 Xbox Series X Galaxy Black Special Edition consoles",2000.00,2026-10-01,Used,0,900000000018,reject
 "Xbox Series X Galaxy Black Special Edition Console",1075.00,2026-10-01,Used,0,900000000019,accept
 "Xbox Series X Galaxy Black 2TB",1090.00,2026-09-30,Used,0,900000000020,accept
+"PlayStation 5 Galaxy Black Special Edition Console",620.00,2026-09-29,Used,0,900000000021,reject
+"Nintendo Switch Galaxy Black Special Edition Console",300.00,2026-09-29,Used,0,900000000022,reject
+"Samsung Galaxy Black Special Edition phone",450.00,2026-09-28,Used,0,900000000023,reject
+"Xbox Series X Galaxy Black Special Edition Console Untested",500.00,2026-09-28,Parts Only,0,900000000024,reject

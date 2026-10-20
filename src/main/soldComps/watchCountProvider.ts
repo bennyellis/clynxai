@@ -57,7 +57,8 @@ export class WatchCountProvider implements SoldCompsProvider {
     if (page.pageState === "security_check") return { comps: [], outcome: { kind: "blocked", detail: "WatchCount showed a security-check page, so no sold prices were read (this says nothing about the market)" } };
     if (page.pageState === "limit") return { comps: [], outcome: { kind: "blocked", detail: "WatchCount showed a limit page, so no sold prices were read (this says nothing about the market)" } };
     if (page.comps.length === 0) {
-      return { comps: [], outcome: { kind: "none", detail: page.pageState === "empty" ? "WatchCount loaded and listed no sold items for this search" : "WatchCount returned no sold items, and the page type is unknown (could be none, could be a hidden block)" } };
+      if (page.pageState === "empty") return { comps: [], outcome: { kind: "none", detail: "WatchCount loaded and listed no sold items for this search" } };
+      return { comps: [], outcome: { kind: "unclear", detail: "WatchCount returned no sold items and the page type is unknown (could be genuinely none, could be a hidden block), so this is not treated as an answer" } };
     }
     const comps = page.comps.map((c) => mapWatchCountComp(c, now, this.options.retentionDays ?? null));
     return { comps: query.limit ? comps.slice(0, query.limit) : comps, outcome: { kind: "ok" } };

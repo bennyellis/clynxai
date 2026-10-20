@@ -52,6 +52,8 @@ export type ProviderOutcome =
   | { kind: "ok"; detail?: string }
   | { kind: "none"; detail: string }
   | { kind: "blocked"; detail: string }
+  /** The source returned nothing and the page could not be told apart from a hidden block: neither "no sales" nor "blocked" is known. Never cached. */
+  | { kind: "unclear"; detail: string }
   | { kind: "disabled"; detail: string }
   | { kind: "not_configured"; detail: string }
   | { kind: "error"; detail: string };
@@ -66,10 +68,25 @@ export interface SoldCompsProvider {
   readonly label: string;
   /** Data that comes from a third party (shown as such; never presented as eBay's own). */
   readonly thirdParty: boolean;
+  /** false for a local table whose contents change between asks (the owner's imports): its answer is never reused from the day's cache. Default true. */
+  readonly cacheable?: boolean;
   search(query: SoldCompsQuery): Promise<ProviderResult>;
 }
 
 export const DAY_MS = 24 * 3600_000;
 
-/** A GTIN / UPC / EAN compared by its digits without leading zeros (a 12-digit UPC and the same code as a 13-digit EAN are one product). Empty string when there are no digits. */
-export const normGtin = (g: string | null | undefined): string => (g ?? "").replace(/\D/g, "").replace(/^0+/, "");
+/**
+ * A GTIN / UPC / EAN compared by its digits without leading zeros (a 12-digit UPC and the same code as a 13-digit EAN are one product). Empty string when the value is not a usable code:
+ * placeholders ("N/A", "Does not apply", "0"), all zeros, a length other than 8-14 digits, or a spreadsheet mangling ("889842640816.0", "8.89842640816E+11").
+ */
+export const normGtin = (g: string | null | undefined): string => {
+  const raw = (g ?? "").trim();
+  if (!raw || /[eE][+-]?\d/.test(raw) || /\.\d+$/.test(raw)) return "";
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length < 8 || digits.length > 14) return "";
+  const stripped = digits.replace(/^0+/, "");
+  return stripped;
+};
+
+/** An ePID compared without case or surrounding spaces; empty when there is none. */
+export const normEpid = (e: string | null | undefined): string => (e ?? "").trim().toUpperCase();

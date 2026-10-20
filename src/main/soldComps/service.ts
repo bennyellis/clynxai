@@ -34,7 +34,7 @@ export interface PriceSummary {
 }
 
 export interface ZeroReason {
-  kind: "none" | "blocked" | "all_rejected" | "no_provider" | "error";
+  kind: "none" | "blocked" | "unclear" | "all_rejected" | "currency" | "no_provider" | "error";
   text: string;
 }
 
@@ -103,6 +103,7 @@ export class SoldCompsService {
     const queryKey = queryKeyOf(title, gtin, epid);
     const day = dayOf(now);
     const enough = this.o.enoughUsable ?? 5;
+    this.o.store.purgeExpired(now); // retention: past-expiry rows (and their matches) go before anything is read
     const reports: ProviderReport[] = [];
     const seen = new Map<string, SoldComp>();
     const matchById = new Map<string, CompMatch>();
@@ -111,13 +112,20 @@ export class SoldCompsService {
       let comps: SoldComp[] = [];
       let outcome: ProviderOutcome;
       let cached = false;
-      const hit = this.o.store.cachedLookup(queryKey, day, provider.id);
-      if (hit) {
-        comps = this.o.store.getComps(hit.compIds);
+      const hit = provider.cacheable === false ? null : this.o.store.cachedLookup(queryKey, day, provider.id);
+      // A saved answer is only reused if every comp it listed is still there and not past its retention date (a licence limit): otherwise the source is asked again.
+      const hitComps = hit ? this.o.store.getComps(hit.compIds).filter((c) => c.expiresAt === null || c.expiresAt > now) : [];
+      if (hit && hitComps.length === hit.compIds.length) {
+        comps = hitComps;
         outcome = hit.outcomeKind === "ok" ? { kind: "ok", detail: "answered earlier today" } : { kind: "none", detail: hit.detail };
         cached = true;
       } else {
-        const res = await provider.search({ title, gtin, epid, categoryId: query?.categoryId ?? null, aspects: query?.aspects });
+        let res: { comps: SoldComp[]; outcome: ProviderOutcome };
+        try {
+          res = await provider.search({ title, gtin, epid, categoryId: query?.categoryId ?? null, aspects: query?.aspects });
+        } catch (e) {
+          res = { comps: [], outcome: { kind: "error", detail: `${provider.label} failed: ${(e as Error).message?.slice(0, 160) ?? "unknown error"}` } };
+        }
         comps = res.comps;
         outcome = res.outcome;
         if (comps.length > 0) this.o.store.upsertComps(comps);
@@ -139,7 +147,7 @@ export class SoldCompsService {
     const usable = matches.filter((m) => m.accepted).map((m) => seen.get(m.compId)!).filter(Boolean);
     const thirdParty = new Set(this.o.providers.filter((p) => p.thirdParty).map((p) => p.id));
     const summary = summarize(usable, thirdParty);
-    const result: ResearchResult = { queryKey, providers: reports, matches, usable, summary, zero: summary ? null : zeroReason(reports, matches) };
+    const result: ResearchResult = { queryKey, providers: reports, matches, usable, summary, zero: summary ? null : usable.length > 0 ? { kind: "currency", text: `${usable.length} usable sale${usable.length === 1 ? "" : "s"} found, but not in US dollars (${[...new Set(usable.map((c) => c.currency))].join(", ")}); Clynx prices in USD only.` } : zeroReason(reports, matches) };
     if (result.zero) log(`sold comps: NO usable sales for "${title}": ${result.zero.text}`);
     return result;
   }
@@ -148,21 +156,25 @@ export class SoldCompsService {
 /** Why nothing is usable, in one honest sentence: never a bare zero. */
 export function zeroReason(reports: ProviderReport[], matches: CompMatch[]): ZeroReason {
   if (reports.length === 0) return { kind: "no_provider", text: "No sold-price source is configured." };
+  const blocked = reports.filter((r) => r.outcome.kind === "blocked");
+  const unclear = reports.filter((r) => r.outcome.kind === "unclear");
+  const errored = reports.filter((r) => r.outcome.kind === "error");
+  const unavailable = reports.filter((r) => r.outcome.kind === "disabled" || r.outcome.kind === "not_configured");
+  const answeredNone = reports.filter((r) => r.outcome.kind === "none");
+  const d = (r: ProviderReport) => `${r.label}: ${"detail" in r.outcome && r.outcome.detail ? r.outcome.detail : r.outcome.kind}`;
   const retrieved = matches.length;
   if (retrieved > 0) {
     const counts: Record<string, number> = {};
     for (const m of matches) for (const r of m.reason.split("; ")) counts[r.split(":")[0]] = (counts[r.split(":")[0]] ?? 0) + 1;
     const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${k} (${n})`).join(", ");
     const uncertain = matches.filter((m) => m.verdict === "uncertain").length;
-    return { kind: "all_rejected", text: `${retrieved} sold listings came back but none could price this product (${uncertain} uncertain, ${retrieved - uncertain} rejected${top ? `; most common: ${top}` : ""}).` };
+    const caveat = blocked.length + unclear.length > 0 ? ` Also, ${[...blocked, ...unclear].map((r) => r.label).join(" and ")} could not be read properly, so sales may be missing.` : "";
+    return { kind: "all_rejected", text: `${retrieved} sold listing${retrieved === 1 ? "" : "s"} came back but none could price this product (${uncertain} uncertain, ${retrieved - uncertain} rejected${top ? `; most common: ${top}` : ""}).${caveat}` };
   }
-  const blocked = reports.filter((r) => r.outcome.kind === "blocked");
-  const errored = reports.filter((r) => r.outcome.kind === "error");
-  const unavailable = reports.filter((r) => r.outcome.kind === "disabled" || r.outcome.kind === "not_configured");
-  const answeredNone = reports.filter((r) => r.outcome.kind === "none");
-  const d = (r: ProviderReport) => `${r.label}: ${"detail" in r.outcome && r.outcome.detail ? r.outcome.detail : r.outcome.kind}`;
   if (blocked.length > 0) return { kind: "blocked", text: `No sales were read, and that says nothing about the market: ${blocked.map(d).join("; ")}.` };
+  if (unclear.length > 0) return { kind: "unclear", text: `Nothing came back, and it is not clear whether there are no sales or the source hid them: ${unclear.map(d).join("; ")}.` };
   if (answeredNone.length > 0 && errored.length === 0) return { kind: "none", text: `The sources answered and found no sold items: ${answeredNone.map(d).join("; ")}${unavailable.length ? `. Not available: ${unavailable.map(d).join("; ")}` : ""}.` };
   if (errored.length > 0) return { kind: "error", text: `A source failed: ${errored.map(d).join("; ")}.` };
+  if (unavailable.length === 0) return { kind: "none", text: "The sources returned no sold sales (any earlier ones have passed their retention date)." };
   return { kind: "no_provider", text: `No source could be asked: ${unavailable.map(d).join("; ")}.` };
 }

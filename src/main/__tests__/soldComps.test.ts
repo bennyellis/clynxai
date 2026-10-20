@@ -53,7 +53,7 @@ run(async () => {
   check("a limit page is 'blocked'", (await wc({ comps: [], pageState: "limit" }).search({ title: "x" })).outcome.kind === "blocked");
   const emptyKnown = await wc({ comps: [], pageState: "empty" }).search({ title: "x" });
   const emptyUnknown = await wc({ comps: [] }).search({ title: "x" });
-  check("a loaded page with no cards is 'none'; an unknown empty page says it could be hidden", emptyKnown.outcome.kind === "none" && /listed no sold items/.test(emptyKnown.outcome.detail) && emptyUnknown.outcome.kind === "none" && /could be a hidden block/.test(emptyUnknown.outcome.detail));
+  check("a loaded page with no cards is 'none'; an unknown empty page is 'unclear' (not an answer, never cached)", emptyKnown.outcome.kind === "none" && /listed no sold items/.test(emptyKnown.outcome.detail) && emptyUnknown.outcome.kind === "unclear" && /hidden block/.test(emptyUnknown.outcome.detail));
   check("a fetch that throws is an 'error' with the reason", (await wc(new Error("net down")).search({ title: "x" })).outcome.kind === "error");
   check("mapWatchCountComp keeps the original card for audit", (mapWatchCountComp(wcComp, NOW, null).raw as typeof wcComp).itemUrl === wcComp.itemUrl);
 
@@ -162,14 +162,14 @@ run(async () => {
 
   section("accuracy against a hand-labelled set (synthetic Galaxy Black titles with the known traps)");
   const fixture = parseSoldImport(fs.readFileSync(path.join(process.cwd(), "src", "main", "__tests__", "fixtures", "soldComps", "galaxy-black-synthetic.csv"), "utf8"), NOW);
-  check("the fixture has 20 sales, 10 labelled accept", fixture.comps.length === 20 && fixture.comps.filter((c) => (c.raw as { label?: string }).label === "accept").length === 10);
+  check("the fixture has 24 sales (20 Galaxy Black traps plus 4 cross-brand / untested), 10 labelled accept", fixture.comps.length === 24 && fixture.comps.filter((c) => (c.raw as { label?: string }).label === "accept").length === 10);
   const labelled = fixture.comps.map((c) => ({ comp: c, label: (c.raw as { label: Label }).label }));
   const fm = await matchAll(GALAXY, labelled.map((l) => l.comp));
   const acc = accuracyReport(labelled.map((l, i) => ({ title: l.comp.title, label: l.label, match: fm[i] })));
   check("precision is perfect: nothing wrong prices the product (no game, accessory, box, lot, skin, for-parts or other console is accepted)", acc.precision === 1 && acc.falsePositives.length === 0, acc.falsePositives);
   check("recall is 70%: exactly the three 'controller' titles are lost (backlog B2: an included or excluded controller is not an accessory listing)", Math.abs(acc.recall - 0.7) < 1e-9 && acc.missed.length === 3 && acc.missed.every((m) => /controller/i.test(m.title) && /ACCESSORY/.test(m.reason)), acc.missed);
   check("'Limited Edition' and 'Collector's Edition' titles are kept for a 'Special Edition' product, and a title with no edition word is kept", ["Limited Edition 2TB Console Brand New", "Collector's Edition 2TB", "Galaxy Black 2TB"].every((frag) => fm.some((m, i) => fixture.comps[i].title.includes(frag) && m.accepted)));
-  const traps = ["Guardians of the Galaxy", "Halo Infinite", "Wireless Controller", "Box Only", "Skin Decal", "Lot of 2", "For Parts", "Series S", "One X", "1TB Black"];
+  const traps = ["Guardians of the Galaxy", "Halo Infinite", "Wireless Controller", "Box Only", "Skin Decal", "Lot of 2", "For Parts", "Series S", "One X", "1TB Black", "PlayStation 5", "Nintendo Switch", "Samsung Galaxy Black", "Untested"];
   check("every labelled trap title is refused", traps.every((frag) => fm.some((m, i) => fixture.comps[i].title.includes(frag) && !m.accepted)));
   const viaWatchCount = await new SoldCompsService({ store: new SoldCompsStore(new DatabaseSync(":memory:")), providers: [new WatchCountProvider(async () => ({ pageState: "results", comps: fixture.comps.map((c) => ({ title: c.title, priceUsd: c.soldPrice, shippingUsd: c.shippingCost, condition: c.condition, listingType: null, runTimeDays: null, itemUrl: `https://www.ebay.com/itm/${c.sourceListingId}` })) }), { now: () => NOW })], now: () => NOW, enoughUsable: 1000 }).research(GALAXY);
   check("the same sales through the WatchCount wrapper give the same accepted count and median, labelled third-party", viaWatchCount.summary?.count === 7 && viaWatchCount.summary.thirdPartyShare === 1 && viaWatchCount.summary.medianUsd === 1099, viaWatchCount.summary);
