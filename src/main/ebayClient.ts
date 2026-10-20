@@ -307,3 +307,24 @@ export async function getEbayCategorySuggestions(query: string): Promise<EbayCat
     return [];
   }
 }
+
+// The item specifics real eBay listings use for a product (storage capacity, colour, edition / model, bundle), with how many listings use each value: the FIRST source of a product's
+// versions (variantDiscovery.ts). One search with fieldgroups=ASPECT_REFINEMENTS inside the product's own eBay category (a refinement needs a category). Returns null on any failure
+// (no category, eBay refused, the response had no refinements): the caller treats that as "this source said nothing", never as "the product has no versions".
+export async function searchEbayAspects(query: string): Promise<{ aspects: import("./variantDiscovery.js").AspectDistribution[]; total: number } | null> {
+  try {
+    const categories = await getEbayCategorySuggestions(query);
+    const category = categories[0];
+    if (!category) return null;
+    const data = await ebayGet<{ total?: number; refinement?: unknown }>(
+      "/item_summary/search",
+      { q: query, category_ids: category.id, filter: "buyingOptions:{FIXED_PRICE}", limit: "1", fieldgroups: "ASPECT_REFINEMENTS" },
+      EBAY_BROWSE_URL
+    );
+    const { parseAspectRefinements } = await import("./variantDiscovery.js");
+    const aspects = parseAspectRefinements(data);
+    return aspects.length > 0 ? { aspects, total: typeof data.total === "number" ? data.total : 0 } : null;
+  } catch {
+    return null;
+  }
+}

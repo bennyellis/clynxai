@@ -11,6 +11,23 @@ import path from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { addonKey, type Addon, type AddonRole, type AddonStatus } from "./addons.js";
+import { candidateKey, type Candidate, type CandidateStatus } from "./variantDiscovery.js";
+
+export interface StoredCandidate {
+  parentId: string;
+  kind: "variant" | "addon";
+  key: string;
+  name: string;
+  sources: Candidate["sources"];
+  evidence: string[];
+  support: "confirmed" | "reported" | null;
+  status: CandidateStatus;
+  note: string | null;
+  entryId: string | null;
+  attempts: number;
+  firstSeenAt: number;
+  lastCheckedAt: number | null;
+}
 import { timedSync, recordEvent } from "./metrics.js";
 import type { BlacklistedImage, BlacklistTerm, FeedbackExample, FeedbackVerdict, FlawFeedbackExample, GateFactsSnapshot, GateReasonRecord, ListingRecord, MyStoreReference, PhotoFlaw, ProductImage, ProductProfile, ScoredListing, SellerRiskResult, Watch, WatchMatch, WatchPlatform, WatchSearchLink, WatchTerm } from "./types.js";
 import { REFERENCE_STATUSES } from "./types.js";
@@ -152,6 +169,24 @@ export class Store {
         created_at INTEGER NOT NULL,
         PRIMARY KEY (listing_id, addon_id)
       );
+      -- Versions and add-ons found while researching a product, with their status: queued ("found, not yet checked"), added (a Database entry), suggestion (one source only), rejected, skipped.
+      CREATE TABLE IF NOT EXISTS variant_candidates (
+        parent_id TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'variant',
+        cand_key TEXT NOT NULL,
+        name TEXT NOT NULL,
+        sources TEXT NOT NULL DEFAULT '[]',
+        evidence TEXT NOT NULL DEFAULT '[]',
+        support TEXT,
+        status TEXT NOT NULL DEFAULT 'queued',
+        note TEXT,
+        entry_id TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        first_seen_at INTEGER NOT NULL,
+        last_checked_at INTEGER,
+        PRIMARY KEY (parent_id, kind, cand_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_variant_candidates_status ON variant_candidates (status, kind);
     `);
   }
 
@@ -2175,6 +2210,7 @@ export class Store {
       this.db.prepare("DELETE FROM product_images WHERE product_id = ?").run(id);
       this.db.prepare("DELETE FROM listing_addons WHERE base_product_id = ?").run(id);
       this.db.prepare("DELETE FROM product_addons WHERE base_product_id = ?").run(id);
+      this.db.prepare("DELETE FROM variant_candidates WHERE parent_id = ?").run(id);
       this.db.prepare("UPDATE products SET parent_product_id = NULL WHERE parent_product_id = ?").run(id);
       this.db.prepare("UPDATE listings SET product_id = NULL WHERE product_id = ?").run(id);
       this.db.prepare("UPDATE watches SET linked_product_id = NULL WHERE linked_product_id = ?").run(id);
@@ -2235,7 +2271,7 @@ export class Store {
   clearAllProducts(): void {
     // the server keeps a copy of every synced product: queue a cloud delete for each (productSync sends them), or the next pull brings every one of them back
     for (const r of this.db.prepare("SELECT id FROM products").all() as Array<{ id: string }>) this.addPendingCloudDelete("product", r.id);
-    this.db.exec("DELETE FROM product_images; DELETE FROM listing_addons; DELETE FROM product_addons; DELETE FROM products;");
+    this.db.exec("DELETE FROM product_images; DELETE FROM listing_addons; DELETE FROM product_addons; DELETE FROM variant_candidates; DELETE FROM products;");
     this.safeguard.invalidate();
     this.identity?.forgetAllProducts();
   }
@@ -2487,6 +2523,27 @@ export class Store {
     return this.getAddon(id);
   }
 
+  /**
+   * An add-on found by research (or seen in a listing) that now has its OWN Database entry: the row on the base product's page is created if missing (suggested, switched OFF, no price) and
+   * linked to the entry. An add-on the person dismissed is left alone and null is returned (the caller must not create an entry for it). The base product's value is never touched.
+   */
+  linkResearchedAddon(baseProductId: string, name: string, entryId: string | null, now: number = Date.now()): Addon | null {
+    const clean = name.replace(/\s+/g, " ").trim().slice(0, 120);
+    const key = addonKey(clean);
+    if (!clean || !key || !this.db.prepare("SELECT 1 FROM products WHERE id = ?").get(baseProductId)) return null;
+    const existing = this.db.prepare("SELECT * FROM product_addons WHERE base_product_id = ? AND name_key = ?").get(baseProductId, key) as any | undefined;
+    if (existing) {
+      if (existing.status === "dismissed") return null;
+      if (entryId) this.db.prepare("UPDATE product_addons SET addon_product_id = ?, last_seen_at = ? WHERE id = ?").run(entryId, now, existing.id);
+      return this.getAddon(existing.id);
+    }
+    const id = randomUUID();
+    this.db
+      .prepare("INSERT INTO product_addons (id, base_product_id, name, name_key, addon_product_id, role, status, source, enabled, times_seen, example_listing_ids, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, 'bonus', 'suggested', 'researched_related', 0, 0, '[]', ?, ?)")
+      .run(id, baseProductId, clean, key, entryId, now, now);
+    return this.getAddon(id);
+  }
+
   /** The toggle. Only changes whether the add-on counts on the page: the base product's stored value is never touched. */
   setAddonEnabled(id: string, enabled: boolean): boolean {
     const row = this.getAddon(id);
@@ -2511,6 +2568,76 @@ export class Store {
     const value = patch.standaloneValueUsd === undefined ? row.standaloneValueUsd : patch.standaloneValueUsd === null ? null : Number.isFinite(patch.standaloneValueUsd) && patch.standaloneValueUsd >= 0 ? patch.standaloneValueUsd : row.standaloneValueUsd;
     this.db.prepare("UPDATE product_addons SET name = ?, name_key = ?, role = ?, standalone_value_usd = ? WHERE id = ?").run(name, addonKey(name), patch.role ?? row.role, value, id);
     return true;
+  }
+
+  // ---- versions and add-ons found by research (variantDiscovery.ts): a persistent queue with a status per name, so nothing is silently dropped.
+
+  /** Adds newly found names as "queued"; a name already known keeps its status and gains any new sources / evidence. A name the person dismissed or that was rejected is not re-queued. */
+  upsertCandidates(parentId: string, candidates: Candidate[], now: number = Date.now()): number {
+    let added = 0;
+    for (const c of candidates) {
+      const key = candidateKey(c.name);
+      if (!key) continue;
+      const row = this.db.prepare("SELECT sources, evidence, support, status FROM variant_candidates WHERE parent_id = ? AND kind = ? AND cand_key = ?").get(parentId, c.kind, key) as { sources: string; evidence: string; support: string | null; status: string } | undefined;
+      if (!row) {
+        this.db
+          .prepare("INSERT INTO variant_candidates (parent_id, kind, cand_key, name, sources, evidence, support, status, first_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)")
+          .run(parentId, c.kind, key, c.name, JSON.stringify(c.sources), JSON.stringify(c.evidence), c.support ?? null, now);
+        added++;
+        continue;
+      }
+      const sources = [...new Set([...(JSON.parse(row.sources) as string[]), ...c.sources])];
+      const evidence = [...new Set([...(JSON.parse(row.evidence) as string[]), ...c.evidence])];
+      const support = c.support === "confirmed" || row.support === "confirmed" ? "confirmed" : (row.support ?? c.support ?? null);
+      // a suggestion that just gained a SECOND kind of source is worth checking again
+      const regained = row.status === "suggestion" && sources.filter((s) => s !== "memory").length > (JSON.parse(row.sources) as string[]).filter((s) => s !== "memory").length;
+      this.db
+        .prepare("UPDATE variant_candidates SET sources = ?, evidence = ?, support = ?, status = ? WHERE parent_id = ? AND kind = ? AND cand_key = ?")
+        .run(JSON.stringify(sources), JSON.stringify(evidence), support, regained ? "queued" : row.status, parentId, c.kind, key);
+    }
+    return added;
+  }
+
+  listCandidates(parentId: string, kind?: "variant" | "addon"): StoredCandidate[] {
+    const rows = (kind
+      ? this.db.prepare("SELECT * FROM variant_candidates WHERE parent_id = ? AND kind = ? ORDER BY first_seen_at, name").all(parentId, kind)
+      : this.db.prepare("SELECT * FROM variant_candidates WHERE parent_id = ? ORDER BY kind, first_seen_at, name").all(parentId)) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.rowToCandidate(r));
+  }
+
+  /** The next queued names (oldest first) across every product, for the background worker. */
+  nextQueuedCandidates(kind: "variant" | "addon", limit: number): StoredCandidate[] {
+    const rows = this.db.prepare("SELECT * FROM variant_candidates WHERE status = 'queued' AND kind = ? ORDER BY first_seen_at, name LIMIT ?").all(kind, limit) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.rowToCandidate(r));
+  }
+
+  setCandidateStatus(parentId: string, kind: "variant" | "addon", key: string, status: CandidateStatus, note: string | null, entryId: string | null = null, now: number = Date.now()): void {
+    this.db
+      .prepare("UPDATE variant_candidates SET status = ?, note = ?, entry_id = COALESCE(?, entry_id), attempts = attempts + 1, last_checked_at = ? WHERE parent_id = ? AND kind = ? AND cand_key = ?")
+      .run(status, note, entryId, now, parentId, kind, key);
+  }
+
+  private rowToCandidate(r: Record<string, unknown>): StoredCandidate {
+    return {
+      parentId: String(r.parent_id),
+      kind: r.kind as "variant" | "addon",
+      key: String(r.cand_key),
+      name: String(r.name),
+      sources: JSON.parse(String(r.sources)) as Candidate["sources"],
+      evidence: JSON.parse(String(r.evidence)) as string[],
+      support: (r.support as "confirmed" | "reported" | null) ?? null,
+      status: r.status as CandidateStatus,
+      note: (r.note as string | null) ?? null,
+      entryId: (r.entry_id as string | null) ?? null,
+      attempts: Number(r.attempts),
+      firstSeenAt: Number(r.first_seen_at),
+      lastCheckedAt: r.last_checked_at == null ? null : Number(r.last_checked_at),
+    };
+  }
+
+  /** Links an add-on (a row of product_addons) to its own Database entry. */
+  setAddonProductId(addonId: string, productId: string | null): boolean {
+    return Number(this.db.prepare("UPDATE product_addons SET addon_product_id = ? WHERE id = ?").run(productId, addonId).changes) > 0;
   }
 
   removeAddon(id: string): boolean {

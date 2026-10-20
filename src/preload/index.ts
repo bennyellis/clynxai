@@ -1,5 +1,6 @@
 import type { ApiSnapshot } from "../main/apiActivity.js";
 import type { Addon, AddonRole, AddonStatus } from "../main/addons.js";
+import type { StoredCandidate } from "../main/store.js";
 import type { SelfTestResult } from "../main/apiSelfTest.js";
 import { contextBridge, ipcRenderer } from "electron";
 import type { DiscoveryEntry } from "../main/discovery.js";
@@ -248,6 +249,7 @@ const api = {
   clearAllProducts: (): Promise<void> => ipcRenderer.invoke("products:clearAll"),
   // Add-ons on a product's Library page (addons.ts). Every call answers with that product's add-ons as they are now.
   listAddons: (productId: string): Promise<Addon[]> => ipcRenderer.invoke("addons:list", productId),
+  listFoundCandidates: (productId: string): Promise<StoredCandidate[]> => ipcRenderer.invoke("variants:found", productId),
   addAddon: (productId: string, input: { name: string; role?: AddonRole; standaloneValueUsd?: number | null; enabled?: boolean }): Promise<Addon[]> => ipcRenderer.invoke("addons:add", productId, input),
   setAddonEnabled: (id: string, enabled: boolean): Promise<Addon[]> => ipcRenderer.invoke("addons:setEnabled", id, enabled),
   setAddonStatus: (id: string, status: AddonStatus): Promise<Addon[]> => ipcRenderer.invoke("addons:setStatus", id, status),

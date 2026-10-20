@@ -10,7 +10,10 @@ import { colorsConflict, colorsIn } from "./colors.js";
 import { ScrapeEngine } from "./scrapeEngine.js";
 import { WatchScheduler } from "./watchScheduler.js";
 import { EbayEngine } from "./ebayEngine.js";
-import { hasEbayCredentials, searchEbayItems, setEbayTransport } from "./ebayClient.js";
+import { hasEbayCredentials, searchEbayAspects, searchEbayItems, setEbayTransport } from "./ebayClient.js";
+import { gatherCandidates, runQueueTick } from "./variantQueue.js";
+import { fetchAddonPages } from "./addonPages.js";
+import { addonFromListing } from "./variantDiscovery.js";
 import { OPENAI_MODEL, callOpenAI, hasOpenAIAccess, initOpenAIProxy, setApiSource } from "./openai.js";
 import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
 import { writeFileAtomic, writeFileAtomicWithBackup } from "./safeFs.js";
@@ -70,7 +73,7 @@ import { runVariantFanout } from "./variantFanout.js";
 import { friendlyPriceCheckFailure, friendlyResearchFailure } from "./researchFailure.js";
 import { adoptOfficialName, planParentLinks } from "./variantLinking.js";
 import { idsToQueueOnReset } from "./cloudDeletes.js";
-import { estimateAddonUplift, isNoiseAddon, type AddonRole, type AddonStatus } from "./addons.js";
+import { addonKey, estimateAddonUplift, isNoiseAddon, type AddonRole, type AddonStatus } from "./addons.js";
 import { makeThumb, noteDecision } from "./aiDecisionLog.js";
 import { fileImage, setFilingRecorder, type FileImageEvidence } from "./fileImage.js";
 import { createKnowledgeService, type KnowledgeService } from "./knowledgeService.js";
@@ -2783,48 +2786,108 @@ async function discoverAndCreateSiblingProducts(brand: string, generation: strin
 // same-base-name products regardless of family.
 const VARIANT_DISCOVERY_COUNT = 5;
 
-// What the model suggests from memory is only a CANDIDATE (see variantFanout.ts): it becomes a product after the evidence check confirms it from sources, a few per typed phrase,
-// started a moment apart and two at a time, and the run stops when the AI is paused. Nothing is created from the model's memory alone, and a failed research is never saved as text.
+// Versions and add-ons of a product (owner decisions 2026-10-20), source-based and repeatable: eBay's item specifics first, then the web catalogues, with the model's memory only as an extra
+// hint (variantDiscovery.ts / variantQueue.ts). Everything found goes into a persistent queue with a status per name, so nothing is silently dropped by a cap; a background worker checks a
+// few at a time until the queue is empty. A version needs more than one voice to become a Database entry (otherwise it stays a suggestion on the product); an add-on found in a source is
+// ALWAYS added as its own accessory entry, filed by the same categorizer the Library uses. A failed research is never saved as text.
 async function discoverAndCreateProductVariants(productName: string, category: string, familyPath: string | null, parentId?: string, sourced = true): Promise<void> {
-  if (!parentId) return; // the confirmed variants are filed under this product
-  if (!sourced) {
-    discovery.note(parentId, "finding", "I could not read real sources for this one yet, so I am not guessing at other versions from memory.");
-    return;
-  }
-  const alreadyTracked = store.listProductIndex().map((p) => p.name);
-  const suggested = await discoverProductVariants({ productName, category, alreadyTracked, count: VARIANT_DISCOVERY_COUNT });
-  // A version of THIS product says more than the product does ("iPhone 13" -> "iPhone 13 Pro"); a different model of the same maker is not a version of it (a "Canon EOS R6 Mark II" has no
-  // "Canon EOS R5" or "R3" as versions: live test, six products from one phrase).
-  const variantNames = suggested.filter((n) => isMoreSpecific(n, productName));
-  if (!variantNames.length) return;
-  const parent = { id: parentId, name: productName };
-  const outcome = await runVariantFanout(
-    variantNames,
+  if (!parentId) return; // the confirmed versions are filed under this product
+  if (!sourced) discovery.note(parentId, "finding", "I could not read real web pages for this one yet; I will still check eBay's listings and the catalogues for its versions.");
+  const aiOk = hasOpenAIAccess() && !isLowAiMode();
+  const result = await gatherCandidates(
+    { id: parentId, name: productName },
     {
-      alreadyTracked: (name) => !!store.findMatchingProduct(name),
-      verify: (name) => verifyClaim(name, parent, []),
-      create: async (name, verdict) => {
+      store,
+      ebaySpecifics: async (name) => (hasEbayCredentials() ? await searchEbayAspects(name) : null),
+      editions: async (name) => {
+        if (beta13Flags(config).webKnowledge === "off") return null;
+        const r = await getKnowledgeService().researchEditions(name, null);
+        return r.blocked ? null : r.findings;
+      },
+      memory: async (name) => (aiOk ? await discoverProductVariants({ productName: name, category, alreadyTracked: [], count: VARIANT_DISCOVERY_COUNT }) : null),
+      addonPages: async (name) => (beta13Flags(config).webKnowledge === "off" ? null : await fetchAddonPages(name, webVerifyDeps())),
+      note: (m) => discovery.note(parentId, "finding", m),
+    }
+  );
+  const queued = result.queued.variants + result.queued.addons;
+  if (queued > 0) discovery.note(parentId, "finding", `Found ${result.queued.variants} version${result.queued.variants === 1 ? "" : "s"} and ${result.queued.addons} add-on${result.queued.addons === 1 ? "" : "s"} to check; I will work through them in the background.`);
+  void runVariantQueueTick(familyPath);
+  scheduleVariantQueue();
+}
+
+let variantQueueTimer: ReturnType<typeof setInterval> | null = null;
+let variantTickRunning = false;
+
+/** One pass of the version / add-on worker (throttled: a few names, then wait). Never overlaps itself. */
+async function runVariantQueueTick(familyHint: string | null = null): Promise<void> {
+  if (variantTickRunning) return;
+  variantTickRunning = true;
+  try {
+    const result = await runQueueTick({
+      store,
+      parentOf: (id) => {
+        const p = store.getProductById(id);
+        return p ? { id: p.id, name: p.name } : null;
+      },
+      verify: (name, parent) => verifyClaim(name, parent, []),
+      createVariant: async (name, parent, verdict) => {
         const candidateId = randomUUID();
         const id = store.addProductStub(candidateId, name);
-        if (id !== candidateId) return; // already in the Database under this name
-        store.setProductParent(id, parentId);
+        if (id !== candidateId) return null; // already in the Database under this name
+        store.setProductParent(id, parent.id);
         store.setProductVariantEvidence(id, verdict);
         sendToRenderer("products:updated", store.getProductById(id));
-        await runProductLookup(id, name, { skipSiblingDiscovery: true, forcedFamily: familyPath ?? undefined, source: "related", verdict });
+        discovery.note(parent.id, "finding", `Confirmed from sources and added: ${name}.`);
+        await runProductLookup(id, name, { skipSiblingDiscovery: true, forcedFamily: familyHint ?? store.getProductById(parent.id)?.family ?? undefined, source: "related", verdict });
+        return id;
       },
-      rememberClaim: (verdict) => {
-        store.recordVariantClaim(parentId, verdict);
+      rememberSuggestion: (parent, verdict) => {
+        store.recordVariantClaim(parent.id, verdict);
+        sendToRenderer("products:updated", store.getProductById(parent.id));
+      },
+      createAddonEntry: async (name, parent, evidence, sources) => {
+        // an add-on the person dismissed on this product never comes back, and gets no entry
+        const dismissed = store.listAddons(parent.id).some((x) => x.status === "dismissed" && addonKey(x.name) === addonKey(name));
+        if (dismissed) return null;
+        const existing = store.findMatchingProduct(name);
+        let entryId: string | null = existing?.id ?? null;
+        let created = false;
+        if (!entryId) {
+          const candidateId = randomUUID();
+          entryId = store.addProductStub(candidateId, name);
+          created = entryId === candidateId;
+          if (created) sendToRenderer("products:updated", store.getProductById(entryId));
+        }
+        // the row on the BASE product's page (switched off, no price) linked to its own entry; the toggle and the rough estimate stay on the base product
+        store.linkResearchedAddon(parent.id, name, entryId);
+        if (created && entryId) {
+          // researched like any product: the categorizer files it (Xbox > Accessories, Xbox > Controllers); its name makes it kind "accessory", so it never prices the console
+          void runProductLookup(entryId, name, { skipSiblingDiscovery: true, source: "related" });
+        }
+        discovery.note(parent.id, "finding", `Add-on "${name}" (${sources.join(" + ")}: ${evidence.slice(0, 2).join(", ") || "a source"}) has its own entry.`);
+        return entryId;
       },
       paused: () => !hasOpenAIAccess() || isLowAiMode(),
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-      note: (message) => discovery.note(parentId, "warn", message),
-    }
-  );
-  const parts: string[] = [];
-  if (outcome.created.length) parts.push(`confirmed from sources and added: ${outcome.created.join(", ")}`);
-  if (outcome.unverified.length) parts.push(`could not confirm yet, so not added: ${outcome.unverified.join(", ")}`);
-  if (outcome.stopped) parts.push(`stopped early because ${outcome.stopped}`);
-  if (parts.length) discovery.note(parentId, "finding", `Other versions I looked into: ${parts.join("; ")}.`);
+      note: (parentId, message) => discovery.note(parentId, "finding", message),
+    });
+    if (result.stopped) console.log(`[variants] worker paused: ${result.stopped}; ${result.deferred} left in the queue`);
+  } catch (err) {
+    console.error(`[variants] worker pass failed: ${(err as Error).message}`);
+  } finally {
+    variantTickRunning = false;
+  }
+}
+
+/** Keeps checking the queue every few minutes until it is empty (restarts on launch, since the queue lives in the Database). */
+function scheduleVariantQueue(): void {
+  if (variantQueueTimer) clearInterval(variantQueueTimer);
+  const startStore = store;
+  variantQueueTimer = setInterval(() => {
+    if (store !== startStore || !hasOpenAIAccess() || researchActive > 1) return;
+    if (startStore.nextQueuedCandidates("variant", 1).length + startStore.nextQueuedCandidates("addon", 1).length === 0) return;
+    void runVariantQueueTick();
+  }, 3 * 60_000);
 }
 
 // Per explicit instruction — multiple Facebook accounts: the live status
@@ -3539,6 +3602,7 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   // A little after startup, so the app is up and the first scan isn't competing with it.
   setTimeout(() => void sweepBlankProducts(), 8000);
   scheduleResearchRetries();
+  scheduleVariantQueue(); // the version / add-on queue lives in the Database: a restart picks up where it stopped
   watchSyncService = new WatchSyncService(store, cloudClient, () => config);
   scheduleListingPhotoShrink(store);
   listingIngestSyncService = new ListingIngestSyncService(store, cloudClient, () => config);
@@ -5001,6 +5065,8 @@ app.whenReady().then(() => {
   // Add-ons (addons.ts): the toggles and the list on a product's Library page. Nothing here changes the base product's value, an alert or a scan.
   const addonsAnswer = (baseId: string | undefined) => (baseId ? store.listAddons(baseId) : []);
   ipcMain.handle("addons:list", (_e, productId: string) => addonsAnswer(String(productId ?? "")));
+  // every version / add-on research found for a product, with its status (variantDiscovery.ts)
+  ipcMain.handle("variants:found", (_e, productId: string) => store.listCandidates(String(productId ?? "")));
   ipcMain.handle("addons:add", (_e, productId: string, input: { name?: string; role?: AddonRole; standaloneValueUsd?: number | null; enabled?: boolean }) => {
     store.addAddon(String(productId ?? ""), { name: String(input?.name ?? ""), role: input?.role === "expected" ? "expected" : "bonus", standaloneValueUsd: typeof input?.standaloneValueUsd === "number" ? input.standaloneValueUsd : null, enabled: input?.enabled === true });
     return addonsAnswer(String(productId ?? ""));

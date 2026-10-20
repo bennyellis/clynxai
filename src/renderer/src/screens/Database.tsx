@@ -10,6 +10,7 @@ import { useLightbox } from "../components/ImageLightbox.js";
 import { ThumbnailSizeSlider, useThumbnailSize } from "../components/ThumbnailSize.js";
 import { WatchFormFlow } from "../components/WatchFormFlow.js";
 import { AddonsSection } from "../components/AddonsSection.js";
+import { VariantsFoundSection } from "../components/VariantsFoundSection.js";
 import { DiscoveryTab, resetDiscoveryUi } from "./DiscoveryTab.js";
 import { ReviewTab } from "./ReviewTab.js";
 import { keepRangeUsd } from "../../../main/resaleMath.js";
@@ -3175,6 +3176,7 @@ function ProductDetailPage({
           )}
 
           <AddonsSection product={product} />
+          <VariantsFoundSection product={product} />
 
           {fbPriceStats && (
             <div style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)" }}>

@@ -77,7 +77,7 @@ export async function runResearchProductTool(args: Record<string, unknown>, user
   }
   const split = splitProductRequest(product);
   product = split.product;
-  const requestNote = split.request ? ` Their message also asked: "${split.request}". Only "${product}" was researched; do that part yourself now (for editions and versions call research_variants; add-ons are not built yet, say so plainly).` : "";
+  const requestNote = split.request ? ` Their message also asked: "${split.request}". Only "${product}" was researched; do that part yourself now (for editions and versions call research_variants; Clynx also looks for the product's versions and add-ons by itself in the background after a first research and lists them, with their status, on the product's page: say that rather than promising a result).` : "";
 
   // The user's own words are the query of record. Only a spelling slip or the word order of a real product title is repaired (typedInput.ts), and the repair is reported.
   const { store } = deps;
