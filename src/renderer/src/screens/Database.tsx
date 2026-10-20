@@ -554,6 +554,23 @@ export function Database({
   const [selectedProductId, setSelectedProductId] = useState<string | null>(savedNav.selectedProductId);
   const [clearing, setClearing] = useState(false);
   const [showClearAllDialog, setShowClearAllDialog] = useState(false);
+  // Clear all now queues the matching deletes for the Clynx server, so the dialog has to say so when cloud sync is on.
+  const [clearAllReachesServer, setClearAllReachesServer] = useState(false);
+  useEffect(() => {
+    if (!showClearAllDialog) return;
+    let cancelled = false;
+    void api.cloud
+      .getStatus()
+      .then((c) => {
+        if (!cancelled) setClearAllReachesServer(Boolean(c.enabled && c.authenticated));
+      })
+      .catch(() => {
+        if (!cancelled) setClearAllReachesServer(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showClearAllDialog]);
   // Library's "Find photos" catch-up button — how many products still have
   // fewer than 5 reference photos, plus live progress while it runs (see
   // index.ts's runPhotoBackfill).
@@ -1241,6 +1258,7 @@ export function Database({
                 Delete all {products.length} researched product{products.length === 1 ? "" : "s"} and their photo
                 galleries? This can't be undone. Your Blacklist and Blacklisted Images are separate and won't be
                 touched.
+                {clearAllReachesServer && " This also deletes them from your Clynx server and from any other computer signed in to it."}
               </p>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="icon" style={{ flex: 1 }} onClick={() => setShowClearAllDialog(false)}>
