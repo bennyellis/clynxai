@@ -47,7 +47,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { lookupProduct, expandSearchKeywords } from "./products.js";
 import { OPENAI_SEARCH_UNLIMITED } from "./openaiSearch.js";
-import { downloadImageAsDataUri, shrinkImageDataUri, findBrandLogoImage, findGroupImage, findPoorConditionProductImage, findReferencePhotos, findFreeReferencePhotos, buildImageCollage, generateCategoryImage, lookUpOnWeb, webVerifyDeps, webHardDeps, configureOpenAiSearch, configureFreeEngines } from "./webResearch.js";
+import { downloadImageAsDataUri, makeThumbnail, shrinkImageDataUri, findBrandLogoImage, findGroupImage, findPoorConditionProductImage, findReferencePhotos, findFreeReferencePhotos, buildImageCollage, generateCategoryImage, lookUpOnWeb, webVerifyDeps, webHardDeps, configureOpenAiSearch, configureFreeEngines } from "./webResearch.js";
 import { verifyVariant, reconcileVerdict, type VariantVerdict } from "./variantEvidence.js";
 import { createVerdictMemory, makeClaimVerifier, publicHttpUrls } from "./variantResearch.js";
 import { runResearchProductTool } from "./researchTool.js";
@@ -5854,8 +5854,8 @@ app.whenReady().then(() => {
             replyStyle: flags.replyStyle,
             notice: notice || undefined,
             thumbnail: async (dataUri) => {
-              const small = await shrinkImageDataUri(dataUri, THUMB_MAX_SIDE, 70);
-              return small.length <= THUMB_MAX_CHARS ? small : null;
+              const small = await makeThumbnail(dataUri, THUMB_MAX_SIDE, 70);
+              return small && small.length <= THUMB_MAX_CHARS ? small : null;
             },
           }
         );

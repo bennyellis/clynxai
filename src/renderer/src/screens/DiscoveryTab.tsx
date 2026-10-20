@@ -6,7 +6,7 @@ import { LiveFeedTile } from "../components/LiveFeedTile.js";
 import { ThinkingBlock } from "../components/ThinkingBlock.js";
 import { agoText, liveTileModel, orderTiles } from "../lib/liveFeed.js";
 import { attachmentHistoryNote, prepareImages } from "../lib/chatAttachments.js";
-import { dismissAllChoices, dismissChoice, forgetSteps } from "../lib/chatExtras.js";
+import { dismissAllChoices, dismissChoice } from "../lib/chatExtras.js";
 import { api } from "../lib/api.js";
 import { DEFAULT_RESALE_SETTINGS, resaleSettingsFrom, type ResaleSettings } from "../../../main/resaleMath.js";
 import { judgeProduct, type FlipLevel, type FlipVerdict } from "../../../main/productVerdict.js";
@@ -64,8 +64,8 @@ function wireChatListeners(): void {
   wired = true;
   api.onChatChunk((id, delta) => patchMessage(id, (m) => ({ ...m, content: m.content + delta })));
   api.onChatDone((id, full) => {
+    // The turn's steps are KEPT: the thinking block above the reply folds to "Thought for 4s · looked at 2 pages" and can be opened again (chatExtras drops old turns by itself).
     patchMessage(id, (m) => ({ ...m, content: full, streaming: false }));
-    forgetSteps(id);
   });
   api.onChatError((id, message) => patchMessage(id, (m) => ({ ...m, streaming: false, error: true, content: `Error: ${message}` })));
 }

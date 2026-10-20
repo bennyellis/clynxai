@@ -740,6 +740,21 @@ export async function shrinkImageDataUri(dataUri: string, maxSide = 640, quality
   }
 }
 
+/**
+ * A real thumbnail for the thinking block: ALWAYS re-encoded (rotated upright, longest side `maxSide`, metadata such as EXIF dropped), whatever the size of the original. null when the bytes
+ * are not an image or cannot be processed (so nothing broken is shown).
+ */
+export async function makeThumbnail(dataUri: string, maxSide = 160, quality = 70): Promise<string | null> {
+  const parsed = parseDataUri(dataUri);
+  if (!parsed) return null;
+  try {
+    const out = await sharp(parsed.buffer).rotate().resize({ width: maxSide, height: maxSide, fit: "inside", withoutEnlargement: true }).jpeg({ quality }).toBuffer();
+    return `data:image/jpeg;base64,${out.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
 function parseDataUri(dataUri: string): { buffer: Buffer } | null {
   const m = dataUri.match(/^data:[^;]+;base64,(.+)$/);
   return m ? { buffer: Buffer.from(m[1], "base64") } : null;

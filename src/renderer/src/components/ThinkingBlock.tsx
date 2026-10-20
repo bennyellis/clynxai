@@ -46,12 +46,11 @@ export function ThinkingBlock({ requestId, working }: { requestId: string; worki
                 </div>
               );
             }
-            if (item.type === "page" && item.url) {
+            if (item.type === "page" && item.url && /^https?:\/\//i.test(item.url)) {
               const host = hostOf(item.url);
               return (
+                <div role="listitem" key={i} style={{ minWidth: 0 }}>
                 <a
-                  role="listitem"
-                  key={i}
                   href={item.url}
                   target="_blank"
                   rel="noreferrer noopener"
@@ -66,13 +65,13 @@ export function ThinkingBlock({ requestId, working }: { requestId: string; worki
                     <span style={{ color: "var(--text-dim)" }}> · {host}</span>
                   </span>
                 </a>
+                </div>
               );
             }
             if (item.type === "image" && item.thumbnail) {
               return (
+                <div role="listitem" key={i}>
                 <button
-                  role="listitem"
-                  key={i}
                   type="button"
                   className="ghost"
                   onClick={() => lightbox.open(item.thumbnail as string)}
@@ -81,6 +80,7 @@ export function ThinkingBlock({ requestId, working }: { requestId: string; worki
                 >
                   <img src={item.thumbnail} alt={item.text ?? "A photo Clynx looked at"} loading="lazy" decoding="async" style={{ maxWidth: 160, maxHeight: 160, objectFit: "contain", display: "block" }} />
                 </button>
+                </div>
               );
             }
             return null;

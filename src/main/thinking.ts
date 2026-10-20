@@ -30,11 +30,24 @@ const MAX_URL = 300;
 const oneLine = (s: unknown, max: number): string => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 
 /** An address that is safe to show and open: http / https only, with credentials, query string and fragment removed. null when it is not one. */
+const PRIVATE_SUFFIX = /\.(?:local|lan|internal|intranet|home|corp|localdomain|localhost)$/i;
+
+/** True for a host that is not a public web address: no dot (a bare name), an internal suffix, an IPv6 literal, or an IPv4 address in a private / loopback / link-local / shared (CGNAT, Tailscale) range. */
+function isPrivateHost(host: string): boolean {
+  const h = host.toLowerCase();
+  if (!h || h.startsWith("[") || !h.includes(".") || PRIVATE_SUFFIX.test(h) || h === "localhost") return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (!m) return false; // a real name: 10.example.com and 127.example.com are fine
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 168 || (b === 0 && Number(m[3]) === 0))) || a >= 224;
+}
+
+/** An address that is safe to show and open: http / https only, a public host, with credentials, query string and fragment removed. null when it is not one. */
 export function publicPageUrl(raw: unknown): string | null {
   try {
     const u = new URL(String(raw ?? "").trim());
     if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-    if (!u.hostname || /^(?:localhost|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|\[?::1\]?$)/i.test(u.hostname) || /^172\.(?:1[6-9]|2\d|3[01])\./.test(u.hostname)) return null;
+    if (isPrivateHost(u.hostname)) return null;
     u.username = "";
     u.password = "";
     u.search = "";
@@ -45,6 +58,24 @@ export function publicPageUrl(raw: unknown): string | null {
     return null;
   }
 }
+
+/** Text that may mention an address: every address in it is cut down to its host (no credentials, path, query or token), and an address that is not public disappears. */
+export function scrubUrlsInText(text: string): string {
+  return text.replace(/\b(?:https?:\/\/)[^\s)"'<>]+/gi, (u) => {
+    const pub = publicPageUrl(u);
+    return pub ? hostOf(pub) : "a page";
+  });
+}
+
+/** The first bytes of the image say what it is: a JPEG, a PNG or a WebP. Anything else is not shown, however it is labelled. */
+function looksLikeImage(dataUri: string): boolean {
+  const b64 = dataUri.slice(dataUri.indexOf(",") + 1, dataUri.indexOf(",") + 1 + 24);
+  const bytes = Buffer.from(b64, "base64");
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true;
+  if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return true;
+  return bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP";
+}
+
 
 export const hostOf = (url: string): string => {
   try {
@@ -58,20 +89,20 @@ export const hostOf = (url: string): string => {
 export function sanitizeThinkingItem(item: ThinkingItem | null | undefined): ThinkingItem | null {
   if (!item) return null;
   if (item.type === "thought") {
-    const text = oneLine(item.text, MAX_TEXT);
+    const text = oneLine(scrubUrlsInText(String(item.text ?? "")), MAX_TEXT);
     return text ? { type: "thought", text } : null;
   }
   if (item.type === "page") {
     const url = publicPageUrl(item.url);
     if (!url) return null;
     const title = oneLine(item.title, MAX_TITLE) || hostOf(url);
-    const text = oneLine(item.text, MAX_TEXT);
-    return { type: "page", url, title, ...(text ? { text } : {}) };
+    const text = oneLine(scrubUrlsInText(String(item.text ?? "")), MAX_TEXT);
+    return { type: "page", url, title: oneLine(scrubUrlsInText(title), MAX_TITLE), ...(text ? { text } : {}) };
   }
   if (item.type === "image") {
     const thumb = String(item.thumbnail ?? "");
-    if (!/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(thumb) || thumb.length > THUMB_MAX_CHARS) return null;
-    const text = oneLine(item.text, MAX_TEXT);
+    if (!/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(thumb) || thumb.length > THUMB_MAX_CHARS || !looksLikeImage(thumb)) return null;
+    const text = oneLine(scrubUrlsInText(String(item.text ?? "")), MAX_TEXT);
     return { type: "image", thumbnail: thumb, ...(text ? { text } : {}) };
   }
   return null;
@@ -103,7 +134,8 @@ export class ThinkingBudget {
   }
 }
 
-const q = (v: unknown, max = 60) => oneLine(v, max);
+/** An argument as short text, only if it IS text or a number (an object would print as "[object Object]"); addresses in it are cut to their host. */
+const q = (v: unknown, max = 60) => (typeof v === "string" || typeof v === "number" ? oneLine(scrubUrlsInText(String(v)), max) : "");
 
 /** The first-person line for a tool starting, written from the tool and its arguments (never model text). null for a tool that needs no line. */
 export function thoughtForTool(name: string, args: Record<string, unknown>): string | null {
@@ -136,5 +168,15 @@ export function thoughtForFailure(name: string): string {
 export function thoughtFromWebLine(line: string, ok: boolean): ThinkingItem | null {
   const text = oneLine(line, MAX_TEXT);
   if (!text) return null;
-  return { type: "thought", text: ok ? text : `${text}` };
+  return { type: "thought", text };
+}
+
+/** One plain line for a tool that ANSWERED but did not do the job ("NOT PLACED", "NOT SAVED", "needs your choice", "Not run"), so the narration says what happened and not only what was tried. */
+export function thoughtForOutcome(result: string): string | null {
+  const r = String(result ?? "").trimStart();
+  if (/^NOT PLACED/i.test(r)) return "I could not tell what that was, so I did not file anything.";
+  if (/^NOT SAVED/i.test(r)) return "I looked, but could not confirm it from a source, so I saved nothing.";
+  if (/^NEEDS THE USER/i.test(r)) return "That could mean two different things, so I am asking you which.";
+  if (/^Not run:/i.test(r)) return "That was only a question, so I changed nothing.";
+  return null;
 }

@@ -6,7 +6,7 @@ import { CLYNX_VOICE } from "./voice.js";
 import { isLowAiMode } from "./aiMode.js";
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 import { describeVerdictForAi, type VariantVerdict } from "./variantEvidence.js";
-import { ThinkingBudget, thoughtForFailure, thoughtForTool, thoughtFromWebLine, type ThinkingItem } from "./thinking.js";
+import { ThinkingBudget, thoughtForFailure, thoughtForOutcome, thoughtForTool, thoughtFromWebLine, type ThinkingItem } from "./thinking.js";
 import { actionNotRunMessage, extractCorrectionSentence, markCorrectionShown, followUpHint, isInformationalOnly, plainToolNames, promisesAction, relevantProducts, SIDE_EFFECT_TOOLS, wantsProductPicture } from "./chatIntent.js";
 
 export interface ChatMessage {
@@ -1213,10 +1213,11 @@ export async function streamChat(
   const toolNamesRun = new Set<string>();
 
   // The photos the person attached are the first things Clynx looks at: a small thumbnail of each (never the full picture), so the thinking block shows what it is going on.
-  if (attachments.length > 0 && hooks.thumbnail) {
+  // Only when the screen is listening (the status feature is on), and never for long: a slow or stuck shrink must not hold up the reply.
+  if (attachments.length > 0 && hooks.thumbnail && hooks.onStatus) {
     emitThinking({ type: "thought", text: attachments.length === 1 ? "I'm looking at the photo you sent." : `I'm looking at the ${attachments.length} photos you sent.` });
     for (const a of attachments.slice(0, 6)) {
-      const thumbnail = await hooks.thumbnail(a.dataUri).catch(() => null);
+      const thumbnail = await Promise.race([hooks.thumbnail(a.dataUri).catch(() => null), new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000))]);
       if (thumbnail) emitThinking({ type: "image", thumbnail, text: String(a.name ?? "").slice(0, 60) });
     }
   }
@@ -1284,14 +1285,25 @@ export async function streamChat(
         let activityNo = 0;
         const startThought = thoughtForTool(tc.name, args);
         if (startThought) emitThinking({ type: "thought", text: startThought });
-        toolResult = await withWebActivity(
-          (line, ok, item) => {
-            hooks.onStatus?.({ stepId: `${stepBase}:a${++activityNo}`, kind: "notice", label: line, state: "end", startedAt: Date.now(), ok });
-            // a page that was really read becomes a page item; every other line (a search, a refusal) is a thought
-            emitThinking(item ?? thoughtFromWebLine(line, ok));
-          },
-          () => executeTool({ name: tc.name as ToolCall["name"], args, userMessage, images: attachments.map((a) => a.dataUri) })
-        );
+        // Work a tool starts and leaves running in the background (a product's research continues after the tool answers) inherits this listener; once the tool has returned its lines
+        // belong to nothing on screen, so they are ignored (they would otherwise fill the cap and stretch "Thought for ...").
+        let toolReturned = false;
+        try {
+          toolResult = await withWebActivity(
+            (line, ok, item) => {
+              if (toolReturned) return;
+              hooks.onStatus?.({ stepId: `${stepBase}:a${++activityNo}`, kind: "notice", label: line, state: "end", startedAt: Date.now(), ok });
+              // a page that was really read becomes a page item; every other line (a search, a refusal) is a thought
+              emitThinking(item ?? thoughtFromWebLine(line, ok));
+            },
+            () => executeTool({ name: tc.name as ToolCall["name"], args, userMessage, images: attachments.map((a) => a.dataUri) })
+          );
+        } finally {
+          toolReturned = true;
+        }
+        // what happened, not only what was tried: a tool that answered "NOT PLACED" / "NOT SAVED" / "needs your choice" says so in one plain line
+        const outcomeLine = thoughtForOutcome(toolResult);
+        if (outcomeLine) emitThinking({ type: "thought", text: outcomeLine });
         if (tc.name === "research_product" && /^Started researching|^Added|new entry/.test(toolResult) && !toolResult.startsWith("Failed:")) researchedNewProduct = true;
         // "I read X as Y": the app says it itself, right away, so it is shown whatever the model writes next
         const understood = tc.name === "research_product" ? extractCorrectionSentence(toolResult) : null;

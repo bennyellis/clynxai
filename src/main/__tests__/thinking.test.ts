@@ -4,7 +4,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { streamChat, type ChatMessage, type ToolCall } from "../chat.js";
 import type { ChatStatusEvent } from "../chatSupport.js";
-import { MAX_THINKING_ITEMS, THUMB_MAX_CHARS, ThinkingBudget, hostOf, publicPageUrl, sanitizeThinkingItem, thoughtForFailure, thoughtForTool, thoughtFromWebLine } from "../thinking.js";
+import sharp from "sharp";
+import { makeThumbnail } from "../webResearch.js";
+import { MAX_THINKING_ITEMS, THUMB_MAX_CHARS, ThinkingBudget, hostOf, publicPageUrl, sanitizeThinkingItem, thoughtForFailure, thoughtForOutcome, thoughtForTool, thoughtFromWebLine } from "../thinking.js";
 import { apiBackends } from "../searchApis.js";
 import { createEvidenceDeps, withWebActivity } from "../webEvidence.js";
 import { applyStatusEvent, thinkingItems, thinkingSummary, type RequestSteps } from "../../renderer/src/lib/chatStatus.js";
@@ -12,7 +14,7 @@ import { buildView } from "../../renderer/src/lib/discoveryStream.js";
 import { baseConfig } from "./_fixtures.js";
 import { check, run, section } from "./_testkit.js";
 
-const JPEG = `data:image/jpeg;base64,${Buffer.from("x".repeat(300)).toString("base64")}`;
+const JPEG = `data:image/jpeg;base64,${Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from("x".repeat(300))]).toString("base64")}`;
 
 let calls = 0;
 let script: (call: number) => { content?: string; tools?: Array<{ name: string; args: Record<string, unknown> }> } = () => ({ content: "ok" });
@@ -144,6 +146,46 @@ run(async () => {
   check("a page opens in your browser (noreferrer), a photo enlarges on click and is capped at 160 px", /href=\{item\.url\}[\s\S]*?target="_blank"[\s\S]*?rel="noreferrer noopener"/.test(block) && /lightbox\.open\(item\.thumbnail/.test(block) && /maxWidth: 160, maxHeight: 160/.test(block));
   check("no third-party favicon is fetched (a letter stands in), and nothing animates", !/favicon|google\.com\/s2|animation|transition/.test(block.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n")));
   check("Discovery shows it above each Clynx reply and leaves out the plain 'Web activity' list", /\{!isUser && <ThinkingBlock requestId=\{msg\.id\}/.test(disc) && /<ChatStatusLine requestId=\{msg\.id\} hideNotices/.test(disc) && disc.indexOf("<ThinkingBlock requestId") < disc.indexOf("{msg.content}"));
+
+  section("TESTER's step 4 review");
+  check("the block stays after the reply is done: Discovery no longer forgets the turn's steps, and old turns are dropped by the store", !/forgetSteps/.test(disc) && /KEEP_TURNS = 12/.test(fs.readFileSync(path.join(process.cwd(), "src", "renderer", "src", "lib", "chatExtras.ts"), "utf8")));
+  // a tool that starts background work and returns: lines that arrive afterwards belong to nothing on screen
+  const lateEvents: ChatStatusEvent[] = [];
+  calls = 0;
+  script = (call) => (call === 1 ? { tools: [{ name: "research_product", args: { product: "Dyson V8" } }] } : { content: "On it." });
+  await streamChat("research the dyson v8", [] as ChatMessage[], "global", baseConfig(), [], [], [], () => {}, async () => {
+    setTimeout(() => void deps.fetchText("https://late.example/p"), 20); // detached: runs after the tool has answered
+    return "Started researching Dyson V8.";
+  }, null, [], [], [], undefined, { onStatus: (e) => lateEvents.push({ requestId: "r", ...e }) });
+  await new Promise((r) => setTimeout(r, 120));
+  check("a page read AFTER the tool returned is not shown as part of the finished turn", !lateEvents.some((e) => e.item?.url?.includes("late.example")) && !lateEvents.some((e) => e.kind === "notice" && /late\.example/.test(e.label)), lateEvents.map((e) => e.item ?? e.label));
+  check("hosts that are not public web addresses are refused, and real hosts that merely start with a number are kept", ["http://[fe80::1]/", "http://[fc00::1]/", "http://100.64.0.5/a", "http://100.100.1.1/a", "http://printer.local/a", "http://nas.lan/a", "http://wiki.internal/a", "http://intranet/a", "http://0.0.0.0/a", "http://224.0.0.1/a"].every((u) => publicPageUrl(u) === null) && publicPageUrl("https://10.example.com/a") !== null && publicPageUrl("https://127.example.com/a") !== null && publicPageUrl("http://8.8.8.8/a") !== null);
+  check("an address inside thought text is cut to its host: no credentials, path or token", sanitizeThinkingItem({ type: "thought", text: "Could not read https://u:p@example.com/a?token=SECRET (HTTP 403)" })?.text === "Could not read example.com (HTTP 403)" && sanitizeThinkingItem({ type: "thought", text: "Tried http://192.168.1.4/admin and gave up" })?.text === "Tried a page and gave up");
+  check("an argument that is not text is not printed as [object Object]", thoughtForTool("research_product", { product: { a: 1 } }) === "I'm looking into the product." && !/object/i.test(thoughtForTool("web_research", { query: ["x"] }) ?? ""));
+  check("a data URI that is not an image is refused even when it is valid base64", sanitizeThinkingItem({ type: "image", thumbnail: "data:image/png;base64,SGVsbG8gd29ybGQh" }) === null && sanitizeThinkingItem({ type: "image", thumbnail: JPEG }) !== null);
+  check("a tool that answered without doing the job says what happened", ["NOT PLACED: x", "NOT SAVED: y", "NEEDS THE USER'S CHOICE: z", "Not run: q"].every((r) => !!thoughtForOutcome(r)) && thoughtForOutcome("Started researching X.") === null);
+  const outcomeEvents: ChatStatusEvent[] = [];
+  calls = 0;
+  script = (call) => (call === 1 ? { tools: [{ name: "research_product", args: { product: "asdf qwer" } }] } : { content: "I could not place that." });
+  await streamChat("asdf qwer", [] as ChatMessage[], "global", baseConfig(), [], [], [], () => {}, async () => "NOT PLACED: could not tell what it is.", null, [], [], [], undefined, { onStatus: (e) => outcomeEvents.push({ requestId: "r", ...e }) });
+  check("in a real turn the outcome line follows the 'looking into' line", outcomeEvents.filter((e) => e.kind === "thinking").map((e) => e.item?.text).join("|") === "I'm looking into asdf qwer.|I could not tell what that was, so I did not file anything.");
+  const slowEvents: ChatStatusEvent[] = [];
+  calls = 0;
+  script = () => ({ content: "ok" });
+  const t0 = Date.now();
+  await streamChat("hi", [] as ChatMessage[], "global", baseConfig(), [], [], [], () => {}, async () => "", null, [], attach as never, [], undefined, { onStatus: (e) => slowEvents.push({ requestId: "r", ...e }), thumbnail: () => new Promise<string | null>(() => {}) });
+  check("a thumbnail maker that hangs delays the reply by a few seconds at most", Date.now() - t0 < 12_000, Date.now() - t0);
+  let thumbCalls = 0;
+  calls = 0;
+  script = () => ({ content: "ok" });
+  await streamChat("hi", [] as ChatMessage[], "global", baseConfig(), [], [], [], () => {}, async () => "", null, [], attach as never, [], undefined, { thumbnail: async () => (thumbCalls++, JPEG) });
+  check("no thumbnails are made when nothing is listening for status events", thumbCalls === 0, thumbCalls);
+  const pngBytes = await sharp({ create: { width: 800, height: 600, channels: 3, background: { r: 200, g: 30, b: 30 } } }).png().toBuffer();
+  const thumb = await makeThumbnail(`data:image/png;base64,${pngBytes.toString("base64")}`, 160, 70);
+  const thumbMeta = thumb ? await sharp(Buffer.from(thumb.split(",")[1], "base64")).metadata() : null;
+  check("a thumbnail is ALWAYS re-encoded, longest side 160 px, whatever the size of the original", !!thumb && thumbMeta?.format === "jpeg" && Math.max(thumbMeta.width ?? 0, thumbMeta.height ?? 0) === 160 && thumb.length <= THUMB_MAX_CHARS, thumbMeta);
+  check("bytes that are not an image give no thumbnail", (await makeThumbnail("data:image/png;base64,SGVsbG8gd29ybGQh")) === null && (await makeThumbnail("not a data uri")) === null);
+  check("a link in the block only opens for http(s) addresses, and links and buttons keep their own roles inside list items", /\/\^https\?:\\\/\\\/\/i\.test\(item\.url\)/.test(block) && !/<a\s+role="listitem"/.test(block) && !/<button\s+role="listitem"/.test(block) && (block.match(/<div role="listitem"/g) ?? []).length >= 2);
 
   section("TESTER's step 3 review: an answer is not buried, a jump does not re-stick, and the Stop is reachable from every view");
   const msgs = [{ id: "u1", role: "user" as const, ts: 1000, streaming: false }, { id: "a1", role: "assistant" as const, ts: 1001, streaming: true }];

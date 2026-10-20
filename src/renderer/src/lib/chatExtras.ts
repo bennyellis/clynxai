@@ -20,10 +20,18 @@ function emit(next: Snapshot) {
   for (const l of listeners) l();
 }
 
+/** How many turns' steps are kept in memory. A chat that shows Clynx's thinking AFTER the reply (Discovery) needs them to stay; older turns are dropped so they never pile up. */
+const KEEP_TURNS = 12;
+function keepRecent(steps: RequestSteps): RequestSteps {
+  const ids = Object.keys(steps);
+  if (ids.length <= KEEP_TURNS) return steps;
+  return Object.fromEntries(ids.slice(ids.length - KEEP_TURNS).map((id) => [id, steps[id]]));
+}
+
 function ensureListening() {
   if (started) return;
   started = true;
-  api.onChatStatus((e) => emit({ ...snapshot, steps: applyStatusEvent(snapshot.steps, e, Date.now()) }));
+  api.onChatStatus((e) => emit({ ...snapshot, steps: keepRecent(applyStatusEvent(snapshot.steps, e, Date.now())) }));
   api.onChatChoices((requestId, choice) => emit({ ...snapshot, choices: { ...snapshot.choices, [requestId]: choice } }));
 }
 
