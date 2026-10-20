@@ -119,7 +119,90 @@ export function promisesAction(reply: string): boolean {
   return !(IS_QUESTION_ONLY.test(text) && /\bif you\b|\bonce you\b|\bwhen you\b/i.test(text));
 }
 
-const WANTS_PICTURE = /\b(thumbnail|thumb|photo|photos|picture|pictures|pic|pics|image|images|looks? like|similar to|match(?:es|ing)? (?:the|this)|same as (?:the|this)|what does it look)\b/i;
+// ---- a question is not a request to act (Beta 28 live test: "hi! what can you do for me?" started the scanner; "what should I check before buying one?" wrote a watch note)
+
+/** Tools that change something: the scanner, settings, lists, watches, notes. A greeting or a pure question must never run one. */
+export const SIDE_EFFECT_TOOLS = new Set([
+  "add_search_item",
+  "remove_search_item",
+  "add_custom_instruction",
+  "add_product_watch_note",
+  "add_blacklist_term",
+  "remove_blacklist_term",
+  "set_general_deal_detection",
+  "update_config",
+  "start_scanner",
+  "stop_scanner",
+  "clear_feed",
+  "create_watch",
+  "pause_watch",
+  "resume_watch",
+  "delete_watch",
+]);
+
+const GREETING = /^(?:hi|hello|hey|yo|sup|hiya|howdy|good (?:morning|afternoon|evening)|thanks|thank you|thx|ok|okay|cool|nice|great|awesome|lol)\b[\s!.,?]*$/i;
+const QUESTION_START = /^(?:what|whats|what's|how|why|which|who|when|where|is|are|was|were|do|does|did|can|could|would|should|will|tell me|explain|any|hi|hello|hey)\b/i;
+const ASKS_FOR_ACTION = /\b(?:start|stop|run|begin|launch|kick off|scan|add|remove|delete|clear|create|make|set|change|turn|switch|enable|disable|pause|resume|block|blacklist|note|remind|remember|log|save|track|watch|monitor|alert|notify|hunt|look for|search for|find me|go ahead|do it)\b/i;
+const CAN_YOU_ACTION = /^(?:can|could|would|will) you\b/i;
+
+/**
+ * True when the message only greets, thanks or ASKS (what can you do, what should I check, is it worth it) and does not ask for any change. Used to refuse side-effect tools for that
+ * turn: the model answers in words instead. "can you start the scanner?" and "add a Series S under $250" are requests and stay allowed; a short "yes / do it / go ahead" is an answer to
+ * the previous turn and also stays allowed (those are handled by classifyShortAnswer).
+ */
+export function isInformationalOnly(message: string): boolean {
+  const m = message.trim();
+  if (!m) return false;
+  if (classifyShortAnswer(m)) return false;
+  if (GREETING.test(m)) return true;
+  const questionLike = /\?/.test(m) || QUESTION_START.test(m);
+  if (!questionLike) return false;
+  if (CAN_YOU_ACTION.test(m) && ASKS_FOR_ACTION.test(m)) return false;
+  return !ASKS_FOR_ACTION.test(m) || /^(?:what|how|why|which|who|when|where)\b[^.]*\b(?:can you do|do you do|are you|is it|should i|do i|does it)\b/i.test(m);
+}
+
+export function actionNotRunMessage(tool: string): string {
+  return `Not run: the person only said hello or asked a question, and "${tool}" changes things. Nothing was changed. Answer their message in plain words (use web_research if facts matter) and, if useful, offer to do it when they ask. Do not say you did anything.`;
+}
+
+// ---- internal tool names are never shown to the person
+
+const TOOL_PHRASES: Array<[RegExp, string]> = [
+  [/\bresearch_variants\b/gi, "the variants check"],
+  [/\bresearch_product\b/gi, "the product research"],
+  [/\bweb_research\b/gi, "a web search"],
+  [/\badd_reference_photos\b/gi, "the photo search"],
+  [/\bfind_products\b/gi, "a Database lookup"],
+  [/\bidentify_from_photo\b/gi, "the photo check"],
+  [/\bcheck_model_name\b/gi, "the name check"],
+  [/\badd_product_watch_note\b/gi, "a watch note"],
+  [/\badd_search_item\b/gi, "the Search For list"],
+  [/\bremove_search_item\b/gi, "the Search For list"],
+  [/\badd_custom_instruction\b/gi, "a custom instruction"],
+  [/\b(?:add|remove)_blacklist_term\b/gi, "the Blacklist"],
+  [/\bset_general_deal_detection\b/gi, "the general deal setting"],
+  [/\bupdate_config\b/gi, "a setting"],
+  [/\b(?:start|stop)_scanner\b/gi, "the scanner"],
+  [/\bclear_feed\b/gi, "the Feed"],
+  [/\b(?:create|pause|resume|delete)_watch\b/gi, "the Watch"],
+  [/\blist_watch_matches\b/gi, "the Watch matches"],
+  [/\bask_choice\b/gi, "a question"],
+  [/\blibrary_(?:op|list)\b/gi, "the Library"],
+];
+
+/** Replaces internal tool identifiers ("research_variants says...", "I ran research_product on X") with plain words, keeping a leading capital. */
+export function plainToolNames(text: string): string {
+  let out = text.replace(/`([a-z]+_[a-z_]+)`/g, "$1");
+  for (const [re, phrase] of TOOL_PHRASES) {
+    out = out.replace(re, (m, offset: number) => {
+      const atStart = offset === 0 || /[.!?]\s*$/.test(out.slice(0, offset));
+      return /^[A-Z]/.test(m) || atStart ? phrase.charAt(0).toUpperCase() + phrase.slice(1) : phrase;
+    });
+  }
+  return out;
+}
+
+const WANTS_PICTURE =/\b(thumbnail|thumb|photo|photos|picture|pictures|pic|pics|image|images|looks? like|similar to|match(?:es|ing)? (?:the|this)|same as (?:the|this)|what does it look)\b/i;
 
 /** Whether the message refers to how the product looks, so the open product's own picture is worth sending to the model. */
 export function wantsProductPicture(message: string): boolean {

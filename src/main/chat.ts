@@ -6,7 +6,7 @@ import { CLYNX_VOICE } from "./voice.js";
 import { isLowAiMode } from "./aiMode.js";
 import { OPENAI_MODEL, callOpenAI, ensureOpenAIAccess } from "./openai.js";
 import { describeVerdictForAi, type VariantVerdict } from "./variantEvidence.js";
-import { followUpHint, promisesAction, relevantProducts, wantsProductPicture } from "./chatIntent.js";
+import { actionNotRunMessage, followUpHint, isInformationalOnly, plainToolNames, promisesAction, relevantProducts, SIDE_EFFECT_TOOLS, wantsProductPicture } from "./chatIntent.js";
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -754,7 +754,7 @@ ${logTail || "(none yet)"}
 Recent evaluated listings:
 ${listingTail || "(none yet)"}
 
-This renders in a normal chat window, so write like a person chatting, not a report, and stay in character as Clynx. After you use a tool, say what you did in a line or two in your own words (e.g. "Done, I'll hunt for Series S under $250 next time I scan" beats "Added to Search For list"), and mention anything the tool result says they still need to do (like starting the scanner).`;
+This renders in a normal chat window, so write like a person chatting, not a report, and stay in character as Clynx. After you use a tool, say what you did in a line or two in your own words (e.g. "Got it, I'll hunt for Series S under $250 next time I scan" beats "Added to Search For list"; only after a tool result says it happened, and never after a greeting or a plain question), and mention anything the tool result says they still need to do (like starting the scanner).`;
 }
 
 function buildDatabaseSystemPrompt(
@@ -1191,8 +1191,10 @@ export async function streamChat(
       trace.aiCalls = trace.rounds.length;
       trace.guards = guards;
     }
-    return withResoldPrompt(shortStyle ? tightenReply(content) : content);
+    return withResoldPrompt(plainToolNames(shortStyle ? tightenReply(content) : content));
   };
+  // A greeting or a pure question must not run anything that changes the app (Beta 28 live test: a hello started the scanner, a question wrote a watch note).
+  const informationalTurn = isInformationalOnly(userMessage);
   let promiseGuardUsed = false;
   let variantsGuardUsed = false;
   const toolNamesRun = new Set<string>();
@@ -1250,6 +1252,11 @@ export async function streamChat(
       try {
         const args = tc.args ? JSON.parse(tc.args) : {};
         label = toolStatusLabel(tc.name, args);
+        if (informationalTurn && SIDE_EFFECT_TOOLS.has(tc.name)) {
+          guards.push("question-not-action");
+          trace?.tools.push({ name: `${tc.name} (refused: question)`, ms: 0, parallel });
+          return { id: tc.id, content: actionNotRunMessage(tc.name) };
+        }
         hooks.onStatus?.({ stepId: tc.id || `${tc.name}-${started}`, kind: "tool", label, state: "start", startedAt: started });
         const stepBase = tc.id || `${tc.name}-${started}`;
         let activityNo = 0;

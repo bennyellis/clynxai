@@ -1685,3 +1685,12 @@ html[data-perf="performance"] button:active:not(:disabled),
 html[data-perf="performance"] button.nav-item:hover:not(:disabled) {
   transform: none;
 }
+
+/* The floating Clynx chat panel (GlobalAssistantBar, 360px wide at the bottom right) used to sit on top of each screen's own chat box and Send button. While it is open the screens
+   (all but Activity, which has no floating chat) leave room for it. A wide window only: on a narrow one the panel stays an overlay. No animation, so no repaint cost. */
+@media (min-width: 1000px) {
+  html[data-floating-chat="open"] [data-screen]:not([data-screen="activity"]) {
+    padding-right: 392px;
+    box-sizing: border-box;
+  }
+}

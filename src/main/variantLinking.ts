@@ -3,6 +3,7 @@
 // Pure: the Database rows are passed in; nothing here writes.
 import { nameScore } from "./variantEvidence.js";
 import { findParentCandidate, identityTokens } from "./variantIdentity.js";
+import { isPlausibleProductName } from "./variantFanout.js";
 
 /** The evidence's own name for the product when it is a clean, short title that names every word of the claim ("Xbox Series X Galaxy" -> "Xbox Series X 2TB Galaxy Black Special Edition"). */
 export function cleanOfficialName(name: string | undefined | null, claim: string): string | null {
@@ -14,6 +15,7 @@ export function cleanOfficialName(name: string | undefined | null, claim: string
   const firstWord = (s: string) => (s.split(/\s+/)[0] ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
   if (!firstWord(cleaned) || firstWord(cleaned) !== firstWord(claim)) return null;
   if (/\b(?:photo|image|picture|screenshot|view|pic)\s+of\b|\b(?:back|front|side|top|bottom|rear|inside|close-?up)\s+(?:panel|view|side|shot|of)\b|\bsee\s+(?:more|all)\b|\bclick\b|\bshop\b|\bbuy\b/i.test(cleaned)) return null;
+  if (!isPlausibleProductName(cleaned)) return null; // unbalanced brackets, a dangling connector: a text fragment, not a name
   const have = new Set(identityTokens(cleaned));
   // It has to read like a product name (not a caption or a button) and hold every word of the claim.
   return nameScore(cleaned, claim) >= 0 && identityTokens(claim).every((t) => have.has(t)) ? cleaned : null;

@@ -5,6 +5,7 @@ import { reconcileVerdict, type VariantVerdict } from "./variantEvidence.js";
 import { cleanOfficialName } from "./variantLinking.js";
 import { identityTokens } from "./variantIdentity.js";
 import { createdVariantMessage, decideResearchTarget, publicHttpUrls, type TrackedProduct } from "./variantResearch.js";
+import { isPlausibleProductName } from "./variantFanout.js";
 import { buildVocabulary, describeCorrections, looksLikeQuestion, normalizeTypedProduct, placePhrase, splitProductRequest, stripCommand } from "./typedInput.js";
 
 export interface ResearchStartOptions {
@@ -85,6 +86,9 @@ export async function runResearchProductTool(args: Record<string, unknown>, user
   const normalized = normalizeTypedProduct(product, vocab);
   product = normalized.text;
   const correction = describeCorrections(normalized);
+  if (!isPlausibleProductName(product)) {
+    return `NOT PLACED: "${product}" looks like a text fragment (unbalanced brackets or a dangling word), not a product name, so nothing was created or changed. Ask the user for the exact product name and do not guess.`;
+  }
   const placement = placePhrase(product, vocab, tracked);
   if (placement.kind === "gibberish") {
     return `NOT PLACED: I could not tell what "${product}" is, so nothing was created or changed. Ask the user what they meant (a product name, a model, or a link or photo) and do not guess.`;

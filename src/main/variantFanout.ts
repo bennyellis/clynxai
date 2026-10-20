@@ -35,6 +35,21 @@ export interface FanoutResult {
   stopped: string | null;
 }
 
+/**
+ * Whether a model-suggested name reads like a product name and not a text fragment (Beta 28 live test: "Xbox (modern Console & common Bundle" was filed as a product). Brackets must be
+ * balanced, it must not end on a connector or open a bracket, and it must be a sensible length with no markup.
+ */
+export function isPlausibleProductName(name: string): boolean {
+  const n = name.replace(/\s+/g, " ").trim();
+  if (n.length < 3 || n.length > 110) return false;
+  if (/[<>{}\\|]/.test(n) || /https?:/i.test(n)) return false;
+  const pairs: Array<[string, string]> = [["(", ")"], ["[", "]"]];
+  for (const [open, close] of pairs) if (n.split(open).length !== n.split(close).length) return false;
+  if (/[&+,/:;-]\s*$/.test(n) || /\b(?:and|or|with|for|the|of|a|an)\s*$/i.test(n)) return false;
+  if (/^[\W_]/.test(n)) return false;
+  return /[a-z]/i.test(n);
+}
+
 export function isConfirmed(v: VariantVerdict): boolean {
   return v.status === "verified" || v.status === "supported";
 }
@@ -57,7 +72,10 @@ export async function runVariantFanout(
     const name = String(raw ?? "").replace(/\s+/g, " ").trim();
     if (!name || seen.has(name.toLowerCase())) continue;
     seen.add(name.toLowerCase());
-    if (deps.alreadyTracked(name)) result.skipped.push(name);
+    if (!isPlausibleProductName(name)) {
+      result.skipped.push(name);
+      deps.note?.(`not filed: "${name}" reads like a text fragment, not a product name`);
+    } else if (deps.alreadyTracked(name)) result.skipped.push(name);
     else queue.push(name);
   }
   if (queue.length > cap) {

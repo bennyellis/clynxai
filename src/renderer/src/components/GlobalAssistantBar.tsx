@@ -77,6 +77,14 @@ export function GlobalAssistantBar() {
   const intake = useImageIntake(attachments, setAttachments);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // While the chat panel is open the page makes room for it (see global.css, html[data-floating-chat="open"]) instead of the panel sitting on top of a screen's own chat box and Send button.
+  useEffect(() => {
+    document.documentElement.dataset.floatingChat = minimized ? "closed" : "open";
+    return () => {
+      delete document.documentElement.dataset.floatingChat;
+    };
+  }, [minimized]);
+
   function setMinimizedPersisted(value: boolean) {
     setMinimized(value);
     try {
