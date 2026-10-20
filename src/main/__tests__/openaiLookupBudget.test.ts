@@ -1,6 +1,6 @@
 // D1.6: ordinary product look-ups ask OpenAI first too, on a budget of their own: a repeated question is answered from memory, real searches are spread out and only a couple run at once,
 // the hourly limit and Save-credits mode still apply, a failed search is never remembered. A fake search and a virtual clock stand in for the network.
-import { openAiWebBackend, type SearchAnswer } from "../openaiSearch.js";
+import { openAiWebBackend, OPENAI_SEARCH_UNLIMITED, type SearchAnswer } from "../openaiSearch.js";
 import { check, run, section } from "./_testkit.js";
 
 const answer = (n: number): SearchAnswer => ({ answer: `answer ${n}`, citations: [{ url: `https://example.com/${n}`, title: `Page ${n}`, snippet: `snippet ${n}` }] });
@@ -64,4 +64,15 @@ run(async () => {
   const c = openAiWebBackend({ enabled: () => true, lowAi: () => false, perHour: 50, maxConcurrent: 2, search: async () => { active++; peak = Math.max(peak, active); await new Promise((r) => setTimeout(r, 15)); active--; return answer(1); } });
   await Promise.all(["q1", "q2", "q3", "q4", "q5"].map((q) => c.run!(q, 5)));
   check("never more than two in flight", peak === 2, { peak });
+
+  section("no hourly limit by default (the owner asked for none); spacing and the cache still apply");
+  let tu = 5_000_000;
+  const gaps: number[] = [];
+  let made = 0;
+  const u = openAiWebBackend({ enabled: () => true, lowAi: () => false, perHour: OPENAI_SEARCH_UNLIMITED, now: () => tu, cacheMs: 7 * 24 * 3600_000, minGapMs: 1500, maxConcurrent: 2, sleep: async (ms) => void (gaps.push(ms), (tu += ms)), search: async () => answer(++made) });
+  for (let i = 0; i < 60; i++) await u.run!(`distinct question ${i}`, 5);
+  check("60 different searches inside one hour are not refused", made === 60 && u.skip!() === null, { made, skip: u.skip!() });
+  await u.run!("distinct question 3", 5);
+  check("a repeat is still answered from memory", made === 60);
+  check("a number in config.json still sets a limit (openaiSearchPerHour: 2)", (() => { const l = openAiWebBackend({ enabled: () => true, lowAi: () => false, perHour: 2, search: async () => answer(1) }); return l.skip!() === null; })());
 });

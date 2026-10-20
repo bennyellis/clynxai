@@ -42,6 +42,7 @@ import {
 } from "./chat.js";
 import { randomUUID } from "node:crypto";
 import { lookupProduct, expandSearchKeywords } from "./products.js";
+import { OPENAI_SEARCH_UNLIMITED } from "./openaiSearch.js";
 import { downloadImageAsDataUri, shrinkImageDataUri, findBrandLogoImage, findGroupImage, findPoorConditionProductImage, findReferencePhotos, findFreeReferencePhotos, buildImageCollage, generateCategoryImage, lookUpOnWeb, webVerifyDeps, webHardDeps, configureOpenAiSearch, configureFreeEngines } from "./webResearch.js";
 import { verifyVariant, reconcileVerdict, type VariantVerdict } from "./variantEvidence.js";
 import { createVerdictMemory, makeClaimVerifier, publicHttpUrls } from "./variantResearch.js";
@@ -2334,7 +2335,7 @@ function applyIdentitySafeguard(): void {
     openAiSearchConfigured = true;
     // read live: switching beta13.openaiSearch in config.json takes effect without a restart of this wiring
     configureFreeEngines(() => config.freeSearchEngines === true);
-    configureOpenAiSearch({ enabled: () => beta13Flags(config).openaiSearch && hasOpenAIAccess(), lowAi: () => isLowAiMode(), perHour: Math.max(1, config.openaiSearchPerHour ?? 12) }, { perHour: Math.max(1, config.openaiLookupPerHour ?? 20) });
+    configureOpenAiSearch({ enabled: () => beta13Flags(config).openaiSearch && hasOpenAIAccess(), lowAi: () => isLowAiMode(), perHour: Math.max(1, config.openaiSearchPerHour ?? OPENAI_SEARCH_UNLIMITED) }, { perHour: Math.max(1, config.openaiLookupPerHour ?? OPENAI_SEARCH_UNLIMITED) });
   }
   getKnowledgeService().install();
   const mode = config.identitySafeguard?.mode === "shadow" || config.identitySafeguard?.mode === "enforce" ? config.identitySafeguard.mode : "off";

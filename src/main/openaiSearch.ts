@@ -63,6 +63,9 @@ export function answerToHits(a: SearchAnswer, max: number): SearchHit[] {
   return a.citations.slice(0, max).map((c) => ({ title: c.title || c.url, url: c.url, snippet: c.snippet || a.answer.slice(0, 300) }));
 }
 
+/** "No hourly limit": the owner asked for none. A number in config.json (openaiSearchPerHour / openaiLookupPerHour) still wins, so a cap can come back. Spacing, concurrency and the lookup cache are separate and stay. */
+export const OPENAI_SEARCH_UNLIMITED = 1_000_000;
+
 export interface OpenAiSearchPolicy {
   /** Switched on by the owner and the AI is reachable (own key or Clynx Cloud). */
   enabled(): boolean;

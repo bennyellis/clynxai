@@ -379,9 +379,9 @@ export interface Config {
   // Beta 13 feature switches (see beta13.ts): identityGate / resolver / conditionEvidence are "off" | "shadow" | "enforce"; the rest are booleans. Missing = the defaults in beta13.ts.
   /** Library folder pictures (folderArtService.ts): generate decorative pictures automatically (default on, limited per day). */
   folderArt?: { generate?: boolean; perDay?: number; perDayManual?: number };
-  /** OpenAI web search for hard research (beta13.openaiSearch turns it on): searches per hour (default 12). */
+  /** OpenAI web search for hard research (beta13.openaiSearch turns it on): searches per hour (default: no limit; a number here sets one). */
   openaiSearchPerHour?: number;
-  /** OpenAI searches per hour for ordinary product look-ups (typed products, edition checks, chat look-ups), separate from openaiSearchPerHour (default 20). */
+  /** OpenAI searches per hour for ordinary product look-ups (typed products, edition checks, chat look-ups), separate from openaiSearchPerHour (default: no limit; a number here sets one). */
   openaiLookupPerHour?: number;
   /** DuckDuckGo and Bing as search sources: OFF unless this is true in config.json (OpenAI web search, a Brave key and Wikipedia are used instead). */
   freeSearchEngines?: boolean;
