@@ -4,6 +4,7 @@ import type { ChatAttachment, ChatChoice, ChatChoiceOption, ChatMessage, EventSt
 import { api } from "../lib/api.js";
 import { useStickToBottom } from "../lib/stickToBottom.js";
 import { ChatChoiceButtons, ChatStatusLine } from "../components/ChatExtras.js";
+import { ClynxAvatar, YouLabel } from "../components/ChatAvatar.js";
 import { attachmentHistoryNote, prepareImages } from "../lib/chatAttachments.js";
 import { dismissAllChoices, dismissChoice, forgetSteps } from "../lib/chatExtras.js";
 import {
@@ -990,23 +991,7 @@ function ChatRow({ entry, onAsk, onStop, onPick }: { entry: ChatEntry; onAsk: (e
         gap: 12,
       }}
     >
-      <div
-        style={{
-          flexShrink: 0,
-          width: 26,
-          height: 26,
-          borderRadius: "50%",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontSize: 13,
-          fontWeight: 700,
-          background: isUser ? "var(--gradient-soft)" : isDealNarration ? "var(--success-bg)" : "var(--border)",
-          color: isUser ? "var(--text)" : "var(--text-muted)",
-        }}
-      >
-        {isUser ? "Y" : isSearchAck ? "🔍" : isDealNarration ? "✨" : isBatchNarration ? "🔭" : "C"}
-      </div>
+      {isUser ? <YouLabel /> : <ClynxAvatar glyph={isSearchAck ? "🔍" : isDealNarration ? "✨" : isBatchNarration ? "🔭" : undefined} />}
       <div style={{ flex: 1, fontSize: 13.5, lineHeight: 1.55, color: entry.error ? "var(--danger)" : "var(--text)", paddingTop: 3 }}>
         {entry.attachments && entry.attachments.length > 0 && (
           <div style={{ display: "flex", gap: 6, marginBottom: entry.content ? 8 : 0 }}>
@@ -1033,17 +1018,10 @@ function ChatRow({ entry, onAsk, onStop, onPick }: { entry: ChatEntry; onAsk: (e
         ) : (
           entry.content
         )}
-        {entry.streaming && !entry.content && (
-          <span className="typing-dots">
-            <span />
-            <span />
-            <span />
-          </span>
-        )}
         {entry.streaming && entry.content && <span className="cursor-blink" />}
         {!isUser && !entry.auto && (
           <>
-            <ChatStatusLine requestId={entry.id} onStop={entry.streaming ? onStop : undefined} />
+            <ChatStatusLine requestId={entry.id} waiting={entry.streaming && !entry.content} onStop={entry.streaming ? onStop : undefined} />
             {!entry.streaming && onPick && <ChatChoiceButtons requestId={entry.id} onPick={onPick} />}
           </>
         )}

@@ -41,6 +41,14 @@ export function formatElapsed(ms: number): string {
   return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
 }
 
+/** The running steps as label + elapsed pieces, so the screen can put the typing dots right after the first word ("Thinking •••  8s") instead of before it. */
+export function statusParts(steps: StepState[] | undefined, now: number): Array<{ label: string; elapsed: string }> {
+  return runningSteps(steps).map((s) => ({ label: s.label, elapsed: formatElapsed(now - s.startedAt) }));
+}
+
+/** What is shown while a reply is on its way but no step has started yet: the same "Thinking" line, with no timer, so there is never an empty bubble. */
+export const WAITING_LABEL = "Thinking";
+
 /** "Researching eBay… 8s" (several at once are joined). Empty when nothing is running. */
 export function statusText(steps: StepState[] | undefined, now: number): string {
   return runningSteps(steps)

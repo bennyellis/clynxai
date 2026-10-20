@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { BlacklistedImage, BlacklistTerm, ChatAttachment, ChatChoice, ChatChoiceOption, ChatContext, ChatMessage, ProductImage, ProductProfile } from "../lib/api.js";
 import { AttachButton, AttachmentBar, ChatChoiceButtons, ChatStatusLine, useImageIntake } from "../components/ChatExtras.js";
+import { ClynxAvatar, YouLabel } from "../components/ChatAvatar.js";
 import { attachmentHistoryNote } from "../lib/chatAttachments.js";
 import { dismissAllChoices, dismissChoice, forgetSteps } from "../lib/chatExtras.js";
 import { api } from "../lib/api.js";
@@ -3442,23 +3443,7 @@ function ChatRow({ entry, onStop, onPick, busy }: { entry: ChatEntry; onStop?: (
         gap: 12,
       }}
     >
-      <div
-        style={{
-          flexShrink: 0,
-          width: 24,
-          height: 24,
-          borderRadius: "50%",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontSize: 14,
-          fontWeight: 700,
-          background: isUser ? "var(--gradient-soft)" : "var(--border)",
-          color: isUser ? "var(--text)" : "var(--text-muted)",
-        }}
-      >
-        {isUser ? "Y" : isSearchAck ? "🔍" : "C"}
-      </div>
+      {isUser ? <YouLabel /> : <ClynxAvatar size={24} glyph={isSearchAck ? "🔍" : undefined} />}
       <div style={{ flex: 1, fontSize: 15, lineHeight: 1.5, color: entry.error ? "var(--danger)" : "var(--text)", paddingTop: 2 }}>
         {isSearchAck ? (
           <>
@@ -3472,13 +3457,6 @@ function ChatRow({ entry, onStop, onPick, busy }: { entry: ChatEntry; onStop?: (
         ) : (
           entry.content
         )}
-        {entry.streaming && !entry.content && (
-          <span className="typing-dots">
-            <span />
-            <span />
-            <span />
-          </span>
-        )}
         {entry.streaming && entry.content && <span className="cursor-blink" />}
         {entry.attachments?.length ? (
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
@@ -3489,7 +3467,7 @@ function ChatRow({ entry, onStop, onPick, busy }: { entry: ChatEntry; onStop?: (
         ) : null}
         {!isUser && (
           <>
-            <ChatStatusLine requestId={entry.id} onStop={entry.streaming ? onStop : undefined} />
+            <ChatStatusLine requestId={entry.id} waiting={entry.streaming && !entry.content} onStop={entry.streaming ? onStop : undefined} />
             {!entry.streaming && onPick && <ChatChoiceButtons requestId={entry.id} disabled={busy} onPick={onPick} />}
           </>
         )}

@@ -208,19 +208,10 @@ export function GlobalAssistantBar() {
               ))}
             </div>
           ) : null}
-          {m.content ||
-            (m.streaming ? (
-              <span className="typing-dots" aria-label="Clynx is typing">
-                <span />
-                <span />
-                <span />
-              </span>
-            ) : (
-              ""
-            ))}
+          {m.content}
           {!mine && m.id !== "welcome" && (
             <>
-              <ChatStatusLine requestId={m.id} onStop={m.streaming ? () => api.cancelChat(m.id) : undefined} />
+              <ChatStatusLine requestId={m.id} waiting={m.streaming && !m.content} onStop={m.streaming ? () => api.cancelChat(m.id) : undefined} />
               {!m.streaming && <ChatChoiceButtons requestId={m.id} disabled={busy} onPick={(c, o) => pickChoice(c, o, m.id)} />}
             </>
           )}

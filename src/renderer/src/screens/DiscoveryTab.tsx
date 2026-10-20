@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ChatAttachment, ChatChoice, ChatChoiceOption, ChatMessage, DiscoveryEntry, DiscoveryThought, ProductProfile } from "../lib/api.js";
 import { ChatChoiceButtons, ChatStatusLine } from "../components/ChatExtras.js";
+import { ClynxAvatar, YouLabel } from "../components/ChatAvatar.js";
 import { attachmentHistoryNote, prepareImages } from "../lib/chatAttachments.js";
 import { dismissAllChoices, dismissChoice, forgetSteps } from "../lib/chatExtras.js";
 import { api } from "../lib/api.js";
@@ -886,28 +887,6 @@ function VerdictBlock({ verdict }: { verdict: FlipVerdict }) {
   );
 }
 
-function ClynxAvatar() {
-  return (
-    <div
-      style={{
-        flexShrink: 0,
-        width: 26,
-        height: 26,
-        borderRadius: "50%",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        fontSize: 13,
-        fontWeight: 700,
-        background: "var(--border)",
-        color: "var(--text-muted)",
-      }}
-    >
-      C
-    </div>
-  );
-}
-
 function ClynxBubble({ text }: { text: string }) {
   return (
     <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexShrink: 0 }}>
@@ -960,7 +939,7 @@ function MessageRow({ msg }: { msg: ThreadMsg }) {
   const isUser = msg.role === "user";
   return (
     <div role="article" aria-label={isUser ? "You" : msg.error ? "Clynx (error)" : "Clynx"} style={{ display: "flex", gap: 10, alignItems: "flex-start", flexDirection: isUser ? "row-reverse" : "row" }}>
-      {isUser ? null : <ClynxAvatar />}
+      {isUser ? <YouLabel /> : <ClynxAvatar />}
       <div
         style={{
           background: isUser ? "var(--bg-card-hover)" : "var(--bg-elevated)",
@@ -992,17 +971,10 @@ function MessageRow({ msg }: { msg: ThreadMsg }) {
           </div>
         )}
         {msg.content}
-        {msg.streaming && !msg.content && (
-          <span className="typing-dots">
-            <span />
-            <span />
-            <span />
-          </span>
-        )}
         {msg.streaming && msg.content && <span className="cursor-blink" />}
         {!isUser && (
           <>
-            <ChatStatusLine requestId={msg.id} onStop={msg.streaming ? () => api.cancelChat(msg.id) : undefined} />
+            <ChatStatusLine requestId={msg.id} waiting={msg.streaming && !msg.content} onStop={msg.streaming ? () => api.cancelChat(msg.id) : undefined} />
             {!msg.streaming && <ChatChoiceButtons requestId={msg.id} onPick={(c, o) => choiceSender?.(c, o, msg.id)} />}
           </>
         )}

@@ -2,14 +2,14 @@ import React, { useEffect, useRef, useState } from "react";
 import type { ChatAttachment, ChatChoice, ChatChoiceOption } from "../lib/api.js";
 import { api } from "../lib/api.js";
 import { dismissChoice, useChatExtras } from "../lib/chatExtras.js";
-import { problemSteps, runningSteps, statusText } from "../lib/chatStatus.js";
+import { problemSteps, runningSteps, statusParts, WAITING_LABEL } from "../lib/chatStatus.js";
 import { prepareImages } from "../lib/chatAttachments.js";
 
 // Beta 13: the pieces every chat shares - live progress with elapsed time, a Stop button, a question's buttons, and picture attachments. Each chat screen keeps its own message
 // list and layout; these are dropped into it.
 
 /** "Researching eBay… 8s", ticking locally from the real start time. Shows nothing when nothing is running; a step that failed stays visible in a warning colour. */
-export function ChatStatusLine({ requestId, onStop }: { requestId: string; onStop?: () => void }) {
+export function ChatStatusLine({ requestId, onStop, waiting }: { requestId: string; onStop?: () => void; /** The reply is on its way but has no words and no step yet: show "Thinking" so the bubble is never empty (this is the ONE set of typing dots). */ waiting?: boolean }) {
   const { steps } = useChatExtras();
   const mine = steps[requestId];
   const running = runningSteps(mine);
@@ -22,23 +22,48 @@ export function ChatStatusLine({ requestId, onStop }: { requestId: string; onSto
   }, [running.length]);
   const problems = problemSteps(mine);
   const notices = (mine ?? []).filter((s) => s.kind === "notice");
-  if (!running.length && !problems.length && !notices.length) return null;
+  const showWaiting = Boolean(waiting) && running.length === 0;
+  if (!running.length && !problems.length && !notices.length && !showWaiting) return null;
+  const parts = statusParts(mine, now);
+  const stopButton = onStop ? (
+    // a real accent button the size of Send, only while a reply is running
+    <button className="primary" style={{ padding: "5px 14px", fontSize: 13, display: "inline-flex", alignItems: "center", gap: 6, borderRadius: 8 }} onClick={onStop} title="Stop this reply">
+      <span aria-hidden="true" style={{ display: "inline-block", width: 9, height: 9, background: "currentColor", borderRadius: 1 }} />
+      Stop
+    </button>
+  ) : null;
   return (
     <>
     <div data-testid="chat-status" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "var(--text-dim)", marginTop: 4, flexWrap: "wrap" }}>
-      {running.length > 0 && (
+      {parts.length > 0 && (
         <>
+          {/* the word first, then the ONE set of dots, then the timer ("Thinking ••• 8s") */}
+          {parts.map((p, i) => (
+            <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              {i > 0 && <span aria-hidden="true">·</span>}
+              <span>{p.label}</span>
+              {i === 0 && (
+                <span className="typing-dots" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </span>
+              )}
+              <span>{p.elapsed}</span>
+            </span>
+          ))}
+          {stopButton}
+        </>
+      )}
+      {showWaiting && (
+        <>
+          <span>{WAITING_LABEL}</span>
           <span className="typing-dots" aria-hidden="true">
             <span />
             <span />
             <span />
           </span>
-          <span>{statusText(mine, now)}</span>
-          {onStop && (
-            <button className="icon ghost" style={{ padding: "0 8px", fontSize: 12 }} onClick={onStop} title="Stop this reply">
-              ■ Stop
-            </button>
-          )}
+          {stopButton}
         </>
       )}
       {problems.map((p) => (
