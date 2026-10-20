@@ -23,6 +23,10 @@ run(async () => {
   check("the dots come AFTER the label in the running line", /<span>\{p\.label\}<\/span>\s*\{i === 0 && \(\s*<span className="typing-dots"/.test(extras));
   check("Stop is a primary (accent) button with a square icon and the word Stop", /className="primary"[\s\S]{0,400}Stop\s*<\/button>/.test(extras) && !/icon ghost[\s\S]{0,200}Stop/.test(extras));
 
+  check("Stop stays whenever a reply is running, even with plain words streaming and no step (TESTER's gap 2)", /!showWaiting && !onStop\) return null/.test(extras) && /parts\.length === 0 && !showWaiting && stopButton/.test(extras));
+  check("the waiting word is announced politely to screen readers", /role="status" aria-live="polite">\{WAITING_LABEL\}/.test(extras));
+  check("Clynx's own narration rows are never empty while they wait (TESTER's gap 1), and have no Stop", /entry\.auto && entry\.streaming && !entry\.content && <ChatStatusLine requestId=\{entry\.id\} waiting \/>/.test(src("screens/Activity.tsx")));
+
   section("no chat draws a second set of dots in the bubble");
   for (const f of ["screens/DiscoveryTab.tsx", "screens/Activity.tsx", "screens/Database.tsx", "components/GlobalAssistantBar.tsx"]) {
     const t = src(f);

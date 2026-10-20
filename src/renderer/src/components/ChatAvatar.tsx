@@ -29,6 +29,6 @@ export function ClynxAvatar({ size = 26, glyph }: { size?: number; glyph?: strin
 /** The person speaking: the word "You". */
 export function YouLabel({ align = "left" }: { align?: "left" | "right" }) {
   return (
-    <div style={{ flexShrink: 0, fontSize: 12, fontWeight: 700, letterSpacing: 0.2, color: "var(--text-muted)", paddingTop: 4, textAlign: align }}>You</div>
+    <div style={{ flexShrink: 0, minWidth: 26, fontSize: 12, fontWeight: 700, letterSpacing: 0.2, color: "var(--text-muted)", paddingTop: 4, textAlign: align }}>You</div>
   );
 }

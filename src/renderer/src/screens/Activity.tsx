@@ -1025,6 +1025,8 @@ function ChatRow({ entry, onAsk, onStop, onPick }: { entry: ChatEntry; onAsk: (e
             {!entry.streaming && onPick && <ChatChoiceButtons requestId={entry.id} onPick={onPick} />}
           </>
         )}
+        {/* Clynx's own narration (deal / batch notes): no Stop, but never an empty row while it waits for its first word */}
+        {!isUser && entry.auto && entry.streaming && !entry.content && <ChatStatusLine requestId={entry.id} waiting />}
       </div>
       {/* Clynx's own narration is an event: it can be asked about like a log line. */}
       {(isDealNarration || isBatchNarration) && !entry.streaming && entry.content && (

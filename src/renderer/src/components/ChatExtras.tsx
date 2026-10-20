@@ -23,7 +23,8 @@ export function ChatStatusLine({ requestId, onStop, waiting }: { requestId: stri
   const problems = problemSteps(mine);
   const notices = (mine ?? []).filter((s) => s.kind === "notice");
   const showWaiting = Boolean(waiting) && running.length === 0;
-  if (!running.length && !problems.length && !notices.length && !showWaiting) return null;
+  // Stop stays available for as long as the reply is running (onStop is only passed while it streams), including while plain words are arriving and no step is running
+  if (!running.length && !problems.length && !notices.length && !showWaiting && !onStop) return null;
   const parts = statusParts(mine, now);
   const stopButton = onStop ? (
     // a real accent button the size of Send, only while a reply is running
@@ -55,9 +56,10 @@ export function ChatStatusLine({ requestId, onStop, waiting }: { requestId: stri
           {stopButton}
         </>
       )}
+      {parts.length === 0 && !showWaiting && stopButton}
       {showWaiting && (
         <>
-          <span>{WAITING_LABEL}</span>
+          <span role="status" aria-live="polite">{WAITING_LABEL}</span>
           <span className="typing-dots" aria-hidden="true">
             <span />
             <span />
