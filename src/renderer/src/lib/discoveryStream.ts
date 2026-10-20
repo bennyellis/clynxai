@@ -109,3 +109,44 @@ export function automationStamp(entries: ReadonlyArray<StreamEntry>): string {
 export function hasUnread(currentStamp: string, seenStamp: string | undefined): boolean {
   return seenStamp !== undefined && currentStamp !== seenStamp;
 }
+
+// ---- one window, three views (AUDITOR proposal section 2, owner-accepted)
+
+/** "everything" = one chronological stream (your messages, Clynx's replies and what it finds on its own, in the order it happened); "automation" = only what Clynx found on its own; "chat" = only your conversation. */
+export type ViewMode = "everything" | "automation" | "chat";
+export const VIEW_MODES: ReadonlyArray<{ id: ViewMode; label: string }> = [
+  { id: "everything", label: "Everything" },
+  { id: "automation", label: "Automation" },
+  { id: "chat", label: "My chat" },
+];
+export const DEFAULT_VIEW: ViewMode = "everything";
+
+export type StreamItem<M extends StreamMessage, E extends StreamEntry> = ChatItem<M, E> | AutomationItem<E>;
+
+/**
+ * What the one window shows for a view, oldest first. `keep` is the Automation filter chip; it narrows the automation entries only (in "everything" it is not applied, so nothing Clynx
+ * found disappears from the full picture). Research you asked for stays with your conversation in every view that has the conversation.
+ */
+export function buildView<M extends StreamMessage, E extends StreamEntry>(mode: ViewMode, messages: ReadonlyArray<M>, entries: ReadonlyArray<E>, keep: (e: E) => boolean = () => true): Array<StreamItem<M, E>> {
+  if (mode === "chat") return buildChatStream(messages, entries);
+  if (mode === "automation") return buildAutomationStream(entries, keep);
+  const merged: Array<StreamItem<M, E>> = [...buildChatStream(messages, entries), ...buildAutomationStream(entries)];
+  // stable: equal timestamps keep the order they were added in (conversation first)
+  return merged.sort((a, b) => a.ts - b.ts);
+}
+
+/** Whether the composer should move the person to the full picture after they send: a message sent while looking at Automation alone would otherwise be invisible. */
+export function viewAfterSend(mode: ViewMode): ViewMode {
+  return mode === "automation" ? "everything" : mode;
+}
+
+/** Arrow / Home / End keys over the three-way switch. Returns the new view, or null when the key does nothing. */
+export function nextViewForKey(mode: ViewMode, key: string): ViewMode | null {
+  const order = VIEW_MODES.map((m) => m.id);
+  const at = order.indexOf(mode);
+  if (key === "ArrowRight" || key === "ArrowDown") return order[(at + 1) % order.length];
+  if (key === "ArrowLeft" || key === "ArrowUp") return order[(at + order.length - 1) % order.length];
+  if (key === "Home") return order[0];
+  if (key === "End") return order[order.length - 1];
+  return null;
+}

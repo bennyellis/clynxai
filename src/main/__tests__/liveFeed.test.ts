@@ -46,7 +46,7 @@ run(async () => {
   const tile = fs.readFileSync(path.join(process.cwd(), "src", "renderer", "src", "components", "LiveFeedTile.tsx"), "utf8");
   check("the Live feed column renders LiveFeedTile for every entry and still opens it on click", /orderTiles\(entries\)\.map\(\(entry\) => \(\s*<LiveFeedTile/.test(disc) && /onClick=\{\(\) => selectEntry\(entry\)\}/.test(disc));
   check("'Ask Clynx' stays on top as before, and the header still says Live feed with the researching count", /title="Ask Clynx"/.test(disc) && /<strong>Live feed<\/strong>/.test(disc) && /\{researchingCount\} researching/.test(disc));
-  const feedColumn = disc.slice(disc.indexOf("<strong>Live feed</strong>"), disc.indexOf("---- right: two channels"));
+  const feedColumn = disc.slice(disc.indexOf("<strong>Live feed</strong>"), disc.indexOf("---- right: ONE window"));
   check("the mixed emoji thumbnails are gone from the feed column (the photo, else the Clynx logo)", feedColumn.length > 200 && !/⚙️|📦/.test(feedColumn) && /clynx-mark\.png/.test(tile));
   check("the researching tile reuses the Dashboard's pulsing dot and shows the product photo", /liveDotPulse/.test(tile) && /<Thumb url=\{photoUrl\} size=\{56\}/.test(tile));
   check("finished entries are the compact one-line tile", /data-testid="live-tile-compact"/.test(tile) && /<Thumb url=\{photoUrl\} size=\{30\}/.test(tile));
