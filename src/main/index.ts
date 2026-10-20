@@ -14,7 +14,7 @@ import { hasEbayCredentials, searchEbayAspects, searchEbayItems, setEbayTranspor
 import { gatherCandidates, runQueueTick } from "./variantQueue.js";
 import { fetchAddonPages } from "./addonPages.js";
 import { THUMB_MAX_CHARS, THUMB_MAX_SIDE } from "./thinking.js";
-import { addonEntryKey, addonFromListing, sameAddonLoosely } from "./variantDiscovery.js";
+import { addonEntryKey, addonFamilyPath, addonFromListing, sameAddonLoosely } from "./variantDiscovery.js";
 import { OPENAI_MODEL, callOpenAI, hasOpenAIAccess, initOpenAIProxy, setApiSource } from "./openai.js";
 import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
 import { writeFileAtomic, writeFileAtomicWithBackup } from "./safeFs.js";
@@ -2851,7 +2851,7 @@ async function discoverAndCreateProductVariants(productName: string, category: s
 }
 
 /** Names (versions and add-ons) checked in the background per day unless config.json says otherwise (backgroundVariantsPerDay). */
-const BACKGROUND_VARIANTS_PER_DAY = 60;
+const BACKGROUND_VARIANTS_PER_DAY = 40;
 function remainingBackgroundChecks(): number {
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
@@ -2908,7 +2908,7 @@ async function runVariantQueueTick(familyHint: string | null = null): Promise<vo
         store.linkResearchedAddon(parent.id, name, entryId);
         if (created && entryId) {
           // researched like any product: the categorizer files it (Xbox > Accessories, Xbox > Controllers); its name makes it kind "accessory", so it never prices the console
-          await runProductLookup(entryId, name, { skipSiblingDiscovery: true, source: "related" });
+          await runProductLookup(entryId, name, { skipSiblingDiscovery: true, source: "related", forcedFamily: addonFamilyPath(baseRow?.family ?? null, name) ?? undefined });
         }
         discovery.note(parent.id, "finding", `Add-on "${name}" (${sources.join(" + ")}: ${evidence.slice(0, 2).join(", ") || "a source"}) has its own entry.`);
         return entryId;

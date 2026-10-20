@@ -12,6 +12,7 @@ import {
   addonCandidatesFromPages,
   addonFromListing,
   addonEntryKey,
+  addonFamilyPath,
   sameAddonLoosely,
   decideVariant,
   findingsToCandidates,
@@ -266,6 +267,20 @@ run(async () => {
   const oldBase = reopened.addProductStub("ob", "Switch OLED");
   reopened.upsertCandidates(oldBase, [{ name: "Switch OLED Zelda Edition", kind: "variant", sources: ["catalogue"], evidence: [] }], 1);
   check("opening it adds next_try_at and the queue works", reopened.nextQueuedCandidates("variant", 5).length === 1 && reopened.deferCandidate(oldBase, "variant", reopened.listCandidates(oldBase)[0].key, "x", 5) === "waiting");
+
+  section("live evidence from the owner's Beta 29 (AUDITOR): stray letters, three spellings of one add-on, one add-on in three folders");
+  const livePages: PageText[] = [{ url: "https://www.xbox.com/accessories", sourceClass: "manufacturer", text: "Compatible with Xbox Series X|S Seagate Storage Expansion Card for Xbox Series X adds 1TB. Works on Xbox Series X Xbox Gaming Headset for Xbox is wireless. The Xbox Wireless Controller. Xbox Wireless Controller again." }];
+  const liveNames = addonCandidatesFromPages("Xbox Series X", livePages).map((c) => c.name);
+  check("no name starts with a stray 'S' or 'X' (the tail of 'Series X|S')", liveNames.length > 0 && liveNames.every((n) => !/^[A-Za-z]\s/.test(n)), liveNames);
+  check("the real names survive the cleaning", liveNames.includes("Seagate Storage Expansion Card") && liveNames.includes("Xbox Wireless Controller") && liveNames.some((n) => /Gaming Headset$/.test(n)), liveNames);
+  check("the three Seagate card spellings are ONE add-on", new Set(["Seagate Storage Expansion Card", "Seagate Expansion Card", "S Seagate Storage Expansion Card"].map((n) => addonEntryKey(n.replace(/^S /, "")))).size === 1);
+  check("the three standard-controller spellings are ONE add-on; Elite and Special Edition stay their own", new Set(["Xbox Wireless Gaming Controller", "XBOX Wireless Controller", "Xbox Controller", "Xbox Wireless Controllers"].map(addonEntryKey)).size === 1 && addonEntryKey("Xbox Elite Wireless Controller") !== addonEntryKey("Xbox Wireless Controller") && addonEntryKey("Xbox Special Edition Wireless Controller") !== addonEntryKey("Xbox Wireless Controller"));
+  const dupBase = store.addProductStub("dupbase", "Xbox Series X Duplicates");
+  store.upsertCandidates(dupBase, ["Seagate Storage Expansion Card", "Seagate Expansion Card", "Xbox Wireless Controller", "XBOX Wireless Controller", "Xbox Wireless Gaming Controller"].map((name) => ({ name, kind: "addon" as const, sources: ["catalogue" as const], evidence: [] })), 1);
+  check("the queue holds one Seagate card and one standard controller, not five rows", store.listCandidates(dupBase, "addon").length === 2, store.listCandidates(dupBase, "addon").map((c) => c.name));
+  check("every add-on of a product is filed in ONE folder: brand > Accessories > kind", addonFamilyPath("Video Games & Consoles > Xbox", "Xbox Wireless Controller") === "Video Games & Consoles > Xbox > Accessories > Controllers" && addonFamilyPath("Video Games & Consoles > Xbox", "Seagate Storage Expansion Card") === "Video Games & Consoles > Xbox > Accessories > Storage" && addonFamilyPath("Video Games & Consoles > Xbox", "Xbox Gaming Headset") === "Video Games & Consoles > Xbox > Accessories > Headsets" && addonFamilyPath("Video Games & Consoles > Xbox", "Xbox Charging Stand") === "Video Games & Consoles > Xbox > Accessories > Power and charging" && addonFamilyPath(null, "Xbox Wireless Controller") === null && addonFamilyPath("Video Games & Consoles > Xbox > Consoles", "Xbox Thing") === "Video Games & Consoles > Xbox > Accessories");
+  const idxSrc = fs.readFileSync(path.join(process.cwd(), "src", "main", "index.ts"), "utf8");
+  check("the add-on entry is researched into that folder, and the daily ceiling defaults to 40", /forcedFamily: addonFamilyPath\(baseRow\?\.family \?\? null, name\)/.test(idxSrc) && /BACKGROUND_VARIANTS_PER_DAY = 40/.test(idxSrc));
 
   section("sources that fail are reported, never read as 'no versions'");
   const quiet = await gatherCandidates({ id: base3, name: "Switch" }, gdeps({ ebaySpecifics: async () => null, editions: async () => null, memory: async () => null, addonPages: async () => null }));

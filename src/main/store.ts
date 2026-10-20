@@ -11,7 +11,7 @@ import path from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { addonKey, type Addon, type AddonRole, type AddonStatus } from "./addons.js";
-import { candidateKey, type Candidate, type CandidateStatus } from "./variantDiscovery.js";
+import { addonEntryKey, candidateKey, type Candidate, type CandidateStatus } from "./variantDiscovery.js";
 
 export interface StoredCandidate {
   parentId: string;
@@ -2581,7 +2581,8 @@ export class Store {
   upsertCandidates(parentId: string, candidates: Candidate[], now: number = Date.now()): number {
     let added = 0;
     for (const c of candidates) {
-      const key = candidateKey(c.name);
+      // an add-on's key ignores filler (brand, "wireless", "gaming", "storage", plurals): the three spellings of one Seagate card or one standard controller are ONE queued name
+      const key = c.kind === "addon" ? addonEntryKey(c.name) : candidateKey(c.name);
       if (!key) continue;
       const row = this.db.prepare("SELECT sources, evidence, support, status FROM variant_candidates WHERE parent_id = ? AND kind = ? AND cand_key = ?").get(parentId, c.kind, key) as { sources: string; evidence: string; support: string | null; status: string } | undefined;
       if (!row) {

@@ -236,6 +236,12 @@ export function addonCandidatesFromPages(base: string, pages: PageText[], max = 
       // sentence words in front ("The", "Shop", "With") are dropped; what is left of the capitalised run is the accessory's brand / line ("Xbox")
       const leadWords = clean(m[1] ?? "").split(" ").filter(Boolean);
       while (leadWords.length > 0 && FRAGMENT_START.test(leadWords[0])) leadWords.shift();
+      // a stray single letter is the tail of "Series X|S" / "Series S" glued on from the text before ("S Seagate Storage Expansion Card", "X Xbox Gaming Headset"): everything up to and including it goes
+      let lastLetter = -1;
+      leadWords.forEach((w, i) => {
+        if (/^[A-Za-z]$/.test(w.replace(/[^A-Za-z]/g, ""))) lastLetter = i;
+      });
+      if (lastLetter >= 0) leadWords.splice(0, lastLetter + 1);
       const name = clean(`${leadWords.join(" ")} ${m[2]}`);
       if (!isPlausibleProductName(name) || candidateKey(name) === baseKey || name.split(" ").length < 2) continue;
       if (kindOfName(name) !== "accessory") continue; // the same "is this an accessory" test the comparable-matching uses
@@ -297,7 +303,7 @@ export function addonFromListing(name: string, listingId: string | null, baseNam
   return { name: n, kind: "addon", sources: ["listing"], evidence: [listingId ? `listing ${listingId}` : "a scanned listing"] };
 }
 
-const LOOSE_STOP = new Set(["microsoft", "xbox", "official", "genuine", "oem", "the", "for", "new", "a", "an", "of", "with", "and", "wireless"]);
+const LOOSE_STOP = new Set(["microsoft", "xbox", "official", "genuine", "oem", "the", "for", "new", "a", "an", "of", "with", "and", "wireless", "gaming", "storage", "original", "authentic"]);
 const COLOUR_WORDS = new Set("black white red blue green yellow orange pink purple gray grey silver gold carbon shock robot pulse electric volt".split(" "));
 const looseTokens = (name: string, dropColours: boolean) =>
   name
@@ -319,4 +325,29 @@ export function addonEntryKey(name: string): string {
 export function sameAddonLoosely(a: string, b: string): boolean {
   const ka = looseTokens(a, true).sort().join(" ");
   return ka !== "" && ka === looseTokens(b, true).sort().join(" ");
+}
+
+/**
+ * Where an add-on's own entry is filed, so every add-on of one product lands in ONE place: the base product's brand folder, then "Accessories", then the kind of accessory
+ * ("Xbox > Accessories > Controllers"). Without this the categoriser put the same family's controller, headset and storage card in three different folders.
+ */
+export function addonFamilyPath(baseFamily: string | null | undefined, addonName: string): string | null {
+  const segments = String(baseFamily ?? "").split(">").map((s) => s.trim()).filter(Boolean);
+  if (segments.length === 0) return null;
+  const brandFolder = segments.slice(0, Math.min(2, segments.length)).join(" > ");
+  const n = addonName.toLowerCase();
+  const kind = /controller|gamepad|joystick|fight stick|arcade stick|flight stick|steering wheel/.test(n)
+    ? "Controllers"
+    : /headset|headphone|microphone/.test(n)
+      ? "Headsets"
+      : /expansion card|memory card|hard drive|ssd|storage/.test(n)
+        ? "Storage"
+        : /charg|battery|dock|stand|cable|adapter|power/.test(n)
+          ? "Power and charging"
+          : /case|sleeve|skin|faceplate|backplate|protector|grip|strap/.test(n)
+            ? "Cases and skins"
+            : /camera|webcam|kinect|remote|keyboard|mouse/.test(n)
+              ? "Peripherals"
+              : null;
+  return kind ? `${brandFolder} > Accessories > ${kind}` : `${brandFolder} > Accessories`;
 }
