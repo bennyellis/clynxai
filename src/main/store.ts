@@ -11,6 +11,7 @@ import path from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { addonKey, type Addon, type AddonRole, type AddonStatus } from "./addons.js";
+import { nameKey } from "./modelFacts.js";
 import { addonEntryKey, candidateKey, type Candidate, type CandidateStatus } from "./variantDiscovery.js";
 
 export interface StoredCandidate {
@@ -189,6 +190,24 @@ export class Store {
         PRIMARY KEY (parent_id, kind, cand_key)
       );
       CREATE INDEX IF NOT EXISTS idx_variant_candidates_status ON variant_candidates (status, kind);
+      -- Other names for a product (old names, official names, how sellers type it), so a rename or a merge never breaks matching or sync (naming engine, Phase 1).
+      CREATE TABLE IF NOT EXISTS product_name_aliases (
+        product_id TEXT NOT NULL,
+        alias TEXT NOT NULL,
+        alias_key TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'rename',
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (product_id, alias_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_product_name_aliases_key ON product_name_aliases (alias_key);
+      -- The owner's edits to the model facts (extra aliases, corrected attributes) on top of the built-in ones.
+      CREATE TABLE IF NOT EXISTS model_fact_overrides (
+        canonical_key TEXT PRIMARY KEY,
+        canonical TEXT NOT NULL,
+        add_aliases TEXT NOT NULL DEFAULT '[]',
+        attrs TEXT NOT NULL DEFAULT '{}',
+        updated_at INTEGER NOT NULL
+      );
     `);
     // a table made by an earlier development build lacks the back-off column
     const cols = (this.db.prepare("PRAGMA table_info(variant_candidates)").all() as Array<{ name: string }>).map((c) => c.name);
@@ -2216,6 +2235,7 @@ export class Store {
       this.db.prepare("DELETE FROM listing_addons WHERE base_product_id = ?").run(id);
       this.db.prepare("DELETE FROM product_addons WHERE base_product_id = ?").run(id);
       this.db.prepare("DELETE FROM variant_candidates WHERE parent_id = ?").run(id);
+      this.db.prepare("DELETE FROM product_name_aliases WHERE product_id = ?").run(id);
       this.db.prepare("UPDATE products SET parent_product_id = NULL WHERE parent_product_id = ?").run(id);
       this.db.prepare("UPDATE listings SET product_id = NULL WHERE product_id = ?").run(id);
       this.db.prepare("UPDATE watches SET linked_product_id = NULL WHERE linked_product_id = ?").run(id);
@@ -2276,7 +2296,7 @@ export class Store {
   clearAllProducts(): void {
     // the server keeps a copy of every synced product: queue a cloud delete for each (productSync sends them), or the next pull brings every one of them back
     for (const r of this.db.prepare("SELECT id FROM products").all() as Array<{ id: string }>) this.addPendingCloudDelete("product", r.id);
-    this.db.exec("DELETE FROM product_images; DELETE FROM listing_addons; DELETE FROM product_addons; DELETE FROM variant_candidates; DELETE FROM products;");
+    this.db.exec("DELETE FROM product_images; DELETE FROM listing_addons; DELETE FROM product_addons; DELETE FROM variant_candidates; DELETE FROM product_name_aliases; DELETE FROM products;");
     this.safeguard.invalidate();
     this.identity?.forgetAllProducts();
   }
@@ -2622,6 +2642,43 @@ export class Store {
   /** How many names were checked (any outcome) since this moment: the count against the daily ceiling. */
   countCandidateChecksSince(since: number): number {
     return Number((this.db.prepare("SELECT COUNT(*) n FROM variant_candidates WHERE last_checked_at IS NOT NULL AND last_checked_at >= ?").get(since) as { n: number }).n);
+  }
+
+  // ---- aliases and the owner's model-fact edits (namingEngine.ts / modelFacts.ts). Nothing in the app calls these on an insert path yet: that is Phase 2.
+
+  /** Keeps another name for a product. A name that is the product's own name, or one it already has, is not added twice. Returns true when it was added. */
+  addProductAlias(productId: string, alias: string, source: string = "rename", now: number = Date.now()): boolean {
+    const clean = alias.replace(/\s+/g, " ").trim().slice(0, 160);
+    const key = nameKey(clean);
+    const row = this.db.prepare("SELECT name FROM products WHERE id = ?").get(productId) as { name: string } | undefined;
+    if (!clean || !key || !row || nameKey(row.name) === key) return false;
+    const res = this.db.prepare("INSERT OR IGNORE INTO product_name_aliases (product_id, alias, alias_key, source, created_at) VALUES (?, ?, ?, ?, ?)").run(productId, clean, key, source, now);
+    return Number(res.changes) > 0;
+  }
+
+  listProductAliases(productId: string): Array<{ alias: string; source: string; createdAt: number }> {
+    return (this.db.prepare("SELECT alias, source, created_at FROM product_name_aliases WHERE product_id = ? ORDER BY created_at, alias").all(productId) as Array<{ alias: string; source: string; created_at: number }>).map((r) => ({ alias: r.alias, source: r.source, createdAt: r.created_at }));
+  }
+
+  /** The product that keeps this name as an alias (null when none, or when two products claim it: an ambiguous alias decides nothing). */
+  findProductIdByAlias(alias: string): string | null {
+    const rows = this.db.prepare("SELECT DISTINCT a.product_id id FROM product_name_aliases a JOIN products p ON p.id = a.product_id WHERE a.alias_key = ?").all(nameKey(alias)) as Array<{ id: string }>;
+    return rows.length === 1 ? rows[0].id : null;
+  }
+
+  setModelFactOverride(canonical: string, patch: { addAliases?: string[]; attrs?: Record<string, string> }, now: number = Date.now()): void {
+    const key = nameKey(canonical);
+    if (!key) return;
+    const row = this.db.prepare("SELECT add_aliases, attrs FROM model_fact_overrides WHERE canonical_key = ?").get(key) as { add_aliases: string; attrs: string } | undefined;
+    const aliases = [...new Set([...(row ? (JSON.parse(row.add_aliases) as string[]) : []), ...(patch.addAliases ?? [])])];
+    const attrs = { ...(row ? (JSON.parse(row.attrs) as Record<string, string>) : {}), ...(patch.attrs ?? {}) };
+    this.db
+      .prepare("INSERT INTO model_fact_overrides (canonical_key, canonical, add_aliases, attrs, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(canonical_key) DO UPDATE SET add_aliases = excluded.add_aliases, attrs = excluded.attrs, updated_at = excluded.updated_at")
+      .run(key, canonical, JSON.stringify(aliases), JSON.stringify(attrs), now);
+  }
+
+  listModelFactOverrides(): Array<{ canonical: string; addAliases: string[]; attrs: Record<string, string> }> {
+    return (this.db.prepare("SELECT canonical, add_aliases, attrs FROM model_fact_overrides ORDER BY canonical").all() as Array<{ canonical: string; add_aliases: string; attrs: string }>).map((r) => ({ canonical: r.canonical, addAliases: JSON.parse(r.add_aliases) as string[], attrs: JSON.parse(r.attrs) as Record<string, string> }));
   }
 
   /** How many names are still waiting (including those in a back-off), for "N waiting to be checked". */
