@@ -143,7 +143,7 @@ export const SIDE_EFFECT_TOOLS = new Set([
 ]);
 
 const GREETING = /^(?:hi|hello|hey|yo|sup|hiya|howdy|good (?:morning|afternoon|evening)|thanks|thank you|thx|ok|okay|cool|nice|great|awesome|lol)\b[\s!.,?]*$/i;
-const QUESTION_START = /^(?:what|whats|what's|how|why|which|who|when|where|is|are|was|were|do|does|did|can|could|would|should|will|tell me|explain|any|hi|hello|hey)\b/i;
+const QUESTION_START = /^(?:what|whats|what's|how|why|which|who|when|where|is|are|was|were|do|does|did|can|could|would|should|will|tell me|explain|any)\b/i;
 const ASKS_FOR_ACTION = /\b(?:start|stop|run|begin|launch|kick off|scan|add|remove|delete|clear|create|make|set|change|turn|switch|enable|disable|pause|resume|block|blacklist|note|remind|remember|log|save|track|watch|monitor|alert|notify|hunt|look for|search for|find me|go ahead|do it)\b/i;
 const IMPERATIVE = /^(?:please\s+|pls\s+|now\s+|also\s+|and\s+|then\s+)*(?:start|stop|add|remove|delete|clear|create|make|set|change|turn|switch|enable|disable|pause|resume|block|blacklist|note|remind|remember|log|save|track|watch|monitor|run|begin|launch|scan)\b/i;
 const CAN_YOU_ACTION = /^(?:can|could|would|will) you\b/i;
@@ -154,11 +154,14 @@ const CAN_YOU_ACTION = /^(?:can|could|would|will) you\b/i;
  * the previous turn and also stays allowed (those are handled by classifyShortAnswer).
  */
 export function isInformationalOnly(message: string): boolean {
-  const m = message.trim();
-  if (!m) return false;
-  if (classifyShortAnswer(m)) return false;
-  if (/https?:\/\//i.test(m)) return false; // a pasted link is material to act on (and its "?" is not a question)
-  if (GREETING.test(m)) return true;
+  const whole = message.trim();
+  if (!whole) return false;
+  if (classifyShortAnswer(whole)) return false;
+  if (/https?:\/\//i.test(whole)) return false; // a pasted link is material to act on (and its "?" is not a question)
+  if (GREETING.test(whole)) return true;
+  // a greeting in front ("hey start the scanner", "hello can you add a Series S") is not part of the request: judge what comes after it
+  const m = whole.replace(/^(?:hi|hello|hey|yo|hiya|howdy|good (?:morning|afternoon|evening))\b[\s,!.:;-]*/i, "").trim();
+  if (!m) return true;
   const questionLike = /\?/.test(m) || QUESTION_START.test(m);
   if (!questionLike) return false;
   // an imperative clause anywhere ("hi, start the scanner", "what's up? stop it") makes it a request; so does "can you <do something>"

@@ -13,7 +13,7 @@ import { EbayEngine } from "./ebayEngine.js";
 import { hasEbayCredentials, searchEbayAspects, searchEbayItems, setEbayTransport } from "./ebayClient.js";
 import { gatherCandidates, runQueueTick } from "./variantQueue.js";
 import { fetchAddonPages } from "./addonPages.js";
-import { addonFromListing } from "./variantDiscovery.js";
+import { addonFromListing, sameAddonLoosely } from "./variantDiscovery.js";
 import { OPENAI_MODEL, callOpenAI, hasOpenAIAccess, initOpenAIProxy, setApiSource } from "./openai.js";
 import { isLowAiMode, registerLowAiModeSource } from "./aiMode.js";
 import { writeFileAtomic, writeFileAtomicWithBackup } from "./safeFs.js";
@@ -2819,7 +2819,8 @@ async function discoverAndCreateProductVariants(productName: string, category: s
   );
   const queued = result.queued.variants + result.queued.addons;
   if (queued > 0) discovery.note(parentId, "finding", `Found ${result.queued.variants} version${result.queued.variants === 1 ? "" : "s"} and ${result.queued.addons} add-on${result.queued.addons === 1 ? "" : "s"} to check; I will work through them in the background.`);
-  void runVariantQueueTick(familyPath);
+  // the first pass waits until this research (and any other) is finished; it never runs inside it
+  setTimeout(() => void runVariantQueueTick(familyPath), 45_000);
   scheduleVariantQueue();
 }
 
@@ -2829,6 +2830,8 @@ let variantTickRunning = false;
 /** One pass of the version / add-on worker (throttled: a few names, then wait). Never overlaps itself. */
 async function runVariantQueueTick(familyHint: string | null = null): Promise<void> {
   if (variantTickRunning) return;
+  // never while a research is running (the same eBay browser times out when researches overlap) or while the person is using Clynx; the next timer tick tries again
+  if (researchActive > 0 || personIsUsingClynx()) return;
   variantTickRunning = true;
   try {
     const result = await runQueueTick({
@@ -2855,9 +2858,11 @@ async function runVariantQueueTick(familyHint: string | null = null): Promise<vo
       },
       createAddonEntry: async (name, parent, evidence, sources) => {
         // an add-on the person dismissed on this product never comes back, and gets no entry
-        const dismissed = store.listAddons(parent.id).some((x) => x.status === "dismissed" && addonKey(x.name) === addonKey(name));
+        const dismissed = store.listAddons(parent.id).some((x) => x.status === "dismissed" && (addonKey(x.name) === addonKey(name) || sameAddonLoosely(x.name, name)));
         if (dismissed) return null;
-        const existing = store.findMatchingProduct(name);
+        // The entry is found by its EXACT name (a fuzzy match returns the console itself for "Xbox Series X Case"); the base product or its parent is never an add-on's entry.
+        const baseRow = store.getProductById(parent.id);
+        const existing = store.listProductIndex().find((x) => addonKey(x.name) === addonKey(name) && x.id !== parent.id && x.id !== baseRow?.parentProductId);
         let entryId: string | null = existing?.id ?? null;
         let created = false;
         if (!entryId) {
@@ -2870,7 +2875,7 @@ async function runVariantQueueTick(familyHint: string | null = null): Promise<vo
         store.linkResearchedAddon(parent.id, name, entryId);
         if (created && entryId) {
           // researched like any product: the categorizer files it (Xbox > Accessories, Xbox > Controllers); its name makes it kind "accessory", so it never prices the console
-          void runProductLookup(entryId, name, { skipSiblingDiscovery: true, source: "related" });
+          await runProductLookup(entryId, name, { skipSiblingDiscovery: true, source: "related" });
         }
         discovery.note(parent.id, "finding", `Add-on "${name}" (${sources.join(" + ")}: ${evidence.slice(0, 2).join(", ") || "a source"}) has its own entry.`);
         return entryId;
@@ -2892,7 +2897,7 @@ function scheduleVariantQueue(): void {
   if (variantQueueTimer) clearInterval(variantQueueTimer);
   const startStore = store;
   variantQueueTimer = setInterval(() => {
-    if (store !== startStore || !hasOpenAIAccess() || researchActive > 1) return;
+    if (store !== startStore || !hasOpenAIAccess() || researchActive > 0) return;
     if (startStore.nextQueuedCandidates("variant", 1).length + startStore.nextQueuedCandidates("addon", 1).length === 0) return;
     void runVariantQueueTick();
   }, 3 * 60_000);
@@ -2944,6 +2949,9 @@ function createEngineForAccount(accountId: string): ScrapeEngine {
       for (const itemName of itemNames) {
         if (isNoiseAddon(itemName)) continue;
         store.noteAddonSeen(base.id, itemName, listingId);
+        // a bundle listing that names it is a source: it is queued to get its own accessory entry too (the worker does it later, never inside the scan)
+        const cand = addonFromListing(itemName, listingId, base.name);
+        if (cand) store.upsertCandidates(base.id, [cand]);
       }
     },
     profileDir: path.join(PROFILES_ROOT, accountId),

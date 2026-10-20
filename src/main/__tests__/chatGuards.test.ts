@@ -79,6 +79,8 @@ run(async () => {
   section("TESTER's re-check: questions that merely MENTION an action word are still questions");
   for (const m of ["should I note anything before buying?", "which watch is best?", "what's a good price to watch for?", "what can I watch for under $100?", "what does stop do?", "is it ok to delete this?", "did you delete my watch?", "why did you stop the scanner?", "hey, what can you do for me?"]) check(`"${m}" is informational`, isInformationalOnly(m));
   for (const m of ["hi, start the scanner", "stop the scanner?", "what's up? stop it", "please add a Series S under $250", "can you start the scanner?", "note that the fan is loud", "watch for Galaxy Black consoles under $900"]) check(`"${m}" is a request`, !isInformationalOnly(m));
+  for (const m of ["hey can you start the scanner", "hey start the scanner", "hello can you add a Series S under $250", "hi there, stop the scanner", "hey, pause the Galaxy watch"]) check(`a greeting in front of a request ("${m}") still lets the request run`, !isInformationalOnly(m));
+  for (const m of ["hey what can you do", "hello, how does the scanner work?", "hi", "hey!", "hey should I buy this?"]) check(`a greeting in front of a question ("${m}") is still informational`, isInformationalOnly(m));
   check("library edits and photo saves are also refused on a greeting or question", SIDE_EFFECT_TOOLS.has("library_op") && SIDE_EFFECT_TOOLS.has("add_reference_photos"));
   const libHello = await chatTurn("hi", "global", (n) => (n === 1 ? { tools: [{ name: "library_op", args: { op: "trash" } }] } : { content: "Hello!" }));
   check("a hello cannot reach library_op", libHello.ran.length === 0, libHello.ran);

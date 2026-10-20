@@ -15,6 +15,8 @@ const LABEL: Record<StoredCandidate["status"], { text: string; color: string; hi
   skipped: { text: "Skipped", color: "var(--text-dim)", hint: "already in the Database" },
 };
 
+/** How many rows are shown before the rest fold away. */
+const SHOWN_AT_FIRST = 8;
 const SOURCE_WORD: Record<string, string> = { ebay_specifics: "eBay listings", catalogue: "web catalogues", listing: "a scanned listing", memory: "the model's memory (hint)", user: "you" };
 
 export function VariantsFoundSection({ product }: { product: ProductProfile }) {
@@ -40,7 +42,17 @@ export function VariantsFoundSection({ product }: { product: ProductProfile }) {
         <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-muted)" }}>
           {title} ({list.length}){waiting > 0 ? ` · ${waiting} waiting to be checked` : ""}
         </div>
-        {list.map((r) => {
+        {list.slice(0, SHOWN_AT_FIRST).map((r) => row(r))}
+        {list.length > SHOWN_AT_FIRST && (
+          <details>
+            <summary style={{ cursor: "pointer", fontSize: 13, color: "var(--text-dim)" }}>Show {list.length - SHOWN_AT_FIRST} more</summary>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>{list.slice(SHOWN_AT_FIRST).map((r) => row(r))}</div>
+          </details>
+        )}
+      </div>
+    );
+  };
+  const row = (r: StoredCandidate) => {
           const l = LABEL[r.status];
           return (
             <div key={`${r.kind}:${r.key}`} style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap", fontSize: 14 }}>
@@ -54,9 +66,6 @@ export function VariantsFoundSection({ product }: { product: ProductProfile }) {
               </span>
             </div>
           );
-        })}
-      </div>
-    );
   };
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 12, padding: "14px 16px", border: "1px solid var(--border)", borderRadius: 12, background: "var(--bg-card)" }}>

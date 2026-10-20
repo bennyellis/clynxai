@@ -36,7 +36,11 @@ export interface AspectDistribution {
 
 const CAPACITY_ASPECT = /^(?:storage capacity|hard drive capacity|memory capacity|capacity|internal storage|ssd capacity|storage)$/i;
 const COLOR_ASPECT = /^(?:colou?r|main colou?r)$/i;
-const EDITION_ASPECT = /^(?:edition|model|series|special edition|version|bundle description|bundle|style|type)$/i;
+// Only the aspects whose values NAME a version. "Type", "Style", "Bundle Description", "Version" and "Series" hold descriptions of what is in the listing ("Home Console", "Console Only",
+// "With 2 Controllers", "NTSC-U/C", "Smartphone"), not versions of the product, so they are not read.
+const EDITION_ASPECT = /^(?:edition|special edition|limited edition)$/i;
+/** Words that make a value a description of the listing, not a version: what is included, the kind of device, a region, "standard". */
+const NOT_A_VERSION = /\b(?:only|with|without|includes?|included|console|smartphone|phone|bar|standard|home|unit|system|body|lens|kit|lot|controllers?|games?|ntsc|pal|region|us|usa|canada|u\/c|used|new|refurbished|open box|genuine|original|authentic|brand|bundle|and|or|plus)\b|[+&/]/i;
 /** A listing value that is not a real choice. */
 const JUNK_VALUE = /^(?:n\/a|na|none|unbranded|does not apply|not specified|other|multicolou?r|multi-?colou?r|unknown|see description|-)$/i;
 /** Share of the counted listings, and a floor, below which a value is noise rather than a real version. */
@@ -66,6 +70,7 @@ export function specificsToCandidates(base: string, aspects: AspectDistribution[
     for (const raw of aspect.values) {
       const value = type === "capacity" ? normalizeCapacity(raw.value) : clean(raw.value);
       if (!value || JUNK_VALUE.test(value) || raw.count < MIN_COUNT || (total > 0 && raw.count / total < MIN_SHARE)) continue;
+      if (type !== "capacity" && NOT_A_VERSION.test(value)) continue;
       // the plain colour almost every listing has ("Black") is the product's default look, not a version of it
       if (type === "color" && !/\s/.test(value) && aspectSum > 0 && raw.count / aspectSum >= 0.5) continue;
       // A value that repeats part of the base ("Series S" for "Xbox Series X", "Xbox Series X 1TB") is cut down to the words it ADDS; a different model (one new letter, "S") is not a version.
@@ -186,8 +191,9 @@ export function decideVariant(c: Candidate, verdict: VariantVerdict | null): Var
     return { action: "suggest", why: "no source confirms it yet" };
   }
   if (verdict.status === "verified") return { action: "create", why: "the maker or two independent sources name it" };
-  // supported = one retailer / reference page names it. Real eBay listings that use the name are a second, independent voice (a different kind of source from a web page).
-  if (c.sources.includes("ebay_specifics")) return { action: "create", why: "eBay listings use the name and a source page supports it" };
+  // supported = one retailer / reference page names it. Real eBay listings that use the name are a second, independent voice (a different kind of source from a web page), but only when a
+  // page states the WHOLE name (an eBay aspect value glued onto the base name is not enough by itself).
+  if (c.sources.includes("ebay_specifics") && verdict.sources.some((s) => s.fullMatch && s.sourceClass !== "marketplace")) return { action: "create", why: "eBay listings use the name and a source page states it in full" };
   if (c.support === "confirmed" || independentSources(c) >= 2 || distinctHosts(verdict) >= 2) return { action: "create", why: "supported by the evidence check and a second source" };
   return { action: "suggest", why: "only one source names it, so it stays a suggestion until a second source or a listing confirms it" };
 }
@@ -200,6 +206,9 @@ const ADDON_NOUNS =
 const ADDON_RE = new RegExp(`((?:[A-Z][A-Za-z0-9'’+-]*[ \\t]){0,3})(${ADDON_NOUNS})\\b`, "g");
 /** Words that make a phrase a sentence fragment, not an accessory's name. */
 const FRAGMENT_START = /^(?:The|This|That|These|Those|With|And|Or|For|Your|Our|A|An|If|When|Includes?|Including|Comes?|Get|Buy|Add|Use|See|New|Free|Best|Top|Why|How|What|Also|Plus|Each|Every)\b/;
+
+/** Navigation, ads, conditions and other platforms: a phrase containing one of these is not an accessory of this product. */
+const ADDON_BANNED = /\b(?:cart|shop|shipping|ship|deal|deals|sale|black friday|cyber monday|coupon|offer|checkout|login|sign ?in|cloud gaming|game pass|remote play|windows|pc|mac|android|ios|used|open box|refurbished|renewed|pre-?owned|nintendo|switch|playstation|ps[2-5]|dualsense|dualshock|sony|steam deck|oculus|quest|iphone|ipad|samsung|google|all|new|free|best|top)\b/i;
 
 export interface PageText {
   url: string;
@@ -216,7 +225,10 @@ export interface PageText {
  */
 export function addonCandidatesFromPages(base: string, pages: PageText[], max = 8): Candidate[] {
   const baseKey = candidateKey(base);
-  const found = new Map<string, { name: string; count: number; hosts: Set<string>; maker: boolean }>();
+  const anchorWord = (base.toLowerCase().match(/[a-z0-9]+/) ?? [""])[0];
+  if (anchorWord.length < 3) return [];
+  const anchorRe = new RegExp(`\\b${anchorWord}`, "i");
+  const found = new Map<string, { name: string; count: number; hosts: Set<string>; maker: boolean; makerAnchored: boolean }>();
   for (const page of pages) {
     if (page.sourceClass === "marketplace") continue;
     const host = hostOf(page.url);
@@ -227,25 +239,64 @@ export function addonCandidatesFromPages(base: string, pages: PageText[], max = 
       const name = clean(`${leadWords.join(" ")} ${m[2]}`);
       if (!isPlausibleProductName(name) || candidateKey(name) === baseKey || name.split(" ").length < 2) continue;
       if (kindOfName(name) !== "accessory") continue; // the same "is this an accessory" test the comparable-matching uses
+      // marketing copy, navigation, condition words and OTHER platforms' accessories are not this product's add-ons
+      if (ADDON_BANNED.test(name)) continue;
+      const at = m.index ?? 0;
+      const around = page.text.slice(Math.max(0, at - 60), at + m[0].length + 60);
+      // it has to belong to THIS product: the name carries the product line ("Xbox Wireless Controller"), or the text right next to it says it is for / compatible with the product
+      const inName = anchorRe.test(name);
+      const anchored = inName || new RegExp(`\\b(?:for|compatible with|works with|designed for)\\s+(?:the\\s+)?(?:microsoft\\s+|sony\\s+|nintendo\\s+|apple\\s+)?${anchorWord}`, "i").test(around);
+      if (!anchored) continue;
       const key = candidateKey(name);
-      const have = found.get(key) ?? { name, count: 0, hosts: new Set<string>(), maker: false };
+      const have = found.get(key) ?? { name, count: 0, hosts: new Set<string>(), maker: false, makerAnchored: false };
       have.count++;
       have.hosts.add(host);
-      if (page.sourceClass === "manufacturer") have.maker = true;
+      if (page.sourceClass === "manufacturer") {
+        have.maker = true;
+        have.makerAnchored = true; // the maker's own page says it, next to this product (in the name or "for <product>")
+      }
       if (name.length > have.name.length) have.name = name;
       found.set(key, have);
     }
   }
+  // two mentions are needed even on a maker's page (one mention is a banner, a menu or an ad); with the product line IN the name and the maker saying it, once is enough
   return [...found.values()]
-    .filter((f) => f.count >= 2 || f.maker)
+    .filter((f) => f.count >= 2 || (f.maker && f.makerAnchored))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
     .slice(0, max)
     .map((f) => ({ name: f.name, kind: "addon" as const, sources: ["catalogue" as const], support: f.maker || f.hosts.size >= 2 ? ("confirmed" as const) : ("reported" as const), evidence: [...f.hosts].slice(0, 3) }));
 }
 
-/** A seen-in-listing add-on name as a candidate (the scanner's bundle breakdown): the listing is its source. */
-export function addonFromListing(name: string, listingId: string | null): Candidate | null {
-  const n = clean(name);
-  if (!isPlausibleProductName(n) || kindOfName(n) !== "accessory") return null;
+/** Quantity / ordinal / condition words a listing puts in front of an extra ("Second Wireless Controller", "2 extra controllers", "spare battery"): not part of the add-on's name. */
+const QUANTITY_WORDS = /^(?:second|2nd|third|extra|additional|another|spare|bonus|free|original|genuine|official|oem|used|new|\d+x?|two|three|four|a|an|the|1|one)$/i;
+
+/**
+ * A scanned listing's extra ("Second Wireless Controller") as an add-on candidate for the BASE product: quantity words are dropped, the product line is added when the name lacks it ("Wireless
+ * Controller" -> "Xbox Wireless Controller"), and a list ("charger + 2 games", "HDMI cable and power cord") is refused: only one accessory per name. The listing is its source.
+ */
+export function addonFromListing(name: string, listingId: string | null, baseName?: string): Candidate | null {
+  const raw = clean(name);
+  if (!raw || /[+,;&]|\band\b|\bwith\b/i.test(raw)) return null; // a list, not a name
+  const words = raw.split(" ").filter((w) => !QUANTITY_WORDS.test(w));
+  let n = words.join(" ");
+  const anchor = baseName ? (baseName.match(/[A-Za-z0-9]+/) ?? [""])[0] : "";
+  if (anchor.length >= 3 && n && !new RegExp(`\\b${anchor}`, "i").test(n)) n =`${anchor} ${n}`;
+  n = clean(n);
+  if (n.split(" ").length < 2 || !isPlausibleProductName(n) || kindOfName(n) !== "accessory" || ADDON_BANNED.test(n)) return null;
   return { name: n, kind: "addon", sources: ["listing"], evidence: [listingId ? `listing ${listingId}` : "a scanned listing"] };
+}
+
+const LOOSE_STOP = new Set(["microsoft", "official", "the", "for", "new", "genuine", "oem", "a", "an", "of", "with", "and"]);
+const looseTokens = (name: string) => name.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t && !LOOSE_STOP.has(t)).map((t) => (t.length > 3 && t.endsWith("s") ? t.slice(0, -1) : t));
+
+/**
+ * Whether two add-on names are the same accessory said differently ("Xbox Wireless Controller" / "Microsoft Xbox Wireless Controller - Carbon Black" / "Xbox Wireless Controllers" / "Xbox
+ * Controller"): one name's words are all inside the other's, with at least two words in common. Used so an add-on the person dismissed does not come back under another spelling.
+ */
+export function sameAddonLoosely(a: string, b: string): boolean {
+  const ta = new Set(looseTokens(a));
+  const tb = new Set(looseTokens(b));
+  if (ta.size === 0 || tb.size === 0) return false;
+  const [small, big] = ta.size <= tb.size ? [ta, tb] : [tb, ta];
+  return [...small].every((t) => big.has(t)) && small.size >= 2;
 }

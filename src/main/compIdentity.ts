@@ -22,7 +22,7 @@ import {
   tokens,
 } from "./compFilter.js";
 import { colorsIn } from "./colors.js";
-import { hardwareTail, mediaAmbiguity, mediaSignal, namesGamePlatform, stripDescriptors } from "./productKind.js";
+import { accessorySignal, hardwareTail, kindOfName, mediaAmbiguity, mediaSignal, namesGamePlatform, stripDescriptors } from "./productKind.js";
 import { editionConflict, extractVariantAttributes, identityTokens } from "./variantIdentity.js";
 import { attributeFindings } from "./identityModel.js";
 import { knowledgeFindings, knowledgeProvider } from "./knowledgeRegistry.js";
@@ -155,9 +155,18 @@ function judgeAgainst(reference: string, title: string, requiredTerms: string[],
       break;
     }
   }
+  // An ACCESSORY entry ("Xbox Wireless Controller") is priced by accessory listings only: a title about a device that merely lists the accessory as included ("Xbox Series X Console with
+  // Controller") is the device. And a DEVICE entry is not priced by a storage card, dock, case or similar made for it ("Seagate Storage Expansion Card 1TB for Xbox Series X").
+  const refIsAccessory = kindOfName(stripDescriptors(reference)) === "accessory";
+  const titleAccessory = accessorySignal(title);
+  if (!broken && refIsAccessory && !titleAccessory) mark("rejected", "ACCESSORY", `the title is about a device (the accessory is only listed as included), not the accessory itself`);
+  if (!broken && !refIsAccessory) {
+    const made = /\b(expansion card|memory card|charging (?:dock|station|stand)|carrying case|screen protector|faceplate)\b/i.exec(title);
+    if (made && !lowerRef.includes(made[1].toLowerCase())) mark("rejected", "ACCESSORY", `the title is an accessory ("${made[1]}") for the product, not the product`);
+  }
   // A game, disc or other software that merely names the platform or shares a word ("Guardians of the Galaxy (Xbox Series X)") is not the console named "... Galaxy ...".
   const mediaInTitle = mediaSignal(title);
-  if (mediaInTitle && !mediaSignal(reference)) mark("rejected", "MEDIA", `the title reads as a game or software for a platform ("${mediaInTitle}"), not the product`);
+  if (mediaInTitle && !mediaSignal(reference) && !(refIsAccessory && titleAccessory)) mark("rejected", "MEDIA", `the title reads as a game or software for a platform ("${mediaInTitle}"), not the product`);
   else if (!mediaInTitle) {
     // "Halo Xbox Series X Brand New": the words cannot tell a special-edition console from the game (or a mislisting); never exact on words alone, the photos decide.
     const ambiguous = mediaAmbiguity(title);

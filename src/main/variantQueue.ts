@@ -10,7 +10,9 @@ import type { VariantVerdict } from "./variantEvidence.js";
 
 export interface QueueStore {
   upsertCandidates(parentId: string, candidates: Candidate[], now?: number): number;
-  nextQueuedCandidates(kind: "variant" | "addon", limit: number): StoredCandidate[];
+  nextQueuedCandidates(kind: "variant" | "addon", limit: number, now?: number): StoredCandidate[];
+  deferCandidate(parentId: string, kind: "variant" | "addon", key: string, note: string, now?: number): "waiting" | "gave_up";
+  countQueuedCandidates(): number;
   setCandidateStatus(parentId: string, kind: "variant" | "addon", key: string, status: StoredCandidate["status"], note: string | null, entryId?: string | null, now?: number): void;
 }
 
@@ -119,7 +121,7 @@ const toCandidate = (c: StoredCandidate): Candidate => ({ name: c.name, kind: c.
 export async function runQueueTick(deps: TickDeps, opts: { variants?: number; addons?: number; gapMs?: number } = {}): Promise<TickResult> {
   const result: TickResult = { added: [], suggested: [], rejected: [], addonsAdded: [], deferred: 0, stopped: null };
   const gap = opts.gapMs ?? TICK_GAP_MS;
-  const todo = [...deps.store.nextQueuedCandidates("variant", opts.variants ?? TICK_VARIANTS), ...deps.store.nextQueuedCandidates("addon", opts.addons ?? TICK_ADDONS)];
+  const todo = [...deps.store.nextQueuedCandidates("variant", opts.variants ?? TICK_VARIANTS, deps.now?.()), ...deps.store.nextQueuedCandidates("addon", opts.addons ?? TICK_ADDONS, deps.now?.())];
   let first = true;
   for (const q of todo) {
     if (deps.paused()) {
@@ -160,13 +162,15 @@ export async function runQueueTick(deps: TickDeps, opts: { variants?: number; ad
         result.rejected.push(q.name);
       }
     } catch (e) {
-      // a failed check leaves the name queued for the next tick (no status change); it is not dropped
-      deps.note?.(q.parentId, `Could not check "${q.name}" just now; it stays in the queue.`);
+      // A failed check goes to the BACK of the line with a growing wait (a name that always fails must never hold up the good ones behind it), and is set aside with a visible
+      // note after four tries. The reason is kept (short), not the raw error.
+      const why = String((e as Error)?.message ?? "unknown error").replace(/\s+/g, " ").slice(0, 80);
+      const outcome = deps.store.deferCandidate(q.parentId, q.kind, q.key, why, deps.now?.());
+      deps.note?.(q.parentId, outcome === "gave_up" ? `I could not check "${q.name}" after several tries, so I set it aside.` : `Could not check "${q.name}" just now; I will try it again later.`);
       result.deferred++;
     }
   }
-  const stillQueued = deps.store.nextQueuedCandidates("variant", 1_000_000).length + deps.store.nextQueuedCandidates("addon", 1_000_000).length;
-  result.deferred = Math.max(result.deferred, stillQueued);
+  result.deferred = Math.max(result.deferred, deps.store.countQueuedCandidates());
   return result;
 }
 

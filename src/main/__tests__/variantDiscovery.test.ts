@@ -10,6 +10,7 @@ import type { VariantVerdict } from "../variantEvidence.js";
 import {
   addonCandidatesFromPages,
   addonFromListing,
+  sameAddonLoosely,
   decideVariant,
   findingsToCandidates,
   memoryHints,
@@ -157,8 +158,8 @@ run(async () => {
   const paused = await runQueueTick(tdeps({ parentOf: (id) => ({ id, name: "PlayStation 5" }), paused: () => true }));
   check("a paused AI stops the tick and leaves everything queued", paused.stopped === "the AI is paused" && store.listCandidates(base2).every((c) => c.status === "queued"), paused);
   const failing = await runQueueTick(tdeps({ parentOf: (id) => ({ id, name: "PlayStation 5" }), verify: async () => { throw new Error("search down"); } }));
-  check("a failed check leaves the name queued for next time (not dropped, not 'rejected')", store.listCandidates(base2).every((c) => c.status === "queued") && failing.deferred >= 2, failing);
-  const gone = await runQueueTick(tdeps({ parentOf: () => null }));
+  check("a failed check leaves the name queued for next time (not dropped, not 'rejected')", store.listCandidates(base2).every((c) => c.status === "queued") && failing.deferred >= 2 && store.listCandidates(base2).every((c) => c.attempts === 1 && (c.nextTryAt ?? 0) > Date.now()), failing);
+  const gone = await runQueueTick(tdeps({ parentOf: () => null, now: () => Date.now() + 30 * 86400_000 }));
   check("a name whose base was deleted is skipped", store.listCandidates(base2).every((c) => c.status === "skipped"), gone);
   store.deleteProduct(baseId);
   check("deleting a product deletes its found list", store.listCandidates(baseId).length === 0 && store.listCandidates(base2).length === 2);
@@ -175,6 +176,68 @@ run(async () => {
     store.setAddonStatus(dismissedRow!.id, "dismissed");
     return !!a && a.addonProductId === "entry-1" && a.enabled === false && a.source === "researched_related" && a.status === "suggested" && store.linkResearchedAddon(base3, "Carrying case", "entry-2") === null;
   })());
+
+  section("TESTER's review: a name that always fails never starves the good ones");
+  const base4 = store.addProductStub("b4", "Nintendo Switch OLED");
+  store.upsertCandidates(base4, ["Bad One", "Bad Two", "Bad Three"].map((n) => ({ name: `Nintendo Switch OLED ${n}`, kind: "variant" as const, sources: ["catalogue" as const], evidence: [] })), 1);
+  store.upsertCandidates(base4, [{ name: "Nintendo Switch OLED Zelda Edition", kind: "variant", sources: ["catalogue"], support: "confirmed", evidence: ["nintendo.com"] }], 2);
+  let clock = 1_000_000;
+  const flaky = tdeps({ parentOf: (id) => ({ id, name: "Nintendo Switch OLED" }), now: () => clock, verify: async (n) => { if (/Bad/.test(n)) throw new Error("page unreadable"); return verdict(n, "verified", ["nintendo.com"]); } });
+  await runQueueTick(flaky, { variants: 3 });
+  clock += 60_000;
+  await runQueueTick(flaky, { variants: 3 });
+  check("the good name is reached on the SECOND tick, not never", store.listCandidates(base4).find((c) => /Zelda/.test(c.name))?.status === "added", store.listCandidates(base4).map((c) => `${c.name}:${c.status}:${c.attempts}`));
+  check("the failing names are backing off, with the reason kept short", store.listCandidates(base4).filter((c) => /Bad/.test(c.name)).every((c) => c.status === "queued" && c.attempts === 1 && (c.nextTryAt ?? 0) > clock && /could not be checked just now/.test(c.note ?? "")));
+  check("a name still in its back-off is not offered", store.nextQueuedCandidates("variant", 10, clock).every((c) => !/Bad/.test(c.name)) && store.nextQueuedCandidates("variant", 10, clock + 7 * 3600_000).some((c) => /Bad/.test(c.name)));
+  for (let i = 0; i < 5; i++) {
+    clock += 7 * 3600_000;
+    await runQueueTick(flaky, { variants: 3 });
+  }
+  check("after four failed tries a name is set aside with a visible note, not retried forever", store.listCandidates(base4).filter((c) => /Bad/.test(c.name)).every((c) => c.status === "skipped" && /set aside/.test(c.note ?? "")), store.listCandidates(base4).map((c) => `${c.name}:${c.status}:${c.attempts}`));
+
+  section("TESTER's review: only real versions come out of eBay's item specifics");
+  const messy: AspectDistribution[] = [
+    { name: "Type", values: [{ value: "Home Console", count: 300 }, { value: "Console Only", count: 80 }] },
+    { name: "Style", values: [{ value: "Standard", count: 100 }, { value: "Console with Controller", count: 40 }] },
+    { name: "Bundle Description", values: [{ value: "With 2 Controllers", count: 20 }, { value: "Console + Game", count: 15 }] },
+    { name: "Version", values: [{ value: "NTSC-U/C (US/Canada)", count: 200 }] },
+    { name: "Series", values: [{ value: "Series X", count: 300 }] },
+    { name: "Edition", values: [{ value: "Standard Edition", count: 60 }, { value: "Console Only", count: 9 }, { value: "Halo Infinite Limited Edition", count: 8 }, { value: "Refurbished Edition", count: 7 }] },
+    { name: "Storage Capacity", values: [{ value: "1 TB", count: 200 }, { value: "2 TB", count: 60 }] },
+  ];
+  const clean = specificsToCandidates("Xbox Series X", messy, 500).map((c) => c.name);
+  check("only storage, colour and a real edition remain", clean.join() === "Xbox Series X 1TB,Xbox Series X 2TB,Xbox Series X Halo Infinite Limited Edition", clean);
+  check("a phone and a camera get no description words either", specificsToCandidates("iPhone 15 Pro Max", [{ name: "Type", values: [{ value: "Smartphone", count: 90 }, { value: "Bar", count: 40 }] }, { name: "Storage Capacity", values: [{ value: "256 GB", count: 50 }] }], 200).map((c) => c.name).join() === "iPhone 15 Pro Max 256GB" && specificsToCandidates("Canon EOS R6 Mark II", [{ name: "Type", values: [{ value: "Mirrorless", count: 50 }, { value: "Body Only", count: 30 }, { value: "With 24-105mm Lens", count: 20 }] }], 100).length === 0);
+  check("eBay specifics plus a source page that does not state the whole name are not two voices", decideVariant(solo(["ebay_specifics"]), { ...verdict("x", "supported", ["bestbuy.com"]), sources: [{ ...verdict("x", "supported", ["bestbuy.com"]).sources[0], fullMatch: false }] }).action === "suggest");
+
+  section("TESTER's review: marketing copy and other platforms are not add-ons");
+  const adPages: PageText[] = [
+    { url: "https://www.xbox.com/shop", sourceClass: "manufacturer", text: "Add to Cart Stand by for deals. Free Shipping Cable included. Shop All Controller options. Xbox Game Pass Controller offers. New Wireless Headset bundles. Xbox Cloud Gaming Remote Play. Windows 11 PC Controller. Used Controller, Open Box Controller, Refurbished Controller." },
+    { url: "https://retail.example.com/x", sourceClass: "retailer", text: "Black Friday Stand sale. Nintendo Switch Pro Controller. PlayStation DualSense Wireless Controller. PS5 Dock. Xbox Series X Console." },
+  ];
+  check("none of that becomes an add-on", addonCandidatesFromPages("Xbox Series X", adPages).length === 0, addonCandidatesFromPages("Xbox Series X", adPages).map((c) => c.name));
+  const goodPage: PageText[] = [{ url: "https://www.xbox.com/accessories", sourceClass: "manufacturer", text: "The Xbox Wireless Controller. Compatible with Xbox Series X|S: the Seagate Storage Expansion Card for Xbox Series X is 1TB. Pair the Wireless Headset for Xbox with it." }];
+  const goodNames = addonCandidatesFromPages("Xbox Series X", goodPage).map((c) => c.name);
+  check("a real accessory on the maker's page is kept: with the product line in its name, or 'for <product>' beside it", goodNames.includes("Xbox Wireless Controller") && goodNames.includes("Seagate Storage Expansion Card"), goodNames);
+  check("one mention on a retailer page is not enough", addonCandidatesFromPages("Xbox Series X", [{ url: "https://r.example.com", sourceClass: "retailer", text: "Xbox Wireless Controller" }]).length === 0);
+
+  section("TESTER's review: a scanned listing's extra becomes ONE clean add-on name for the base product");
+  check("'Second Wireless Controller' becomes 'Xbox Wireless Controller'", addonFromListing("Second Wireless Controller", "L1", "Xbox Series X")?.name === "Xbox Wireless Controller");
+  check("'2 extra controllers', 'spare battery' lose the quantity words and gain the product line", addonFromListing("extra Controller", null, "Xbox Series X")?.name === "Xbox Controller" && addonFromListing("spare Battery Pack", null, "Xbox Series X")?.name === "Xbox Battery Pack");
+  check("lists and non-accessories are refused", ["charger + 2 games", "HDMI cable and power cord", "Xbox Series X Galaxy Black", "controller, headset", "box"].every((n) => addonFromListing(n, null, "Xbox Series X") === null));
+  check("a bare 'Controller' with no product line to add stays refused", addonFromListing("Controller", null) === null);
+
+  section("TESTER's review: a dismissed add-on stays dismissed under another spelling");
+  check("same accessory, said differently", [["Xbox Wireless Controller", "Microsoft Xbox Wireless Controller - Carbon Black"], ["Xbox Wireless Controller", "Xbox Controller"], ["Xbox Wireless Controller", "Xbox Wireless Controllers"], ["Xbox Wireless Controller", "xbox wireless controller"]].every(([a, b]) => sameAddonLoosely(a, b)));
+  check("different accessories are not the same", !sameAddonLoosely("Xbox Wireless Controller", "Xbox Stereo Headset") && !sameAddonLoosely("Xbox Wireless Controller", "Controller") && !sameAddonLoosely("Xbox Elite Wireless Controller", "Xbox Stereo Headset"));
+
+  section("TESTER's review: accessory entries and device entries do not price each other");
+  const ctrl = (title: string) => classifyComparable({ name: "Xbox Wireless Controller" }, title);
+  check("a console 'with controller' listing does not price the controller entry", !usableForValuation(ctrl("Xbox Series X Console with Controller").verdict), ctrl("Xbox Series X Console with Controller"));
+  check("a real controller listing 'for Series X' is not refused as a game", usableForValuation(ctrl("Xbox Wireless Controller for Series X Carbon Black").verdict), ctrl("Xbox Wireless Controller for Series X Carbon Black"));
+  const consoleRef = (title: string) => classifyComparable({ name: "Xbox Series X" }, title);
+  check("a storage card, dock or case 'for Xbox Series X' does not price the console", ["Seagate Storage Expansion Card 1TB for Xbox Series X", "Xbox Series X Charging Dock", "Carrying Case for Xbox Series X", "Xbox Series X Memory Card"].every((t) => !usableForValuation(consoleRef(t).verdict)));
+  check("the console's own listing still prices the console", usableForValuation(consoleRef("Microsoft Xbox Series X 1TB Console Black").verdict));
 
   section("sources that fail are reported, never read as 'no versions'");
   const quiet = await gatherCandidates({ id: base3, name: "Switch" }, gdeps({ ebaySpecifics: async () => null, editions: async () => null, memory: async () => null, addonPages: async () => null }));

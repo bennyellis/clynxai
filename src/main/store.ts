@@ -25,6 +25,7 @@ export interface StoredCandidate {
   note: string | null;
   entryId: string | null;
   attempts: number;
+  nextTryAt: number | null;
   firstSeenAt: number;
   lastCheckedAt: number | null;
 }
@@ -184,6 +185,7 @@ export class Store {
         attempts INTEGER NOT NULL DEFAULT 0,
         first_seen_at INTEGER NOT NULL,
         last_checked_at INTEGER,
+        next_try_at INTEGER,
         PRIMARY KEY (parent_id, kind, cand_key)
       );
       CREATE INDEX IF NOT EXISTS idx_variant_candidates_status ON variant_candidates (status, kind);
@@ -2605,15 +2607,40 @@ export class Store {
     return rows.map((r) => this.rowToCandidate(r));
   }
 
-  /** The next queued names (oldest first) across every product, for the background worker. */
-  nextQueuedCandidates(kind: "variant" | "addon", limit: number): StoredCandidate[] {
-    const rows = this.db.prepare("SELECT * FROM variant_candidates WHERE status = 'queued' AND kind = ? ORDER BY first_seen_at, name LIMIT ?").all(kind, limit) as Array<Record<string, unknown>>;
+  /** The next queued names across every product, for the background worker: names never tried come first, then the ones that failed least; a name waiting out a back-off is not offered yet. */
+  nextQueuedCandidates(kind: "variant" | "addon", limit: number, now: number = Date.now()): StoredCandidate[] {
+    const rows = this.db
+      .prepare("SELECT * FROM variant_candidates WHERE status = 'queued' AND kind = ? AND (next_try_at IS NULL OR next_try_at <= ?) ORDER BY attempts, first_seen_at, name LIMIT ?")
+      .all(kind, now, limit) as Array<Record<string, unknown>>;
     return rows.map((r) => this.rowToCandidate(r));
+  }
+
+  /** How many names are still waiting (including those in a back-off), for "N waiting to be checked". */
+  countQueuedCandidates(): number {
+    return Number((this.db.prepare("SELECT COUNT(*) n FROM variant_candidates WHERE status = 'queued'").get() as { n: number }).n);
+  }
+
+  static readonly CANDIDATE_RETRY_DELAYS_MS = [10 * 60_000, 30 * 60_000, 2 * 3600_000, 6 * 3600_000];
+
+  /**
+   * A check of this name FAILED (a blocked search, an unreadable page): it goes to the back of the line with a growing wait, so a name that always fails can never hold up the good ones
+   * behind it, and after four failures it is set aside with a visible note instead of being retried forever.
+   */
+  deferCandidate(parentId: string, kind: "variant" | "addon", key: string, note: string, now: number = Date.now()): "waiting" | "gave_up" {
+    const row = this.db.prepare("SELECT attempts FROM variant_candidates WHERE parent_id = ? AND kind = ? AND cand_key = ?").get(parentId, kind, key) as { attempts: number } | undefined;
+    const attempts = (row?.attempts ?? 0) + 1;
+    const delay = Store.CANDIDATE_RETRY_DELAYS_MS[attempts - 1];
+    if (delay === undefined) {
+      this.db.prepare("UPDATE variant_candidates SET status = 'skipped', note = ?, attempts = ?, last_checked_at = ?, next_try_at = NULL WHERE parent_id = ? AND kind = ? AND cand_key = ?").run(`could not be checked after ${attempts} tries (${note}); set aside`, attempts, now, parentId, kind, key);
+      return "gave_up";
+    }
+    this.db.prepare("UPDATE variant_candidates SET note = ?, attempts = ?, last_checked_at = ?, next_try_at = ? WHERE parent_id = ? AND kind = ? AND cand_key = ?").run(`could not be checked just now (${note}); will try again`, attempts, now, now + delay, parentId, kind, key);
+    return "waiting";
   }
 
   setCandidateStatus(parentId: string, kind: "variant" | "addon", key: string, status: CandidateStatus, note: string | null, entryId: string | null = null, now: number = Date.now()): void {
     this.db
-      .prepare("UPDATE variant_candidates SET status = ?, note = ?, entry_id = COALESCE(?, entry_id), attempts = attempts + 1, last_checked_at = ? WHERE parent_id = ? AND kind = ? AND cand_key = ?")
+      .prepare("UPDATE variant_candidates SET status = ?, note = ?, entry_id = COALESCE(?, entry_id), attempts = attempts + 1, last_checked_at = ?, next_try_at = NULL WHERE parent_id = ? AND kind = ? AND cand_key = ?")
       .run(status, note, entryId, now, parentId, kind, key);
   }
 
@@ -2630,6 +2657,7 @@ export class Store {
       note: (r.note as string | null) ?? null,
       entryId: (r.entry_id as string | null) ?? null,
       attempts: Number(r.attempts),
+      nextTryAt: r.next_try_at == null ? null : Number(r.next_try_at),
       firstSeenAt: Number(r.first_seen_at),
       lastCheckedAt: r.last_checked_at == null ? null : Number(r.last_checked_at),
     };
