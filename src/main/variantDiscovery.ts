@@ -291,7 +291,7 @@ export function addonFromListing(name: string, listingId: string | null, baseNam
   let n = words.join(" ");
   const anchor = baseName ? (baseName.match(/[A-Za-z0-9]+/) ?? [""])[0] : "";
   const allGeneric = words.every((w) => GENERIC_ACCESSORY_WORDS.has(w.toLowerCase()));
-  if (anchor.length >= 3 && allGeneric && !new RegExp(`\b${anchor}`, "i").test(n)) n = `${anchor} ${n}`;
+  if (anchor.length >= 3 && allGeneric && !new RegExp(`\\b${anchor}`, "i").test(n)) n =`${anchor} ${n}`;
   n = clean(n);
   if (!isPlausibleProductName(n) || kindOfName(n) !== "accessory" || ADDON_BANNED.test(n)) return null;
   return { name: n, kind: "addon", sources: ["listing"], evidence: [listingId ? `listing ${listingId}` : "a scanned listing"] };
@@ -299,16 +299,16 @@ export function addonFromListing(name: string, listingId: string | null, baseNam
 
 const LOOSE_STOP = new Set(["microsoft", "xbox", "official", "genuine", "oem", "the", "for", "new", "a", "an", "of", "with", "and", "wireless"]);
 const COLOUR_WORDS = new Set("black white red blue green yellow orange pink purple gray grey silver gold carbon shock robot pulse electric volt".split(" "));
-const looseTokens = (name: string) =>
+const looseTokens = (name: string, dropColours: boolean) =>
   name
     .toLowerCase()
     .split(/[^a-z0-9]+/)
-    .filter((t) => t && !LOOSE_STOP.has(t) && !COLOUR_WORDS.has(t))
+    .filter((t) => t && !LOOSE_STOP.has(t) && !(dropColours && COLOUR_WORDS.has(t)))
     .map(singular);
 
-/** One key for an accessory's name with brand, "wireless", colours and plurals set aside: "Xbox Wireless Controller", "Xbox Wireless Controllers" and "Microsoft Xbox Controller - Carbon Black" share it. */
+/** One key for an accessory's name with the brand, "wireless" and plurals set aside (COLOURS STAY: a Pulse Red controller is its own entry): "Xbox Wireless Controller" and "Xbox Wireless Controllers" share it. */
 export function addonEntryKey(name: string): string {
-  return looseTokens(name).sort().join(" ");
+  return looseTokens(name, false).sort().join(" ");
 }
 
 /**
@@ -317,6 +317,6 @@ export function addonEntryKey(name: string): string {
  * "Xbox Elite Wireless Controller" (a different product).
  */
 export function sameAddonLoosely(a: string, b: string): boolean {
-  const ka = addonEntryKey(a);
-  return ka !== "" && ka === addonEntryKey(b);
+  const ka = looseTokens(a, true).sort().join(" ");
+  return ka !== "" && ka === looseTokens(b, true).sort().join(" ");
 }

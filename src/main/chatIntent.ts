@@ -142,7 +142,7 @@ export const SIDE_EFFECT_TOOLS = new Set([
   "add_reference_photos",
 ]);
 
-const GREETING = /^(?:hi|hello|hey|yo|sup|hiya|howdy|good (?:morning|afternoon|evening)|thanks|thank you|thx|ok|okay|cool|nice|great|awesome|lol)\b[\s!.,?]*$/i;
+const GREETING = /^(?:hi|hello|hey|yo|sup|hiya|howdy|good (?:morning|afternoon|evening)|thanks|thank you|thx|ok|okay|cool|nice|great|awesome|lol)(?:\s+(?:there|again|all|everyone|clynx|buddy|friend|so much|a lot|very much|man|mate))*\b[\s!.,?]*$/i;
 const QUESTION_START = /^(?:what|whats|what's|how|why|which|who|when|where|is|are|was|were|do|does|did|can|could|would|should|will|tell me|explain|any)\b/i;
 const ASKS_FOR_ACTION = /\b(?:start|stop|run|begin|launch|kick off|scan|add|remove|delete|clear|create|make|set|change|turn|switch|enable|disable|pause|resume|block|blacklist|note|remind|remember|log|save|track|watch|monitor|alert|notify|hunt|look for|search for|find me|go ahead|do it)\b/i;
 const IMPERATIVE = /^(?:please\s+|pls\s+|now\s+|also\s+|and\s+|then\s+)*(?:start|stop|add|remove|delete|clear|create|make|set|change|turn|switch|enable|disable|pause|resume|block|blacklist|note|remind|remember|log|save|track|watch|monitor|run|begin|launch|scan)\b/i;
@@ -160,7 +160,7 @@ export function isInformationalOnly(message: string): boolean {
   if (/https?:\/\//i.test(whole)) return false; // a pasted link is material to act on (and its "?" is not a question)
   if (GREETING.test(whole)) return true;
   // a greeting in front ("hey start the scanner", "hello can you add a Series S") is not part of the request: judge what comes after it
-  const m = whole.replace(/^(?:hi|hello|hey|yo|hiya|howdy|good (?:morning|afternoon|evening))\b[\s,!.:;-]*/i, "").trim();
+  const m = whole.replace(/^(?:hi|hello|hey|yo|hiya|howdy|good (?:morning|afternoon|evening))(?:\s+(?:there|clynx|everyone|all))?\b[\s,!.:;-]*/i, "").trim();
   if (!m || GREETING.test(m)) return true; // "hey thanks"
   const questionLike = /\?/.test(m) || QUESTION_START.test(m);
   if (!questionLike) return false;

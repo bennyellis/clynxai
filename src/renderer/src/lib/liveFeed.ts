@@ -39,7 +39,10 @@ const CHIP: Record<FlipLevel, { text: string; tone: TileTone }> = {
 };
 
 const money = (n: number) => `$${Math.round(n)}`;
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
+const clip = (s: string, n: number) => {
+  const chars = Array.from(s); // by code point, so an emoji is never cut in half
+  return chars.length > n ? `${chars.slice(0, n - 1).join("").trimEnd()}…` : s;
+};
 
 /** The latest thing Clynx said about this product, in its own words, for the live tile (a "start" line is the opener and is only used when nothing else was said yet). */
 export function latestThought(entry: Pick<DiscoveryEntry, "thoughts">): string | null {
@@ -51,13 +54,15 @@ export function latestThought(entry: Pick<DiscoveryEntry, "thoughts">): string |
 export function liveTileModel(entry: Pick<DiscoveryEntry, "status" | "startedAt" | "finishedAt" | "thoughts">, level: FlipLevel | null, valueUsd: number | null, now: number): LiveTileModel {
   const ago = agoText(entry.finishedAt ?? entry.startedAt, now);
   if (entry.status === "researching") {
-    return { chip: "Researching", tone: "live", line: latestThought(entry) ?? "Looking into it", researching: true, compact: false, ago };
+    return { chip: "Researching", tone: "live", line: latestThought(entry) ?? "Starting…", researching: true, compact: false, ago };
   }
   if (entry.status === "failed") {
     return { chip: "Didn't work out", tone: "warn", line: ago, researching: false, compact: true, ago };
   }
-  const chip = CHIP[level ?? "unknown"];
-  return { chip: chip.text, tone: chip.tone, line: valueUsd !== null && valueUsd > 0 ? `Worth about ${money(valueUsd)} · ${ago}` : ago, researching: false, compact: true, ago };
+  const known = level !== null && level !== "unknown" ? CHIP[level] : undefined;
+  const chip = known ?? CHIP.unknown;
+  // "Can't judge" next to "Worth about $X" would contradict itself: with no verdict the line is only how long ago
+  return { chip: chip.text, tone: chip.tone, line: known && valueUsd !== null && valueUsd > 0 ? `Worth about ${money(valueUsd)} · ${ago}` : ago, researching: false, compact: true, ago };
 }
 
 /** Researching tiles first (newest first), then the rest in the order they arrived; the column never reshuffles finished tiles while you read them. */

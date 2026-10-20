@@ -13,7 +13,7 @@ run(async () => {
   const r = liveTileModel(entry({ status: "researching", finishedAt: null, thoughts: [{ ts: 1, kind: "start", text: "Looking into Xbox Series X" }, { ts: 2, kind: "step", text: "Reading the Microsoft page for the Galaxy edition" }] }), null, null, NOW);
   check("chip says Researching, tone is live, and it is not compact", r.chip === "Researching" && r.tone === "live" && r.researching && !r.compact, r);
   check("its status line is the latest thing Clynx said (not the opener)", r.line === "Reading the Microsoft page for the Galaxy edition", r.line);
-  check("with only the opener said, the opener is used; with nothing said, 'Looking into it'", liveTileModel(entry({ status: "researching", finishedAt: null, thoughts: [{ ts: 1, kind: "start", text: "Looking into Xbox Series X" }] }), null, null, NOW).line === "Looking into Xbox Series X" && liveTileModel(entry({ status: "researching", finishedAt: null }), null, null, NOW).line === "Looking into it");
+  check("with only the opener said, the opener is used; with nothing said, 'Starting…'", liveTileModel(entry({ status: "researching", finishedAt: null, thoughts: [{ ts: 1, kind: "start", text: "Looking into Xbox Series X" }] }), null, null, NOW).line === "Looking into Xbox Series X" && liveTileModel(entry({ status: "researching", finishedAt: null }), null, null, NOW).line === "Starting…");
   check("a long thought is cut to one readable line", latestThought({ thoughts: [{ ts: 1, kind: "step", text: "word ".repeat(80) }] })!.length <= 110 && latestThought({ thoughts: [{ ts: 1, kind: "step", text: "word ".repeat(80) }] })!.endsWith("…"));
 
   section("a finished product folds to one compact line with a verdict chip");
@@ -26,6 +26,15 @@ run(async () => {
   const failed = liveTileModel(entry({ status: "failed" }), null, null, NOW);
   check("a failed one says Didn't work out, in a warning tone, compact", failed.chip === "Didn't work out" && failed.tone === "warn" && failed.compact && failed.line === "3 min ago", failed);
   check("times read naturally", agoText(NOW - 10_000, NOW) === "just now" && agoText(NOW - 5 * 60_000, NOW) === "5 min ago" && agoText(NOW - 3 * 3600_000, NOW) === "3 hr ago" && agoText(NOW - 2 * 86400_000, NOW) === "2 days ago" && agoText(NOW - 86400_000, NOW) === "1 day ago");
+
+  section("TESTER's review of the tiles");
+  check("an 'unknown' verdict with a stored value does not say 'Worth about' next to 'Can't judge'", liveTileModel(entry(), "unknown", 1288, NOW).line === "3 min ago" && liveTileModel(entry(), "unknown", 1288, NOW).chip === "Can't judge");
+  check("an unexpected verdict level falls back to Can't judge instead of throwing", liveTileModel(entry(), "mystery" as never, 100, NOW).chip === "Can't judge");
+  const emojiCut = latestThought({ thoughts: [{ ts: 1, kind: "step", text: "a".repeat(108) + "🎮🎮🎮🎮" }] })!;
+  check("a thought cut near an emoji never leaves half a character", !/[\uD800-\uDBFF]$/.test(emojiCut.replace(/…$/, "")) && Array.from(emojiCut).length <= 110, emojiCut);
+  const tileSrc = fs.readFileSync(path.join(process.cwd(), "src", "renderer", "src", "components", "LiveFeedTile.tsx"), "utf8");
+  check("each tile names the product (tooltip + accessible name with the status) and marks the selected one", (tileSrc.match(/title=\{name\}/g) ?? []).length === 2 && (tileSrc.match(/aria-label=\{`\$\{name\}, \$\{model\.chip\}`\}/g) ?? []).length === 2 && (tileSrc.match(/aria-current=/g) ?? []).length === 2);
+  check("the researching tile no longer repeats 'Looking into it' beside the chip", !/>Looking into it</.test(tileSrc));
 
   section("order: researching first (newest first), the rest untouched");
   const list = [{ id: "a", status: "done", startedAt: 5 }, { id: "b", status: "researching", startedAt: 1 }, { id: "c", status: "failed", startedAt: 9 }, { id: "d", status: "researching", startedAt: 7 }];

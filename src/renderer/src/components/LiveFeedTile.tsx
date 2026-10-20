@@ -52,7 +52,9 @@ export function LiveFeedTile({ name, photoUrl, model, active, badge, onClick }: 
         className="ghost"
         onClick={onClick}
         data-testid="live-tile-compact"
-        title={model.line}
+        title={name}
+        aria-label={`${name}, ${model.chip}`}
+        aria-current={active ? "true" : undefined}
         style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "7px 14px", borderRadius: 0, borderBottom: "1px solid var(--border)", borderLeft: `3px solid ${active ? "var(--accent-1)" : "transparent"}`, background: active ? "var(--bg-card-hover)" : "transparent" }}
       >
         <Thumb url={photoUrl} size={30} />
@@ -69,11 +71,13 @@ export function LiveFeedTile({ name, photoUrl, model, active, badge, onClick }: 
       className="ghost"
       onClick={onClick}
       data-testid="live-tile"
+      title={name}
+      aria-label={`${name}, ${model.chip}`}
+      aria-current={active ? "true" : undefined}
       style={{ display: "flex", flexDirection: "column", gap: 8, width: "calc(100% - 20px)", margin: "10px 10px 0", textAlign: "left", padding: 10, borderRadius: 12, border: `1px solid ${active ? "var(--accent-1)" : "var(--border)"}`, background: "var(--bg-elevated)" }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 12.5 }}>
         <span aria-hidden="true" style={{ width: 9, height: 9, borderRadius: "50%", background: "currentColor", color: "var(--danger)", boxShadow: "0 0 8px currentColor", animation: "liveDotPulse 1.6s ease-in-out infinite", flexShrink: 0 }} />
-        <span style={{ color: "var(--text-muted)" }}>Looking into it</span>
         <span style={{ marginLeft: "auto" }}>{chip}</span>
       </div>
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
