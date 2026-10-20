@@ -29,6 +29,8 @@ export interface CompMatch {
 const NEVER_BY_ID: CompReason[] = ["NOT_WORKING", "LOT_OR_BUNDLE", "ACCESSORY", "MEDIA"];
 const ID_CONFLICT: CompReason[] = ["EDITION", "GENERATION", "TIER", "CAPACITY", "COLOR", "MODEL_NUMBER", "MODEL_LETTER", "MODEL_VARIANT", "SKU", "REGION"];
 /** Words in a TITLE that say it is not a working complete unit (the condition field has its own check). */
+/** "fully working, not as is" / "never cracked" / "no water damage": the word is there to say it does NOT apply. */
+const NEGATED_BROKEN = /\b(?:not|never|isn\x27?t|is not|no|without|zero)\s+(?:an?\s+)?(?:untested|cracked|as[- ]is|dead|bricked|water damage[d]?|red ring|ring of death)\b/gi;
 const BROKEN_TITLE = /\b(untested|cracked|red ring|ring of death|no power|won'?t (?:turn on|power|boot)|dead|bricked|as is|as-is|water damage[d]?)\b/i;
 /** Other makers / platforms: a title naming one of these that the product does not name is a different product, whatever code it carries. */
 const OTHER_BRANDS = /\b(playstation|ps[2-5]|nintendo|switch|wii|samsung|iphone|ipad|apple|sony|google|pixel|lenovo|dell|asus|hp|microsoft|xbox|steam deck|oculus|quest|gopro|canon|nikon|dyson)\b/gi;
@@ -50,7 +52,8 @@ export function matchComp(product: ProductIdentity, comp: SoldComp): CompMatch {
   const judged = classifyComparable(product, comp.title);
   const idBasis = pg && cg ? "gtin" : pe && ce ? "epid" : null;
   // A title that says it is untested / cracked / dead is not a working unit, with or without a code (unless the product IS the broken variant).
-  if (!product.broken && BROKEN_TITLE.test(comp.title)) return { ...base, verdict: "rejected", reason: `NOT_WORKING: the title says "${BROKEN_TITLE.exec(comp.title)![0]}"`, basis: idBasis ?? "title", accepted: false };
+  const sayingBroken = comp.title.replace(NEGATED_BROKEN, " ");
+  if (!product.broken && BROKEN_TITLE.test(sayingBroken)) return { ...base, verdict: "rejected", reason: `NOT_WORKING: the title says "${BROKEN_TITLE.exec(sayingBroken)![0]}"`, basis: idBasis ?? "title", accepted: false };
   // A code that matches is not enough when the title names a DIFFERENT maker or platform ("PlayStation 5 ... Special Edition" carrying an Xbox code): held, never priced.
   if (idBasis) {
     const mine = new Set((product.name.toLowerCase().match(OTHER_BRANDS) ?? []).map((w) => w.toLowerCase()));

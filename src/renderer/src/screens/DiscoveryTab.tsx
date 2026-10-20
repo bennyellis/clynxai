@@ -144,11 +144,14 @@ function earlierEntry(p: ProductProfile): DiscoveryEntry {
     name: p.name,
     source: "scanner",
     status: failed ? "failed" : "done",
-    startedAt: p.updatedAt,
+    // History from before this session sits at the TOP of the stream, whatever its last-updated time: a product that was refreshed an hour ago must not look like it was found just now.
+    startedAt: Math.min(p.updatedAt, SESSION_STARTED_AT - 1),
     finishedAt: p.updatedAt,
     thoughts,
   };
 }
+
+const SESSION_STARTED_AT = Date.now();
 
 type Filter = "all" | "worth" | "pass" | "researching";
 
@@ -166,7 +169,9 @@ const ui: {
   filter: Filter;
   mode: ViewMode;
   pos: StickPosition | null;
-} = { live: [], fetched: false, focus: null, filter: "all", mode: DEFAULT_VIEW, pos: null };
+  /** Where each view was left when you switched away, so going back finds your place in a long stream. */
+  places: Partial<Record<ViewMode, StickPosition>>;
+} = { live: [], fetched: false, focus: null, filter: "all", mode: DEFAULT_VIEW, pos: null, places: {} };
 const resetters = new Set<() => void>();
 
 // The Database's home (a second click on its sidebar icon) clears this tab's focus, filter, view and scroll too.
@@ -175,6 +180,7 @@ export function resetDiscoveryUi(): void {
   ui.filter = "all";
   ui.mode = DEFAULT_VIEW;
   ui.pos = null;
+  ui.places = {};
   resetters.forEach((fn) => fn());
 }
 
@@ -300,11 +306,20 @@ export function DiscoveryTab({ products, onOpenProduct }: { products: ProductPro
       skipModeScroll.current = false; // a jump to a card is in progress: it scrolls to the card, not the bottom
       return;
     }
-    stick.scrollToBottom();
+    // back in a view you left in the middle of reading: put its scroll back where it was; a view you left at the latest (or never opened) goes to the latest
+    const place = ui.places[mode];
+    if (place && !place.stuck) {
+      stick.release();
+      requestAnimationFrame(() => {
+        if (stick.element) stick.element.scrollTop = place.top;
+      });
+    } else stick.scrollToBottom();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
   function showView(next: ViewMode) {
+    if (next === mode) return;
+    ui.places[mode] = stick.getPosition(); // remember where this view was left
     setMode(next);
   }
 

@@ -14,6 +14,7 @@ import { VariantsFoundSection } from "../components/VariantsFoundSection.js";
 import { DiscoveryTab, resetDiscoveryUi } from "./DiscoveryTab.js";
 import { ReviewTab } from "./ReviewTab.js";
 import { keepRangeUsd } from "../../../main/resaleMath.js";
+import { tilePrice } from "../lib/tilePrice.js";
 import { imageSource } from "../lib/imageSource.js";
 import { AutoFolderMenu, folderLabel, folderMetaFor, pictureNote, useFolderMeta, type FolderMeta } from "../components/AutoFolderTools.js";
 import { FolderDialog, LibraryNote, MY_FOLDERS, NeedsReviewPanel, OrganizeCard, PhotoActions, TrashPanel, doLibraryOp, folderPaths, statusBadge, type LibraryFolder } from "../components/LibraryTools.js";
@@ -2101,6 +2102,7 @@ function ProductTile({
   hot?: boolean;
 }) {
   const tileRef = useImpression(product);
+  const shownPrice = tilePrice(product);
   const [searching, setSearching] = useState(false);
   // Per explicit instruction — themed popups only, never window.confirm.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -2236,6 +2238,28 @@ function ProductTile({
         >
           <StarIcon filled={product.prioritized} />
         </button>
+        {/* The eBay average over the bottom-left of the thumbnail (owner request): what it typically sells for, so "is this worth flipping" is clear without opening the page. The search / delete
+            buttons sit bottom-right, so the two never overlap. */}
+        <span
+          data-testid="tile-price"
+          title={shownPrice.title}
+          style={{
+            position: "absolute",
+            bottom: 6,
+            left: 6,
+            maxWidth: "calc(100% - 78px)",
+            padding: "3px 8px",
+            borderRadius: 8,
+            background: "rgba(20,18,28,0.78)",
+            border: shownPrice.tone === "asking" ? "1px dashed rgba(251,191,36,0.8)" : "1px solid rgba(255,255,255,0.25)",
+            color: shownPrice.tone === "none" ? "rgba(255,255,255,0.7)" : "white",
+            lineHeight: 1.15,
+            pointerEvents: "auto",
+          }}
+        >
+          <span style={{ display: "block", fontWeight: 700, fontSize: shownPrice.tone === "none" ? 11.5 : 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{shownPrice.text}</span>
+          {shownPrice.sub && <span style={{ display: "block", fontSize: 10, opacity: 0.85, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: shownPrice.tone === "asking" ? "#fbbf24" : undefined }}>{shownPrice.sub}</span>}
+        </span>
         {hot && (
           <span
             title={`Sells for a high price AND fast (avg. ${product.ebayAvgRunTimeDays !== null && product.ebayAvgRunTimeDays < 1 ? `${(product.ebayAvgRunTimeDays * 24).toFixed(1)}h` : `${product.ebayAvgRunTimeDays?.toFixed(1)}d`} to sell)`}

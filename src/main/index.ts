@@ -2408,11 +2408,31 @@ const verifyClaim = makeClaimVerifier({
   },
 });
 
+/** A research that has not finished after this long is stopped and shown as failed (Beta 28 live test: one sat on "Looking into it" for 15+ minutes behind overlapping browser launches). */
+const RESEARCH_WATCHDOG_MS = 12 * 60_000;
+
 async function runProductLookup(...args: Parameters<typeof runProductLookupInner>): Promise<void> {
   researchActive++;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await runProductLookupInner(...args);
+    const stuck = new Promise<"stuck">((resolve) => {
+      timer = setTimeout(() => resolve("stuck"), RESEARCH_WATCHDOG_MS);
+    });
+    const outcome = await Promise.race([runProductLookupInner(...args).then(() => "done" as const), stuck]);
+    if (outcome === "stuck") {
+      const [id, name] = args;
+      const friendly = "This research took too long, so I stopped it. I'll try it again by myself.";
+      console.error(`[research] "${name}" was still running after ${Math.round(RESEARCH_WATCHDOG_MS / 60_000)} minutes and was stopped`);
+      discovery.note(id, "warn", friendly);
+      store.markResearchFailed(id, friendly);
+      activeResearch.delete(id);
+      broadcastResearchStatus();
+      discovery.finish(id, "failed");
+      const updated = store.getProductById(id);
+      if (updated) sendToRenderer("products:updated", updated);
+    }
   } finally {
+    if (timer) clearTimeout(timer);
     researchActive--;
   }
 }
