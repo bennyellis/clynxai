@@ -527,6 +527,8 @@ export interface Config {
   // Database chat). Defaults to true, matching the behavior this app has
   // always had.
   autoResearchListings: boolean;
+  /** The most names (versions and add-ons) Clynx checks in the background in one day, default 60. Each is a web check and often a full research. config.json only. */
+  backgroundVariantsPerDay?: number;
   // Per explicit instruction — condition-awareness for the Database side:
   // gates BOTH (a) vision.ts detecting visible flaws in listing photos
   // (ListingCard's yellow-outline "?" badge) and (b) automatic product

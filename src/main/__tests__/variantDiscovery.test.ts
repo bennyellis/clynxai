@@ -1,6 +1,7 @@
 // Owner decisions 2026-10-20 (CLYNX_VARIANTS_AND_ADDONS_AUDIT): versions found from sources in a fixed order, kept in a queue that never drops a name, one source = a suggestion, and add-ons
 // always get their own accessory entry. Fakes and a throwaway Database only: no network, no model.
 import fs from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
 import { classifyComparable, usableForValuation } from "../compIdentity.js";
@@ -242,6 +243,29 @@ run(async () => {
   const consoleRef = (title: string) => classifyComparable({ name: "Xbox Series X" }, title);
   check("a storage card, dock or case 'for Xbox Series X' does not price the console", ["Seagate Storage Expansion Card 1TB for Xbox Series X", "Xbox Series X Charging Dock", "Carrying Case for Xbox Series X", "Xbox Series X Memory Card"].every((t) => !usableForValuation(consoleRef(t).verdict)));
   check("the console's own listing still prices the console", usableForValuation(consoleRef("Microsoft Xbox Series X 1TB Console Black").verdict));
+
+  section("a daily ceiling keeps the background work from running away (release-gate finding on Beta 29)");
+  const base5 = store.addProductStub("b5", "Steam Deck");
+  store.upsertCandidates(base5, Array.from({ length: 10 }, (_, i) => ({ name: `Steam Deck Edition ${String.fromCharCode(65 + i)}`, kind: "variant" as const, sources: ["catalogue" as const], support: "confirmed" as const, evidence: ["valve.com"] })), 1);
+  let left = 4;
+  const ceilingDeps = tdeps({ parentOf: (id) => ({ id, name: "Steam Deck" }), remainingToday: () => left });
+  const capped = await runQueueTick(ceilingDeps, { variants: 10, addons: 0, gapMs: 0 });
+  check("only as many names as the day still allows are checked, the rest stay queued", capped.added.length + capped.suggested.length + capped.rejected.length === 4 && store.listCandidates(base5).filter((c) => c.status === "queued").length === 6, capped);
+  left = 0;
+  const none = await runQueueTick(ceilingDeps, { variants: 10, addons: 3, gapMs: 0 });
+  check("with no allowance left nothing is checked, and it says why", none.stopped === "today's limit for background versions and add-ons is used" && none.added.length + none.suggested.length === 0 && none.deferred >= 6, none);
+  check("without a ceiling (undefined) the tick behaves as before", (await runQueueTick(tdeps({ parentOf: (id) => ({ id, name: "Steam Deck" }) }), { variants: 10, addons: 0, gapMs: 0 })).deferred === 0);
+  check("checks are counted from a moment on, by when they happened", store.countCandidateChecksSince(0) > 0 && store.countCandidateChecksSince(Date.now() + 90 * 86_400_000) === 0);
+
+  section("an older development database gets the back-off column instead of failing");
+  const oldPath = path.join(dir, "old.db");
+  const old = new DatabaseSync(oldPath);
+  old.exec("CREATE TABLE variant_candidates (parent_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'variant', cand_key TEXT NOT NULL, name TEXT NOT NULL, sources TEXT NOT NULL DEFAULT '[]', evidence TEXT NOT NULL DEFAULT '[]', support TEXT, status TEXT NOT NULL DEFAULT 'queued', note TEXT, entry_id TEXT, attempts INTEGER NOT NULL DEFAULT 0, first_seen_at INTEGER NOT NULL, last_checked_at INTEGER, PRIMARY KEY (parent_id, kind, cand_key))");
+  old.close();
+  const reopened = new Store(oldPath);
+  const oldBase = reopened.addProductStub("ob", "Switch OLED");
+  reopened.upsertCandidates(oldBase, [{ name: "Switch OLED Zelda Edition", kind: "variant", sources: ["catalogue"], evidence: [] }], 1);
+  check("opening it adds next_try_at and the queue works", reopened.nextQueuedCandidates("variant", 5).length === 1 && reopened.deferCandidate(oldBase, "variant", reopened.listCandidates(oldBase)[0].key, "x", 5) === "waiting");
 
   section("sources that fail are reported, never read as 'no versions'");
   const quiet = await gatherCandidates({ id: base3, name: "Switch" }, gdeps({ ebaySpecifics: async () => null, editions: async () => null, memory: async () => null, addonPages: async () => null }));

@@ -190,6 +190,9 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_variant_candidates_status ON variant_candidates (status, kind);
     `);
+    // a table made by an earlier development build lacks the back-off column
+    const cols = (this.db.prepare("PRAGMA table_info(variant_candidates)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!cols.includes("next_try_at")) this.db.exec("ALTER TABLE variant_candidates ADD COLUMN next_try_at INTEGER");
   }
 
   private migrateBeta13(): void {
@@ -2613,6 +2616,11 @@ export class Store {
       .prepare("SELECT * FROM variant_candidates WHERE status = 'queued' AND kind = ? AND (next_try_at IS NULL OR next_try_at <= ?) ORDER BY attempts, first_seen_at, name LIMIT ?")
       .all(kind, now, limit) as Array<Record<string, unknown>>;
     return rows.map((r) => this.rowToCandidate(r));
+  }
+
+  /** How many names were checked (any outcome) since this moment: the count against the daily ceiling. */
+  countCandidateChecksSince(since: number): number {
+    return Number((this.db.prepare("SELECT COUNT(*) n FROM variant_candidates WHERE last_checked_at IS NOT NULL AND last_checked_at >= ?").get(since) as { n: number }).n);
   }
 
   /** How many names are still waiting (including those in a back-off), for "N waiting to be checked". */

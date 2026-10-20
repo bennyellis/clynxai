@@ -95,6 +95,8 @@ export interface TickDeps {
   createAddonEntry(name: string, parent: { id: string; name: string }, evidence: string[], source: StoredCandidate["sources"]): Promise<string | null>;
   /** The AI is paused / unavailable: stop and leave the rest queued. */
   paused(): boolean;
+  /** How many more names may be checked TODAY (the daily ceiling for background work). Undefined = no ceiling. */
+  remainingToday?(): number;
   sleep(ms: number): Promise<void>;
   now?(): number;
   note?(parentId: string, message: string): void;
@@ -121,7 +123,14 @@ const toCandidate = (c: StoredCandidate): Candidate => ({ name: c.name, kind: c.
 export async function runQueueTick(deps: TickDeps, opts: { variants?: number; addons?: number; gapMs?: number } = {}): Promise<TickResult> {
   const result: TickResult = { added: [], suggested: [], rejected: [], addonsAdded: [], deferred: 0, stopped: null };
   const gap = opts.gapMs ?? TICK_GAP_MS;
-  const todo = [...deps.store.nextQueuedCandidates("variant", opts.variants ?? TICK_VARIANTS, deps.now?.()), ...deps.store.nextQueuedCandidates("addon", opts.addons ?? TICK_ADDONS, deps.now?.())];
+  // A daily ceiling: the queue refills all day while the scanner meets new products, and every name is a web check and often a full research. Past the ceiling nothing more is checked until tomorrow.
+  const allowance = deps.remainingToday ? Math.max(0, deps.remainingToday()) : Infinity;
+  if (allowance <= 0) {
+    result.stopped = "today's limit for background versions and add-ons is used";
+    result.deferred = deps.store.countQueuedCandidates();
+    return result;
+  }
+  const todo = [...deps.store.nextQueuedCandidates("variant", opts.variants ?? TICK_VARIANTS, deps.now?.()), ...deps.store.nextQueuedCandidates("addon", opts.addons ?? TICK_ADDONS, deps.now?.())].slice(0, allowance);
   let first = true;
   for (const q of todo) {
     if (deps.paused()) {

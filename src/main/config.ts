@@ -462,7 +462,7 @@ export function normalizeSearchItems(raw: unknown): SearchItem[] {
 }
 
 /** Owner switches that no screen shows: whoever writes the config, a switch already on disk is carried over instead of silently erased (a hand-set beta13 flag kept disappearing). */
-const KEPT_ON_SAVE = ["beta13", "openaiSearchPerHour", "openaiLookupPerHour", "freeSearchEngines"] as const;
+const KEPT_ON_SAVE = ["beta13", "openaiSearchPerHour", "openaiLookupPerHour", "freeSearchEngines", "backgroundVariantsPerDay"] as const;
 function carryOverOwnerSwitches(configPath: string, config: Config): Config {
   try {
     const onDisk = readJsonFileSafe<any>(configPath);

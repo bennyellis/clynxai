@@ -2802,6 +2802,11 @@ const VARIANT_DISCOVERY_COUNT = 5;
 async function discoverAndCreateProductVariants(productName: string, category: string, familyPath: string | null, parentId?: string, sourced = true): Promise<void> {
   if (!parentId) return; // the confirmed versions are filed under this product
   if (!sourced) discovery.note(parentId, "finding", "I could not read real web pages for this one yet; I will still check eBay's listings and the catalogues for its versions.");
+  // Looking for a product's versions and add-ons costs searches and AI calls for every new product the scanner meets: past the day's ceiling it waits for tomorrow.
+  if (remainingBackgroundChecks() <= 0) {
+    discovery.note(parentId, "finding", "Today's limit for looking into versions and add-ons in the background is used, so I am not looking for this product's versions now.");
+    return;
+  }
   const aiOk = hasOpenAIAccess() && !isLowAiMode();
   const result = await gatherCandidates(
     { id: parentId, name: productName },
@@ -2825,6 +2830,13 @@ async function discoverAndCreateProductVariants(productName: string, category: s
   scheduleVariantQueue();
 }
 
+/** Names (versions and add-ons) checked in the background per day unless config.json says otherwise (backgroundVariantsPerDay). */
+const BACKGROUND_VARIANTS_PER_DAY = 60;
+function remainingBackgroundChecks(): number {
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  return Math.max(0, Math.round(config.backgroundVariantsPerDay ?? BACKGROUND_VARIANTS_PER_DAY)) - store.countCandidateChecksSince(startOfDay.getTime());
+}
 let variantQueueTimer: ReturnType<typeof setInterval> | null = null;
 let variantTickRunning = false;
 
@@ -2882,6 +2894,7 @@ async function runVariantQueueTick(familyHint: string | null = null): Promise<vo
         return entryId;
       },
       paused: () => !hasOpenAIAccess() || isLowAiMode(),
+      remainingToday: remainingBackgroundChecks,
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       note: (parentId, message) => discovery.note(parentId, "finding", message),
     });
