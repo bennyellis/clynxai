@@ -60,7 +60,7 @@ run(async () => {
   check("a reply that names tools is cleaned before it is returned", !/research_product|research_variants/.test(leak.reply) && /product research/.test(leak.reply), leak.reply);
 
   section("a text fragment is not a product name");
-  for (const bad of ["Xbox (modern Console & common Bundle", "Xbox Series X Bundle (", "Xbox Series X &", "Xbox Series X with", "[Xbox Series X", "<b>Xbox</b>", "ab", "https://x.com/y xbox"]) check(`"${bad}" is not plausible`, !isPlausibleProductName(bad));
+  for (const bad of ["Xbox (modern Console & common Bundle", "Xbox Series X Bundle (", "Xbox Series X &", "Xbox Series X with", "[Xbox Series X", "<b>Xbox</b>", "a", "https://x.com/y xbox"]) check(`"${bad}" is not plausible`, !isPlausibleProductName(bad));
   for (const good of ["Xbox Series X", "Xbox Series X 2TB Galaxy Black Special Edition", "Canon EOS R6 Mark II (Body Only)", "Sony WH-1000XM4", "Nikon Z6 II 24.5MP body", "PlayStation 5 Slim [Digital Edition]"]) check(`"${good}" is plausible`, isPlausibleProductName(good));
   const filed: string[] = [];
   const noted: string[] = [];
@@ -75,6 +75,19 @@ run(async () => {
   });
   check("the fan-out never verifies or files the fragment, and says why", filed.join() === "Xbox Series S" && out.skipped.includes("Xbox (modern Console & common Bundle") && noted.some((n) => /text fragment/.test(n)), { filed, out, noted });
   check("an official name with unbalanced brackets is never adopted", cleanOfficialName("Xbox Series X Galaxy Edition (modern Console & common Bundle", "Xbox Series X Galaxy Edition") === null && cleanOfficialName("Xbox Series X 2TB Galaxy Black Special Edition", "Xbox Series X Galaxy Edition") !== null);
+
+  section("TESTER's re-check: questions that merely MENTION an action word are still questions");
+  for (const m of ["should I note anything before buying?", "which watch is best?", "what's a good price to watch for?", "what can I watch for under $100?", "what does stop do?", "is it ok to delete this?", "did you delete my watch?", "why did you stop the scanner?", "hey, what can you do for me?"]) check(`"${m}" is informational`, isInformationalOnly(m));
+  for (const m of ["hi, start the scanner", "stop the scanner?", "what's up? stop it", "please add a Series S under $250", "can you start the scanner?", "note that the fan is loud", "watch for Galaxy Black consoles under $900"]) check(`"${m}" is a request`, !isInformationalOnly(m));
+  check("library edits and photo saves are also refused on a greeting or question", SIDE_EFFECT_TOOLS.has("library_op") && SIDE_EFFECT_TOOLS.has("add_reference_photos"));
+  const libHello = await chatTurn("hi", "global", (n) => (n === 1 ? { tools: [{ name: "library_op", args: { op: "trash" } }] } : { content: "Hello!" }));
+  check("a hello cannot reach library_op", libHello.ran.length === 0, libHello.ran);
+  const doneNoTool = await chatTurn("what can you do?", "global", () => ({ content: "Done — I can scan, research and watch for deals." }));
+  check("a reply that opens with 'Done' when nothing ran loses the false opener", !/^Done/.test(doneNoTool.reply) && /I can scan/.test(doneNoTool.reply), doneNoTool.reply);
+  const doneWithTool = await chatTurn("start the scanner", "global", (n) => (n === 1 ? { tools: [{ name: "start_scanner", args: {} }] } : { content: "Done — scanning." }));
+  check("a 'Done' after a tool really ran is kept", /^Done/.test(doneWithTool.reply), doneWithTool.reply);
+  for (const good of ["Samsung Galaxy S24+", "Galaxy S24+", "Dyson V8 Absolute+", "Apple TV+", "S9", "iPhone 15 Pro Max"]) check(`"${good}" is a plausible name`, isPlausibleProductName(good));
+  check("a dangling ' +' and non-Latin names", !isPlausibleProductName("Xbox Series X +") && isPlausibleProductName("任天堂 Switch") && isPlausibleProductName("ПлейСтейшн 5"));
 
   section("the floating chat leaves room instead of covering the screen's own chat box");
   const root = process.cwd();

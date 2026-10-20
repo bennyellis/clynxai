@@ -28,7 +28,7 @@ run(async () => {
   check("both sides all zeros are not a match", matchComp({ ...XBOX, gtin: "0000000000000" }, comp({ title: "Whatever", gtin: "0000000000000" })).basis !== "gtin");
   check("a real code on both sides still matches, leading zeros ignored (UPC vs EAN)", normGtin("889842640816") === normGtin("0889842640816") && normGtin("889842640816") !== "");
   check("spreadsheet-mangled codes are not codes", normGtin("889842640816.0") === "" && normGtin("8.89842640816E+11") === "" && normGtin("1,234") === "");
-  check("ePIDs compare without case or spaces", normEpid(" ep1 ") === normEpid("EP1") && matchComp({ ...XBOX, epid: "ep1" }, comp({ title: "whatever", epid: "EP1 " })).accepted);
+  check("ePIDs compare without case or spaces", normEpid(" ep12345 ") === normEpid("EP12345") && matchComp({ ...XBOX, epid: "ep12345" }, comp({ title: "whatever", epid: "EP12345 " })).accepted);
 
   section("2 the owner's imports are never hidden by the day's cache");
   const store = new SoldCompsStore(new DatabaseSync(":memory:"));
@@ -104,4 +104,27 @@ run(async () => {
   const ok = fake("manual_import", () => ({ comps: [comp({ id: "k1" })], outcome: { kind: "ok" } }));
   const rb = await svc([boom, ok.p]).research(XBOX);
   check("the failure is reported as an error outcome and the next source is still asked", rb.providers[0].outcome.kind === "error" && rb.providers[1].usable === 1 && rb.summary?.count === 1, rb.providers);
+
+  section("TESTER's re-check: one number is the price");
+  for (const [cell, want] of [["$1,099.00 + $12 shipping", 1099], ["$1,050.00 (3 bids)", 1050], ["$99.99 x2", 99.99], ["3 bids $50", 50], ["$1,099.00 / 2 items", 1099], ["Sold for $1,050 on 10/19/2026", 1050], ["EUR 12,50 + shipping 4,00", 12.5], ["950", 950]] as const) {
+    check(`"${cell}" -> ${want}`, parseMoney(cell) === want, parseMoney(cell));
+  }
+  check("an amount with no sign still picks the first number, and a cell with no number is no price", parseMoney("1050 (3 bids)") === 1050 && parseMoney("free") === null && parseMoney("") === null);
+
+  section("TESTER's re-check: placeholder ePIDs and codes carried by other products");
+  for (const e of ["N/A", "0", "none", "Does not apply", "00000", "abc"]) check(`ePID "${e}" is ignored`, normEpid(e) === "", normEpid(e));
+  check("two placeholder ePIDs never make a Switch title 'exact' for the Xbox", !matchComp({ ...XBOX, epid: "N/A" }, comp({ title: "Nintendo Switch OLED White Console", epid: "N/A" })).accepted);
+  const coded: ProductIdentity = { ...XBOX, gtin: "0889842640816" };
+  for (const t of ["PlayStation 5 Galaxy Black Special Edition Console", "Nintendo Switch Galaxy Black Special Edition Console", "Samsung Galaxy Black Special Edition phone"]) {
+    const m = matchComp(coded, comp({ title: t, gtin: "0889842640816" }));
+    check(`a matching GTIN does not rescue "${t}"`, !m.accepted && m.verdict === "uncertain" && /names/.test(m.reason), m);
+  }
+  for (const t of ["Xbox Series X Galaxy Black Special Edition Console Untested", "Xbox Series X Galaxy Black Special Edition cracked case works", "Xbox Series X Galaxy Black Special Edition red ring"]) {
+    check(`"${t}" is not a working unit, code or no code`, !matchComp(coded, comp({ title: t, gtin: "0889842640816" })).accepted && !matchComp(XBOX, comp({ title: t })).accepted);
+  }
+  check("a code match with a title that simply omits the brand is still exact", matchComp(coded, comp({ title: "Galaxy Black Special Edition 2TB console", gtin: "0889842640816" })).verdict === "exact");
+
+  section("TESTER's re-check: pasted model numbers are not prices");
+  const pasted = parseSoldImport("PlayStation 5\niPhone 15 Pro 256\nXbox Series X Galaxy Black - 1,075\nXbox Series X Galaxy Black Special Edition $1,090.00\n", NOW);
+  check("'PlayStation 5' and 'iPhone 15 Pro 256' are not read as $5 and $256; a delimited number or a $ amount is", pasted.comps.length === 2 && pasted.comps.map((c) => c.soldPrice).join() === "1075,1090" && pasted.skipped.length === 2, pasted);
 });

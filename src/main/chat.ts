@@ -1191,7 +1191,9 @@ export async function streamChat(
       trace.aiCalls = trace.rounds.length;
       trace.guards = guards;
     }
-    return withResoldPrompt(plainToolNames(shortStyle ? tightenReply(content) : content));
+    // "Done" with nothing done: no tool ran this turn, so the opener is a false claim (Beta 28 live test: "Done — I started a quick general scan..." after a hello)
+    const honest = toolsRunThisTurn === 0 ? content.replace(/^\s*Done\b[\s,.:—–-]*/i, "") : content;
+    return withResoldPrompt(plainToolNames(shortStyle ? tightenReply(honest) : honest));
   };
   // A greeting or a pure question must not run anything that changes the app (Beta 28 live test: a hello started the scanner, a question wrote a watch note).
   const informationalTurn = isInformationalOnly(userMessage);

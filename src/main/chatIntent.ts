@@ -138,11 +138,14 @@ export const SIDE_EFFECT_TOOLS = new Set([
   "pause_watch",
   "resume_watch",
   "delete_watch",
+  "library_op",
+  "add_reference_photos",
 ]);
 
 const GREETING = /^(?:hi|hello|hey|yo|sup|hiya|howdy|good (?:morning|afternoon|evening)|thanks|thank you|thx|ok|okay|cool|nice|great|awesome|lol)\b[\s!.,?]*$/i;
 const QUESTION_START = /^(?:what|whats|what's|how|why|which|who|when|where|is|are|was|were|do|does|did|can|could|would|should|will|tell me|explain|any|hi|hello|hey)\b/i;
 const ASKS_FOR_ACTION = /\b(?:start|stop|run|begin|launch|kick off|scan|add|remove|delete|clear|create|make|set|change|turn|switch|enable|disable|pause|resume|block|blacklist|note|remind|remember|log|save|track|watch|monitor|alert|notify|hunt|look for|search for|find me|go ahead|do it)\b/i;
+const IMPERATIVE = /^(?:please\s+|pls\s+|now\s+|also\s+|and\s+|then\s+)*(?:start|stop|add|remove|delete|clear|create|make|set|change|turn|switch|enable|disable|pause|resume|block|blacklist|note|remind|remember|log|save|track|watch|monitor|run|begin|launch|scan)\b/i;
 const CAN_YOU_ACTION = /^(?:can|could|would|will) you\b/i;
 
 /**
@@ -154,11 +157,14 @@ export function isInformationalOnly(message: string): boolean {
   const m = message.trim();
   if (!m) return false;
   if (classifyShortAnswer(m)) return false;
+  if (/https?:\/\//i.test(m)) return false; // a pasted link is material to act on (and its "?" is not a question)
   if (GREETING.test(m)) return true;
   const questionLike = /\?/.test(m) || QUESTION_START.test(m);
   if (!questionLike) return false;
-  if (CAN_YOU_ACTION.test(m) && ASKS_FOR_ACTION.test(m)) return false;
-  return !ASKS_FOR_ACTION.test(m) || /^(?:what|how|why|which|who|when|where)\b[^.]*\b(?:can you do|do you do|are you|is it|should i|do i|does it)\b/i.test(m);
+  // an imperative clause anywhere ("hi, start the scanner", "what's up? stop it") makes it a request; so does "can you <do something>"
+  if (m.split(/[,.;!?]+\s*/).some((s) => IMPERATIVE.test(s.trim()))) return false;
+  if (CAN_YOU_ACTION.test(m)) return !ASKS_FOR_ACTION.test(m);
+  return true; // a question that merely MENTIONS stop / watch / note / delete ("which watch is best?", "why did you stop the scanner?") is still a question
 }
 
 export function actionNotRunMessage(tool: string): string {

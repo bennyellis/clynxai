@@ -30,9 +30,12 @@ const CURRENCY_CODES = /\b(USD|EUR|GBP|CAD|AUD|CHF|JPY)\b/i;
  */
 export function parsePrice(text: string | undefined | null): { value: number; currency: string } | null {
   if (!text) return null;
-  const compact = text.replace(/\s/g, "");
-  const currency = /€/.test(compact) ? "EUR" : /£/.test(compact) ? "GBP" : (CURRENCY_CODES.exec(text)?.[1]?.toUpperCase() ?? "USD");
-  let body = compact.replace(CURRENCY_CODES, "").replace(/[^\d.,-]/g, "");
+  // Only ONE number is the price: the first one that carries a currency sign or code ("$1,099.00 + $12 shipping" is 1099, "3 bids $50" is 50), else the first number in the cell.
+  const tokens = [...text.matchAll(/(?:([$€£])|\b(USD|EUR|GBP|CAD|AUD|CHF|JPY)\b)?\s*(-?\d[\d.,]*\d|-?\d)/gi)];
+  if (tokens.length === 0) return null;
+  const pick = tokens.find((t) => t[1] || t[2]) ?? tokens[0];
+  const currency = pick[1] === "€" ? "EUR" : pick[1] === "£" ? "GBP" : (pick[2]?.toUpperCase() ?? CURRENCY_CODES.exec(text)?.[1]?.toUpperCase() ?? "USD");
+  let body = pick[3];
   if (/^-?\d{1,3}(?:\.\d{3})+,\d{1,2}$/.test(body)) body = body.replace(/\./g, "").replace(",", ".");
   else if (/^-?\d+,\d{1,2}$/.test(body)) body = body.replace(",", ".");
   else body = body.replace(/,/g, "");
@@ -145,7 +148,9 @@ export function parseSoldImport(text: string, now: number = Date.now(), retentio
       const m = /^(.*?)[\s,\t|-]+((?:[$€£]\s?)?\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|(?:[$€£]\s?)?\d+(?:[.,]\d{1,2})?)\s*$/.exec(raw.trim());
       if (m) {
         const token = m[2];
-        const priceShaped = /[$€£]/.test(token) || /[.,]\d{2}$/.test(token) || (!/^(19|20)\d{2}$/.test(token) && token.length <= 5);
+        // a bare whole number ("PlayStation 5", "iPhone 15 Pro 256") is a model number, not a price, unless a real delimiter (" - ", a tab, a comma, a pipe) stands in front of it
+        const delimited = /(?:\s[-–|]\s|\t|,\s*|\|)\s*$/.test(raw.trim().slice(0, raw.trim().length - token.length));
+        const priceShaped = /[$€£]/.test(token) || /[.,]\d{2}$/.test(token) || (delimited && !/^(19|20)\d{2}$/.test(token) && token.length <= 5);
         if (priceShaped) {
           title = m[1].trim();
           price = parsePrice(token);

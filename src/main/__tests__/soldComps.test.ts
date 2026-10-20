@@ -58,7 +58,7 @@ run(async () => {
   check("mapWatchCountComp keeps the original card for audit", (mapWatchCountComp(wcComp, NOW, null).raw as typeof wcComp).itemUrl === wcComp.itemUrl);
 
   section("Marketplace Insights provider: OFF until approved, built against the documented shape with a fake transport");
-  const sales = { itemSales: [{ itemId: "v1|1|0", title: "Xbox Series X 2TB Galaxy Black Special Edition", lastSoldPrice: { value: "1099.00", currency: "USD" }, lastSoldDate: "2026-10-12T15:00:00.000Z", totalSoldQuantity: 1, condition: "Used", buyingOptions: ["FIXED_PRICE"], image: { imageUrl: "https://i.ebayimg.com/a.jpg" }, categoryId: "139971", epid: "EP1", gtin: ["0889842640816"], seller: { username: "someseller" }, shippingOptions: [{ shippingCost: { value: "0.00" } }] }, { itemId: "v1|2|0", title: "no price here" }] };
+  const sales = { itemSales: [{ itemId: "v1|1|0", title: "Xbox Series X 2TB Galaxy Black Special Edition", lastSoldPrice: { value: "1099.00", currency: "USD" }, lastSoldDate: "2026-10-12T15:00:00.000Z", totalSoldQuantity: 1, condition: "Used", buyingOptions: ["FIXED_PRICE"], image: { imageUrl: "https://i.ebayimg.com/a.jpg" }, categoryId: "139971", epid: "EP12345", gtin: ["0889842640816"], seller: { username: "someseller" }, shippingOptions: [{ shippingCost: { value: "0.00" } }] }, { itemId: "v1|2|0", title: "no price here" }] };
   let called = 0;
   const transport = (res: InsightsResponse | Error) => async (_p: string, _q: Record<string, string>) => { called++; if (res instanceof Error) throw res; return res; };
   const off = new MarketplaceInsightsProvider({ enabled: () => false, transport: transport({ status: 200, body: sales }) });
@@ -66,7 +66,7 @@ run(async () => {
   check("disabled by default: says why, and the transport is never called", offRes.outcome.kind === "disabled" && /approval/.test(offRes.outcome.detail) && called === 0);
   const on = (res: InsightsResponse | Error, extra: object = {}) => new MarketplaceInsightsProvider({ enabled: () => true, transport: transport(res), now: () => NOW, ...extra });
   const good = await on({ status: 200, body: sales }, { retentionDays: 7 }).search({ title: "xbox series x galaxy" });
-  check("a sale is mapped to a comp; a sale with no price is skipped and counted", good.comps.length === 1 && good.comps[0].soldPrice === 1099 && good.comps[0].soldAt === Date.parse("2026-10-12T15:00:00.000Z") && good.comps[0].gtin === "0889842640816" && good.comps[0].epid === "EP1" && good.comps[0].categoryId === "139971" && good.comps[0].shippingCost === 0 && good.comps[0].expiresAt === NOW + 7 * DAY_MS && /1 sales skipped/.test(good.outcome.kind === "ok" ? good.outcome.detail ?? "" : ""), good);
+  check("a sale is mapped to a comp; a sale with no price is skipped and counted", good.comps.length === 1 && good.comps[0].soldPrice === 1099 && good.comps[0].soldAt === Date.parse("2026-10-12T15:00:00.000Z") && good.comps[0].gtin === "0889842640816" && good.comps[0].epid === "EP12345" && good.comps[0].categoryId === "139971" && good.comps[0].shippingCost === 0 && good.comps[0].expiresAt === NOW + 7 * DAY_MS && /1 sales skipped/.test(good.outcome.kind === "ok" ? good.outcome.detail ?? "" : ""), good);
   check("the seller's name is not kept unless the licence allows it", good.comps[0].seller === null && mapInsightsSale(sales.itemSales[0], NOW, null, true)?.seller === "someseller");
   check("request: GTIN first, else ePID, else keyword; category and aspects only narrow", buildInsightsParams({ title: "xbox", gtin: "123", epid: "E" }).gtin === "123" && !("q" in buildInsightsParams({ title: "xbox", gtin: "123" })) && buildInsightsParams({ title: "xbox", epid: "E" }).epid === "E" && buildInsightsParams({ title: "xbox" }).q === "xbox" && buildInsightsParams({ title: "x", categoryId: "139971", aspects: { Storage: "2 TB" } }).aspect_filter === "categoryId:139971,Storage:{2 TB}" && buildInsightsParams({ title: "x", limit: 9999 }).limit === "200");
   let seenPath = "";
@@ -96,12 +96,12 @@ run(async () => {
   check("the query key ignores case and spacing", queryKeyOf("xbox   series X") === queryKeyOf("Xbox Series x"));
 
   section("matching: identifiers first, then compIdentity; uncertain never prices; photos only downgrade");
-  const withIds: ProductIdentity = { ...GALAXY, gtin: "0889842640816", epid: "EP1" };
+  const withIds: ProductIdentity = { ...GALAXY, gtin: "0889842640816", epid: "EP12345" };
   const m1 = matchComp(withIds, comp({ title: "Some odd seller title with no product words", gtin: "889842640816" }));
   check("a matching GTIN (leading zero ignored) is exact whatever the title says", m1.verdict === "exact" && m1.accepted && m1.basis === "gtin", m1);
   check("a different GTIN is rejected even with a perfect title", (() => { const m = matchComp(withIds, comp({ gtin: "0123456789012" })); return m.verdict === "rejected" && !m.accepted && /GTIN differs/.test(m.reason); })());
-  check("a different ePID is rejected", matchComp({ ...GALAXY, epid: "EP1" }, comp({ epid: "EP9" })).verdict === "rejected");
-  check("an ePID match is exact", matchComp({ ...GALAXY, epid: "EP1" }, comp({ title: "whatever", epid: "EP1" })).accepted);
+  check("a different ePID is rejected", matchComp({ ...GALAXY, epid: "EP12345" }, comp({ epid: "EP98765" })).verdict === "rejected");
+  check("an ePID match is exact", matchComp({ ...GALAXY, epid: "EP12345" }, comp({ title: "whatever", epid: "EP12345" })).accepted);
   const parts = matchComp(withIds, comp({ title: "Xbox Series X Galaxy Black Special Edition For Parts Not Working", gtin: "0889842640816" }));
   check("an identifier match still fails a for-parts listing", parts.verdict === "rejected" && /matches but/.test(parts.reason), parts);
   check("an identifier match still fails when the condition field says for parts", matchComp(withIds, comp({ gtin: "0889842640816", condition: "For parts or not working" })).accepted === false);

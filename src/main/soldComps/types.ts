@@ -88,5 +88,9 @@ export const normGtin = (g: string | null | undefined): string => {
   return stripped;
 };
 
-/** An ePID compared without case or surrounding spaces; empty when there is none. */
-export const normEpid = (e: string | null | undefined): string => (e ?? "").trim().toUpperCase();
+/** An ePID compared without case or surrounding spaces; empty when there is none or it is a placeholder ("N/A", "Does not apply", "0"): a real ePID is 5 or more letters / digits. */
+export const normEpid = (e: string | null | undefined): string => {
+  const t = (e ?? "").trim().toUpperCase();
+  if (!/^[A-Z0-9-]{5,}$/.test(t) || /^0+$/.test(t.replace(/-/g, "")) || /^(?:NONE|NULL|UNKNOWN|NOTAPPLICABLE|NA)$/.test(t)) return "";
+  return t;
+};

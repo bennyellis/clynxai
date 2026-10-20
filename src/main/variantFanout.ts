@@ -41,13 +41,14 @@ export interface FanoutResult {
  */
 export function isPlausibleProductName(name: string): boolean {
   const n = name.replace(/\s+/g, " ").trim();
-  if (n.length < 3 || n.length > 110) return false;
+  if (n.length < 2 || n.length > 110) return false;
   if (/[<>{}\\|]/.test(n) || /https?:/i.test(n)) return false;
   const pairs: Array<[string, string]> = [["(", ")"], ["[", "]"]];
   for (const [open, close] of pairs) if (n.split(open).length !== n.split(close).length) return false;
-  if (/[&+,/:;-]\s*$/.test(n) || /\b(?:and|or|with|for|the|of|a|an)\s*$/i.test(n)) return false;
-  if (/^[\W_]/.test(n)) return false;
-  return /[a-z]/i.test(n);
+  // a trailing "+" is part of real names (Galaxy S24+, Apple TV+); only a lone " +" dangling after a space is a fragment
+  if (/[&,/:;-]\s*$/.test(n) || /\s\+\s*$/.test(n) || /\b(?:and|or|with|for|the|of|a|an)\s*$/i.test(n)) return false;
+  if (/^[^\p{L}\p{N}]/u.test(n)) return false;
+  return /\p{L}/u.test(n);
 }
 
 export function isConfirmed(v: VariantVerdict): boolean {

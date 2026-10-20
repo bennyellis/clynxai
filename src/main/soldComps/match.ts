@@ -28,6 +28,10 @@ export interface CompMatch {
 
 const NEVER_BY_ID: CompReason[] = ["NOT_WORKING", "LOT_OR_BUNDLE", "ACCESSORY", "MEDIA"];
 const ID_CONFLICT: CompReason[] = ["EDITION", "GENERATION", "TIER", "CAPACITY", "COLOR", "MODEL_NUMBER", "MODEL_LETTER", "MODEL_VARIANT", "SKU", "REGION"];
+/** Words in a TITLE that say it is not a working complete unit (the condition field has its own check). */
+const BROKEN_TITLE = /\b(untested|cracked|red ring|ring of death|no power|won'?t (?:turn on|power|boot)|dead|bricked|as is|as-is|water damage[d]?)\b/i;
+/** Other makers / platforms: a title naming one of these that the product does not name is a different product, whatever code it carries. */
+const OTHER_BRANDS = /\b(playstation|ps[2-5]|nintendo|switch|wii|samsung|iphone|ipad|apple|sony|google|pixel|lenovo|dell|asus|hp|microsoft|xbox|steam deck|oculus|quest|gopro|canon|nikon|dyson)\b/gi;
 const BROKEN_CONDITION = /\b(for parts|parts only|not working|parts or repair|broken|damaged|salvage|untested|as is|as-is|cracked)\b/i;
 
 const reasonText = (j: { reasons: Array<{ code: CompReason; text: string }> }) => j.reasons.map((r) => `${r.code}: ${r.text}`).join("; ");
@@ -45,6 +49,14 @@ export function matchComp(product: ProductIdentity, comp: SoldComp): CompMatch {
 
   const judged = classifyComparable(product, comp.title);
   const idBasis = pg && cg ? "gtin" : pe && ce ? "epid" : null;
+  // A title that says it is untested / cracked / dead is not a working unit, with or without a code (unless the product IS the broken variant).
+  if (!product.broken && BROKEN_TITLE.test(comp.title)) return { ...base, verdict: "rejected", reason: `NOT_WORKING: the title says "${BROKEN_TITLE.exec(comp.title)![0]}"`, basis: idBasis ?? "title", accepted: false };
+  // A code that matches is not enough when the title names a DIFFERENT maker or platform ("PlayStation 5 ... Special Edition" carrying an Xbox code): held, never priced.
+  if (idBasis) {
+    const mine = new Set((product.name.toLowerCase().match(OTHER_BRANDS) ?? []).map((w) => w.toLowerCase()));
+    const theirs = [...new Set((comp.title.toLowerCase().match(OTHER_BRANDS) ?? []).map((w) => w.toLowerCase()))].filter((w) => !mine.has(w));
+    if (theirs.length > 0) return { ...base, verdict: "uncertain", reason: `${idBasis.toUpperCase()} matches but the title names ${theirs.join(", ")}, which this product does not`, basis: idBasis, accepted: false };
+  }
   if (idBasis) {
     // The identifier says it IS the product; only a listing that is plainly not a working, single, complete product still fails.
     const bad = judged.reasons.filter((r) => NEVER_BY_ID.includes(r.code));
