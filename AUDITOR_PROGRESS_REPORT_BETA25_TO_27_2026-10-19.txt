@@ -1,0 +1,69 @@
+AUDITOR PROGRESS REPORT - how the improvements have gone, Beta 25 -> Beta 26 -> Beta 27
+2026-10-19 (written ~22:55 local, at the owner's request relayed by TESTER). Plain English. Read-only: I changed no code and no owner data.
+
+WHAT YOU ASKED FOR AT THE START
+1. Typing "xbox series x galaxy edition" must really find and verify the Galaxy edition (using OpenAI web search), keep your exact words, and not confuse a game with a console.
+2. Every change must be better than the last, measured by how well it tested.
+
+THE SHORT ANSWER
+- The core ask now works. In your own live test (Beta 26, 06:38) Clynx kept your words, searched through OpenAI on your server, found the Galaxy edition, verified it from Microsoft/Xbox pages and priced it about $1,287.
+- The scanning/pricing side (game vs console, Galaxy isolation) improved on almost every step, with two regressions that were caught and repaired within hours.
+- The typed-phrase side improved a lot at the code level (Beta 27) but its first live run found one new bug (a photo caption became a product's official name) and one old gap (the "I read ... as ..." line is still not shown).
+- The biggest risk since Beta 26 has not been the AI. It was data safety: the library was emptied twice by "Reset Clynx" on your real profile (06:09 and 22:35), and Beta 27 made cloud deletes real. All backups are intact.
+
+STEP BY STEP (each change against the one before)
+
+BETA 25 BASELINE (commit 1161595) - "the defect"
+- Game-called-console 29 of 125 test titles; console-called-game 14. Lookups used Wikipedia only (OpenAI search was never used). Guardians of the Galaxy scored EXACT for your Galaxy console.
+
+404d7a8 - REGRESSION. 9 real consoles were now called games (console-called-game 14 -> 28). Caught the same day.
+3331249 - Fixed that regression and net better than baseline (console-called-game 11, game-passes-as-console 17).
+e5cd78e - IMPROVEMENT. No console called a game, 16 lone-word game titles no longer pass. Cost: 9 of 73 console listings lose price use until a photo confirms.
+7951cf9 - SMALL IMPROVEMENT ("Halo Series X Brand New" caught). No regression.
+3a8aa4f - PROBABLE IMPROVEMENT: of 18 harder title shapes, 16 caught; "Sonic Genesis" and "Mario 3DS XL" still pass.
+2d0fcac (D1.6) - IMPROVEMENT for typing: your phrase no longer refreshes an invented "Galaxy/White" entry; OpenAI-first lookups with their own budget; gibberish and questions not placed.
+6c5cf08 - Galaxy isolation clearly better (leaks closed; plain Xbox no longer steals Galaxy titles) BUT a real REGRESSION: ordinary Xbox titles with a word between "Xbox" and "Series X" lost their price (14 of 23).
+36e69d6 - REGRESSION REPAIRED (21 of 23 priced again; wrong-generation titles priced 0).
+e40fd58 - IMPROVEMENT for Galaxy recall (real Galaxy titles turned away by the official-name entry 5 -> 1 of 11) with a side effect on phones/Switch editions.
+0245528 - Side effect fixed; nothing else moved. This code became Beta 26.
+
+BETA 26 (published 06:25)
+- Live test (06:35-06:39): PASS typed words kept, PASS OpenAI search reached your server (first proof, status 200), PASS Galaxy entry verified from manufacturer pages with a clean write-up, PARTIAL name/parent/photos/price (price came from asking prices, not sold prices), FAIL one phrase caused ~120 AI calls and 10+ guessed products, FAIL 4 products saved error text as their description, FAIL "xbox series x. find all variants and add-ons" became a product name, FAIL deleted products came back (cloud deletes never worked).
+- Beta 26 also had a bug that repeated: its Reset emptied your library at 06:09 (that build was an unpacked test build run on your real profile; nobody has said who pressed it).
+
+12545dd (L1-L4, L8, Add-ons P1) - code-only check by TESTER
+- WORKING: fan-out capped (Canon R6 Mark II no longer yields R5/R8/R7/R3), plain-words failures, retries at 10 min/30 min/2 h/6 h, official names adopted and editions linked, several duplicates now refresh, cloud deletes fixed.
+- NEW HIGH REGRESSION: the "is this a question?" filter refused real titles (Can Am Maverick X3, Will Smith Oscars poster, How to Train Your Dragon DVD...).
+19d787b - FIXED that regression and 8 smaller findings; nothing else moved; TESTER found no code release-blocker.
+b59b673 - made the Clear all dialog say it also deletes the server copies; corrected the release notes.
+
+BETA 27 (published 22:21; your own app updated itself at 22:29)
+- Live check by TESTER on a scratch copy: Clear all warning verified. NEW BUG: the Galaxy entry was renamed to an image caption ("Back panel of XBOX Series X 2TB Galaxy Black Special Edition") and that name synced to your cloud library. The "I read ... as ..." correction line is still not shown.
+- b26e80a (22:44, NOT in any release yet): fixes the caption bug (a photo caption is never adopted as an official name).
+- Uncommitted work I can see (not released): DEVELOPER removing the hourly OpenAI search/lookup cap you asked for.
+
+SCOREBOARD IN ONE LOOK
+- Scanning/game-vs-console: Beta 25 baseline -> now: wrong calls fell from 43 (14+29) to about 0-1 in the 125-title probe; two regressions on the way, each repaired the same day.
+- Galaxy isolation: leaks under Galaxy entries 11 -> 0-2; real Galaxy titles turned away 7 -> 1 of 11. Still open: "w/ Controller" listings, bare "Xbox Series X Galaxy".
+- Typing: duplicates fixed for 3 of 5 plain-name cases (kitchenaid, lego, halo infinite, plus exact "xbox series x"); still duplicates: "dewalt dcd771", "samsng galaxy s24 ultra"; request-splitting still drops attributes ("iPhone 15 Pro Max. 256GB. Blue").
+- Tests: kindRegression 61/67 -> 499/0; galaxyOnly 0 -> 129; typedInputFlow 35 -> 75; full suite 98 of 101 (the same 3 files fail only because Windows will not let tests delete temp folders).
+- Honesty of notes: Beta 26 notes were accurate; Beta 27 notes were first too generous (question filter, retries) and were corrected before publishing after TESTER's check.
+
+WHAT IS STILL NOT PROVEN OR OPEN
+1. The "I read ... as ..." correction sentence has never appeared live.
+2. Sold prices are still 0 for most lookups (WatchCount challenge/limit); estimates rely on asking prices.
+3. Photos: stock photos have no source title; photo and text are still combined by four separate code paths.
+4. Question filter still lets about 10 of 25 plain questions become products and still refuses about 14 of 29 real titles with "you/I/much" or "?".
+5. Galaxy parent link, automatic retries and fan-out have not been seen in a live run. Reset-with-cloud WAS seen live (22:35) and deleted your 36 server rows exactly as warned.
+6. Your open decisions (I have assumed none of them): Q2 Stage A vs server mode; Q3 re-queue the 4 failed products; Q4 push no-comps high-gap items quietly; Q5 typed name in Save-credits mode; Q6 split mixed galleries; Add-ons Z1-Z5; whether to restore your old library.
+
+DATA STATE RIGHT NOW (read-only look)
+- Your real library holds 2 products. Before the 22:35 reset it held 36 (old 14 + 22 test entries).
+- Server rows for your account: 2 (was 36). The other account's 57 rows were not touched.
+- Safe copies: reset-backups\2026-10-20T02-34-40-017Z (36 products, 126 photos), backups\clynx-20261019-223439.db, backups\clynx-20261019-000815.db (your original 14 with their photos), reset-backups\2026-10-19T10-09-22-779Z (the 06:09 reset).
+
+MY RECOMMENDED NEXT STEPS (your call; nothing starts without you)
+1. Decide about restoring your library from the backups before anything else touches it.
+2. Let DEVELOPER finish and commit the cap removal and the caption fix, then have TESTER recheck code-only before any Beta 28.
+3. Ask TESTER for one live run that covers: the correction sentence, the Galaxy parent link, automatic retries and a fan-out phrase, on a scratch copy only.
+4. Answer Q2-Q6 and Z1-Z5 when you are ready; they gate the next larger items (identity card, game/console split, photo checks).

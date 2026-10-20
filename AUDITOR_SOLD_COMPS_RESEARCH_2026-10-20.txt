@@ -1,0 +1,45 @@
+AUDITOR RESEARCH - a Clynx-owned eBay sold-comps history finder: what eBay allows, and a plan
+2026-10-20. Written by AUDITOR (read-only; no code changed). NOT SENT TO DEVELOPER: it waits for the owner's decision.
+This is research, not legal advice. Where a source was a blog or a summary I say so; eBay's own pages and the API License Agreement are the authority and should be read by the owner before any build that depends on them.
+
+THE ASK (owner, 2026-10-20)
+Build, and test separately first, a retrieval system that finds historical eBay SOLD listings without WatchCount/130point; identify products from names, model numbers, UPCs and Clynx's reference photos; save sold price, date, condition, shipping and details in a local database; later run automatically whenever Clynx researches a product. Priorities: reliability, accuracy, compliance.
+
+SHORT ANSWER
+1. There is exactly one OFFICIAL programmatic source of sold history: eBay's Marketplace Insights API. It is limited-release: you need approval; it is not self-serve.
+2. There is no compliant way to harvest eBay's public "Sold items" pages automatically. eBay's User Agreement prohibits robots/scrapers/data-extraction without eBay's express permission (per a third-party summary of the current agreement), and a Dec 2025 report says eBay added a "Robot & Agent Policy" to robots.txt against automated scraping and LLM-driven agents. WatchCount and 130point are third parties doing that kind of collection, so replacing them with our own scraper would move the same risk onto Clynx (and onto every beta user's IP/account), plus anti-bot blocks and constant breakage.
+3. So the compliant, reliable plan is: build the retrieval system, the local sold-comps database and the identity matching NOW behind a provider interface; plug the official API into it when approved; keep WatchCount as the temporary provider; add a manual-import provider (Terapeak export/paste) as a safe interim.
+
+WHAT EBAY ACTUALLY ALLOWS TODAY (checked 2026-10-20)
+A. Marketplace Insights API (Buy API family) - official sold data.
+   - Resource item_sales/search. Sales history up to 90 days in the past. Filters: keyword, GTIN, ePID, category. Not all categories are supported; categories are vetted and whitelisted per partner. (eBay developer docs.)
+   - Access: "limited release", available to select developers approved by eBay business units. The Buy APIs production path is for eBay Partner Network (EPN) partners: sign up for EPN, submit the Buy API Application, reply with mocks and data flows (EPN answers within about 10 business days), then a Developer Support ticket with sandbox test instructions, compliance review, signed contracts. Eligibility depends on your proposed business model; approval is not guaranteed. (eBay Buy APIs requirements page.)
+   - Developer Program free tier: 5,000 calls/day; premium tier higher.
+   - Unknown from what I could read (must verify in the API reference and the API License Agreement before building on it): the exact fields returned per sale (price, date, condition, shipping, GTIN/ePID, image URL), rate limits for this API, and the rules on STORING/caching the data and for how long. The "save in a local database" requirement depends on that last point.
+B. Finding API findCompletedItems - DEAD. Deprecated since 2020; all Finding API calls decommissioned 5 Feb 2025. eBay's own pointer for completed-sales data is Marketplace Insights.
+C. Browse API (already used by Clynx for active listings in ebayClient.ts) - ACTIVE listings only; no sold filter. Useful for identity (GTIN/ePID, category ids, item specifics) but not for sold prices. eBay staff in forums suggest Browse as the general replacement for Finding, which does not cover sold data.
+D. Terapeak / Seller Hub "Product Research" - official, FREE to eBay sellers, shows actual sold prices (incl. accepted Best Offer prices), average, range, sell-through. Sources say a 3-year lookback (one blog says 365 days; verify). It is a logged-in website feature with NO API. Using it by hand is fully allowed; having Clynx drive the page automatically is automated access to a logged-in seller account, which is the same prohibited-automation problem plus account risk. A user exporting/pasting results into Clynx is a clean alternative (check whether the page offers a download).
+E. Scraping eBay's public sold search (LH_Sold/LH_Complete URLs) - technically possible, NOT compliant (see Short answer 2), fragile (security-check page seen after about 8 quick loads, see backlog B3), and a risk for beta users. Not recommended as the foundation.
+F. Third-party data (WatchCount, 130point, Apify actors and similar) - what Clynx does today; works until it does not; owner wants to move off it.
+
+RECOMMENDED ARCHITECTURE (build and test separately, as the owner asked)
+1. New standalone module (for example src/main/soldComps/) with NO wiring into Clynx's background research yet and its own command-line test harness.
+2. A provider interface: SoldCompsProvider.search(query: {title, gtin?, epid?, categoryId?, aspects?}) -> SoldComp[]. Providers:
+   - MarketplaceInsightsProvider (official; built against the documented schema and fakes; switched on only after approval).
+   - ManualImportProvider (CSV/paste from Terapeak or the owner's own eBay research; compliant, works today).
+   - WatchCountProvider (the existing code, kept as the bridge and as a fallback, clearly labelled third-party).
+3. Local database tables (SQLite, new tables, no change to existing ones): sold_comps(id, source, source_listing_id, title, sold_price, currency, sold_at, condition, shipping_cost, quantity_sold, buying_option, gtin, epid, category_id, image_url, seller (only if the license allows), fetched_at, expires_at, raw_json) and sold_comp_matches(comp_id, product_id, identity_verdict, reason, photo_check, accepted). Respect any retention/caching limit from the API License Agreement (an expires_at column makes that a setting, not a rewrite).
+4. Identity and accuracy (reuse, do not rebuild): query by GTIN/ePID first (exact), then by the product's official name from the identity card; every returned comp is judged by the existing compIdentity rules (kind, edition, generation, accessories, for-parts) and, for uncertain ones, a photo check against the product's reference photos (photoIdentity). Store the verdict and reason so a wrong match can be audited. Never let a comp price a product when its identity is uncertain.
+5. Reliability: provider results cached per (query, day); clear logging of WHY zero results came back (limit page vs genuinely none), which is backlog item B3; no silent zeros.
+6. Test plan before any integration: fixtures of real sold-listing JSON/CSV (including the 20 Galaxy Black sold titles AUDITOR already measured, with the known EDITION/ACCESSORY traps), unit tests with fakes, an accuracy report (precision of accepted comps vs a hand-labelled set), and a measured comparison with the current WatchCount numbers. No live eBay calls from tests.
+7. Integration later (separate owner go): research service asks the provider chain in order (official -> manual -> third party) and writes the comps into the existing estimate; the owner does nothing.
+
+WHAT I CANNOT DO / WHAT NEEDS THE OWNER
+- Apply for EPN and Buy API production access, accept eBay agreements, or create developer accounts: only the owner can (I will not accept terms or enter credentials for anyone).
+- Decide how to describe Clynx's business model in the application. Honest framing: a reseller research tool; whether eBay approves a personal-use tool is eBay's call. If Clynx will be shared with beta users, say so in the application.
+
+QUESTIONS FOR THE OWNER (defaults in brackets)
+ Q-SC1 Will you apply for EPN + Buy API / Marketplace Insights access (about 10 business days for step one, no guarantee)? [yes, in parallel with the build]
+ Q-SC2 Until approval, keep WatchCount as the provider and add the manual-import provider (paste/CSV from Terapeak)? [yes]
+ Q-SC3 Do you accept that Clynx will NOT scrape eBay's sold pages itself, because of eBay's terms? [yes; if no, tell me the risk you want to take and I will write it up separately]
+ Q-SC4 Build order: database + provider interface + matching + test harness first (no eBay needed), official provider last? [yes]

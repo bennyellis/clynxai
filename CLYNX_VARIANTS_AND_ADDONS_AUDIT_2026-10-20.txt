@@ -1,0 +1,60 @@
+AUDIT - how Clynx finds variants and add-ons, and why "xbox series x" finds only one variant and a different one each time
+2026-10-20. AUDITOR, read-only: from reading the code at HEAD (cbeaba5 + Beta 28). I did not run it live; the owner's observation is the live evidence. Nothing changed.
+
+THE SHORT ANSWER
+Clynx has THREE separate ways to find variants and they do not share a plan. The one that runs on its own after a first research is a guess from the AI's memory, then it is cut down by four filters, so it returns a handful at most and a different handful each time. The one that reads real web sources only reports; it does not create products, and it only runs when you ask in words. Add-ons are not searched for at all.
+
+1. AUTOMATIC VARIANT DISCOVERY (runs after the first research of a product)
+Code: index.ts discoverAndCreateProductVariants (2788) -> chat.ts discoverProductVariants (1635) -> variantFanout.ts runVariantFanout.
+Steps and where variants are lost:
+ a. The AI is asked, with no web search, to "name up to 5 other well-known named variants" of the product and to "return fewer rather than guessing". It is a memory question, so the answer is different every run (that is your "not the same each time").
+ b. Only if the research found real sources ("sourced"); otherwise it writes "I am not guessing from memory" and finds nothing.
+ c. Only if the AI is available and Save-credits (lowAiMode) is OFF; otherwise it returns nothing silently.
+ d. Filter isMoreSpecific: the candidate must contain ALL the words of "Xbox Series X" plus a new distinguishing word. So "Xbox Series S", "Xbox One X", "Xbox Series X|S" bundles that drop a word are removed on purpose, and anything the model words differently ("Galaxy Black 2TB Series X") can fail the word test.
+ e. Cap: at most 3 candidates per phrase (FANOUT_CAP_PER_PHRASE), started 1.5 s apart, 2 at a time. Candidates 4 and 5 are dropped without being checked. This cap was added after the live test where one phrase made ~120 AI calls and 10+ junk products.
+ f. Each survivor is checked against web sources (verifyClaim). Only "verified" or "supported" becomes a product. An unconfirmed one is kept as a claim on the base product, not shown as a variant.
+ g. Never runs again for a variant's own variants, and only on a product's FIRST research ("first-time research"); a later Refresh does not look for more.
+Net effect for Xbox Series X: 5 remembered names (different each time) -> usually 1-3 pass the word filter -> max 3 checked -> only the ones the web evidence confirms get added. One confirmed variant is a normal outcome, and it can be a different one each time because step (a) is random.
+Also: "Xbox Series X" has many real variants that are NOT named "X Edition" in a way the model volunteers: colour/capacity versions (1TB Carbon Black, 2TB Galaxy Black, Digital/White), and game-themed editions (Halo Infinite, Starfield, Cyberpunk 2077, Forza Horizon 5, Diablo IV, 20th Anniversary). A 5-name memory list will not cover them consistently.
+
+2. VARIANT RESEARCH FROM SOURCES (the chat tool research_variants)
+Code: chat.ts tool "research_variants" (349), index.ts 1078, editionResearch.ts + editionDiscovery.ts.
+ - It searches the web (3 queries, 5 if you named an edition: "<product> special editions list", "... all limited edition variants and colors", "... special edition database collectors"), takes the top 8 hits per query, reads at most 6 pages in full (maker, specialist, catalogue pages first), and extracts edition names with a pattern.
+ - It runs only when the chat decides to call it. A guard forces it when your message contains the words variant(s)/edition(s)/version of. Typing just "xbox series x" does not trigger it; typing "xbox series x. find all variants and add-ons" is split, the product is researched, and the request is left for the chat model to run research_variants itself.
+ - It only REPORTS what it found ("confirmed" = official/specialist source or two independent sites, "reported" = one source). It does NOT create product entries, so nothing from it appears in the Library or the Variants section.
+ - Weak spots: (1) the extraction pattern needs capitalised words followed by "Edition" or "Style" ("Galaxy Black Special Edition" yes; "1TB Carbon Black", "Digital", "Robot White", "Series X bundle" no), so colour, capacity and bundle variants are invisible to it; (2) when a page cannot be fetched it falls back to the search snippet, which is short; (3) the web results change from run to run, so the list changes; (4) only 3-5 searches, 6 pages; (5) one-source finds are only "reported".
+
+3. SIBLING GAMES DISCOVERY (only for a "Games" sub-family): 3 titles from the model's memory per first research. Not relevant to consoles, listed for completeness.
+
+4. ADD-ONS
+Code: addons.ts, scrapeEngine.ts 2694 (onAddonsSeen), store.ts 2426.
+ - Add-ons come from only two places: (a) "seen_in_listing": while SCANNING, when a listing of a known product is a bundle and the AI bundle breakdown names the extra items (a second controller, a storage card, the box), each becomes a SUGGESTED add-on, switched off; (b) "user_added": you type one.
+ - The third source, "researched_related" (add-ons found while researching the product), exists as a name in the code but NOTHING creates it. researchTool.ts even tells the chat to say "add-ons are not built yet". So researching "xbox series x" never searches for add-ons; they only appear if the scanner happens to see a bundle listing, and only if the bundle valuation ran (it uses the AI, so Save-credits mode skips it).
+ - There is no catalogue of what is compatible (controllers, storage expansion card, headsets, charging stand, Kinect, etc.), no eBay "frequently sold with" or compatibility data, and no web search for accessories.
+
+WHY IT FEELS RANDOM (summary)
+ - The automatic list starts from the AI's memory (random each run) and is cut to 3, so which variant survives changes.
+ - The source-based search reports editions but creates nothing, and misses colours, capacities and bundles.
+ - Neither runs on a Refresh, and Save-credits mode switches the automatic one off silently.
+ - Add-ons are only learned from scanned bundle listings.
+
+SUGGESTED FIXES (proposal only, in order; nothing is started)
+ V1 Make variant discovery source-based and repeatable: use the real-market list first. eBay's Browse API (already used by ebayClient.ts for active listings) can return the item-specific values that real listings use for a product (storage capacity, colour, edition/model, bundle) as a distribution; this is a stable, evidence-based list (to verify in the API reference; fields differ by category). Then add the web-catalogue findings (researchEditions) and only then the AI's memory as an extra hint. Same input -> same list.
+ V2 Let research_variants CREATE confirmed variants (through the existing verify/link/fan-out path), not just report them, and run it automatically after the first research, not only when the user types the word "variants". Keep the cap per run but make it a queue that continues (so 3 per run does not mean "only 3 ever"): remaining candidates are listed as "found, not yet checked" and checked later in the background.
+ V3 Widen what counts as a variant: colour, capacity/storage, bundle ("Digital", "with controller"), game-themed editions, regional models; replace the "...Edition" regex with a small set of patterns plus the eBay specifics from V1.
+ V4 Show the user the whole picture: a "Variants found" list on the product with status (confirmed / reported / not yet checked) so nothing is silently dropped, and say when Save-credits mode or a blocked search prevented the search.
+ V5 Add-ons found during research: per product category, search/derive the standard accessories and compatible add-ons (web sources + eBay compatibility/frequently-bought-together data if available), create them as SUGGESTED add-ons with source "researched_related" (switched off, no price until a source gives one), never changing the product's value. Keep the existing scanner path as a second source. This needs the owner's Add-ons decisions Z1-Z5 (still open) before it starts.
+ V6 Tests with fakes: same input twice gives the same variants; the Xbox Series X fixture list (1TB/2TB, Carbon Black, Galaxy Black, Digital, Halo Infinite, Starfield, Cyberpunk, Forza, Diablo IV, 20th Anniversary) is all found; Series S and One X are NOT variants; capped runs continue; nothing created from memory alone.
+
+OPEN QUESTIONS FOR THE OWNER (defaults in brackets)
+ Q-V1 Should variant discovery run automatically on every first research and keep going in the background until all confirmed variants are in (a few AI/search calls each), or stay capped at 3 per run? [automatic and continuing, throttled; you said AI calls can be unlimited]
+ Q-V2 Should a variant that is only "reported" by one source be added as an entry, or stay a suggestion until a second source or a listing confirms it? [stay a suggestion, as now]
+ Q-V3 Is it fine to use eBay's item specifics (colour, capacity, edition) from the Browse API as the first source of variants? [yes]
+ Q-V4 Add-ons found during research: confirm Z1-Z5 defaults (suggested add-ons start OFF, Library page only, consoles and phones first, lazy learning, show bundled + parting-out). [yes]
+
+OWNER DECISIONS (2026-10-20)
+ Q-V1 yes: variant search runs automatically on every first research and continues in the background (throttled).
+ Q-V2 a variant reported by only ONE source stays a SUGGESTION (not a Database entry) until a second source or a listing confirms it.
+ Q-V3 yes: use eBay item specifics (Browse API) as the first source of variants.
+ Q-V4 CHANGED from the Z defaults: potential add-ons are ALWAYS added, each with its OWN entry in the Database, and each entry is categorized appropriately (for example Xbox > Accessories > Controllers).
+ Consequences to design for (AUDITOR): an add-on entry must have kind "accessory" so it never prices a console and a console listing never prices it (compIdentity / ACCESSORY_WORDS); entries need a family/category, a link to the base product (addonProductId in addons.ts), the toggle/estimate stays on the base product's Library page, and the add-on's own research must be throttled so it does not multiply the AI/search cost.

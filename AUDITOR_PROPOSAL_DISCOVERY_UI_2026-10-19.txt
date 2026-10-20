@@ -1,0 +1,56 @@
+PROPOSAL (NOT SENT TO DEVELOPER) - Discovery tab redesign for the next beta
+2026-10-19. Written by AUDITOR from the owner's request and the screenshots. Nothing goes to DEVELOPER until the owner accepts.
+Based on reading src/renderer/src/screens/DiscoveryTab.tsx (1,272 lines), Dashboard.tsx (LiveCard/LiveAccountTile), components/ChatExtras.tsx (ChatStatusLine), lib/chatStatus.ts, styles/global.css.
+
+1. LIVE FEED = A VERTICAL VERSION OF THE DASHBOARD'S LIVE VIEW (same behavior, less messy)
+Today (DiscoveryTab.tsx 431-498): a plain list of rows (thumb, name, "Looking into it...", "Worth about $X, N min ago"), plus an "Ask Clynx" row. The Dashboard's Live view (Dashboard.tsx LiveCard 405-476 + LiveAccountTile) is a stack of live tiles: what it is doing right now, the photo it is on, its reaction.
+Proposed:
+ a. Keep the left column, same width (about 300-360 px), same data and same click behavior (click a row = open that product in the main window; "Ask Clynx" stays on top).
+ b. Restyle the column as a vertical stack of the same tile design the Dashboard uses: photo thumbnail on top or left, name, one status line, a small status chip (Researching / Worth flipping / Not great / Can't judge / Didn't work out), time ago. One consistent card height; no mixed emoji thumbnails (use the product photo, else the Clynx logo as placeholder).
+ c. "Researching" entries get the live tile treatment (current action + the same animated dot used on the Dashboard); finished entries collapse to one compact line so the column stays calm.
+ d. Header "Live feed" stays, with "N researching" / "idle" as today.
+ e. Pure layout/style change: no change to how entries are created, ordered or stored.
+
+2. ONE WINDOW INSTEAD OF TWO, Claude-style
+Today (DiscoveryTab.tsx 543-654): two cards side by side (Automation | Chat with Clynx), or two tabs when narrow.
+Proposed:
+ a. One main window. Header with a switch: [Everything] [Automation] [My chat]. Default "Everything" = one chronological stream like Claude: your messages, Clynx's replies and its automatic findings in order. "Automation" = only what Clynx found on its own (keeps the existing All / Worth flipping / Not great / Researching filters). "My chat" = only your conversation.
+ b. Composer pinned at the bottom in every view (as in Claude): attach button, text box, Send. The three starter chips show only on an empty chat.
+ c. Messages look like Claude: your message as a rounded bubble on the right labelled "You"; Clynx's reply as plain readable text on the left under the Clynx logo (no heavy card), generous spacing, a "Jump to latest" button as today.
+ d. Product cards from Automation (verdicts, "Ask about this", "Open in Library") stay as cards inside the stream.
+ e. The existing narrow-window tab code and the unread dots go away (replaced by the switch).
+
+3. CLYNX'S NARRATED THINKING (images, pages, thought process)
+Today: chat shows one line "Researching eBay... 8s" and an optional collapsed "Web activity (N)" list of text labels; the Automation side shows short "thoughts" (text only). No images or page links are in these events.
+Proposed (like Claude's thinking panel, collapsed by default, one per Clynx turn):
+ a. A collapsible "Clynx's thinking" block above the reply, open while it works, collapses to "Thought for 12s - looked at 3 pages, 5 photos" when done.
+ b. Inside, in order: short first-person thought lines ("Checking whether this is the console or the game..."), each page it opened (favicon + title + domain, click to open), each photo it looked at (small thumbnail, click to enlarge), and any worry or decision ("These two photos disagree, so I'm leaving it out").
+ c. The same block feeds the Live feed tile of the product being researched (latest line + thumbnail).
+ NEEDS NEW DATA (this is the one part that is not purely visual): the main process currently sends step labels only. DEVELOPER must add fields to the status/thought events: kind = "thought" | "page" | "image", plus url, title, thumbnail (a small data URI or a local file path), and emit them from the places that already know them (web research, photo checks, comp reads). Keep it small: thumbnails capped (for example 160 px), at most about 20 items per turn, no personal data, nothing stored longer than the chat history.
+
+4. SMALL CHAT FIXES YOU LISTED
+ a. Two sets of dots: the cause is that BOTH the message bubble (DiscoveryTab.tsx 995-1001, empty reply while streaming) and ChatStatusLine (ChatExtras.tsx 29-36) draw their own typing dots. Fix: remove the bubble's dots and keep one set, placed AFTER the text: "Thinking..." with the three animated dots following the word, then the seconds counter ("Thinking 0s" style as today).
+ b. Stop box: make it a real coloured button (accent colour, rounded, white square icon + "Stop"), same size as Send, visible only while it runs. Today it is a plain ghost button "[square] Stop" (ChatExtras.tsx 37-41).
+ c. The grey "C" circle: replace with the Clynx logo (assets/clynx/clynx-mark.png) wherever Clynx speaks: ClynxAvatar in DiscoveryTab.tsx 889-909, and the same "C" in Activity.tsx 1008 and Database.tsx 3460 so every chat matches. One shared Avatar component.
+ d. User label "Y" -> "You": the "Y" circles are in Activity.tsx 1008 and Database.tsx 3460; Discovery currently shows no user avatar, so it will get the word "You" over the user's bubble. Use the word "You" everywhere, not a letter.
+
+5. WHAT STAYS EXACTLY AS IT IS
+Entries, research logic, verdicts, the Library link, attachments (up to 4 images and 3 text files), the 25-item "earlier" limit, scrolling and jump-to-latest behaviour, and all identity/price rules. No change to what Clynx decides, only how it is shown.
+
+6. PERFORMANCE AND LOOK RULES (from the owner's earlier requirements)
+ - Animations use only transform and opacity; the starfield backdrop stays static (Intel integrated GPU at 144 Hz).
+ - Thumbnails are small and lazy-loaded; the stream is windowed or capped so long sessions do not slow down.
+ - Colours stay on the existing theme tokens and keep the readable-colour rules for any user-picked colours.
+
+7. SUGGESTED ORDER FOR DEVELOPER (small safe steps, tests with fakes, no release until the owner says)
+ Step 1: section 4 (dots, Stop button, Clynx logo, "You"). Small, visible, low risk.
+ Step 2: section 1 (vertical Live feed).
+ Step 3: section 2 (one window with the three-way switch and Claude-style messages).
+ Step 4: section 3 (thinking block + new event fields). Largest; needs main-process changes.
+ After each step: TESTER code-only check, then a look at the real screen by the owner before the next.
+
+8. QUESTIONS FOR THE OWNER (defaults in brackets if you do not choose)
+ Q-UI1 Should the Live feed also show the Facebook/eBay scanner tiles from the Dashboard (what the scanner is doing right now), or only products Clynx is researching? [only researched products, scanner tiles stay on the Dashboard]
+ Q-UI2 Default view of the single window: Everything, Automation, or My chat? [Everything]
+ Q-UI3 Should the thinking block be open or collapsed once Clynx finishes? [collapsed, one line summary]
+ Q-UI4 Are page thumbnails/favicons and product photos in the thinking block fine to show (they are the same public pages/photos Clynx already reads)? [yes]

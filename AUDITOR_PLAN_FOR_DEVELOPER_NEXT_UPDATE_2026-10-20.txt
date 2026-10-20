@@ -1,0 +1,99 @@
+PLAN FOR DEVELOPER - THE NEXT UPDATE (proposal; NOT SENT until the owner says "accept")
+2026-10-20. AUDITOR, from memory + the audits + TESTER's reports + the owner's decisions of today. Sources: AUDITOR_DEDUPE_NAMING_ADDONS_PROPOSAL_2026-10-20.txt, CLYNX_VARIANTS_AND_ADDONS_AUDIT_2026-10-20.txt, AUDITOR_SOLD_COMPS_RESEARCH_2026-10-20.txt, AUDITOR_BACKLOG_FOR_DEVELOPER_2026-10-19.txt, memory notes (scoreboard, owner design decisions).
+
+0. GROUND RULES (carry over, nothing here changes them)
+ - Code and tests with fakes only. No build, version bump, release or publish until the owner says. Never touch the owner's real profile, scout.db, config.json or server rows; tests use temp DBs.
+ - Any migration that renames, merges or deletes entries: automatic backup first, dry run first, owner reviews the dry run before the first real run, undo available, cloud deletes only after the local change succeeded.
+ - Commit after the full suite passes; TESTER code-only check after each phase; owner looks at the real screen (unpacked scratch build, only with the owner's OK) before the UI is judged done.
+ - Notes for each release stay honest about what is NOT fixed.
+
+1. WHERE WE ARE (commits since Beta 28 are NOT released)
+ Released: Beta 28 (caption fix, no hourly OpenAI cap, chat tidy-up step 1).
+ Committed, unreleased: sold-comps module (standalone, not wired), variants and add-ons from sources (queue, eBay specifics, add-on entries), Beta 28 leftovers ("I read X as Y"), Discovery UI steps 2-4 (Live feed tiles, one window, narrated thinking). TESTER's last checks: all earlier HIGH defects fixed; step 4 has one blocking bug (below). None of the UI has been seen on a real screen.
+
+2. PHASE 0 - FINISH WHAT IS OPEN (small, first)
+ 0.1 Discovery step 4 BLOCKING bug: the thinking block disappears when the reply finishes (the chat-done handler drops the steps the block reads) so "Thought for Ns - looked at N pages" never shows. Plus TESTER's list: late background research reporting into a finished turn, thumbnails policy (and not built when the flag is off), private-address filter gaps (fe80/fc00, 100.x, .local/.lan/.internal), scrub URLs/tokens from thought lines, roles for links/buttons, narration should say what happened not what is about to.
+ 0.2 Discovery step 3 leftovers TESTER listed (stream position vs later cards, "finished" signal without unread dots, jump/scroll race, scroll position when switching views, "earlier" products shown as new).
+ 0.3 Add-on leftovers: dismissed-name matching, plural/colour keys, "hey thanks" never runs tools, third-party names need a per-name anchor.
+ 0.4 Caption/official-name rule (F5): refuse page-title suffixes ("| xbox.com", "- Wikipedia", "... review", "gallery image 3 of 5") and accept brand-prefixed real names ("Microsoft Xbox Series X ...", "Apple iPhone 15 Pro Max", "Valve Steam Deck OLED"); also clean the old caption-named Galaxy entry through the new dedupe (phase 2), not by hand.
+ 0.5 Beta 28 live findings still open (F7): misspelling gets "Short answer: yes" without price data or the "I read X as Y" line; "Can Am Maverick X3" has 22 accepted asks yet "no price yet"; poster gets a chat answer but no card; research stuck "Looking into it" 15+ minutes (needs a timeout and a plain failure state).
+ 0.6 Sold-comps leftovers TESTER named: brand-less title with matching GTIN, "not as is" false reject, multi-device duplicates, Save-credits gating of catalogue searches; verify the REAL eBay item-specifics response shape on a scratch live run (owner OK) before trusting it on real data.
+
+3. PHASE 1 - MODEL FACTS AND THE NAMING ENGINE (the foundation for everything below)
+ 1.1 A "model facts" store per product line: which attributes exist (colour, capacity, edition, generation, disc/no-disc, lock state, region), their values, whether each attribute is DISTINGUISHING, the source of each fact, and the visual/label tells (for example "disc slot present", model-number table). Learned from eBay item specifics + maker/catalogue pages (the variants work already reads these); editable by the owner; the owner's statements are a valid source.
+ 1.2 The distinguishing rule (owner approved): an attribute is part of the NAME only when models that differ in it have a real price or function difference. Until sold data can measure the gap, default name parts are storage, edition, model generation and disc/no-disc; colour is folded in unless the facts say otherwise.
+ 1.3 Canonical name format: "<Line> <state/edition word> (<hardware: colour, capacity>)". Seed with the owner-confirmed facts: Xbox Series X (Black) [disc], Xbox Series X Digital (White) [no disc], Xbox Series X Galaxy Edition [2TB only, no size in the name], Xbox Series S (White, 512GB), (White, 1TB), (Black, 1TB).
+ 1.4 Alias table on every entry: old names, official names ("Robot White", "Carbon Black", "Digital Edition", "2TB Galaxy Black Special Edition"), typed phrases, so renames never break matching or sync.
+ 1.5 Family parents: "Xbox Series X" above its models (not priced itself); Nintendo Switch as parent of the OLED and other near-identical Switch models; the same for the 3DS family; Nintendo Switch 2 is its own product with its own listing; Mario Kart 8 stays its own Games entry linked to the console.
+ 1.6 Phones: iPhone 15 Pro -> "iPhone 15 Pro Unlocked (256GB)" and "iPhone 15 Pro Locked (256GB)"; Locked has carrier children ("Locked T-Mobile (256GB)", Verizon, AT&T, Xfinity...); created on demand, not all up front. iCloud/activation-locked, MDM, blacklisted and financed-with-balance phones are NOT variants: they go to a For Parts entry and never alert. A phone that was locked and is now unlocked counts as Unlocked when the seller or the Settings screen says no restrictions.
+ 1.7 VISIBLE notices (owner): wherever colours/variants are folded because they do not move the price, show a note on the family/entry with the evidence ("Colours of this model sell for the same, so they share one entry": sold medians per colour, sample sizes). Never a silent merge.
+ ACCEPTANCE: fixtures for the owner's Xbox lines, Switch/Switch OLED/Switch Lite/Switch 2, iPhone 15 Pro (sizes, lock states, carriers), Sony WH-1000XM5 (colours folded), KitchenAid Artisan (colours folded; bowl-lift Professional separate), DeWalt DCD771 vs DCD771C2 (kit differs), AirPods Pro (generations). Names match the format, aliases resolve old names, notices appear.
+
+4. PHASE 2 - DEDUPLICATION (auto, safe)
+ 2.1 Creation-time prevention on EVERY insert path (addProductStub, createManualProduct, libraryOps split, cloud upsert, fan-out, sync pull): the same naming rules and alias lookup (backlog B7).
+ 2.2 One-time clean-up of existing duplicates: a DRY RUN listing "N entries become M" (read-only report/UI), reviewed by the owner before the first real run.
+ 2.3 Merge rules: auto-merge only when identity is certain after the naming rules; never across a hard attribute (colour that matters, real capacity, generation, edition, disc/no-disc, game vs console, accessory vs device, lock state); uncertain stays in the review list (this relaxes the Beta 13 "nothing merges without OK" rule at the owner's request).
+ 2.4 Merge mechanics: keep the older entry; move photos (de-duplicated by hash), notes, price numbers, linked listings, Watch references, parent/child and add-on links onto it; keep the other names as aliases; entry history records it; automatic backup before the first run; Undo for 30 days from Recent changes; cloud deletes only after the local merge succeeded.
+ ACCEPTANCE: "Xbox Series X" + "(1TB)" -> one; the three KitchenAid entries -> one; Series S 512GB and 1TB stay two; undo restores everything (photos, notes, links); a failed merge changes nothing; nothing is sent to the server before success.
+
+5. PHASE 3 - VAGUE ENTRIES AND THE "RESOLVE BEFORE GIVING UP" LADDER
+ 3.1 Confidence on every identity decision: settled / likely / vague, with the reason.
+ 3.2 A visible "Vague" marker on the listing and the entry saying exactly what is missing and what was already tried.
+ 3.3 The ladder, cheapest and most certain first, stopping at the first rung that is confident: (0) title, description, category, eBay item specifics; (1) all the listing's photos read for the line's visual tells (colour, disc slot, ports); (2) labels, packaging, model numbers, UPC (OCR); (3) eBay search-by-image (Browse API, availability to verify) and a vote among the top matches, optionally a paid official image API if the owner adds a key; (4) research the line's tells from sources and re-run 1-2; (5) draft a short question for the seller (never sent automatically). No browser-driven Google Lens/Bing.
+ 3.4 Escalate only when the answer changes the decision (deal vs not deal under every candidate), with a per-listing and per-day budget, a cache (listing -> resolved model, rung, evidence), a longer wait before re-trying, and a re-check when new evidence appears (seller reply, new photo, new sold data). Never loops forever.
+ 3.5 Until settled: priced at the lowest candidate, no deal alert, the user sees why; when settled the marker clears and the reasoning stays in the entry history.
+ ACCEPTANCE: Series X/Digital, Series S size/colour, iPhone storage and lock state, MacBook Air A-number, AirPods generation fixtures; a vague listing is never alerted; the loop ends within budget; a listing that is a deal under every candidate is not researched further.
+
+6. PHASE 4 - SOLD DATA (the evidence everything else leans on)
+ 4.1 Wire the standalone sold-comps module into the research background: provider chain manual import -> WatchCount (labelled third party) -> official Marketplace Insights (only after the owner has approval); no scraping of eBay's own sold pages. Log WHY zero results (limit page vs none), backlog B3.
+ 4.2 Per-entry stats: sold median, sold count (30/90 days), active asks, sell-through; days-to-sell only when the source provides listing and sold dates (say plainly when a number is unavailable). Feeds the per-colour/per-carrier comparison behind the "details don't matter" notices and the lock-state/carrier entries.
+ 4.3 Manual import UI (paste/CSV from Terapeak or the owner's own research).
+ OWNER ACTION: apply to eBay Partner Network / Buy API for Marketplace Insights (about 10 business days for step one, no guarantee). Nobody else can do it.
+
+7. PHASE 5 - ADD-ONS THE REALISTIC WAY
+ 5.1 Standard controllers of any colour = one shared entry (colour folded, with the visible notice); special edition / Elite / Adaptive / third-party get their own entries when confirmed; add-on entries are categorised (Xbox > Accessories > Controllers) and linked to every console they fit.
+ 5.2 The picker (owner): do not cram every add-on into one giant list. An option "Add a <thing>" (for a Switch: "Add a game") opens a pop-up with the researched and found add-ons for that broader niche, searchable; applies to every product family (games, lenses, batteries, attachments, cases...).
+ 5.3 Value: base value of the console from console-only comps (no double counting); the add-on premium MEASURED from sold pairs (median with minus median without, same model/edition/condition/period, enough samples, otherwise a cautious prior shown as a guess); never above the standalone price; hard ceiling of half the base kept as a safety net; deal scoring uses only the low end; used console -> used add-on prices. The owner's market numbers are the first fixture: console alone about $480-530, with controller about $500-550+, standalone controller about $30+.
+ 5.4 Scanner-seen add-ons also queue (the hook exists); invented names are not created without a web check.
+ ACCEPTANCE: the Xbox example above prices as measured, not guessed; Switch + game + case does not sum linearly; Canon body vs kit lens uses the measured premium; 24-entry explosions for phones do not happen (on demand).
+
+8. PHASE 6 - ACCURACY BACKLOG (parallel, lower priority)
+ B1 edition aliases (Limited vs Special), B2 "w/ controller" as an included extra, B4 one text+photo fusion function (fail closed), B5 log why every product is created, B6 config BOM, B8 "edition unpriced" flag, C-items (photo source badges, raw error text on the Library page, product page opens scrolled down, Escape in dialogs, substring-only search, merge dialog cannot tell duplicates apart), library search scope, "I read X as Y" and tool-name leaks stay fixed.
+
+9. SUGGESTED ORDER AND SHIPPING
+ Order: Phase 0 -> Phase 1 -> Phase 2 -> Phase 3 -> Phase 4 -> Phase 5 -> Phase 6 alongside. Phases 1 and 2 ship together (naming without dedupe, or dedupe without naming, would be half a job); Phase 3 can ship with them or the next beta; Phase 5 realism waits for Phase 4 data. Suggested releases: Beta 29 = Phase 0 + the Discovery redesign (once the owner has seen it on a real screen); Beta 30 = Phases 1-2 (+3); Beta 31 = Phases 4-5.
+ Each phase: code and tests, TESTER code-only check, fixes, then the owner's look.
+
+10. WHAT THE OWNER STILL NEEDS TO DECIDE OR DO
+ - "accept" to send this plan (or changes).
+ - OK for an unpacked scratch build so the Discovery redesign (steps 1-4, never seen) can be looked at; and a scratch live run to verify eBay's real item-specifics shape.
+ - Apply to eBay Partner Network / Buy API (Marketplace Insights).
+ - Restore of the old library from backups (still pending), and what to do with the 22 test entries on the server.
+ - Older open questions: Q2 (Stage A vs server mode), Q3 (re-queue the 4 failed products), Q4 (push no-comps high-gap items quietly), Q5 (typed name in Save-credits mode), Q6 (split mixed galleries). Add-on defaults Z1-Z5 are replaced by today's decisions (add-ons always get their own categorised entries; one-source = suggestion).
+ - Names pattern for phones, and whether paid image APIs / IMEI checks are ever allowed (default: no, later).
+
+11. RISKS
+ - Wrong model facts -> wrong names: mitigated by sources, owner-editable facts, aliases, the visible notices.
+ - Auto-merge mistakes: dry run, backup, certainty-only, undo.
+ - Cost: AI/search calls are uncapped by the owner's choice; the ladder escalates only when the decision changes and has budgets; dollar ceilings stay.
+ - Data safety: two Reset incidents already happened on the real profile; no test or build may touch it; every migration is backed up.
+ - Scope: this is a lot; the phases are ordered so each one is useful alone.
+
+12. OWNER DECISIONS ON THE OLD QUESTIONS AND SHIPPING (2026-10-20, after the plan was written) - THE OWNER SAID "SEND ALL CHANGES TO DEVELOPER"
+ - Q2: A (search the web first, then structure the result; no server "identity mode").
+ - Q3: disregard (the 4 failed products belonged to the library that was reset; nothing to re-queue).
+ - Q4: YES. A "Worth a look" for a high-gap item with no sold comps is pushed to the phone QUIETLY by default (low priority notification), only for large gaps, with the "not proven / no sold prices" warning in the message.
+ - Q5: YES, to the fullest "limited" capability: a user-typed name builds its card even in Save-credits mode, with the one-call-per-typed-phrase and a small hourly cap. If Clynx is extremely unconfident, it says in plain words that it needs Save-credits turned OFF to do better.
+ - Q6: YES. Split mixed listings/galleries into separate entries in their own categories and locations. Example: an Xbox Series X listed with Titanfall 2 must produce TWO Database entries: the console (Consoles) and the game (Games), each filed in its own category/location, linked. This applies when a listing is first processed, and as an owner-approved Review action for existing mixed galleries (backup first, undo available).
+ - SHIPPING: DEVELOPER is releasing Beta 29 now. Everything in this plan plus the work already in development becomes BETA 30 (replaces the earlier Beta 30/31 split in section 9). Do not start the new work or build anything until Beta 29 is released and DEVELOPER has reported it. The owner will run manual tests, and TESTER tests alongside the owner.
+ - AUDITOR will send this plan to DEVELOPER only after Beta 29 is published (installer beta.29 in beta-release, version committed, DEVELOPER idle), as the owner asked.
+
+13. ADDENDUM - SCANNER PARITY (owner said yes, 2026-10-20 ~06:15)
+ The owner asked whether Clynx will apply all the new knowledge to what it finds from Facebook scans. Answer from the code: the scanner already shares the Database, identity matching (findMatchingProduct, resolveIdentityTarget), product research and the bundle/add-on hook (onAddonsSeen), so naming, dedupe and the version/add-on worker are inherited when the scanner creates an entry. These are NOT automatic and must be wired and tested in the scan path:
+  S1 Vague listings: the resolve ladder (all photos, labels/model numbers/OCR, eBay image search, line research, seller-question draft) runs inside the scan decision for a listing whose identity is not settled, with the per-listing and per-day budget, the cache, and the decision-relevance gate (only when deal vs not-deal differs between candidates). A vague listing is never alerted and the entry/listing shows the "Vague" marker.
+  S2 Mixed listings: when a scanned listing contains two products (console + game such as Xbox Series X + Titanfall 2), it becomes TWO entries at the moment the scanner reads it: console in Consoles, game in Games, each in its own category/location, linked. Not only a Library/Review action.
+  S3 Phone lock states: the scanner reads unlocked / carrier names from title, description, item specifics and photos and chooses (or creates on demand) the right Unlocked/Locked/carrier entry; iCloud-locked, blacklisted and financed-with-balance listings go to For Parts and never alert.
+  S4 Deal scoring with add-ons: the scanner's deal decision uses the console-only base value plus the LOW end of the measured add-on premium; no double counting from "with controller" comps.
+  S5 Alerts: the scanner sends the quiet push for a high-gap "Worth a look" with no sold comps (owner decision Q4), with the "not proven / no sold prices" warning in the message.
+  S6 Typed-name/Save-credits (Q5) only concerns typed names; scans stay governed by the existing low-AI rules.
+ ACCEPTANCE (every phase is judged on a SCAN, not only on chat): scanner fixture listings with fake photo/analysis results: (a) "Series X + controller" -> console + controller entries, controller counted at the low end only; (b) "iPhone 15 Pro unlocked" and "T-Mobile locked" and "iCloud locked" -> three different outcomes; (c) "Switch OLED + Mario Kart 8 + case" -> console, game entry, minor add-on; (d) "MacBook Air" with no specs -> vague, lowest candidate value, no alert, ladder runs within budget; (e) "Xbox Series X with Titanfall 2" -> two entries in different categories; (f) a listing that is a deal under every candidate model -> no extra research. Each phase's definition of done includes its scan-path test passing.

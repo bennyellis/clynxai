@@ -1,0 +1,116 @@
+AUDITOR - the owner's ideas for the next update, restated and expanded (NOT SENT TO DEVELOPER)
+2026-10-20. Read-only analysis, grounded in the code (addons.ts, bundleBreakdown.ts, variantIdentity.ts, store.ts addProductStub) and the owner's own numbers. Nothing changed.
+
+THE OWNER'S IDEAS (as I understood them)
+ 1. Clynx should deduplicate duplicate Library entries by itself ("Xbox Series X" and "Xbox Series X (1TB)" are the same thing).
+ 2. Keep entries as simple as possible. Put a specification in the name ONLY when real, separately sold models of that product differ in it. Series X: no 1TB in the name (there is no other size); Galaxy Edition: no 2TB; but Series X has Black and White, so "Xbox Series X (Black)" and "Xbox Series X (White)"; Series S has 512GB and 1TB, so those stay separate.
+ 3. Add-ons: a listing like "Series X + controller" makes Clynx research the console AND the controller. Standard controllers sell for about the same whatever the colour, so they are one thing. Special edition / Elite / third-party controllers are different products and each gets its own Library entry. Controllers are add-ons of the consoles.
+ 4. Add-on value must be realistic. The owner's market numbers: console without controller about $480-530; with controller about $500-550+; a standalone controller about $30+. A small error here skews the console estimate.
+
+WHAT THE CODE DOES TODAY (why you see what you see)
+ - Names: storage size, colour and edition are all treated as "variant attributes" (variantIdentity.ts). A listing that says "1TB" has a word the plain entry lacks, so Clynx makes or keeps "Xbox Series X (1TB)" as a child. Clynx has no idea that a plain Series X only ever comes in one size, so it cannot tell "1TB" is redundant.
+ - Duplicates: addProductStub refuses a second entry only when the words reduce to the same key; "1TB" changes the key, so both live. Merges are only PROPOSED to you in a review list; nothing merges without your OK (rule since Beta 13).
+ - Add-on value (addons.ts): for an add-on made for the console ("expected" role) Clynx credits 55% of the add-on's own price, the total flattens as add-ons pile up, is capped at 30% of the console's value and never more than 50% of it, and is shown as a range whose low end is half. For a $30 controller that is about $8-$16. Your market numbers imply about $20-25, i.e. roughly 70-80% of the standalone price, so today's range is a little LOW and nothing is measured from sales (it says "rough").
+
+EXPANSION 1 - NAMING: "ONLY WHAT REALLY DISTINGUISHES A MODEL" BECOMES A RULE
+ - Rule: an attribute (colour, capacity, edition) goes into an entry's name only if, for that product line, at least two separately sold models differ in it. Otherwise it is dropped from the name and kept as a fact on the page ("1TB SSD").
+ - To apply it Clynx needs "model facts" per product line: which colours, capacities and editions truly exist. Learn them from sources (eBay item specifics, the maker, catalogue pages, already built in the variants work), cache them on the line's page, and let the owner correct them. Do not hard-code Xbox; the same rule then works for iPhones (capacity matters), Switch (colour/edition), headphones, etc.
+ - FACT CHECK BEFORE BUILDING (from my own knowledge, please verify): the WHITE standard Series X, as far as I know, is the 2024 "Digital Edition" with NO disc drive, a different product from the black disc console and cheaper. If so, "(White)" would hide that difference; a name like "Xbox Series X (White, Digital)" or "Xbox Series X Digital (White)" would be honest. I also believe the Series S has a 512GB white model and 1TB models (black, and later white). This is exactly why the facts should come from sources and be editable, not from my memory or a hard-coded table.
+ - Format: one parenthesis, fixed order for several attributes (suggest Edition, Colour, Capacity), for example "Xbox Series S (White, 512GB)". Official long names ("Xbox Series X 2TB Galaxy Black Special Edition") stay as the entry's official name/alias; the Library shows the simple name.
+ - Aliases: every entry keeps a list of other names (old names, official names, typed phrases) so "Xbox Series X 1TB", "xbox series x galaxy edition 2tb" and old listings still land on the right entry. This also fixes renamed entries breaking matches and syncs.
+ - Parent kept: with two colours there should still be a family-level entry "Xbox Series X" that groups its models (not priced itself when children exist).
+ - Listing says no colour ("Xbox Series X console"): the photo decides (Clynx already analyses photos); if the photo cannot, the listing is treated as "model unclear" and valued against the lower of the models or flagged, never silently as Black.
+
+EXPANSION 2 - DEDUPLICATION: SAFE ENOUGH TO RUN BY ITSELF
+ - Why it needs care: a merge changes a lot at once: reference photos, notes, price numbers, listings linked to the entry (product_id), Watches that use it as reference, parent/child and add-on links, cloud rows, the undo log. And it overrides the Beta 13 rule "nothing merges without your OK".
+ - Proposed rule: auto-merge only when identity is certain after the new naming rules (same line, same distinguishing attributes, nothing contradicting); anything uncertain still goes to the review list. Never merge entries that differ in a hard attribute (colour, real capacity difference, generation, edition, game vs console, accessory vs device).
+ - Safety: a one-time DRY RUN first (a list of "these 9 would merge into these 4" for you to read), an automatic backup before the first real run, keep the older entry and move everything onto it (photos de-duplicated by hash, notes joined, links re-pointed), remember the old name as an alias, a visible log in "Recent changes" with Undo for at least 30 days, and cloud deletes only AFTER the local merge succeeded (Beta 27 deletes now reach the server).
+ - Also stop creating the duplicates: the same naming rules applied at creation (addProductStub, fan-out, sync pull), so the library stays clean after the clean-up.
+
+EXPANSION 3 - ADD-ONS THE WAY YOU DESCRIBE THEM
+ Flow for "black Series X + black controller" on Facebook:
+ 1. The scanner reads the listing as a bundle: console + controller.
+ 2. Console resolves to "Xbox Series X (Black)". The controller resolves to ONE shared entry "Xbox Wireless Controller" (colour is not a model for standard controllers; the colour is kept as a fact), filed under Xbox > Accessories > Controllers and linked as an add-on to every console it works with (many consoles, one controller entry).
+ 3. Special edition, Elite (Series 2), Adaptive and third-party controllers are different products: each gets its own entry only when confirmed (two sources or a seen listing; one source stays a suggestion, as you decided). "Special edition" is decided by evidence: sources say so AND/OR its sold price is clearly above the standard one, not by colour name alone.
+ 4. The controller entry gets its own sold comps (the roughly $30+ price) so its standalone value is measured, not typed.
+ REALISTIC ADD-ON VALUE (the part where small errors matter)
+ - Your example: console alone about $505 mid, with controller about $525 mid: the premium is about $20, about 4% of the console. The standalone controller is about $30. So an add-on is worth roughly 2/3 to 3/4 of its standalone price here, because buyers pay less for a controller bundled with a console than for one bought alone.
+ - Measure it, do not guess it: compare SOLD "console only" with SOLD "console + controller" for the same model/edition/condition over the same recent window; premium = median(with) minus median(without); needs enough sales in both groups (for example 8-10 each) because the console's own price noise ($50 range) is bigger than the premium. Show it as "about $20, measured from 14 sales" when enough data exists; otherwise show the cautious prior (about 0.4-0.8 x standalone price, range) and say it is a guess. Never let the high end go above the standalone price.
+ - Avoid double counting: build the CONSOLE's base value from "console only" comps and keep "with controller" comps in their own group. Otherwise the base is already inflated by controller bundles and the add-on is added on top. This is the skew you are worried about, and it is the most important rule.
+ - For DEAL SCORING (is this listing a good flip) use base value plus the LOW end of the add-on range only; show the range on the page. A listing that bundles a controller should never look like a deal because of a generous add-on guess.
+ - Condition matters: a used console's bundled controller is a used controller; use used standalone prices.
+ - Keep the ceilings (never more than half the console's value) as a safety net, but they are not what makes it realistic; the measured premium is.
+ DEPENDENCY: measuring premiums needs sold prices, and sold-price lookups are the weakest part today (often empty). The new sold-comps module plus manual import (Terapeak paste/CSV) or the official API is what makes this work. Until then the add-on estimate stays labelled "rough".
+
+RISKS AND TRADE-OFFS
+ - Naming relies on model facts that can be wrong or incomplete; mitigation: sources + editable + an alias list.
+ - Auto-merge is irreversible if done carelessly; mitigation: dry run, backup, undo, certainty-only.
+ - Renaming existing entries changes names that sync to the server; do it as one controlled migration (after the backup), with aliases.
+ - Add-on entries multiply (colours, third-party); the "colour is not a model" rule for standard controllers and the confirmation rule keep it bounded.
+ - Today's library is small (reset on 22:35) so the dry run is cheap now; the old 14 and the 36 are in backups if you restore.
+
+QUESTIONS FOR THE OWNER (my suggested answer in brackets)
+ Q-N1 Keep a family-level entry ("Xbox Series X") above its colour models? [yes, not priced itself]
+ Q-N2 Is the white Series X the no-disc Digital model, and should the name say so? [verify, then "(White, Digital)"]
+ Q-N3 Attribute order inside the parenthesis? [Edition, Colour, Capacity]
+ Q-N4 Auto-merge only when certain, with a dry run first, a backup, and 30-day Undo? Anything uncertain stays in the review list? [yes]
+ Q-N5 A listing that does not state the colour: use the photo, else flag as unclear? [yes]
+ Q-A1 Standard controllers of any colour = one entry; special/Elite/third-party = their own entries when confirmed? [yes]
+ Q-A2 Build the console's base value from console-only sold comps and measure the with-controller premium from sold pairs? [yes]
+ Q-A3 For deal scoring use only the low end of the add-on range? [yes]
+ Q-A4 Order of work: dedupe + naming first (cleans the library), add-on realism second (needs sold data)? [yes]
+
+OWNER-CONFIRMED FACTS (2026-10-20, answer to Q-N2) - still NOT sent to DEVELOPER
+ - Series X: the black one has a disc drive; the white one does NOT (Digital). Different product, different price.
+ - Series S: a 512GB model, a 1TB model, and a black 1TB model (so 512GB white, 1TB white, 1TB black).
+ - Galaxy Edition: 2TB only (so no size in the name).
+ Resulting names (colour and size shown only where they really distinguish; fixed order Edition, Colour, Capacity):
+   Xbox Series X (Black)                 disc drive; the plain entry for the standard console
+   Xbox Series X Digital (White)         no disc drive; "Digital" is part of the product name, white is the only colour it comes in
+   Xbox Series X Galaxy Edition          2TB, black, disc; no size in the name
+   Xbox Series S (White, 512GB)
+   Xbox Series S (White, 1TB)
+   Xbox Series S (Black, 1TB)
+   (Official names stay as aliases: "Robot White", "Carbon Black", "Digital Edition", "1TB SSD", "2TB Galaxy Black Special Edition".)
+ What the facts let Clynx infer when a listing is vague (this is why the facts must be stored per product line):
+   Series X: "digital", "no disc", "white" -> the Digital (White) entry. "black" or "disc drive" -> Series X (Black). Nothing stated -> photo decides, else unclear (the prices differ).
+   Series S: "512GB" -> White 512GB (only 512GB model). "black" -> Black 1TB (only black model). "1TB" alone -> white or black: photo decides, else unclear. "white" alone -> 512GB or 1TB white: size decides, else unclear.
+   Galaxy: "Galaxy" with the console words -> the Galaxy entry whatever size is stated; a stated size other than 2TB is a contradiction and is flagged.
+ This also shows why "(White)" alone would have been misleading for the Series X: the disc drive is the real difference, so "Digital" belongs in the name.
+ Facts are stored with their source and can be edited by the owner; the owner's confirmation above is a valid source for these three lines.
+
+OWNER CHANGE (2026-10-20): "unclear" must not be the first answer; Clynx should reverse-image-search and research more thoroughly - still NOT sent to DEVELOPER
+ TODAY: Clynx has photo analysis (vision.ts), comp-photo checks (compPhotoCheck.ts) and reference-photo identity (photoIdentity.ts), but NO reverse image search anywhere in the code, and one look at the listing's own photos is as far as it goes.
+ PROPOSED "RESOLVE BEFORE YOU GIVE UP" LADDER (cheap and certain first, expensive last; stop at the first rung that is confident):
+  Rung 0 Words: title, description, category and, for eBay, the structured item specifics ("Disc drive: No", "Colour: White", "Storage: 512GB"). Free and exact.
+  Rung 1 All the photos of the listing (not just the first), read for the visible tells stored in the product line's facts: colour, whether there is a disc slot/eject button, port layout, logos. Series X: a disc slot means the black disc console, no slot means the Digital white one.
+  Rung 2 Read labels and packaging in any photo (OCR): the model number on the back label, a UPC on the box, a serial sticker. Model numbers settle disc vs digital and Series S sizes exactly (the line's facts carry the number-to-model table; to be learned from sources, not hard-coded).
+  Rung 3 Visual match: eBay's own image search in the Browse API (search by image; to verify it is available to the app's API access) returns similar eBay listings; if most of the top matches agree on the model, take it. Optionally Google Cloud Vision "web detection" (an official, paid API that returns web pages and labels for a matching image) or TinEye's paid API. Do NOT drive Google Lens/Bing Images with a browser: automated use of those pages is against their terms and breaks constantly. Reverse search also flags a stock/stolen photo (the same picture all over the web), which is a useful warning on its own.
+  Rung 4 Research the line: look up, from sources, how the models differ and how to tell them apart in a photo, store it as a "visual tell" fact on the line (cached, editable), then re-run rungs 1-2 with it.
+  Rung 5 Ask: draft (never auto-send) a short question to the seller ("Does it have a disc drive?") for the owner to send or ignore.
+  Only if every rung fails: "unclear", valued at the LOWER of the candidate models, no deal alert, with the reason written out ("disc slot not visible in 4 photos; no label shown").
+ COST CONTROL (important now that AI calls are not capped): escalate only when it matters. If the listing is a deal (or not a deal) under EVERY candidate model, no need to resolve it. Spend rungs 3-5 only on listings where the answer changes the decision. Cache every result (listing id -> resolved model, with the rung and evidence) so a relisted item is not researched again.
+ SAME LADDER FOR OTHER AMBIGUITY: edition vs plain, colour variants of consoles, phone capacities, controller types (standard vs special edition vs Elite).
+ QUESTIONS: Q-R1 Is it OK to use paid official image APIs (Google Cloud Vision web detection / TinEye) in addition to eBay's image search? [eBay image search first, paid APIs only if you add a key] Q-R2 Seller question drafts: yes, never sent automatically? [yes] Q-R3 Escalate only when the decision changes? [yes]
+
+OWNER IDEA (2026-10-20): phone lock states as variants - NOT sent to DEVELOPER
+ Owner: when Clynx finds an unlocked phone it should understand what "unlocked" means in phone context, and also look into locked phones and create a separate variant: iPhone 15 Pro -> iPhone 15 Pro Unlocked (256GB) + iPhone 15 Pro Locked (256GB); a locked phone goes to the Locked entry, which has carrier children (T-Mobile, Verizon, AT&T, Xfinity, ...) because carrier locks differ in price, sell-through and demand.
+ AUDITOR expansion:
+  - Today: comp identity already has a "carrier lock" attribute (compIdentity.ts, Beta 13 attributes), so a locked comp does not price an unlocked entry. But no locked entries exist, so a locked phone listing has nowhere to land and is priced against nothing, or against the wrong entry.
+  - Four different things hide behind "locked"; only the first is a variant: (1) carrier-locked (SIM lock to one carrier) = variant by carrier; (2) factory/carrier-unlocked = Unlocked entry (a phone that WAS locked and has since been unlocked is unlocked; for some carriers the lock lifts automatically after a period, so "Verizon" may price near unlocked; the facts per carrier come from sources, not memory); (3) iCloud/Activation-locked, MDM/enterprise-locked, blacklisted/reported stolen, or financed with a balance owed = NOT a normal variant: worth parts value at best, must never price as a working phone; file under the (For Parts / Broken) idea, never alert; (4) unclear.
+  - Hierarchy: family "iPhone 15 Pro" -> lock state (Unlocked / Locked) -> carrier for Locked -> capacity. Names follow the same pattern as the Xbox ones: state word before the parenthesis, hardware inside: "iPhone 15 Pro Unlocked (256GB)", "iPhone 15 Pro Locked (256GB)", "iPhone 15 Pro Locked T-Mobile (256GB)".
+  - Avoid an explosion: 4 capacities x (unlocked + locked + 4 carriers) = 24 entries for one phone. Create locked/carrier/capacity entries on demand (first time a listing or source shows one, or when it is a decision-relevant case), not all up front; the family's model facts list what exists, entries appear lazily.
+  - Resolving the lock state from a listing (same "resolve before giving up" ladder): title words ("unlocked", "factory unlocked", "T-Mobile", "carrier locked"), description, eBay "Network" item specific, photos (Settings > General > About shows "Carrier Lock: No SIM restrictions" for an unlocked iPhone; boot-screen carrier logo), IMEI/blacklist check (optional paid third party, not assumed), seller question draft; only then unclear = valued as the cheaper state.
+  - Why it matters most: scoring a $450 locked phone against unlocked comps of $700 would look like a huge deal and is a false deal; separate entries make the profit rule honest.
+  - Per-carrier price, sell-through and demand: each entry gets its own sold median, sold count (30/90 days), active asks count, and sell-through (sold vs active). Days-to-sell needs listing start and sold dates, which depend on the sold-data source (the new sold-comps module and its sources); say plainly when a number is not available.
+  - Questions: Q-L1 name pattern "iPhone 15 Pro Unlocked (256GB)" as the owner wrote? [yes] Q-L2 create locked/carrier entries on demand, not all up front? [yes] Q-L3 iCloud-locked/blacklisted/financed-with-balance go to the For Parts variant and never alert? [yes] Q-L4 an unlocked-after-being-locked phone counts as Unlocked? [yes, if the seller or the Settings screen says no restrictions] Q-L5 optional paid IMEI/blacklist checks later? [later]
+
+OWNER ANSWERS (2026-10-20) - still NOT sent to DEVELOPER until the owner says accept
+ - Naming rule clarification: YES. An attribute is part of a name only when models differing in it have a real price or function difference. Until sold data can measure the gap, default name parts are storage, edition, model generation and disc/no-disc; colour is folded in unless the facts say otherwise. The "details that don't matter" must be VISIBLE to the user (a note where entries were folded, with the evidence).
+ - Bulk dedupe example (KitchenAid): approved ("perfect").
+ - VAGUE ENTRIES: Clynx must know an entry/listing is vague, tell the user, and keep researching until it is more confident. Design:
+   * A confidence level on every identity decision: settled / likely / vague, with the reason ("disc slot not visible in 4 photos; no label shown").
+   * A visible "Vague" marker on the listing and the entry, listing exactly what is missing (colour? size? generation?) and what Clynx already tried.
+   * A research loop that climbs the resolve ladder rung by rung and re-scores after each rung; it stops when confidence reaches "settled/likely", or the budget is spent (a cap per listing and per day, plus a longer wait before trying again), or nothing new can be learned; it never loops forever.
+   * Re-check later when new evidence appears (a new photo, a seller reply, new sold data), and update the marker.
+   * Until settled: priced at the lowest candidate, no deal alert, and the user sees why. When settled: the marker clears and the reason is kept in the entry history.
