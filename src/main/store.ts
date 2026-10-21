@@ -15,6 +15,9 @@ import { randomUUID } from "node:crypto";
 import { addonKey, type Addon, type AddonRole, type AddonStatus } from "./addons.js";
 import { nameKey } from "./modelFacts.js";
 import { measurePremium, splitByInclusion, type PremiumResult } from "./addonPremium.js";
+import { soldStats, type SoldStats } from "./soldComps/stats.js";
+import { mapWatchCountComp } from "./soldComps/watchCountProvider.js";
+import type { EbayComp } from "./watchcount.js";
 import { SoldCompsStore } from "./soldComps/store.js";
 import { cleanOwnerAnswer, ownerValueUsd, pickPricePrompts, type OwnerAnswerInput, type OwnerPrice, type PromptRecord, type PromptState } from "./ownerPrice.js";
 import { proposeSplits } from "./gallerySplit.js";
@@ -1840,6 +1843,25 @@ export class Store {
   /** Every colour real listings use for any line, lower case, that the owner has not ignored: names like "Cosmic Teal" that the built-in colour list does not know. */
   learnedColours(): string[] {
     return (this.db.prepare("SELECT DISTINCT value FROM learned_facts WHERE attribute = 'colour' AND ignored = 0 AND count >= 3").all() as Array<{ value: string }>).map((r) => r.value.toLowerCase());
+  }
+
+  // ---- Phase 4: the sales accepted for an entry, kept so they can be counted (soldComps/stats.ts).
+
+  /** Replaces the WatchCount sales kept for this entry with the ones that just passed every identity check. Imported sales are kept by the import itself. */
+  recordAcceptedSales(productId: string, comps: ReadonlyArray<EbayComp>, now: number = Date.now()): number {
+    this.soldComps(); // creates the tables on first use
+    this.db.prepare("DELETE FROM sold_comp_matches WHERE product_id = ? AND comp_id LIKE 'watchcount:%'").run(productId);
+    const mapped = comps.map((c) => mapWatchCountComp(c, now, 180));
+    if (mapped.length > 0) this.soldComps().upsertComps(mapped);
+    for (const c of mapped) this.soldComps().saveMatch({ compId: c.id, productId, identityVerdict: "exact", reason: "accepted by the identity checks", photoCheck: null, accepted: true, judgedAt: now });
+    return mapped.length;
+  }
+
+  soldStatsFor(productId: string, now: number = Date.now()): SoldStats {
+    const accepted = this.soldComps().matchesFor(productId, true);
+    const sales = this.soldComps().getComps(accepted.map((m) => m.compId)).filter((c) => c.expiresAt === null || c.expiresAt > now);
+    const row = this.db.prepare("SELECT ebay_active_sample_size a, ebay_avg_run_time_days r FROM products WHERE id = ?").get(productId) as { a: number | null; r: number | null } | undefined;
+    return soldStats(sales, row?.a ?? null, row?.r ?? null, now);
   }
 
   // ---- Phase 4a: "Your price" and the questions that collect it.

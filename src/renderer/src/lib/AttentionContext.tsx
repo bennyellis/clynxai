@@ -10,3 +10,6 @@ export function AttentionDot({ productIds, className }: { productIds: ReadonlyAr
   if (n === 0) return null;
   return <span className={`nav-item-pulse-dot attention-dot${shouldPulse(summary, productIds) ? "" : " steady"}${className ? ` ${className}` : ""}`} role="img" aria-label={attentionLabel(n)} />;
 }
+
+/** Entries that have a high-demand model below them (hotParents.ts): their price gets a green frame. */
+export const HotParentsContext = createContext<ReadonlySet<string>>(new Set());

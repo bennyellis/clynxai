@@ -284,3 +284,31 @@ export function gateExtrasFromLump(lumpUsd: number, baseValueUsd: number, corrob
   const counted = corroboratedByText ? Math.min(lump, Math.max(0, baseValueUsd) * VISION_LUMP_CAP_OF_BASE) : 0;
   return { countedUsd: Math.round(counted), uncountedUsd: Math.round(lump - counted) };
 }
+
+/** What the Database has MEASURED for an add-on of the main item (addonPremium.ts): only its low end may count in a deal. */
+export interface MeasuredPremiumFor {
+  /** how the add-on is named in the Database */
+  name: string;
+  basis: "measured" | "prior" | "none";
+  lowUsd: number | null;
+}
+
+/**
+ * Deal scoring with measured add-ons (scanner parity S4): the main item is valued from its own (console-only) sales, and an extra that the Database has a MEASURED premium for counts at most at the
+ * LOW end of that premium - never at the fixed weight, which can overstate it. Extras without a measured premium are left exactly as the valuation priced them. The totals are recomputed so
+ * nothing is counted twice; `sameName` decides whether a bundle line is the Database's add-on.
+ */
+export function applyMeasuredPremiums(v: BundleValuation, measured: ReadonlyArray<MeasuredPremiumFor>, sameName: (a: string, b: string) => boolean): BundleValuation {
+  let changed = false;
+  const lines = v.lines.map((l): BundleLine => {
+    if (l.status !== "counted") return l;
+    const m = measured.find((x) => x.basis === "measured" && x.lowUsd !== null && sameName(x.name, l.name));
+    if (!m) return l;
+    const low = Math.max(0, m.lowUsd as number);
+    changed = true;
+    return { ...l, countedUsd: Math.min(l.countedUsd, low), estimated: false, note: `${l.note} Counted at the low end of its measured premium (${money(low)}).`.trim() };
+  });
+  if (!changed) return v;
+  const added = lines.filter((l) => l.status === "counted").reduce((n, l) => n + l.countedUsd, 0);
+  return { ...v, lines, upliftUsd: added, addedUsd: added, totalValueUsd: v.mainValueUsd + added, summary: `${v.summary} Add-ons with a measured premium count at its low end.` };
+}

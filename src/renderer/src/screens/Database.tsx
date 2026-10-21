@@ -1,6 +1,7 @@
 import { matchesLibrarySearch } from "../lib/librarySearch";
 import { ProductNotes } from "../components/ProductNotes";
-import { AttentionDot, AttentionContext } from "../lib/AttentionContext";
+import { AttentionDot, AttentionContext, HotParentsContext } from "../lib/AttentionContext";
+import { hotParentIds } from "../lib/hotParents";
 import { attentionLabel } from "../lib/attention";
 import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { BlacklistedImage, BlacklistTerm, ChatAttachment, ChatChoice, ChatChoiceOption, ChatContext, ChatMessage, ProductImage, ProductProfile } from "../lib/api.js";
@@ -746,6 +747,8 @@ export function Database({
     const prices = products.map((p) => p.ebayAvgSoldPriceUsd).filter((v): v is number => v !== null);
     return prices.length ? prices.reduce((sum, v) => sum + v, 0) / prices.length : null;
   }, [products]);
+  // entries with a high-demand model below them get a green frame on their price
+  const hotParents = useMemo(() => hotParentIds(products, avgSoldPriceAcrossLibrary), [products, avgSoldPriceAcrossLibrary]);
 
   // Per explicit instruction — a second grouping tier within category: a
   // product's own family (e.g. "Xbox", or a deeper path like "Xbox > Games
@@ -996,6 +999,7 @@ export function Database({
   const TAB_LABELS: Record<DatabaseTab, string> = { discovery: "Discovery", library: "Library", review: "Review", blacklist: "Blacklist" };
 
   return (
+    <HotParentsContext.Provider value={hotParents}>
     <div style={{ display: "flex", flexDirection: "column", gap: 20, height: "100%" }}>
       <div>
         <h1 style={{ margin: 0, fontSize: 28 }}>Database</h1>
@@ -1363,6 +1367,7 @@ export function Database({
         </div>
       )}
     </div>
+    </HotParentsContext.Provider>
   );
 }
 
@@ -2120,6 +2125,7 @@ function ProductTile({
 }) {
   const tileRef = useImpression(product);
   const shownPrice = tilePrice(product);
+  const hotChild = useContext(HotParentsContext).has(product.id);
   const [searching, setSearching] = useState(false);
   // Per explicit instruction — themed popups only, never window.confirm.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -2260,7 +2266,7 @@ function ProductTile({
             buttons sit bottom-right, so the two never overlap. */}
         <span
           data-testid="tile-price"
-          title={shownPrice.title}
+          title={hotChild ? `${shownPrice.title} A model below this one sells high and fast.` : shownPrice.title}
           style={{
             position: "absolute",
             bottom: 6,
@@ -2269,7 +2275,8 @@ function ProductTile({
             padding: "3px 8px",
             borderRadius: 8,
             background: "rgba(20,18,28,0.78)",
-            border: shownPrice.tone === "asking" ? "1px dashed rgba(251,191,36,0.8)" : "1px solid rgba(255,255,255,0.25)",
+            border: hotChild ? "2px solid var(--success)" : shownPrice.tone === "asking" ? "1px dashed rgba(251,191,36,0.8)" : "1px solid rgba(255,255,255,0.25)",
+            boxShadow: hotChild ? "0 0 8px var(--success)" : undefined,
             color: shownPrice.tone === "none" ? "rgba(255,255,255,0.7)" : "white",
             lineHeight: 1.15,
             pointerEvents: "auto",

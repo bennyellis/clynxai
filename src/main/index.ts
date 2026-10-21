@@ -115,7 +115,7 @@ import { timed, getMetricsSnapshot, resetMetrics, recordStage } from "./metrics.
 import { runAddReferencePhotos, topUpReferencePhotos } from "./referencePhotos.js";
 import { searchProducts } from "./chatIntent.js";
 import { DiscoveryFeed, type DiscoverySource } from "./discovery.js";
-import { breakDownListing, valueBundle, type BundleValuation, type PricedBundleItem } from "./bundleBreakdown.js";
+import { applyMeasuredPremiums, breakDownListing, valueBundle, type BundleValuation, type PricedBundleItem } from "./bundleBreakdown.js";
 import { setClientVersion, CloudClient, isBillingStatus } from "./cloudClient.js";
 import { readBuildInfo } from "./buildInfo.js";
 import { importLocalData, localDataExists } from "./localMigration.js";
@@ -1760,10 +1760,12 @@ async function researchEbayComps(
   // The owner's own imported sales join the search results and go through the same identity checks.
   let comps = soldAttempt.comps;
   let importedUsed = 0;
+  const importedKeys = new Set<string>();
   try {
     const mine = await importedCompsForQuery(store.soldComps().listComps("manual_import"), query, comps);
     if (mine.length > 0) {
       importedUsed = mine.length;
+      for (const c of mine) importedKeys.add(`${c.title.toLowerCase().replace(/\s+/g, " ").trim()}|${Math.round(c.priceUsd)}`);
       comps = [...comps, ...mine];
       discovery.note(id, "step", `I also tried ${plural(mine.length, "sale")} you imported yourself, with the same checks as the rest.`);
     }
@@ -1802,6 +1804,19 @@ async function researchEbayComps(
   const parentEntry = self?.parentProductId ? store.getProductById(self.parentProductId) : null;
   const requiredTerms = parentEntry ? distinguishingTokens(fallbackName, parentEntry.name).other.filter((t) => !/^\d+$/.test(t)) : [];
   const analysis = await analyzeEbayComps(query, comps, fallbackName, photoCheck, false, requiredTerms, sourceTitle);
+  // Keep the sales that passed every check, for this entry, so they can be counted (sold statistics on the product page).
+  try {
+    const keyOf = (c: { title: string; priceUsd: number }) => `${c.title.toLowerCase().replace(/\s+/g, " ").trim()}|${Math.round(c.priceUsd)}`;
+    const accepted = analysis.acceptedComps ?? [];
+    store.recordAcceptedSales(id, accepted.filter((c) => !importedKeys.has(keyOf(c))));
+    const mineRows = store.soldComps().listComps("manual_import");
+    for (const c of accepted.filter((x) => importedKeys.has(keyOf(x)))) {
+      const row = mineRows.find((r) => keyOf({ title: r.title, priceUsd: r.soldPrice }) === keyOf(c));
+      if (row) store.soldComps().saveMatch({ compId: row.id, productId: id, identityVerdict: "exact", reason: "accepted by the identity checks", photoCheck: null, accepted: true, judgedAt: Date.now() });
+    }
+  } catch (err) {
+    console.error(`[sold stats] ${(err as Error).message}`);
+  }
   // What sellers are asking for the same thing right now: sold comps stay the main evidence, asking prices fill in
   // when there are few of them (see marketValue.ts). Never fails the research: no data just means sold comps alone.
   const active = await fetchActiveAsks(query, fallbackName, analysis.dominantCondition, photoCheck, false, store.getProductById(id)?.family ?? null, requiredTerms, sourceTitle);
@@ -2043,7 +2058,18 @@ async function valueListingBundle(args: { title: string; description: string; ma
       return { item, unitValueUsd: valueUsd ?? item.guessUsd, runTimeDays: exact ? (signals?.runTimeDays ?? null) : null, estimated };
     })
   );
-  return valueBundle({ main: { ...main, name: args.mainName }, mainValueUsd: args.mainValueUsd, extras: priced });
+  const valuation = valueBundle({ main: { ...main, name: args.mainName }, mainValueUsd: args.mainValueUsd, extras: priced });
+  // Extras the Database has a MEASURED premium for count at the low end of it (never the fixed weight); the rest stay as priced.
+  try {
+    const base = store.findMatchingProduct(args.mainName);
+    if (base) {
+      const measured = store.listAddons(base.id, { withPremium: true }).map((a) => ({ name: a.name, basis: a.premium?.basis ?? ("none" as const), lowUsd: a.premium?.lowUsd ?? null }));
+      return applyMeasuredPremiums(valuation, measured, (a, b) => addonKey(a) === addonKey(b) || sameAddonLoosely(a, b));
+    }
+  } catch (err) {
+    console.error(`[bundle] measured premiums skipped: ${(err as Error).message}`);
+  }
+  return valuation;
 }
 
 // What broken / for-parts copies of a product sell for (the research behind a "(For Parts / Broken)" Database variant): WatchCount
@@ -5244,6 +5270,7 @@ app.whenReady().then(() => {
     const p = store.getProductById(String(args?.productId ?? ""));
     return { ok: p ? store.setLearnedFactIgnored(p.name, String(args.attribute), String(args.value), args.ignored === true) : false };
   });
+  ipcMain.handle("products:soldStats", (_e, productId: string) => store.soldStatsFor(String(productId ?? "")));
   ipcMain.handle("products:foldedNotice", (_e, productId: string) => store.foldedNoticeFor(String(productId ?? "")));
   ipcMain.handle("products:origin", (_e, productId: string) => store.getProductOrigin(String(productId ?? "")));
   // Review > "Move them to their own entry": backup first, then ONE undoable action (Recent changes), then the new game's own research.

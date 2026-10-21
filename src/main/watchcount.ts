@@ -257,6 +257,8 @@ export interface CompAnalysis {
   // How the results were judged against the product's identity before any price was used (see compIdentity.ts): retrieved, exact, compatible, uncertain,
   // rejected, with the reasons. Only exact and compatible results are in the figures above.
   validation?: ValidationSummary;
+  // The sales that went into the figures above (after every identity check), so they can be kept and counted later.
+  acceptedComps?: EbayComp[];
 }
 
 const EMPTY_ANALYSIS: CompAnalysis = { identity: "exact", identityNote: null, photoRejected: 0, avgSoldPriceUsd: null, avgRunTimeDays: null, avgShippingUsd: null, sampleSize: 0, dominantCondition: null, rejectedCount: 0 };
@@ -422,6 +424,7 @@ export async function analyzeEbayComps(
     avgRunTimeDays,
     avgShippingUsd,
     sampleSize: price.used,
+    acceptedComps: source,
     dominantCondition: !broken && useSegment && dominantKey !== "unknown" ? dominantKey : null,
     rejectedCount,
     photoRejected,

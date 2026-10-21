@@ -7,22 +7,35 @@ export function ProductNotes({ product }: { product: ProductProfile }) {
   const [origin, setOrigin] = useState<{ reason: string; detail: string | null; at: number } | null>(null);
   const [learned, setLearned] = useState<Array<{ attribute: string; value: string; count: number; source: string; ignored: boolean }>>([]);
   const reloadLearned = () => void api.learnedFacts(product.id).then(setLearned).catch(() => undefined);
+  const [stats, setStats] = useState<Awaited<ReturnType<typeof api.productSoldStats>> | null>(null);
   const [folded, setFolded] = useState<{ colours: string[]; names: string[]; text: string } | null>(null);
   useEffect(() => {
     let live = true;
     api.learnedFacts(product.id).then((l) => live && setLearned(l)).catch(() => undefined);
+    api.productSoldStats(product.id).then((x) => live && setStats(x)).catch(() => undefined);
     api.productOrigin(product.id).then((o) => live && setOrigin(o)).catch(() => undefined);
     api.productFoldedNotice(product.id).then((f) => live && setFolded(f)).catch(() => undefined);
     return () => {
       live = false;
     };
   }, [product.id, product.updatedAt]);
-  if (!origin && !folded && learned.length === 0) return null;
+  if (!origin && !folded && learned.length === 0 && (!stats || stats.count === 0)) return null;
   return (
     <div style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5, color: "var(--text-muted)" }} data-testid="product-notes">
       {folded && (
         <div>
           <strong style={{ color: "var(--text)" }}>Colours share this entry.</strong> {folded.text} Names kept: {folded.names.slice(0, 6).map((n) => `“${n}”`).join(", ")}.
+        </div>
+      )}
+      {stats && stats.count > 0 && (
+        <div data-testid="sold-stats">
+          <strong style={{ color: "var(--text)" }}>Sold:</strong> {stats.count} accepted sale{stats.count === 1 ? "" : "s"}
+          {stats.medianUsd !== null ? `, middle price $${Math.round(stats.medianUsd)}` : ""}
+          {stats.medianDeliveredUsd !== null ? ` ($${Math.round(stats.medianDeliveredUsd)} with shipping)` : ""}
+          {stats.count30 !== null ? `; ${stats.count30} in 30 days, ${stats.count90} in 90 days` : ""}
+          {stats.avgDaysToSell !== null ? `; takes about ${stats.avgDaysToSell < 1 ? "under a day" : `${stats.avgDaysToSell.toFixed(1)} days`} to sell` : ""}
+          {stats.sellThrough !== null ? `; ${Math.round(stats.sellThrough * 100)}% of what is listed has sold` : "; sell-through unknown"}.
+          {stats.note ? <span style={{ opacity: 0.85 }}> {stats.note}</span> : null}
         </div>
       )}
       {learned.length > 0 && (

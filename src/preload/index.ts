@@ -256,6 +256,7 @@ const api = {
   productAliases: (): Promise<Record<string, string[]>> => ipcRenderer.invoke("products:aliases"),
   learnedFacts: (productId: string): Promise<Array<{ attribute: string; value: string; count: number; source: string; ignored: boolean; lastSeenAt: number }>> => ipcRenderer.invoke("facts:learned", productId),
   ignoreLearnedFact: (productId: string, attribute: string, value: string, ignored: boolean): Promise<{ ok: boolean }> => ipcRenderer.invoke("facts:ignore", { productId, attribute, value, ignored }),
+  productSoldStats: (productId: string): Promise<{ count: number; medianUsd: number | null; medianDeliveredUsd: number | null; count30: number | null; count90: number | null; datesKnown: boolean; activeAsks: number | null; sellThrough: number | null; avgDaysToSell: number | null; note: string }> => ipcRenderer.invoke("products:soldStats", productId),
   productFoldedNotice: (productId: string): Promise<{ colours: string[]; names: string[]; text: string } | null> => ipcRenderer.invoke("products:foldedNotice", productId),
   productOrigin: (productId: string): Promise<{ reason: string; detail: string | null; at: number } | null> => ipcRenderer.invoke("products:origin", productId),
   splitGallery: (itemId: string): Promise<{ ok: boolean; error?: string; summary?: string; opId?: string | null }> => ipcRenderer.invoke("library:splitGallery", { itemId }),
