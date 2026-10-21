@@ -6,8 +6,39 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import type { ProductProfile } from "../../../main/types.js";
 import { estimateAddonUplift, type Addon, type AddonRole } from "../../../main/addons.js";
 import { api } from "../lib/api.js";
+import { Modal } from "./Modal.js";
+import { isGamePlatform } from "../../../main/mixedListing.js";
 
 const usd = (n: number) => `$${Math.round(n)}`;
+
+/** The "Add a game / Add an accessory" pop-up: the Database's own entries for that niche, searchable, instead of one giant list on the page. */
+function AddonPicker({ product, niche, onPicked, onClose }: { product: ProductProfile; niche: "game" | "accessory"; onPicked: (addons: Addon[]) => void; onClose: () => void }) {
+  const [options, setOptions] = useState<Array<{ entryId: string; name: string; valueUsd: number | null }> | null>(null);
+  const [q, setQ] = useState("");
+  useEffect(() => {
+    api.addonPickerOptions(product.id, niche).then(setOptions).catch(() => setOptions([]));
+  }, [product.id, niche]);
+  const shown = (options ?? []).filter((o) => o.name.toLowerCase().includes(q.trim().toLowerCase()));
+  return (
+    <Modal title={niche === "game" ? "Add a game" : "Add an accessory"} onClose={onClose} width={520}>
+      <input autoFocus placeholder={`Search ${niche === "game" ? "games" : "accessories"} in your Database`} value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search" />
+      <div style={{ maxHeight: "50vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+        {options === null && <div style={{ color: "var(--text-dim)" }}>Loading…</div>}
+        {options !== null && shown.length === 0 && (
+          <div style={{ color: "var(--text-dim)", fontSize: 13.5 }}>
+            {options.length === 0 ? `No ${niche === "game" ? "games" : "accessories"} for this product are in your Database yet. They appear here when Clynx finds them in listings, or type a name under the add-ons list.` : "Nothing matches."}
+          </div>
+        )}
+        {shown.map((o) => (
+          <button key={o.entryId} className="icon" style={{ display: "flex", justifyContent: "space-between", textAlign: "left", gap: 8 }} onClick={() => void api.addAddonFromEntry(product.id, o.entryId).then((a) => { onPicked(a); onClose(); })}>
+            <span>{o.name}</span>
+            <span style={{ color: "var(--text-dim)" }}>{o.valueUsd !== null ? `$${Math.round(o.valueUsd)}` : "no price yet"}</span>
+          </button>
+        ))}
+      </div>
+    </Modal>
+  );
+}
 
 export function AddonsSection({ product }: { product: ProductProfile }) {
   const [addons, setAddons] = useState<Addon[]>([]);
@@ -15,6 +46,8 @@ export function AddonsSection({ product }: { product: ProductProfile }) {
   const [price, setPrice] = useState("");
   const [role, setRole] = useState<AddonRole>("bonus");
   const [busy, setBusy] = useState(false);
+  const [picker, setPicker] = useState<null | "game" | "accessory">(null);
+  const hasGames = isGamePlatform(`${product.family ?? ""} ${product.name}`);
 
   const reload = useCallback(async () => {
     try {
@@ -93,6 +126,7 @@ export function AddonsSection({ product }: { product: ProductProfile }) {
                 }}
               />
             </label>
+            {a.premium && a.enabled && a.premium.note && <div style={{ flexBasis: "100%", fontSize: 12, color: a.premium.guess ? "var(--warn)" : "var(--text-dim)" }}>{a.premium.note}</div>}
             {a.status === "suggested" && (
               <button className="icon" disabled={busy} onClick={() => void run(() => api.setAddonStatus(a.id, "confirmed"))}>
                 Confirm
@@ -104,6 +138,18 @@ export function AddonsSection({ product }: { product: ProductProfile }) {
           </div>
         ))}
       </div>
+
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+        {hasGames && (
+          <button className="icon" disabled={busy} onClick={() => setPicker("game")}>
+            Add a game…
+          </button>
+        )}
+        <button className="icon" disabled={busy} onClick={() => setPicker("accessory")}>
+          Add an accessory…
+        </button>
+      </div>
+      {picker && <AddonPicker product={product} niche={picker} onPicked={setAddons} onClose={() => setPicker(null)} />}
 
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
         <input placeholder="Add an add-on, e.g. second controller" value={name} onChange={(e) => setName(e.target.value)} style={{ flex: "1 1 220px", minWidth: 0 }} />
@@ -121,16 +167,16 @@ export function AddonsSection({ product }: { product: ProductProfile }) {
       </div>
 
       {estimate.highUsd !== null && estimate.lowUsd !== null ? (
-        <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--warn)" }} data-testid="addons-estimate">
+        <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 8, border: `1px solid ${estimate.confidence === "measured" ? "var(--success)" : "var(--warn)"}` }} data-testid="addons-estimate">
           <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
             <span style={{ fontWeight: 700, fontSize: 14 }}>
               With these add-ons: about +{usd(estimate.lowUsd)} to +{usd(estimate.highUsd)}
             </span>
-            {pill("ROUGH ESTIMATE", "var(--warn)")}
+            {estimate.confidence === "measured" ? pill(`MEASURED · ${estimate.sampleSize} sales each side`, "var(--success)") : pill("ROUGH ESTIMATE", "var(--warn)")}
           </div>
           <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 3 }}>
             {baseValue !== null ? `On top of the ${usd(baseValue)} estimate for the product alone (sale price, before eBay's cut). ` : ""}
-            {estimate.why} No sold listings are behind this number yet, so treat it as a guess.
+            {estimate.why} {estimate.confidence === "measured" ? "Deals use only the low end." : "No sold listings are behind this number yet, so treat it as a guess."}
           </div>
         </div>
       ) : (

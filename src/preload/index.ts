@@ -268,6 +268,8 @@ const api = {
   // Add-ons on a product's Library page (addons.ts). Every call answers with that product's add-ons as they are now.
   listAddons: (productId: string): Promise<Addon[]> => ipcRenderer.invoke("addons:list", productId),
   listFoundCandidates: (productId: string): Promise<StoredCandidate[]> => ipcRenderer.invoke("variants:found", productId),
+  addonPickerOptions: (productId: string, niche: "game" | "accessory"): Promise<Array<{ entryId: string; name: string; valueUsd: number | null }>> => ipcRenderer.invoke("addons:pickerOptions", productId, niche),
+  addAddonFromEntry: (productId: string, entryId: string): Promise<Addon[]> => ipcRenderer.invoke("addons:addFromEntry", productId, entryId),
   addAddon: (productId: string, input: { name: string; role?: AddonRole; standaloneValueUsd?: number | null; enabled?: boolean }): Promise<Addon[]> => ipcRenderer.invoke("addons:add", productId, input),
   setAddonEnabled: (id: string, enabled: boolean): Promise<Addon[]> => ipcRenderer.invoke("addons:setEnabled", id, enabled),
   setAddonStatus: (id: string, status: AddonStatus): Promise<Addon[]> => ipcRenderer.invoke("addons:setStatus", id, status),

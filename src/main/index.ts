@@ -5311,12 +5311,33 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("products:clearAll", () => store.clearAllProducts());
   // Add-ons (addons.ts): the toggles and the list on a product's Library page. Nothing here changes the base product's value, an alert or a scan.
-  const addonsAnswer = (baseId: string | undefined) => (baseId ? store.listAddons(baseId) : []);
+  const addonsAnswer = (baseId: string | undefined) => (baseId ? store.listAddons(baseId, { withPremium: true }) : []);
   ipcMain.handle("addons:list", (_e, productId: string) => addonsAnswer(String(productId ?? "")));
   // every version / add-on research found for a product, with its status (variantDiscovery.ts)
   ipcMain.handle("variants:found", (_e, productId: string) => store.listCandidates(String(productId ?? "")));
   ipcMain.handle("addons:add", (_e, productId: string, input: { name?: string; role?: AddonRole; standaloneValueUsd?: number | null; enabled?: boolean }) => {
     store.addAddon(String(productId ?? ""), { name: String(input?.name ?? ""), role: input?.role === "expected" ? "expected" : "bonus", standaloneValueUsd: typeof input?.standaloneValueUsd === "number" ? input.standaloneValueUsd : null, enabled: input?.enabled === true });
+    return addonsAnswer(String(productId ?? ""));
+  });
+  // The "Add a game / Add an accessory" picker: the Database's own entries for that niche in the base product's brand folder, searchable in the window, minus what is already added.
+  ipcMain.handle("addons:pickerOptions", (_e, productId: string, niche: "game" | "accessory") => {
+    const base = store.getProductById(String(productId ?? ""));
+    if (!base) return [];
+    const brand = String(base.family ?? "").split(">")[0].trim().toLowerCase();
+    const have = new Set(store.listAddons(base.id).filter((a) => a.status !== "dismissed").flatMap((a) => [addonKey(a.name), a.addonProductId ?? ""]));
+    const wantFolder = niche === "game" ? /(^|>)\s*games\s*($|>)/i : /(^|>)\s*accessories\s*($|>)/i;
+    return store
+      .listProducts()
+      .filter((p) => p.id !== base.id && String(p.family ?? "").split(">")[0].trim().toLowerCase() === brand && wantFolder.test(String(p.family ?? "")))
+      .filter((p) => !have.has(addonKey(p.name)) && !have.has(p.id))
+      .map((p) => ({ entryId: p.id, name: p.name, valueUsd: p.ebayEstimatedValueUsd ?? p.ebayAvgSoldPriceUsd ?? null }))
+      .slice(0, 300);
+  });
+  ipcMain.handle("addons:addFromEntry", (_e, productId: string, entryId: string) => {
+    const entry = store.getProductById(String(entryId ?? ""));
+    if (entry) {
+      store.addAddon(String(productId ?? ""), { name: entry.name, role: "bonus", standaloneValueUsd: entry.ebayEstimatedValueUsd ?? entry.ebayAvgSoldPriceUsd ?? null, addonProductId: entry.id, enabled: false });
+    }
     return addonsAnswer(String(productId ?? ""));
   });
   ipcMain.handle("addons:setEnabled", (_e, id: string, enabled: boolean) => {

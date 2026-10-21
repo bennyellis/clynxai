@@ -4,6 +4,7 @@
 // HONESTY RULES (spec section 7): the numbers here are ROUGH. They come from the same fixed weights the bundle valuation already uses (bundleBreakdown.ts), NOT from sold listings, and
 // they say so; add-ons are never summed linearly (diminishing returns, capped by the base value); an add-on that is OFF, dismissed, still only suggested, or has no price adds nothing;
 // the base value is never changed, only a range shown next to it. Learning the real premium from sold data is a later phase. Pure: no Database, no clock.
+import type { PremiumResult } from "./addonPremium.js";
 import { ACCESSORY_WEIGHT, EXTRA_WEIGHT, UPLIFT_CAP_OF_FOCAL, UPLIFT_CAP_OF_RAW } from "./bundleBreakdown.js";
 
 export type AddonRole = "expected" | "bonus";
@@ -30,6 +31,8 @@ export interface Addon {
   exampleListingIds: string[];
   firstSeenAt: number;
   lastSeenAt: number;
+  /** What it adds, measured from sold pairs (or a labelled guess), when the caller asked for it (addonPremium.ts). */
+  premium?: PremiumResult | null;
 }
 
 export interface AddonLine {
@@ -46,9 +49,10 @@ export interface AddonEstimate {
   lowUsd: number | null;
   highUsd: number | null;
   lines: AddonLine[];
-  /** Always "rough": no sold listings stand behind these numbers yet. */
-  confidence: "rough";
-  sampleSize: null;
+  /** "measured" only when every counted add-on was measured from sold pairs; otherwise "rough". */
+  confidence: "rough" | "measured";
+  /** The smallest number of sales on either side of the measured pairs; null when rough. */
+  sampleSize: number | null;
   /** One plain sentence for the page. */
   why: string;
 }
@@ -82,6 +86,29 @@ export function estimateAddonUplift(baseValueUsd: number | null, addons: Addon[]
       raw += adds;
       lines.push({ id: a.id, name: a.name, roughAddsUsd: adds, counted: true, note: `${a.name} sells for about ${money(a.standaloneValueUsd)} on its own` });
     }
+  }
+  // Every counted add-on measured from sold pairs: the measured gaps are used as they are (low end for scoring), still under half of the base.
+  const counted0 = addons.filter((a) => lines.find((l) => l.id === a.id)?.counted);
+  if (counted0.length > 0 && counted0.every((a) => a.premium?.basis === "measured" && a.premium.midUsd !== null && a.premium.lowUsd !== null)) {
+    const base0 = baseValueUsd !== null && Number.isFinite(baseValueUsd) ? Math.max(0, baseValueUsd) : 0;
+    const ceiling = base0 > 0 ? base0 * ADDON_HARD_CEILING_OF_BASE : Infinity;
+    const mid = Math.min(ceiling, counted0.reduce((n, a) => n + (a.premium?.midUsd ?? 0), 0));
+    const low = Math.min(mid, counted0.reduce((n, a) => n + (a.premium?.lowUsd ?? 0), 0));
+    for (const l of lines) {
+      const a = counted0.find((x) => x.id === l.id);
+      if (a?.premium) {
+        l.roughAddsUsd = a.premium.midUsd ?? 0;
+        l.note = a.premium.note;
+      }
+    }
+    return {
+      lowUsd: Math.round(low),
+      highUsd: Math.round(mid),
+      lines,
+      confidence: "measured",
+      sampleSize: Math.min(...counted0.map((a) => Math.min(a.premium?.sampleWith ?? 0, a.premium?.sampleWithout ?? 0))),
+      why: `Measured from sold pairs: about ${money(low)} to ${money(mid)} on top of the console alone. Deals are judged on the low end.`,
+    };
   }
   if (raw <= 0) {
     return { lowUsd: null, highUsd: null, lines, confidence: "rough", sampleSize: null, why: lines.some((l) => !l.counted && l.note !== "dismissed") ? "Switch an add-on on and give it a price to see what it could add." : "No add-ons yet." };

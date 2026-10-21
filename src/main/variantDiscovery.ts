@@ -312,10 +312,16 @@ const looseTokens = (name: string, dropColours: boolean) =>
     .filter((t) => t && !LOOSE_STOP.has(t) && !(dropColours && COLOUR_WORDS.has(t)))
     .map(singular);
 
-/** One key for an accessory's name with the brand, "wireless" and plurals set aside (COLOURS STAY: a Pulse Red controller is its own entry): "Xbox Wireless Controller" and "Xbox Wireless Controllers" share it. */
+/** One key for an accessory's name with the brand, "wireless" and plurals set aside (colours stay in the key, except for a standard controller, where every colour is one entry): "Xbox Wireless Controller" and "Xbox Wireless Controllers" share it. */
 export function addonEntryKey(name: string): string {
-  return looseTokens(name, false).sort().join(" ");
+  const tokens = looseTokens(name, false);
+  // A STANDARD controller in any colour is one shared entry (owner decision): a Carbon Black and a Robot White Xbox controller are the same add-on. Anything with a further distinguishing word
+  // (Elite, Adaptive, a special edition or a named design) keeps its colour, and so its own entry.
+  if (tokens.includes("controller") && tokens.every((t) => t === "controller" || COLOUR_WORDS.has(t) || STANDARD_CONTROLLER_WORDS.has(t))) return looseTokens(name, true).sort().join(" ");
+  return tokens.sort().join(" ");
 }
+
+const STANDARD_CONTROLLER_WORDS = new Set(["series", "x", "s", "one", "pc", "windows", "bluetooth", "usb", "gamepad", "console"]);
 
 /**
  * Whether two add-on names are the same accessory said differently. The distinguishing words (Elite, Adaptive, Stereo, a maker like Seagate) must match on both sides; the product line,

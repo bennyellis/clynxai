@@ -13,6 +13,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { addonKey, type Addon, type AddonRole, type AddonStatus } from "./addons.js";
 import { nameKey } from "./modelFacts.js";
+import { measurePremium, splitByInclusion, type PremiumResult } from "./addonPremium.js";
 import { SoldCompsStore } from "./soldComps/store.js";
 import { cleanOwnerAnswer, ownerValueUsd, pickPricePrompts, type OwnerAnswerInput, type OwnerPrice, type PromptRecord, type PromptState } from "./ownerPrice.js";
 import { planCleanup, type CleanupGroup, type CleanupPlan } from "./duplicateCleanup.js";
@@ -2817,7 +2818,32 @@ export class Store {
     };
   }
 
-  listAddons(baseProductId: string): Addon[] {
+  listAddons(baseProductId: string, opts: { withPremium?: boolean } = {}): Addon[] {
+    const list = this.listAddonsPlain(baseProductId);
+    return opts.withPremium ? list.map((a) => ({ ...a, premium: this.premiumForAddon(baseProductId, a) })) : list;
+  }
+
+  /**
+   * What this add-on adds to the base, from the stored sold sales whose titles name the base product: sales that mention the add-on against sales that do not (addonPremium.ts). With too
+   * few sales on either side it is a labelled guess. Console-only sales give the base value; nothing is double counted.
+   */
+  premiumForAddon(baseProductId: string, addon: Addon): PremiumResult {
+    const base = this.getProductById(baseProductId);
+    const baseUsd = base ? (base.ebayEstimatedValueUsd ?? base.ebayAvgSoldPriceUsd ?? null) : null;
+    const baseWords = (base?.name ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").split(" ").filter((w) => w.length > 1 && !["the", "and", "for", "with", "of"].includes(w));
+    const addonWords = addonKey(addon.name).split(" ").filter((w) => w.length > 2 && !["second", "extra", "wireless", "the"].includes(w)).slice(0, 2);
+    if (!base || baseWords.length === 0 || addonWords.length === 0) return measurePremium({ withUsd: [], withoutUsd: [], standaloneUsd: addon.standaloneValueUsd, baseUsd, role: addon.role });
+    const sales = this.soldComps().listComps().filter((c) => {
+      if (c.currency !== "USD") return false;
+      const t = ` ${c.title.toLowerCase().replace(/[^a-z0-9]+/g, " ")} `;
+      return baseWords.every((w) => t.includes(` ${w} `)) && compMatchesSpecs(base.name, c.title);
+    });
+    const { withIt, withoutIt } = splitByInclusion(sales, addonWords);
+    const total = (c: { soldPrice: number; shippingCost: number | null }) => c.soldPrice + Math.max(0, c.shippingCost ?? 0);
+    return measurePremium({ withUsd: withIt.map(total), withoutUsd: withoutIt.map(total), standaloneUsd: addon.standaloneValueUsd, baseUsd, role: addon.role });
+  }
+
+  private listAddonsPlain(baseProductId: string): Addon[] {
     return (this.db.prepare("SELECT * FROM product_addons WHERE base_product_id = ? ORDER BY CASE status WHEN 'confirmed' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END, first_seen_at").all(baseProductId) as any[]).map((r) => this.addonFromRow(r));
   }
 
