@@ -1714,3 +1714,13 @@ html[data-perf="performance"] button.nav-item:hover:not(:disabled) {
     box-sizing: border-box;
   }
 }
+
+/* The Wow / Heads-up toast: opacity and transform only. */
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.toast-card { animation: toastIn 0.25s ease-out both; }
+html[data-perf="balanced"] .toast-card,
+html[data-perf="performance"] .toast-card { animation: none; }
+@media (prefers-reduced-motion: reduce) { .toast-card { animation: none; } }

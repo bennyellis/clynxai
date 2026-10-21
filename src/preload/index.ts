@@ -241,6 +241,15 @@ const api = {
   libraryCleanupPlan: (): Promise<{ plan: { groups: Array<{ canonical: string; keep: { id: string; name: string }; fold: Array<{ id: string; name: string }>; why: string }>; before: number; after: number; skipped: Array<{ canonical: string; names: string[]; why: string }>; fingerprint: string }; text: string; batches: Array<{ batchId: string; at: number; folded: number; keptNames: string[]; undone: boolean }> }> => ipcRenderer.invoke("library:cleanupPlan"),
   libraryCleanupRun: (fingerprint: string): Promise<{ ok: boolean; merged: number; batchId?: string | null; error?: string }> => ipcRenderer.invoke("library:cleanupRun", { fingerprint }),
   libraryCleanupUndo: (batchId: string): Promise<{ ok: boolean; restored: number }> => ipcRenderer.invoke("library:cleanupUndo", { batchId }),
+  priceAnswer: (a: { productId: string; lowUsd: number; highUsd?: number; condition?: string; includes?: string; recency?: string }): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("price:answer", a),
+  priceDismiss: (productId: string, how: "later" | "never" | "notSure"): Promise<{ ok: boolean }> => ipcRenderer.invoke("price:dismiss", { productId, how }),
+  priceOpenSold: (productId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("price:openSold", { productId }),
+  priceHowTo: (): Promise<string[]> => ipcRenderer.invoke("price:howTo"),
+  onToast: (cb: (t: { id: string; message: string; productId: string | null; tone: "good" | "info" }) => void): (() => void) => {
+    const listener = (_e: unknown, t: { id: string; message: string; productId: string | null; tone: "good" | "info" }) => cb(t);
+    ipcRenderer.on("toast:show", listener);
+    return () => ipcRenderer.removeListener("toast:show", listener);
+  },
   attentionGet: (): Promise<{ count: number; items: Array<{ id: string; kind: string; productIds: string[] }> }> => ipcRenderer.invoke("attention:get"),
   attentionAck: (itemId: string): Promise<{ count: number; items: Array<{ id: string; kind: string; productIds: string[] }> }> => ipcRenderer.invoke("attention:ack", { itemId }),
   attentionAckAll: (): Promise<{ count: number; items: Array<{ id: string; kind: string; productIds: string[] }> }> => ipcRenderer.invoke("attention:ackAll"),

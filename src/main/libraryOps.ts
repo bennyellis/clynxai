@@ -701,6 +701,11 @@ export class LibraryOps {
     return { ok: true, summary: `Undid: ${row.op}.`, opId };
   }
 
+  /** A change Clynx made on its own that the person should be able to see in Recent changes (for example "your price was replaced by real sales"). Not undoable from History. */
+  logChange(summary: string): void {
+    this.db.prepare("INSERT INTO library_ops (id, at, actor, op, args_json, inverse_json) VALUES (?, ?, 'clynx', 'priceReplaced', ?, NULL)").run(randomUUID(), Date.now(), JSON.stringify({ summary }));
+  }
+
   /** The most recent operations (for a History view and "undo that"). */
   recent(limit = 20): Array<{ id: string; at: number; actor: string; op: string; undone: boolean }> {
     return (this.db.prepare("SELECT id, at, actor, op, undone_at FROM library_ops WHERE actor != 'system' ORDER BY at DESC LIMIT ?").all(limit) as any[]).map((r) => ({ id: r.id, at: r.at, actor: r.actor, op: r.op, undone: !!r.undone_at }));

@@ -26,7 +26,7 @@ export interface ProductSignals {
   // What the user's own linked eBay store lists it for (their own price, not the market's).
   storeValueUsd?: number | null;
   // What the value rests on: sold comps, sold nudged by asking prices ("blend"), or asking prices only ("active"). null: unknown.
-  basis?: "sold" | "blend" | "active" | null;
+  basis?: "sold" | "blend" | "active" | "owner" | null;
   // Whether the comps behind the value are the market of exactly this product ("approximate": mixed comps, the cheapest group stood in).
   identity?: "exact" | "approximate" | "unresolved" | null;
   // Defining codes the listing states that the product's name lacks AND that evidence shows to be real model / version markers (see

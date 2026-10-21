@@ -79,7 +79,8 @@ export function evidenceFromSignals(signals: ProductSignals | null | undefined, 
   if (!signals || signals.valueUsd === null || !(signals.valueUsd > 0)) return null;
   return {
     valueUsd: signals.valueUsd,
-    basis: signals.basis ?? (signals.compSample ? "sold" : null),
+    // the owner's own number counts as the owner's word ("user"), not as sold prices
+    basis: signals.basis === "owner" ? "user" : (signals.basis ?? (signals.compSample ? "sold" : null)),
     sampleSize: signals.compSample ?? null,
     ageDays: signals.checkedAt ? Math.max(0, (now - signals.checkedAt) / 86_400_000) : null,
     ...(signals.identity === "approximate" || signals.identity === "unresolved" ? { approximate: true } : {}),

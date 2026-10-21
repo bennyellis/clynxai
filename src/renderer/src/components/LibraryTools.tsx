@@ -202,6 +202,75 @@ function CleanupSection() {
   );
 }
 
+/** "Needs your price knowledge": the name Clynx thinks it is, then Yes / Similar but different / No. */
+function PriceQuestion({ row, onDone }: { row: ReviewRow; onDone: () => void }) {
+  const productId = String(row.evidence.productId ?? row.subjectId);
+  const [step, setStep] = useState<"ask" | "yes" | "no">("ask");
+  const [low, setLow] = useState("");
+  const [high, setHigh] = useState("");
+  const [condition, setCondition] = useState("");
+  const [includes, setIncludes] = useState("");
+  const [recency, setRecency] = useState("");
+  const [error, setError] = useState("");
+  const [howTo, setHowTo] = useState<string[]>([]);
+  const dismiss = async (how: "later" | "never" | "notSure") => {
+    await api.priceDismiss(productId, how);
+    onDone();
+  };
+  const save = async () => {
+    const r = await api.priceAnswer({ productId, lowUsd: Number(low), highUsd: high ? Number(high) : undefined, condition, includes, recency });
+    if (!r.ok) return setError(r.error ?? "That did not save.");
+    onDone();
+  };
+  return (
+    <>
+      <div style={{ fontSize: 14.5 }}>
+        <strong>Needs your price knowledge:</strong> I think this is <strong>{row.productName ?? "(gone)"}</strong>. {row.reasons.join(" ")}
+      </div>
+      {step === "ask" && (
+        <>
+          <div style={{ fontSize: 13.5, color: "var(--text-muted)" }}>Have you seen this before?</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <button className="icon" onClick={() => setStep("yes")}>Yes, that's it</button>
+            <button className="icon" onClick={() => { void api.priceDismiss(productId, "later"); void api.libraryOp({ op: "resolveReview", itemId: row.id, state: "snoozed" }).then(onDone); }} title="Pick the right model or version in the entry's page, then answer again">Similar but different</button>
+            <button className="icon" onClick={() => { setStep("no"); void api.priceHowTo().then(setHowTo); }}>No / not sure</button>
+            <button className="icon ghost" onClick={() => dismiss("later")}>Ask me later</button>
+            <button className="icon ghost" onClick={() => dismiss("never")}>Don't ask for this product</button>
+          </div>
+        </>
+      )}
+      {step === "yes" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ fontSize: 13.5, color: "var(--text-muted)" }}>What does it usually sell for? One number, or a range. What a buyer pays in total is best.</div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input inputMode="decimal" placeholder="Low $" value={low} onChange={(e) => setLow(e.target.value)} style={{ width: 110 }} />
+            <input inputMode="decimal" placeholder="High $ (optional)" value={high} onChange={(e) => setHigh(e.target.value)} style={{ width: 150 }} />
+          </div>
+          <input placeholder="Condition (used - good, new in box...)" value={condition} onChange={(e) => setCondition(e.target.value)} />
+          <input placeholder="What is included (controller, box...)" value={includes} onChange={(e) => setIncludes(e.target.value)} />
+          <input placeholder="How recent (this week, last month...)" value={recency} onChange={(e) => setRecency(e.target.value)} />
+          {error && <div style={{ color: "var(--danger)", fontSize: 13.5 }}>{error}</div>}
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="primary" onClick={save}>Save my price</button>
+            <button className="icon ghost" onClick={() => setStep("ask")}>Back</button>
+          </div>
+        </div>
+      )}
+      {step === "no" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 13.5 }}>
+          <div>No problem. Here is how to check what it really sells for:</div>
+          <ol style={{ margin: 0, paddingLeft: 20 }}>{howTo.map((h) => <li key={h}>{h}</li>)}</ol>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <button className="icon" onClick={() => void api.priceOpenSold(productId)}>Open eBay's sold listings in my browser</button>
+            <button className="icon" onClick={() => setStep("yes")}>I found it: enter my price</button>
+            <button className="icon ghost" onClick={() => dismiss("later")}>Ask me later</button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 export function NeedsReviewPanel({ products, onClose }: { products: ProductProfile[]; onClose: () => void }) {
   const [rows, setRows] = useState<ReviewRow[] | null>(null);
   const unseen = useContext(AttentionContext);
@@ -283,6 +352,7 @@ export function NeedsReviewPanel({ products, onClose }: { products: ProductProfi
                   </div>
                 </>
               )}
+              {r.kind === "price" && <PriceQuestion row={r} onDone={load} />}
               {r.kind === "merge" && (
                 <>
                   <div style={{ fontSize: 14.5 }}>{r.reasons.join(" ")}</div>

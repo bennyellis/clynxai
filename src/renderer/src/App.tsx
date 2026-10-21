@@ -1,3 +1,4 @@
+import { ToastHost } from "./components/Toast";
 import { AttentionContext } from "./lib/AttentionContext";
 import { useAttention } from "./lib/useAttention";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -582,6 +583,7 @@ export default function App() {
     <AttentionContext.Provider value={attention.summary}>
     <div style={{ display: "flex", height: "100%", position: "relative" }}>
       <SpaceBackdrop />
+      <ToastHost onOpenProduct={goToProduct} />
       {particlesEnabled && <StarfieldBackground />}
       {!authChecked ? (
         <div

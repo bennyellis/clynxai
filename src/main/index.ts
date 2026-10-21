@@ -1,3 +1,4 @@
+import { combineWows, compareWithSold, HOW_TO_CHECK_SOLD, soldSearchUrl } from "./ownerPrice.js";
 import "dotenv/config";
 import { parse as parseDotenv } from "dotenv";
 import { makePhotoCheck } from "./compPhotoCheck.js";
@@ -1810,6 +1811,7 @@ async function researchEbayComps(
     estimateBasis: estimate.basis,
     identity: analysis.identity ?? "exact",
   });
+  checkOwnerPriceAgainstSold(id, buyerTotalUsd(analysis.avgSoldPriceUsd, analysis.avgShippingUsd), analysis.sampleSize, (analysis.identity ?? "exact") === "exact");
   getPrimaryEngine().markEbayCompsResearched(id);
   await refreshMyStoreReference(id, fallbackName);
   // The listings that were just confirmed to be this exact product have real photos of it: keep a few as reference photos.
@@ -3322,6 +3324,48 @@ async function sweepBlankProducts(): Promise<void> {
 // Whether a Watch's check is running right now (the sidebar's Watch eye is awake while it is, asleep otherwise).
 let watchSearching = false;
 
+// Phase 4a: now and then (a few at a time, never twice for the same entry within ~90 days) Clynx adds "Needs your price knowledge" items for entries that matter and have no sold prices.
+let priceQuestionTimer: ReturnType<typeof setInterval> | null = null;
+function scheduleOwnerPriceQuestions(): void {
+  if (priceQuestionTimer) return;
+  const run = () => {
+    try {
+      const added = store.queuePriceQuestions();
+      if (added > 0) sendToRenderer("library:changed", { folders: false, review: true });
+    } catch (err) {
+      console.error(`[price questions] ${(err as Error).message}`);
+    }
+  };
+  setTimeout(run, 120_000);
+  priceQuestionTimer = setInterval(run, 6 * 3600_000);
+}
+
+// Phase 4b: real sold prices came in for an entry the owner had put their own number on. When they differ enough, one short toast says so, the owner's number is marked replaced (it stays visible
+// beside the real ones), and the change is logged in Recent changes.
+const pendingWows: Array<{ message: string; productId: string }> = [];
+let wowTimer: ReturnType<typeof setTimeout> | null = null;
+function checkOwnerPriceAgainstSold(productId: string, soldTotalUsd: number | null, n: number, identitySettled: boolean): void {
+  try {
+    const own = store.getOwnerPrice(productId);
+    const product = store.getProductById(productId);
+    if (!own || !product || soldTotalUsd === null) return;
+    const wow = compareWithSold(product.name, own, { medianUsd: soldTotalUsd, n, identitySettled, likeForLike: identitySettled });
+    if (!wow) return;
+    store.markOwnerPriceReplaced(productId);
+    libraryOps().logChange(`Your price for "${product.name}" ($${Math.round(wow.ownerUsd)}) was replaced by real sales ($${Math.round(wow.soldUsd)}, ${n} sales).`);
+    pendingWows.push({ message: wow.message, productId });
+    if (wowTimer) return;
+    // several that arrive together become one toast
+    wowTimer = setTimeout(() => {
+      wowTimer = null;
+      const batch = pendingWows.splice(0);
+      if (batch.length) sendToRenderer("toast:show", { id: randomUUID(), message: combineWows(batch), productId: batch.length === 1 ? batch[0].productId : null, tone: batch.length === 1 && /^Wow/.test(batch[0].message) ? "good" : "info" });
+    }, 4000);
+  } catch (err) {
+    console.error(`[wow] ${(err as Error).message}`);
+  }
+}
+
 // Scanner parity S2: a game found in a listing that also holds its console becomes its own Database entry in the platform's Games folder, linked to the console. The same name never makes a second entry
 // (the creation rules return the existing one), and a game the person dismissed on this console never comes back.
 async function createLinkedGameEntry(base: ProductProfile, name: string, listingId: string): Promise<void> {
@@ -3679,6 +3723,7 @@ async function bootstrapUserSession(userId: string, email: string): Promise<void
   }, 90_000);
   scheduleDatabaseBackups();
   mergeDuplicateProductEntries();
+  scheduleOwnerPriceQuestions();
   scheduleIdentityBackfill();
   // A little after startup, so the app is up and the first scan isn't competing with it.
   setTimeout(() => void sweepBlankProducts(), 8000);
@@ -5121,6 +5166,34 @@ app.whenReady().then(() => {
     return { ok: r.ok, summary: r.ok ? r.message : "", error: r.ok ? undefined : r.message };
   });
   ipcMain.handle("library:history", () => libraryOps().recent(30));
+  // Phase 4a: the owner's answers to "Needs your price knowledge".
+  const priceItemFor = (productId: string) => store.listReviewItems("open").find((i) => i.kind === "price" && i.subjectId === productId);
+  ipcMain.handle("price:answer", (_e, args: { productId: string; lowUsd: number; highUsd?: number; condition?: string; includes?: string; recency?: string }) => {
+    const r = store.setOwnerPrice(String(args?.productId ?? ""), { lowUsd: Number(args?.lowUsd), highUsd: args?.highUsd === undefined ? undefined : Number(args.highUsd), condition: args?.condition ?? null, includes: args?.includes ?? null, recency: args?.recency ?? null });
+    if (r.ok) {
+      const item = priceItemFor(args.productId);
+      if (item) store.resolveReviewItem(item.id, "accepted", "user");
+      const p = store.getProductById(args.productId);
+      if (p) sendToRenderer("products:updated", p);
+      sendToRenderer("library:changed", { folders: false, review: true });
+    }
+    return r.ok ? { ok: true } : { ok: false, error: r.error };
+  });
+  ipcMain.handle("price:dismiss", (_e, args: { productId: string; how: "later" | "never" | "notSure" }) => {
+    const productId = String(args?.productId ?? "");
+    store.recordPricePrompt(productId, args?.how === "never" ? "never" : "later");
+    const item = priceItemFor(productId);
+    if (item) store.resolveReviewItem(item.id, "snoozed", "user");
+    sendToRenderer("library:changed", { folders: false, review: true });
+    return { ok: true };
+  });
+  ipcMain.handle("price:openSold", (_e, args: { productId: string }) => {
+    const p = store.getProductById(String(args?.productId ?? ""));
+    if (!p) return { ok: false };
+    void shell.openExternal(soldSearchUrl(p.name));
+    return { ok: true };
+  });
+  ipcMain.handle("price:howTo", () => HOW_TO_CHECK_SOLD);
   ipcMain.handle("attention:get", () => store.attentionSummary());
   ipcMain.handle("attention:ack", (_e, args: { itemId: string }) => {
     if (args?.itemId) store.ackAttention(String(args.itemId));
@@ -5186,6 +5259,12 @@ app.whenReady().then(() => {
         productName = store.getProductById(img.productId)?.name ?? null;
         const sid = typeof item.evidence.suggestedProductId === "string" ? item.evidence.suggestedProductId : null;
         suggestedName = sid ? (store.getProductById(sid)?.name ?? null) : null;
+      }
+      if (item.kind === "price") {
+        const prod = store.getProductById(item.subjectId);
+        if (!prod) { store.resolveReviewItem(item.id, "rejected", "system"); continue; }
+        productName = prod.name;
+        image = prod.imageUrl ? await makeThumb(prod.imageUrl, 320) : null;
       }
       out.push({ ...item, image, productName, suggestedName });
     }

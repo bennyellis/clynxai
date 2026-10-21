@@ -13,6 +13,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { addonKey, type Addon, type AddonRole, type AddonStatus } from "./addons.js";
 import { nameKey } from "./modelFacts.js";
+import { cleanOwnerAnswer, ownerValueUsd, pickPricePrompts, type OwnerAnswerInput, type OwnerPrice, type PromptRecord, type PromptState } from "./ownerPrice.js";
 import { planCleanup, type CleanupGroup, type CleanupPlan } from "./duplicateCleanup.js";
 import { addonEntryKey, candidateKey, type Candidate, type CandidateStatus } from "./variantDiscovery.js";
 
@@ -202,6 +203,25 @@ export class Store {
         PRIMARY KEY (product_id, alias_key)
       );
       CREATE INDEX IF NOT EXISTS idx_product_name_aliases_key ON product_name_aliases (alias_key);
+      -- What the owner knows an item sells for ("Your price"), with where it came from; real sold prices lead once they arrive and mark it replaced.
+      CREATE TABLE IF NOT EXISTS owner_prices (
+        product_id TEXT PRIMARY KEY,
+        low_usd REAL NOT NULL,
+        high_usd REAL NOT NULL,
+        condition TEXT,
+        includes TEXT,
+        recency TEXT,
+        buyer_total INTEGER NOT NULL DEFAULT 1,
+        set_at INTEGER NOT NULL,
+        replaced_at INTEGER
+      );
+      -- When Clynx asked the owner about an entry's price, and what came of it (asked / answered / later / never).
+      CREATE TABLE IF NOT EXISTS price_prompts (
+        product_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_price_prompts_product ON price_prompts (product_id, at);
       -- Review items the person has already opened (the pulsing attention dots stay until the item itself is opened).
       CREATE TABLE IF NOT EXISTS attention_ack (
         item_id TEXT PRIMARY KEY,
@@ -1487,12 +1507,12 @@ export class Store {
       return {
       id: r.id,
       name: r.name,
-      valueUsd: r.value !== null && r.value > 0 ? r.value : null,
+      valueUsd: r.value !== null && r.value > 0 ? r.value : this.ownerValueFor(r.id),
       runTimeDays: r.run ?? null,
       compSample: r.n ?? null,
       checkedAt: r.at ?? null,
       storeValueUsd: parseMyStore(r.store)?.medianUsd ?? null,
-      basis: r.basis === "sold" || r.basis === "blend" || r.basis === "active" ? r.basis : null,
+      basis: r.basis === "sold" || r.basis === "blend" || r.basis === "active" ? r.basis : r.value === null || !(r.value > 0) ? (this.ownerValueFor(r.id) !== null ? "owner" : null) : null,
       identity: r.ident === "exact" || r.ident === "approximate" || r.ident === "unresolved" ? r.ident : null,
       // Codes the listing states that this product's name does not, split by evidence (see identity/credibility.ts): the credible ones mean
       // the listing may be a more specific product than the entry it matched, so the entry's value is not known to apply to it.
@@ -1730,6 +1750,63 @@ export class Store {
     const watchRows = this.db.prepare("SELECT id, terms_json FROM watches WHERE terms_json LIKE ?").all(`%${loser.id}%`) as Array<{ id: string; terms_json: string }>;
     for (const w of watchRows) this.db.prepare("UPDATE watches SET terms_json = ? WHERE id = ?").run(w.terms_json.split(loser.id).join(winner.id), w.id);
 
+  }
+
+  // ---- Phase 4a: "Your price" and the questions that collect it.
+
+  getOwnerPrice(productId: string): OwnerPrice | null {
+    const r = this.db.prepare("SELECT * FROM owner_prices WHERE product_id = ?").get(productId) as any;
+    return r ? { productId: r.product_id, lowUsd: r.low_usd, highUsd: r.high_usd, condition: r.condition, includes: r.includes, recency: r.recency, buyerTotal: !!r.buyer_total, setAt: r.set_at, replacedAt: r.replaced_at } : null;
+  }
+
+  /** The value the owner's number may contribute right now (its low end; null when expired, drifted from the asking prices, or replaced by real sold prices). */
+  ownerValueFor(productId: string, now: number = Date.now()): number | null {
+    const own = this.getOwnerPrice(productId);
+    if (!own) return null;
+    const active = this.db.prepare("SELECT ebay_active_median_usd m FROM products WHERE id = ?").get(productId) as { m: number | null } | undefined;
+    return ownerValueUsd(own, now, active?.m ?? null);
+  }
+
+  setOwnerPrice(productId: string, a: OwnerAnswerInput, now: number = Date.now()): { ok: true; price: OwnerPrice } | { ok: false; error: string } {
+    const clean = cleanOwnerAnswer(a);
+    if (!clean.ok) return clean;
+    if (!this.db.prepare("SELECT 1 FROM products WHERE id = ?").get(productId)) return { ok: false, error: "That entry is gone." };
+    this.db.prepare("INSERT INTO owner_prices (product_id, low_usd, high_usd, condition, includes, recency, buyer_total, set_at, replaced_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(product_id) DO UPDATE SET low_usd = excluded.low_usd, high_usd = excluded.high_usd, condition = excluded.condition, includes = excluded.includes, recency = excluded.recency, buyer_total = excluded.buyer_total, set_at = excluded.set_at, replaced_at = NULL")
+      .run(productId, clean.lowUsd, clean.highUsd, a.condition ?? null, a.includes ?? null, a.recency ?? null, a.buyerTotal === false ? 0 : 1, now);
+    this.recordPricePrompt(productId, "answered", now);
+    this.ebayValueCache = null;
+    return { ok: true, price: this.getOwnerPrice(productId) as OwnerPrice };
+  }
+
+  markOwnerPriceReplaced(productId: string, now: number = Date.now()): void {
+    this.db.prepare("UPDATE owner_prices SET replaced_at = ? WHERE product_id = ? AND replaced_at IS NULL").run(now, productId);
+  }
+
+  recordPricePrompt(productId: string, state: PromptState, now: number = Date.now()): void {
+    this.db.prepare("INSERT INTO price_prompts (product_id, state, at) VALUES (?, ?, ?)").run(productId, state, now);
+  }
+
+  listPricePrompts(): PromptRecord[] {
+    return (this.db.prepare("SELECT product_id, state, at FROM price_prompts").all() as Array<{ product_id: string; state: PromptState; at: number }>).map((r) => ({ productId: r.product_id, state: r.state, at: r.at }));
+  }
+
+  /**
+   * Entries that matter and have no sold prices: prioritized ones, and ones that real listings keep matching. Asks (as Review items that light the attention dot) about a few of them per day,
+   * never one asked about in the last ~90 days. The scanner never waits for the answer.
+   */
+  queuePriceQuestions(now: number = Date.now()): number {
+    const rows = this.db.prepare(`
+      SELECT p.id id, p.name name FROM products p
+      WHERE p.deleted_at IS NULL AND p.loading = 0 AND COALESCE(p.ebay_comps_sample_size, 0) = 0
+        AND NOT EXISTS (SELECT 1 FROM owner_prices o WHERE o.product_id = p.id AND o.replaced_at IS NULL)
+        AND (p.prioritized = 1 OR (SELECT COUNT(*) FROM listings l WHERE l.product_id = p.id) >= 2)
+      ORDER BY p.prioritized DESC, p.updated_at DESC LIMIT 40`).all() as Array<{ id: string; name: string }>;
+    const picks = pickPricePrompts(rows.map((r) => ({ productId: r.id, name: r.name })), this.listPricePrompts(), now);
+    for (const pick of picks) {
+      this.addReviewItem({ kind: "price", subjectId: pick.productId, reasons: [`There are no sold prices for ${pick.name} yet. If you have seen one sell, your number helps.`], evidence: { productId: pick.productId, productName: pick.name } });
+      this.recordPricePrompt(pick.productId, "asked", now);
+    }
+    return picks.length;
   }
 
   // ---- attention dots: open review items the person has not opened yet. Routine background work never lands here; only things a person has to look at.
@@ -2650,7 +2727,7 @@ export class Store {
   }
 
   // --- Review queue: things a person should look at (a picture whose evidence disagrees, a name made from a picture alone). Suggestions only; nothing here changes the Library.
-  addReviewItem(item: { kind: "image" | "product" | "merge"; subjectId: string; reasons: string[]; evidence: Record<string, unknown> }): string {
+  addReviewItem(item: { kind: "image" | "product" | "merge" | "price"; subjectId: string; reasons: string[]; evidence: Record<string, unknown> }): string {
     // one open item per (kind, subject): re-detecting the same problem updates it instead of piling up
     const open = this.db.prepare("SELECT id FROM review_items WHERE kind = ? AND subject_id = ? AND state = 'open'").get(item.kind, item.subjectId) as { id: string } | undefined;
     if (open) {
