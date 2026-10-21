@@ -1,4 +1,4 @@
-import { namingFacts, resolveName } from "./namingEngine.js";
+import { foldedNotice, namingFacts, resolveName } from "./namingEngine.js";
 import { REQUALIFY_CODES, type SavedListingState } from "./relisting.js";
 import { countLifecycle, type LifecycleCounts } from "./listingLifecycle.js";
 import { DatabaseSync, backup as sqliteBackup } from "node:sqlite";
@@ -1640,6 +1640,30 @@ export class Store {
     this.db.prepare("INSERT OR REPLACE INTO product_origins (product_id, reason, detail, at) VALUES (?, ?, ?, ?)").run(id, why?.reason ?? "unspecified", why?.detail ?? null, now);
     this.safeguard.invalidate();
     return id;
+  }
+
+  /**
+   * The visible note for an entry that several names were folded into because a detail (the colour) does not move the price: which colours were folded in, and what sales say. Null when nothing
+   * was folded. Sales are not split by colour yet, so it says that plainly instead of showing a made-up comparison.
+   */
+  foldedNoticeFor(productId: string): { colours: string[]; names: string[]; text: string } | null {
+    const facts = namingFacts(this.listModelFactOverrides());
+    const names = this.listProductAliases(productId).map((a) => a.alias);
+    const colours = new Set<string>();
+    const foldedNames: string[] = [];
+    for (const n of names) {
+      const r = resolveName(n, facts);
+      const cs = r.folded.filter((f) => f.kind === "colour").map((f) => f.value);
+      if (cs.length > 0) {
+        foldedNames.push(n);
+        for (const c of cs) colours.add(c.toLowerCase());
+      }
+    }
+    if (colours.size === 0) return null;
+    const p = this.getProductById(productId);
+    const sales = p?.ebayCompsSampleSize ?? 0;
+    const evidence = sales > 0 ? ` All ${sales} sold sales for it are counted together; sales are not split by colour yet, so there is no per-colour comparison to show.` : " There are no sold sales to compare colours with yet.";
+    return { colours: [...colours], names: foldedNames, text: `${foldedNotice({ folded: [...colours].map((value) => ({ kind: "colour" as const, value })) })}${evidence}` };
   }
 
   /** Why an entry exists: the reason and the detail recorded when it was created (null for entries made before this was kept). */

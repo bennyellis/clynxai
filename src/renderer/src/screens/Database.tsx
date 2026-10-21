@@ -1,3 +1,4 @@
+import { ProductNotes } from "../components/ProductNotes";
 import { AttentionDot, AttentionContext } from "../lib/AttentionContext";
 import { attentionLabel } from "../lib/attention";
 import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -3205,6 +3206,7 @@ function ProductDetailPage({
             </div>
           )}
 
+          <ProductNotes product={product} />
           <AddonsSection product={product} />
           <VariantsFoundSection product={product} />
 

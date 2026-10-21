@@ -27,6 +27,15 @@ run(async () => {
   check("a name that matched an existing entry does not overwrite why it was first made", (() => { store.addProductStub("a2", "Zorblax 3000", { reason: "asked in chat" }); return store.getProductOrigin(a)?.reason === "found in a listing"; })());
   store.deleteProduct(a);
   check("deleting the entry removes its record", store.getProductOrigin(a) === null);
+  section("the visible note when colours were folded");
+  const xm = store.addProductStub("xm", "Sony WH-1000XM5 Black");
+  store.addProductStub("xm2", "Sony WH-1000XM5 Silver");
+  store.addProductStub("xm3", "sony wh-1000xm5 midnight blue");
+  const note = store.foldedNoticeFor(xm);
+  check("it names the colours that share the entry and the names kept, and says sales are not split by colour", !!note && note.colours.length >= 2 && note.names.length >= 2 && /share one entry/.test(note.text) && /no sold sales to compare/.test(note.text), note);
+  store.updateProductEbayComps(xm, { avgSoldPriceUsd: 300, avgRunTimeDays: 3, avgShippingUsd: 0, sampleSize: 9, activeMedianUsd: 310, activeSampleSize: 5, estimatedValueUsd: 300, estimateBasis: "sold", identity: "exact" });
+  check("with sales it counts them together and does not invent a per-colour comparison", /All 9 sold sales/.test(store.foldedNoticeFor(xm)?.text ?? "") && /not split by colour/.test(store.foldedNoticeFor(xm)?.text ?? ""));
+  check("an entry nothing was folded into has no note", store.foldedNoticeFor(store.addProductStub("plain", "Zorblax Deluxe 3000")) === null);
   try {
     fs.rmSync(dir, { recursive: true, force: true });
   } catch {

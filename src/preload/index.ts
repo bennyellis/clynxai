@@ -253,6 +253,8 @@ const api = {
     ipcRenderer.on("toast:show", listener);
     return () => ipcRenderer.removeListener("toast:show", listener);
   },
+  productFoldedNotice: (productId: string): Promise<{ colours: string[]; names: string[]; text: string } | null> => ipcRenderer.invoke("products:foldedNotice", productId),
+  productOrigin: (productId: string): Promise<{ reason: string; detail: string | null; at: number } | null> => ipcRenderer.invoke("products:origin", productId),
   attentionGet: (): Promise<{ count: number; items: Array<{ id: string; kind: string; productIds: string[] }> }> => ipcRenderer.invoke("attention:get"),
   attentionAck: (itemId: string): Promise<{ count: number; items: Array<{ id: string; kind: string; productIds: string[] }> }> => ipcRenderer.invoke("attention:ack", { itemId }),
   attentionAckAll: (): Promise<{ count: number; items: Array<{ id: string; kind: string; productIds: string[] }> }> => ipcRenderer.invoke("attention:ackAll"),

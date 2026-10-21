@@ -5233,6 +5233,8 @@ app.whenReady().then(() => {
     const rows = store.soldComps().listComps("manual_import");
     return { removed: rows.length, ok: store.soldComps().removeBySource("manual_import") };
   });
+  ipcMain.handle("products:foldedNotice", (_e, productId: string) => store.foldedNoticeFor(String(productId ?? "")));
+  ipcMain.handle("products:origin", (_e, productId: string) => store.getProductOrigin(String(productId ?? "")));
   ipcMain.handle("attention:get", () => store.attentionSummary());
   ipcMain.handle("attention:ack", (_e, args: { itemId: string }) => {
     if (args?.itemId) store.ackAttention(String(args.itemId));
