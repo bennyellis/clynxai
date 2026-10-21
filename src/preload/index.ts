@@ -240,6 +240,7 @@ const api = {
   generateFolderThumbnail: (key: string): Promise<OpResult> => ipcRenderer.invoke("library:generateFolderThumbnail", { key }),
   libraryCleanupPlan: (): Promise<{ plan: { groups: Array<{ canonical: string; keep: { id: string; name: string }; fold: Array<{ id: string; name: string }>; why: string }>; before: number; after: number; skipped: Array<{ canonical: string; names: string[]; why: string }>; fingerprint: string }; text: string; batches: Array<{ batchId: string; at: number; folded: number; keptNames: string[]; undone: boolean }> }> => ipcRenderer.invoke("library:cleanupPlan"),
   libraryCleanupRun: (fingerprint: string): Promise<{ ok: boolean; merged: number; batchId?: string | null; error?: string }> => ipcRenderer.invoke("library:cleanupRun", { fingerprint }),
+  libraryMergeApproved: (ids: string[], itemId?: string): Promise<{ ok: boolean; error?: string; batchId?: string; keptName?: string }> => ipcRenderer.invoke("library:mergeApproved", { ids, itemId }),
   libraryCleanupUndo: (batchId: string): Promise<{ ok: boolean; restored: number }> => ipcRenderer.invoke("library:cleanupUndo", { batchId }),
   priceAnswer: (a: { productId: string; lowUsd: number; highUsd?: number; condition?: string; includes?: string; recency?: string }): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("price:answer", a),
   priceDismiss: (productId: string, how: "later" | "never" | "notSure"): Promise<{ ok: boolean }> => ipcRenderer.invoke("price:dismiss", { productId, how }),

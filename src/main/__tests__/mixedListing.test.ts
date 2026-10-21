@@ -14,4 +14,11 @@ run(async () => {
   section("where the game is filed");
   check("under the console's brand folder, in Games", gameFamilyPath("Xbox > Consoles") === "Xbox > Games" && gameFamilyPath("Xbox") === "Xbox > Games" && gameFamilyPath("Nintendo > Switch > Consoles") === "Nintendo > Switch > Games" && gameFamilyPath(null) === null && gameFamilyPath("") === null, [gameFamilyPath("Xbox > Consoles"), gameFamilyPath("Nintendo > Switch > Consoles")]);
   check("a lot is capped", MAX_GAMES_PER_LISTING === 5);
+
+  section("Switch OLED + Mario Kart 8 + case (fixture c)");
+  const parts = [["Mario Kart 8 Deluxe", "game"], ["Carrying case", "accessory"], ["Nintendo Switch Lite", "other"]] as const;
+  check("the game becomes its own entry, the case stays a minor add-on, a second console is neither", parts.every(([n, role]) => itemRole(n, "Nintendo Switch OLED", "Nintendo > Consoles") === role), parts.map(([n]) => itemRole(n, "Nintendo Switch OLED", "Nintendo > Consoles")));
+  check("it is filed with the Switch games, not in a flat list", gameFamilyPath("Nintendo > Consoles") === "Nintendo > Games");
+  section("Xbox Series X with Titanfall 2 (fixture e)");
+  check("two entries: the console stays, the game is a game", itemRole("Titanfall 2", "Xbox Series X", "Xbox > Consoles") === "game" && gameFamilyPath("Xbox > Consoles") === "Xbox > Games");
 });

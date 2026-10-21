@@ -1,6 +1,7 @@
+import { noSoldPrices, quietPushDecision } from "./quietPush.js";
 import { imageSearchRung, labelsRung, photoRung } from "./identityRungs.js";
 import { imageSearchAsk, labelAsk, photoAsk } from "./visionRungs.js";
-import { namingFacts, resolveName } from "./namingEngine.js";
+import { namingFacts, parsePhone, phoneEntry, resolveName } from "./namingEngine.js";
 import { nameKey } from "./modelFacts.js";
 import { assessListingIdentity } from "./scanIdentity.js";
 import { newLadderState } from "./identityLadder.js";
@@ -380,6 +381,8 @@ export interface ScrapeEngineOptions {
   valueBundle?: (args: { title: string; description: string; mainName: string; mainValueUsd: number }) => Promise<BundleValuation | null>;
   /** The things a listing of a known product comes with (from the bundle breakdown): they become SUGGESTED add-ons on that product (switched off, shown on its Library page). Never changes a value or an alert. */
   onAddonsSeen?: (mainName: string, itemNames: string[], listingId: string) => void;
+  /** A phone listing whose lock state (and carrier) is stated: the entry for that exact state is made on demand ("iPhone 15 Pro Unlocked (256GB)"), under the model, never all combinations up front. */
+  onPhoneEntry?: (entry: { name: string; parent: string | null }, listingTitle: string) => void;
 }
 
 // A readable name for a Marketplace place address ("…/marketplace/richmond/" ->
@@ -1371,6 +1374,12 @@ export class ScrapeEngine {
         }
       );
       if (verdict.marker) this.log("info", `Identity: ${verdict.marker}`, listing.url);
+      try {
+        const pe = phoneEntry(parsePhone(`${listing.title}\n${description ?? ""}`));
+        if (pe && pe.kind === "normal" && pe.certainty === "settled") this.opts.onPhoneEntry?.({ name: pe.name, parent: pe.parent }, listing.title);
+      } catch {
+        /* phone entries are optional */
+      }
       return verdict.unconfirmed;
     } catch (err) {
       this.log("info", `Identity step skipped: ${(err as Error).message}`, listing.url);
@@ -3362,12 +3371,25 @@ export class ScrapeEngine {
   }
 
   // Worth a look: kept in the Feed, never pushed unless the user turned that on (Config > notifyWorthALook), and then quietly.
+  private quietPushDay = "";
+  private quietPushCount = 0;
   private async noteWorthALook(q: Qualification, config: EngineConfig, listing: ListingSummary & { price: number }): Promise<void> {
     this.log("info", `Worth a look: ${listing.title} — ${q.verdict.headline}`, listing.url);
-    if (!config.notifyWorthALook || this.opts.store.isListingNotified(q.scored.listing.id)) return;
+    if (this.opts.store.isListingNotified(q.scored.listing.id)) return;
+    // Owner decision Q4: a large gap with no sold prices behind it is pushed quietly even when the general setting is off, with a "not proven" warning.
+    const f = q.verdict.facts;
+    const today = new Date().toISOString().slice(0, 10);
+    if (this.quietPushDay !== today) {
+      this.quietPushDay = today;
+      this.quietPushCount = 0;
+    }
+    const quiet = quietPushDecision({ status: q.verdict.status, basis: f.basis, marginAtAskPercent: f.marginAtAskPercent, profitAtAskUsd: f.profitAtAskUsd, reasonCodes: q.verdict.reasons.map((r) => r.code) }, this.quietPushCount, resaleSettingsFrom(config).minMarginPercent);
+    if (!config.notifyWorthALook && !quiet.send) return;
     try {
       const summary = buildQualifiedAlert({ q, source: this.opts.store, settings: resaleSettingsFrom(config), kind: "look" });
-      await sendWorthALookAlert(config, q.scored, { ...summary, message: `${q.verdict.headline}` });
+      const unproven = quietPushDecision({ status: q.verdict.status, basis: f.basis, marginAtAskPercent: f.marginAtAskPercent, profitAtAskUsd: f.profitAtAskUsd, reasonCodes: [] }, 0, 0).warning;
+      await sendWorthALookAlert(config, q.scored, { ...summary, message: `${q.verdict.headline}${noSoldPrices(f.basis) ? `\n${unproven}` : ""}` });
+      if (!config.notifyWorthALook) this.quietPushCount++;
       this.opts.store.markNotified(q.scored.listing.id);
     } catch (err) {
       this.log("error", `Notification failed: ${(err as Error).message}`, listing.url);

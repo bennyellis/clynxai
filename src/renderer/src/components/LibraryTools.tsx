@@ -351,6 +351,7 @@ function SplitQuestion({ row, onDone }: { row: ReviewRow; onDone: () => void }) 
 export function NeedsReviewPanel({ products, onClose }: { products: ProductProfile[]; onClose: () => void }) {
   const [rows, setRows] = useState<ReviewRow[] | null>(null);
   const unseen = useContext(AttentionContext);
+  const [panelNotice, setPanelNotice] = useState("");
   const isUnseen = (id: string) => unseen.items.some((i) => i.id === id);
   // opening an item (a click or a focus inside it) is what clears ITS dot; nothing else does
   const open = (id: string) => {
@@ -375,6 +376,7 @@ export function NeedsReviewPanel({ products, onClose }: { products: ProductProfi
       <p style={{ margin: 0, fontSize: 14, color: "var(--text-muted)", lineHeight: 1.5 }}>
         Clynx sets a photo aside when its own title or the photos around it disagree, and it never moves or deletes anything by a picture-only guess. You decide here; every choice can be undone.
       </p>
+      {panelNotice && <div style={{ fontSize: 13.5, color: "var(--text-muted)" }}>{panelNotice}</div>}
       {unseen.count > 0 && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, color: "var(--text-muted)" }}>
           <span style={{ flex: 1 }}>{attentionLabel(unseen.count)}.</span>
@@ -446,8 +448,8 @@ export function NeedsReviewPanel({ products, onClose }: { products: ProductProfi
                     </ul>
                   )}
                   <div style={{ display: "flex", gap: 6 }}>
-                    <button className="icon" onClick={() => act({ op: "mergeProducts", ids: (r.evidence.ids as string[]) ?? [] }).then(() => api.libraryOp({ op: "resolveReview", itemId: r.id, state: "accepted" }).then(load))}>
-                      Merge them
+                    <button className="icon" title="A backup copy is made first, the oldest entry is kept, and you can undo it from 'Same product under different names' for 30 days" onClick={() => void api.libraryMergeApproved((r.evidence.ids as string[]) ?? [], r.id).then((res) => { setPanelNotice(res.ok ? `Merged into "${res.keptName}". You can undo it under Same product under different names.` : (res.error ?? "Nothing was merged.")); load(); })}>
+                      Merge them (undo for 30 days)
                     </button>
                     <button className="icon ghost" onClick={() => act({ op: "resolveReview", itemId: r.id, state: "rejected" })}>
                       They are different

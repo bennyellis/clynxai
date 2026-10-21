@@ -3,7 +3,7 @@
 // Pure apart from the injected value lookup and rungs; nothing here fetches anything.
 import { resolveIdentity, vagueMarker, type Candidate, type Identity, type LadderBudget, type LadderState, type Resolution, type Rung } from "./identityLadder.js";
 import { namingFacts, parsePhone, phoneEntry, resolveName, type NamingFacts } from "./namingEngine.js";
-import { nameKey } from "./modelFacts.js";
+import { lineFor, nameKey } from "./modelFacts.js";
 
 export interface ScanListing {
   id: string;
@@ -64,8 +64,11 @@ function candidatesUnfiltered(text: string, valueOf: (name: string) => number | 
     return null;
   }
   const r = resolveName(text, facts);
-  if (r.generic) {
-    const line = facts.lines.find((l) => l.name === r.line);
+  // the bare line name ("Xbox Series X", "MacBook Air"): lines with a default model resolve to it (generic); lines with none just match the line itself
+  const bareLine = lineFor(text, facts.lines);
+  const isBare = r.generic || (!!bareLine && nameKey(text) === nameKey(bareLine.name));
+  if (isBare) {
+    const line = r.generic ? facts.lines.find((l) => l.name === r.line) : bareLine;
     if (line && line.models.length > 1) return { candidates: line.models.map((m) => ({ name: m.canonical, valueUsd: valueOf(m.canonical) })), missing: ["which model (disc or digital, size, edition)"] };
   }
   return null;

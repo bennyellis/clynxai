@@ -290,3 +290,15 @@ export function phoneEntry(p: PhoneParse): PhoneEntry | null {
 
 /** An entry that is For Parts never raises a deal alert (an iCloud-locked phone is not a bargain). */
 export const neverAlerts = (e: Pick<PhoneEntry, "kind" | "certainty">): boolean => e.kind === "for_parts" || e.certainty === "vague";
+
+/** The names from the model down to a phone entry: ["iPhone 15 Pro", "iPhone 15 Pro Locked (256GB)", "iPhone 15 Pro Locked T-Mobile (256GB)"]. Each is the parent of the next; made on demand, top first. */
+export function phoneChain(entry: Pick<PhoneEntry, "name" | "parent">): string[] {
+  const chain: string[] = [entry.name];
+  let parent = entry.parent;
+  for (let guard = 0; parent && guard < 4; guard++) {
+    chain.unshift(parent);
+    const m = /^(.*?)\s+Locked(?:\s+\([^)]*\))?$/.exec(parent);
+    parent = m ? m[1] : null;
+  }
+  return chain;
+}

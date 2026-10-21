@@ -81,6 +81,7 @@ import { friendlyPriceCheckFailure, friendlyResearchFailure, friendlySoldFailure
 import { adoptOfficialName, planParentLinks } from "./variantLinking.js";
 import { idsToQueueOnReset } from "./cloudDeletes.js";
 import { gameFamilyPath, itemRole, MAX_GAMES_PER_LISTING } from "./mixedListing.js";
+import { phoneChain } from "./namingEngine.js";
 import { addonKey, estimateAddonUplift, isNoiseAddon, type AddonRole, type AddonStatus } from "./addons.js";
 import { makeThumb, noteDecision } from "./aiDecisionLog.js";
 import { fileImage, setFilingRecorder, type FileImageEvidence } from "./fileImage.js";
@@ -3036,6 +3037,7 @@ function createEngineForAccount(accountId: string): ScrapeEngine {
     checkMarket: checkMarketBeforeAlert,
     ensureBrokenVariant,
     valueBundle: valueListingBundle,
+    onPhoneEntry: (entry, listingTitle) => void ensurePhoneEntries(entry, listingTitle),
     onAddonsSeen: (mainName, itemNames, listingId) => {
       const base = store.findMatchingProduct(mainName);
       if (!base) return;
@@ -3420,6 +3422,29 @@ function checkOwnerPriceAgainstSold(productId: string, soldTotalUsd: number | nu
   }
 }
 
+// Phone listings with a stated lock state (and carrier): the entry for exactly that state is made on demand, under the one above it ("iPhone 15 Pro" > "iPhone 15 Pro Locked (256GB)" > "... Locked T-Mobile
+// (256GB)"). Entries that already exist (under any spelling) are reused; nothing is made for every combination up front.
+async function ensurePhoneEntries(entry: { name: string; parent: string | null }, listingTitle: string): Promise<void> {
+  try {
+    const chain = phoneChain({ name: entry.name, parent: entry.parent });
+    let parentId: string | null = null;
+    for (const name of chain) {
+      const candidateId = randomUUID();
+      const id = store.addProductStub(candidateId, name, { reason: "phone version found in a listing", detail: listingTitle });
+      const created = id === candidateId;
+      if (parentId && id !== parentId && store.getProductById(id)?.parentProductId == null) store.setProductParent(id, parentId);
+      if (created) {
+        const fresh = store.getProductById(id);
+        if (fresh) sendToRenderer("products:updated", fresh);
+        const parentRow = parentId ? store.getProductById(parentId) : null;
+        void runProductLookup(id, name, { skipSiblingDiscovery: true, source: "related", forcedFamily: parentRow?.family ?? undefined });
+      }
+      parentId = id;
+    }
+  } catch (err) {
+    console.error(`[phone entries] ${(err as Error).message}`);
+  }
+}
 // Scanner parity S2: a game found in a listing that also holds its console becomes its own Database entry in the platform's Games folder, linked to the console. The same name never makes a second entry
 // (the creation rules return the existing one), and a game the person dismissed on this console never comes back.
 async function createLinkedGameEntry(base: ProductProfile, name: string, listingId: string): Promise<void> {
@@ -5341,6 +5366,29 @@ app.whenReady().then(() => {
       sendToRenderer("library:changed", { folders: true, review: true });
     }
     return { ok: true, merged, batchId };
+  });
+  // A merge the person approved from a Needs review suggestion: the same safe path as the clean-up (backup first, the oldest entry is kept, everything moves onto it, undo for 30 days).
+  ipcMain.handle("library:mergeApproved", async (_e, args: { ids: string[]; itemId?: string }) => {
+    const rows = (Array.isArray(args?.ids) ? args.ids : []).map(String).flatMap((id) => {
+      const p = store.getProductById(id);
+      return p ? [p] : [];
+    });
+    if (rows.length < 2) return { ok: false, error: "Those entries are not both there any more." };
+    const backup = await runDatabaseBackup(true);
+    if (!backup?.ok) return { ok: false, error: "A backup copy could not be made first, so nothing was merged." };
+    const [keep, ...fold] = [...rows].sort((a, b) => a.createdAt - b.createdAt);
+    const batchId = randomUUID();
+    try {
+      store.mergeEntriesWithUndo({ keep: { id: keep.id, name: keep.name }, fold: fold.map((f) => ({ id: f.id, name: f.name })) }, batchId);
+    } catch (err) {
+      return { ok: false, error: `Stopped: ${(err as Error).message}. Nothing was changed.` };
+    }
+    if (args.itemId) store.resolveReviewItem(String(args.itemId), "accepted", "user");
+    store.invalidateFolders();
+    const p = store.getProductById(keep.id);
+    if (p) sendToRenderer("products:updated", p);
+    sendToRenderer("library:changed", { folders: true, review: true });
+    return { ok: true, batchId, keptName: keep.name };
   });
   ipcMain.handle("library:cleanupUndo", (_e, args: { batchId: string }) => {
     const restored = store.undoMergeBatch(String(args?.batchId ?? ""));

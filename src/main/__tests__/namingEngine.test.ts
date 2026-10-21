@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Store } from "../store.js";
-import { foldedNotice, judgeAttribute, namingFacts, neverAlerts, normalizeGeneration, parsePhone, phoneEntry, resolveName } from "../namingEngine.js";
+import { foldedNotice, judgeAttribute, namingFacts, phoneChain, neverAlerts, normalizeGeneration, parsePhone, phoneEntry, resolveName } from "../namingEngine.js";
 import { buildAliasIndex, nameKey, SEED_LINES } from "../modelFacts.js";
 import { check, run, section } from "./_testkit.js";
 
@@ -68,6 +68,7 @@ run(async () => {
   check("'no iCloud lock', 'iCloud removed', 'not blacklisted', 'paid off' are NOT for parts", ["iPhone 15 Pro 256GB unlocked, no iCloud lock", "iPhone 15 Pro 256GB iCloud removed unlocked", "iPhone 14 128GB unlocked, not blacklisted, clean IMEI", "iPhone 14 128GB unlocked, fully paid off"].every((t) => parsePhone(t).forParts === null));
   const vague = phoneEntry(parsePhone("iPhone 15 Pro 256GB great shape"))!;
   check("no lock information: named by model and size only, marked vague, never alerts", vague.name === "iPhone 15 Pro (256GB)" && vague.certainty === "vague" && neverAlerts(vague) && !neverAlerts(unlocked) && !neverAlerts(tmo), vague);
+  check("a carrier entry is made under Locked, under the model - top first, only what is needed", phoneChain(tmo).join(" | ") === "iPhone 15 Pro | iPhone 15 Pro Locked (256GB) | iPhone 15 Pro Locked T-Mobile (256GB)" && phoneChain(unlocked).join(" | ") === "iPhone 15 Pro | iPhone 15 Pro Unlocked (256GB)" && phoneChain(locked).length === 2);
   check("not a phone model -> no phone entry", phoneEntry(parsePhone("Dyson V8 Absolute")) === null);
 
   section("aliases and the owner's edits live in the Database (not yet wired to any insert path)");

@@ -104,6 +104,20 @@ export const SEED_LINES: LineFact[] = [
       { canonical: "Nintendo 2DS XL", parent: "Nintendo 3DS", source: owner, attrs: { size: "XL" }, aliases: ["New Nintendo 2DS XL", "2DS XL"] },
     ],
   },
+  {
+    // MacBook Air by chip generation. The model numbers (A-numbers) printed on the underside separate them when a listing gives no specs; they are from the maker's public identification list, not
+    // confirmed by the owner, so the source is "default": correct them in the facts if one is wrong.
+    key: "macbook-air",
+    name: "MacBook Air",
+    source: "default",
+    distinguishing: ["generation", "capacity"],
+    tells: ["the A-number printed on the underside names the chip generation", "M1 has the older flat case; M2 and M3 have the MagSafe charging port"],
+    models: [
+      { canonical: "MacBook Air M1 (2020)", parent: "MacBook Air", source: "default", attrs: { generation: "M1", codes: "A2337" }, aliases: ["MacBook Air M1", "MacBook Air 2020", "Apple MacBook Air M1", "MacBook Air 13 M1", "MacBook Air A2337"] },
+      { canonical: "MacBook Air M2 (2022)", parent: "MacBook Air", source: "default", attrs: { generation: "M2", codes: "A2681" }, aliases: ["MacBook Air M2", "MacBook Air 2022", "Apple MacBook Air M2", "MacBook Air 13 M2", "MacBook Air A2681"] },
+      { canonical: "MacBook Air M3 (2024)", parent: "MacBook Air", source: "default", attrs: { generation: "M3", codes: "A3113" }, aliases: ["MacBook Air M3", "MacBook Air 2024", "Apple MacBook Air M3", "MacBook Air 13 M3", "MacBook Air A3113"] },
+    ],
+  },
   // Lines whose colours do not move the price (the owner's examples): no models listed, the general rule folds colour.
   { key: "sony-wh-1000xm5", name: "Sony WH-1000XM5", source: owner, models: [] },
   { key: "kitchenaid-artisan", name: "KitchenAid Artisan", source: owner, models: [], tells: ["the Artisan is the tilt-head mixer; the bowl-lift Professional is a different product"] },

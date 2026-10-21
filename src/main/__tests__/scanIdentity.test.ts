@@ -68,4 +68,17 @@ run(async () => {
   const unsure = gate(["which model (disc or digital, size, edition)"]);
   check("settled: it qualifies", settled.qualified === true, settled.status);
   check("not settled: it is a 'worth a look' with the reason, never a deal", unsure.qualified === false && unsure.status === "worth_a_look" && unsure.reasons.some((r) => r.code === "IDENTITY_UNCONFIRMED" && /Not sure which model/.test(r.text)), unsure);
+
+  section("MacBook Air with no specs (fixture d)");
+  const MAC: Record<string, number> = { "MacBook Air M1 (2020)": 650, "MacBook Air M2 (2022)": 850, "MacBook Air M3 (2024)": 1000 };
+  const macDeps = (extra: Record<string, unknown> = {}) => ({ ...deps({ valueOf: (n: string) => MAC[n] ?? null }), ...extra });
+  check("the bare line could be any of its generations", candidatesFor("MacBook Air", (n) => MAC[n] ?? null, facts)?.candidates.length === 3);
+  const calls: string[] = [];
+  const mac = await assessListingIdentity(L("m1", "MacBook Air", 480), macDeps({ extraRungs: { all_photos: async (id: any) => { calls.push("photos"); return { candidates: id.candidates, confidence: "vague" as const, found: "no A-number visible", missing: id.missing }; }, labels_and_codes: async (id: any) => { calls.push("labels"); return { candidates: id.candidates, confidence: "vague" as const, found: "no label legible", missing: id.missing }; } } }));
+  check("a deal for one generation and not another: held back (no alert), priced at the lowest value, and the ladder ran within its budget", mac.unconfirmed.length > 0 && mac.valueUsd === 650 && calls.join() === "photos,labels" && (mac.resolution?.stepsUsed ?? 99) <= 4, mac);
+  check("the marker says what was tried", /Already tried/.test(mac.marker) && /A-number/.test(mac.marker), mac.marker);
+  const sure = await assessListingIdentity(L("m2", "MacBook Air", 480), macDeps({ state: newLadderState(), extraRungs: { labels_and_codes: async () => ({ candidates: [{ name: "MacBook Air M1 (2020)", valueUsd: 650 }], confidence: "settled" as const, found: "the underside says A2337", missing: [] }) } }));
+  check("an A-number read from a photo settles it as the M1", sure.unconfirmed.length === 0 && sure.valueUsd === 650);
+  const everyDeal = await assessListingIdentity(L("m3", "MacBook Air", 300), macDeps({ state: newLadderState() }));
+  check("a deal under every generation is not researched at all", everyDeal.resolution?.stop === "not_relevant" && everyDeal.resolution.stepsUsed === 0 && everyDeal.unconfirmed.length === 0);
 });
