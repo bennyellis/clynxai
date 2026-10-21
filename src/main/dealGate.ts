@@ -117,6 +117,8 @@ export interface GateInput {
   // listing may be a more specific product than the one whose value is being used. Caps the evidence at weak and rules out the
   // "big gap on thin evidence" shortcut, so it can be a Worth a look but never a confident deal until the specific product is priced.
   identityUnconfirmed?: string[];
+  /** Phase 3: what the identity step could not settle about WHICH model the listing is ("whether it is unlocked or locked to a carrier"); non-empty keeps it from being called a deal. */
+  identityVague?: string[];
   // Codes the title states that nothing vouches for (maybe a seller's own code). Note only: the verdict keeps its status, but a "high"
   // confidence is shown as "medium" because the match to the product is not fully confirmed.
   identityUnverified?: string[];
@@ -255,7 +257,8 @@ function verdict(status: DealStatus, level: EvidenceLevel, facts: GateFacts, rea
 export function qualifyListing(input: GateInput): GateVerdict {
   const unconfirmed = input.identityUnconfirmed ?? [];
   let level = evidenceLevel(input.evidence);
-  if (unconfirmed.length > 0 && level !== "none") level = "weak";
+  const vague = input.identityVague ?? [];
+  if ((unconfirmed.length > 0 || vague.length > 0) && level !== "none") level = "weak";
   const facts = emptyFacts(level, input);
   const reasons: GateReason[] = [];
   const settings = input.settings;
@@ -359,6 +362,11 @@ export function qualifyListing(input: GateInput): GateVerdict {
       input.evidence.basis === "active"
         ? "That value comes from asking prices only: nothing has confirmed what it actually sells for."
         : `Only ${plural(input.evidence.sampleSize ?? 0, "sale")} to go on${input.evidence.ageDays !== null && input.evidence.ageDays > EVIDENCE_RULES.staleDays ? ", and they are old" : ""}.`;
+    if (vague.length > 0) {
+      const text = `Not sure which model this is yet - missing: ${vague.join("; ")}. It is priced at the lowest possibility and is not called a deal until that is settled.`;
+      reasons.push({ code: "IDENTITY_UNCONFIRMED", severity: "warn", text });
+      return verdict("worth_a_look", level, facts, reasons, text, null, "low");
+    }
     if (unconfirmed.length > 0) {
       const text = `This looks like a more specific version (${unconfirmed.join(", ")}) than the product it matched, so that product's price can't be trusted for it yet.`;
       reasons.push({ code: "IDENTITY_UNCONFIRMED", severity: "warn", text });

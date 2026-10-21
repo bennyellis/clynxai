@@ -46,6 +46,8 @@ export interface QualifyArgs {
   hardCapExceeded?: boolean;
   // The product names the photo analysis gave this listing: independent evidence that a code in the title is a real marker.
   identityTexts?: string[];
+  // Phase 3: what the identity step (scanIdentity.ts) could not settle about WHICH model this is; non-empty keeps the listing from being called a deal.
+  ladderUnconfirmed?: string[];
   // Beta 13: the defect-specific condition adjustment (conditionAdjust.ts), given the clean value; absent = the flat condition multiplier as before.
   conditionAdjust?: GateInput["conditionAdjust"];
   log: (message: string) => void;
@@ -89,6 +91,7 @@ export function resolveEvidence(scored: ScoredListing, source: SignalSource | nu
 function gateOnce(args: QualifyArgs, evidence: ValueEvidence | null, scored: ScoredListing, identityUnconfirmed?: string[]): GateVerdict {
   const { listing, extraction } = scored;
   let unconfirmed: string[] = identityUnconfirmed ?? [];
+  const ladder = args.ladderUnconfirmed ?? [];
   let unverified: string[] = [];
   let market: { runTimeDays: number | null; fbAvgPriceUsd: number | null; fbSample: number | null } | undefined;
   try {
@@ -112,6 +115,7 @@ function gateOnce(args: QualifyArgs, evidence: ValueEvidence | null, scored: Sco
     broken: !!extraction.brokenVariant,
     evidence,
     identityUnconfirmed: unconfirmed,
+    identityVague: ladder,
     identityUnverified: unverified,
     extras: args.extras ?? null,
     age: assessListingAge(listing.listingAge, args.maxAgeHours),

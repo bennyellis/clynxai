@@ -1,3 +1,5 @@
+import { assessListingIdentity } from "./scanIdentity.js";
+import { newLadderState } from "./identityLadder.js";
 import { stageOf } from "./scanPipeline.js";
 import { noteDecision } from "./aiDecisionLog.js";
 import { powerSaveBlocker } from "electron";
@@ -1305,6 +1307,34 @@ export class ScrapeEngine {
   // thumbnail-classification skip, which is timed separately as its own
   // "thumbnail_classification" stage instead, since it's a real vision
   // call, not a cheap check).
+  // Stage 5 of the scan pipeline (scanPipeline.ts): when the listing's words do not say WHICH model it is, the resolve ladder narrows it within its budgets; what is still unsettled keeps the gate from
+  // calling it a deal. A failure here never blocks the scan: it just adds nothing.
+  private ladderState = newLadderState();
+  private async identityUnconfirmedFor(listing: ListingSummary, description: string | null, config: EngineConfig): Promise<string[]> {
+    if (listing.price === null) return [];
+    try {
+      const settings = resaleSettingsFrom(config);
+      const store = this.opts.store;
+      const verdict = await assessListingIdentity(
+        { id: listing.id, title: listing.title, description, priceUsd: listing.price, evidenceKey: `${listing.title.length}:${(description ?? "").length}:${listing.price}` },
+        {
+          valueOf: (name) => {
+            const id = store.existingProductIdForName(name);
+            const p = id ? store.getProductById(id) : null;
+            return p?.ebayEstimatedValueUsd ?? null;
+          },
+          isDeal: (ask, value) => (value * settings.netPercent) / 100 - ask >= (ask * settings.minMarginPercent) / 100,
+          state: this.ladderState,
+        }
+      );
+      if (verdict.marker) this.log("info", `Identity: ${verdict.marker}`, listing.url);
+      return verdict.unconfirmed;
+    } catch (err) {
+      this.log("info", `Identity step skipped: ${(err as Error).message}`, listing.url);
+      return [];
+    }
+  }
+
   private recordInstantSkip(listing: ListingSummary, reasoning: string, cheapFilterStartedAt?: number, research?: { status: ResearchStatus; code: string }): ListingEvalResult {
     if (cheapFilterStartedAt !== undefined) recordStage("cheap_filters", Date.now() - cheapFilterStartedAt, true);
     // Why it was skipped, in the same words as the saved reason: rules that skip a listing before it is opened never look at it,
@@ -3073,8 +3103,10 @@ export class ScrapeEngine {
           }
         : null;
     if (!checkedDismissal && (scored.isDeal || gateExtras !== null || priceQualifiedWatches.length > 0)) {
+      const ladderUnconfirmed = await this.identityUnconfirmedFor(listing, detail.description ?? null, config);
       qualification = await qualifyScoredListing({
         conditionAdjust,
+        ladderUnconfirmed,
         scored,
         source: this.opts.store,
         settings: resaleSettingsFrom(config),
