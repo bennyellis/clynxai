@@ -48,7 +48,7 @@ export interface LadderBudget {
   perListing: number;
   perDay: number;
 }
-export const DEFAULT_BUDGET: LadderBudget = { perListing: 3, perDay: 40 };
+export const DEFAULT_BUDGET: LadderBudget = { perListing: 4, perDay: 40 };
 
 export interface LadderState {
   /** rung steps spent per listing and the day's total. */

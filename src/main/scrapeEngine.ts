@@ -1,3 +1,7 @@
+import { imageSearchRung, labelsRung, photoRung } from "./identityRungs.js";
+import { imageSearchAsk, labelAsk, photoAsk } from "./visionRungs.js";
+import { namingFacts, resolveName } from "./namingEngine.js";
+import { nameKey } from "./modelFacts.js";
 import { assessListingIdentity } from "./scanIdentity.js";
 import { newLadderState } from "./identityLadder.js";
 import { stageOf } from "./scanPipeline.js";
@@ -1313,10 +1317,42 @@ export class ScrapeEngine {
   // thumbnail-classification skip, which is timed separately as its own
   // "thumbnail_classification" stage instead, since it's a real vision
   // call, not a cheap check).
+  // The photo, label and image-search rungs of the resolve ladder, for one listing's photos. They run only when the ladder reaches them (a decision that depends on which model it is, inside the
+  // budgets), never in Save-credits mode, and the photos are fetched once, shrunk, and only when a rung asks.
+  private identityRungsFor(imageUrls: string[]) {
+    let cache: Promise<string[]> | null = null;
+    const images = () =>
+      (cache ??= Promise.all(
+        imageUrls.slice(0, 4).map(async (u) => {
+          const data = await downloadImageAsDataUri(u).catch(() => null);
+          return data ? await shrinkImageDataUri(data, 640, 70).catch(() => data) : null;
+        })
+      ).then((all) => all.filter((x): x is string => !!x)));
+    const facts = namingFacts();
+    const tellsFor = (name: string) => {
+      const line = facts.lines.find((l) => l.models.some((m) => nameKey(m.canonical) === nameKey(name)));
+      const model = line?.models.find((m) => nameKey(m.canonical) === nameKey(name));
+      return [...(line?.tells ?? []), ...Object.entries(model?.attrs ?? {}).filter(([k]) => k !== "codes").map(([k, v]) => `${k}: ${v}`)];
+    };
+    const codesFor = (name: string) => {
+      const model = facts.lines.flatMap((l) => l.models).find((m) => nameKey(m.canonical) === nameKey(name));
+      return String(model?.attrs.codes ?? "").split(",").map((c) => c.trim()).filter(Boolean);
+    };
+    const matchTitle = (title: string, cands: Array<{ name: string }>) => {
+      const r = resolveName(title, facts);
+      return cands.find((c) => nameKey(c.name) === nameKey(r.canonical))?.name ?? null;
+    };
+    return {
+      all_photos: photoRung({ images, tellsFor, ask: photoAsk }),
+      labels_and_codes: labelsRung({ images, codesFor, ask: labelAsk }),
+      image_search: imageSearchRung({ images, matchTitle, ask: imageSearchAsk }),
+    };
+  }
+
   // Stage 5 of the scan pipeline (scanPipeline.ts): when the listing's words do not say WHICH model it is, the resolve ladder narrows it within its budgets; what is still unsettled keeps the gate from
   // calling it a deal. A failure here never blocks the scan: it just adds nothing.
   private ladderState = newLadderState();
-  private async identityUnconfirmedFor(listing: ListingSummary, description: string | null, config: EngineConfig): Promise<string[]> {
+  private async identityUnconfirmedFor(listing: ListingSummary, description: string | null, config: EngineConfig, imageUrls: string[] = []): Promise<string[]> {
     if (listing.price === null) return [];
     try {
       const settings = resaleSettingsFrom(config);
@@ -1331,6 +1367,7 @@ export class ScrapeEngine {
           },
           isDeal: (ask, value) => (value * settings.netPercent) / 100 - ask >= (ask * settings.minMarginPercent) / 100,
           state: this.ladderState,
+          extraRungs: isLowAiMode() ? undefined : this.identityRungsFor(imageUrls),
         }
       );
       if (verdict.marker) this.log("info", `Identity: ${verdict.marker}`, listing.url);
@@ -3109,7 +3146,7 @@ export class ScrapeEngine {
           }
         : null;
     if (!checkedDismissal && (scored.isDeal || gateExtras !== null || priceQualifiedWatches.length > 0)) {
-      const ladderUnconfirmed = await this.identityUnconfirmedFor(listing, detail.description ?? null, config);
+      const ladderUnconfirmed = await this.identityUnconfirmedFor(listing, detail.description ?? null, config, detail.imageUrls ?? []);
       qualification = await qualifyScoredListing({
         conditionAdjust,
         ladderUnconfirmed,

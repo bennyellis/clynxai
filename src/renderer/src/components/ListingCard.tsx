@@ -1,3 +1,4 @@
+import { reasonChips } from "../lib/reasonChips";
 import React, { useEffect, useState } from "react";
 import type { ListingRecord, PhotoFlaw } from "../lib/api.js";
 import { FlameIcon, HotRing, OUTLINE_WIDTH_PX, SOURCE_NAMES, SourceLogo, isHotListing, listingOutlineColor } from "./ListingSourceMarks.js";
@@ -687,6 +688,24 @@ function ListingCardImpl({
             <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{verdictChip.detail}</span>
           </div>
         )}
+
+        {(() => {
+          const chips = reasonChips(record);
+          return chips.length === 0 ? null : (
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }} data-testid="reason-chips">
+              {chips.map((c) => (
+                <span
+                  key={c.id}
+                  className="pill"
+                  title={c.title}
+                  style={{ fontSize: 11, padding: "1px 8px", color: c.tone === "good" ? "var(--success)" : c.tone === "warn" ? "var(--warn)" : "var(--text-muted)", borderColor: c.tone === "good" ? "var(--success)" : c.tone === "warn" ? "var(--warn)" : "var(--border-strong)" }}
+                >
+                  {c.label}
+                </span>
+              ))}
+            </div>
+          );
+        })()}
 
         {record.conditionAssessment && (record.conditionAssessment.defects.length > 0 || record.conditionAssessment.statements.length > 0) && (() => {
           const c = record.conditionAssessment!;

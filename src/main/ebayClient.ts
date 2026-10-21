@@ -328,3 +328,35 @@ export async function searchEbayAspects(query: string): Promise<{ aspects: impor
     return null;
   }
 }
+
+/**
+ * Titles of the listings eBay's Browse "search by image" returns for a photo (base64, no data-URI prefix). Used as one vote among several by the identity ladder. Direct eBay keys only (Clynx Cloud's
+ * transport carries GET requests only), and the endpoint's availability on a given eBay account was NOT verified: any failure returns null, which the ladder reads as "this source said nothing".
+ */
+export async function searchEbayByImage(imageBase64: string, limit = 10): Promise<string[] | null> {
+  if (transport?.enabled() || !credentials()) return null;
+  const started = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), EBAY_TIMEOUT_MS);
+  try {
+    const token = await getAccessToken();
+    const res = await fetch(`${EBAY_BROWSE_URL}/item_summary/search_by_image?limit=${limit}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US" },
+      body: JSON.stringify({ image: imageBase64 }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      apiActivity.record({ provider: "ebay", kind: "browse_other", outcome: "live_failed", route: "ebay_direct", status: res.status, ms: Date.now() - started, error: `eBay image search answered ${res.status}` });
+      return null;
+    }
+    const data = (await res.json()) as { itemSummaries?: Array<{ title?: string }> };
+    const titles = (data.itemSummaries ?? []).map((i) => String(i.title ?? "")).filter(Boolean);
+    apiActivity.record({ provider: "ebay", kind: "browse_other", outcome: "live_ok", route: "ebay_direct", ms: Date.now() - started, results: titles.length });
+    return titles.length > 0 ? titles : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
