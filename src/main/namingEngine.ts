@@ -31,13 +31,38 @@ export interface NameResolution {
 export interface NamingFacts {
   lines: ReadonlyArray<LineFact>;
   index: Map<string, AliasHit>;
+  /** Colour names learned from real listings (lower case) that the built-in list does not know. */
+  extraColours?: ReadonlyArray<string>;
 }
 
 /** The facts in force: the seeds plus the owner's edits. Build it once and pass it around. */
-export function namingFacts(overrides: ReadonlyArray<{ canonical: string; addAliases?: string[]; attrs?: Record<string, string> }> = []): NamingFacts {
+export function namingFacts(overrides: ReadonlyArray<{ canonical: string; addAliases?: string[]; attrs?: Record<string, string> }> = [], extraColours: ReadonlyArray<string> = []): NamingFacts {
   const lines = overrides.length ? applyOverrides(SEED_LINES, overrides) : SEED_LINES;
-  return { lines, index: buildAliasIndex(lines) };
+  return { lines, index: buildAliasIndex(lines), ...(extraColours.length ? { extraColours } : {}) };
 }
+
+const extraColourRe = (c: string, flags: string) => new RegExp(`(?<![a-z0-9])${c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+")}(?![a-z0-9])`, flags);
+
+/** The colour words in a name: the ones learned from listings (longest first) and the built-in list. */
+function coloursIn(text: string, facts: NamingFacts): string[] {
+  const found: string[] = [];
+  let rest = text;
+  for (const c of [...(facts.extraColours ?? [])].sort((x, y) => y.length - x.length)) {
+    const m = extraColourRe(c, "i").exec(rest);
+    if (m) {
+      found.push(m[0]);
+      rest = rest.replace(extraColourRe(c, "ig"), " ");
+    }
+  }
+  return [...found, ...colourWordsIn(rest)];
+}
+
+function stripColoursWith(text: string, facts: NamingFacts): string {
+  let t = text;
+  for (const c of [...(facts.extraColours ?? [])].sort((x, y) => y.length - x.length)) t = t.replace(extraColourRe(c, "ig"), " ");
+  return stripColours(t).replace(/\s+/g, " ").trim();
+}
+
 const DEFAULT_FACTS = namingFacts();
 
 const CONDITION_FILLER = /\b(?:brand new|new in box|new sealed|factory sealed|sealed|like new|open box|used|refurbished|renewed|pre-?owned|mint condition|excellent condition|great condition|good condition|nib|nwt|free shipping|fast shipping)\b/gi;
@@ -74,14 +99,14 @@ export function resolveName(raw: string, facts: NamingFacts = DEFAULT_FACTS): Na
   const noMaker = generation.replace(MAKER, "");
   // The name as typed first, then with the filler off, then without the maker, then without the colour (only for lines whose colour does not move the price).
   const attempts: Array<{ text: string; dropColour: boolean }> = [typed, noFiller, generation, noMaker].map((text) => ({ text, dropColour: false }));
-  for (const text of [generation, noMaker]) attempts.push({ text: stripColours(text), dropColour: true });
+  for (const text of [generation, noMaker]) attempts.push({ text: stripColoursWith(text, facts), dropColour: true });
   for (const { text, dropColour } of attempts) {
     const hit = facts.index.get(nameKey(text));
     if (!hit) continue;
     if (dropColour && (hit.line.keepColour || hit.line.distinguishing?.includes("colour"))) continue;
     const folded: FoldedDetail[] = [];
     for (const m of typed.matchAll(CONDITION_FILLER)) folded.push({ kind: "condition", value: m[0] });
-    if (dropColour) for (const c of colourWordsIn(generation)) folded.push({ kind: "colour", value: c });
+    if (dropColour) for (const c of coloursIn(generation, facts)) folded.push({ kind: "colour", value: c });
     return result({ canonical: hit.model.canonical, parent: parentOf(hit.model), how: "model", line: hit.line.name, generic: hit.line.models.length > 1 && nameKey(text) === nameKey(hit.line.name), folded });
   }
 
@@ -93,8 +118,8 @@ export function resolveName(raw: string, facts: NamingFacts = DEFAULT_FACTS): Na
   const line = lineFor(name, facts.lines);
   const colourMatters = Boolean(line?.keepColour || line?.distinguishing?.includes("colour"));
   if (!colourMatters) {
-    const colours = colourWordsIn(name);
-    const stripped = stripColours(name);
+    const colours = coloursIn(name, facts);
+    const stripped = stripColoursWith(name, facts);
     // never strip a name down to nothing: "Black Friday" or "Silver" alone stay as they are
     if (colours.length > 0 && stripped.split(" ").filter(Boolean).length >= 2) {
       for (const c of colours) folded.push({ kind: "colour", value: c });

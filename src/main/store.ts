@@ -1,3 +1,4 @@
+import type { LearnedFact } from "./factsLearner.js";
 import { foldedNotice, namingFacts, resolveName } from "./namingEngine.js";
 import { REQUALIFY_CODES, type SavedListingState } from "./relisting.js";
 import { countLifecycle, type LifecycleCounts } from "./listingLifecycle.js";
@@ -206,6 +207,19 @@ export class Store {
         PRIMARY KEY (product_id, alias_key)
       );
       CREATE INDEX IF NOT EXISTS idx_product_name_aliases_key ON product_name_aliases (alias_key);
+      -- What real listings of a product line say it comes in (colours, capacities, editions), with where that came from; "ignored" is the owner saying a value is not real.
+      CREATE TABLE IF NOT EXISTS learned_facts (
+        line_key TEXT NOT NULL,
+        attribute TEXT NOT NULL,
+        value TEXT NOT NULL,
+        value_key TEXT NOT NULL,
+        source TEXT NOT NULL,
+        count INTEGER NOT NULL,
+        ignored INTEGER NOT NULL DEFAULT 0,
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        PRIMARY KEY (line_key, attribute, value_key)
+      );
       -- Why an entry was created (the scanner found it in a listing, the chat asked for it, a version / add-on / game of another entry...), so "where did this come from" always has an answer.
       CREATE TABLE IF NOT EXISTS product_origins (
         product_id TEXT PRIMARY KEY,
@@ -1648,7 +1662,7 @@ export class Store {
    * was folded. Sales are not split by colour yet, so it says that plainly instead of showing a made-up comparison.
    */
   foldedNoticeFor(productId: string): { colours: string[]; names: string[]; text: string } | null {
-    const facts = namingFacts(this.listModelFactOverrides());
+    const facts = namingFacts(this.listModelFactOverrides(), this.learnedColours());
     const names = this.listProductAliases(productId).map((a) => a.alias);
     const colours = new Set<string>();
     const foldedNames: string[] = [];
@@ -1685,7 +1699,7 @@ export class Store {
 
   private lookUpExistingByName(typed: string): { r: ReturnType<typeof resolveName>; canonical: string; existing: { id: string; name: string } | undefined } {
     const trimmed = typed.replace(/\s+/g, " ").trim();
-    const facts = namingFacts(this.listModelFactOverrides());
+    const facts = namingFacts(this.listModelFactOverrides(), this.learnedColours());
     const r = resolveName(trimmed, facts);
     const canonical = r.canonical || trimmed;
     const rows = this.db.prepare("SELECT id, name FROM products WHERE deleted_at IS NULL").all() as Array<{ id: string; name: string }>;
@@ -1799,6 +1813,35 @@ export class Store {
     return (this.soldCompsStore ??= new SoldCompsStore(this.db));
   }
 
+  // ---- Phase 1.1: facts learned from eBay item specifics.
+
+  /** Records what listings of this line use. Counts are the latest seen (not summed over repeated looks), and a value the owner ignored stays ignored. */
+  recordLearnedFacts(lineName: string, facts: ReadonlyArray<LearnedFact>, source: string = "ebay_specifics", now: number = Date.now()): number {
+    const lineKey = nameKey(lineName);
+    if (!lineKey) return 0;
+    let n = 0;
+    for (const f of facts) {
+      this.db.prepare("INSERT INTO learned_facts (line_key, attribute, value, value_key, source, count, ignored, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?) ON CONFLICT(line_key, attribute, value_key) DO UPDATE SET count = excluded.count, last_seen_at = excluded.last_seen_at, source = CASE WHEN learned_facts.ignored = 1 THEN learned_facts.source ELSE excluded.source END")
+        .run(lineKey, f.attribute, f.value, nameKey(f.value), source, f.count, now, now);
+      n++;
+    }
+    return n;
+  }
+
+  listLearnedFacts(lineName: string): Array<{ attribute: string; value: string; count: number; source: string; ignored: boolean; lastSeenAt: number }> {
+    return (this.db.prepare("SELECT attribute, value, count, source, ignored, last_seen_at FROM learned_facts WHERE line_key = ? ORDER BY attribute, ignored, count DESC, value").all(nameKey(lineName)) as Array<{ attribute: string; value: string; count: number; source: string; ignored: number; last_seen_at: number }>).map((r) => ({ attribute: r.attribute, value: r.value, count: r.count, source: r.source, ignored: !!r.ignored, lastSeenAt: r.last_seen_at }));
+  }
+
+  /** The owner says a learned value is not real (a seller's typo, a different product): it stops being used and stays hidden. */
+  setLearnedFactIgnored(lineName: string, attribute: string, value: string, ignored: boolean): boolean {
+    return Number(this.db.prepare("UPDATE learned_facts SET ignored = ?, source = CASE WHEN ? = 1 THEN 'owner' ELSE source END WHERE line_key = ? AND attribute = ? AND value_key = ?").run(ignored ? 1 : 0, ignored ? 1 : 0, nameKey(lineName), attribute, nameKey(value)).changes) > 0;
+  }
+
+  /** Every colour real listings use for any line, lower case, that the owner has not ignored: names like "Cosmic Teal" that the built-in colour list does not know. */
+  learnedColours(): string[] {
+    return (this.db.prepare("SELECT DISTINCT value FROM learned_facts WHERE attribute = 'colour' AND ignored = 0 AND count >= 3").all() as Array<{ value: string }>).map((r) => r.value.toLowerCase());
+  }
+
   // ---- Phase 4a: "Your price" and the questions that collect it.
 
   getOwnerPrice(productId: string): OwnerPrice | null {
@@ -1906,7 +1949,7 @@ export class Store {
   /** Read-only: which entries the naming rules say are the same product ("N entries become M"). Changes nothing. */
   planDuplicateCleanup(): CleanupPlan {
     const rows = this.db.prepare("SELECT id, name, category, created_at, parent_product_id FROM products WHERE deleted_at IS NULL").all() as Array<{ id: string; name: string; category: string | null; created_at: number; parent_product_id: string | null }>;
-    return planCleanup(rows.map((r) => ({ id: r.id, name: r.name, category: r.category, createdAt: r.created_at, parentProductId: r.parent_product_id })), namingFacts(this.listModelFactOverrides()));
+    return planCleanup(rows.map((r) => ({ id: r.id, name: r.name, category: r.category, createdAt: r.created_at, parentProductId: r.parent_product_id })), namingFacts(this.listModelFactOverrides(), this.learnedColours()));
   }
 
   private static readonly MERGE_LINK_TABLES: Array<{ table: string; col: string; pk: string[] }> = [
@@ -2478,7 +2521,7 @@ export class Store {
     const aliasId = this.findProductIdByAlias(name);
     const byAlias = aliasId ? this.getProductById(aliasId) : null;
     if (byAlias) return byAlias;
-    const named = resolveName(name, namingFacts(this.listModelFactOverrides()));
+    const named = resolveName(name, namingFacts(this.listModelFactOverrides(), this.learnedColours()));
     if (named.how === "model" && named.canonical) {
       const byCanonical = this.getProductByName(named.canonical);
       if (byCanonical) return byCanonical;

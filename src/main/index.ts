@@ -2865,6 +2865,7 @@ async function discoverAndCreateProductVariants(productName: string, category: s
     {
       store,
       ebaySpecifics: async (name) => (hasEbayCredentials() ? await searchEbayAspects(name) : null),
+      learnFacts: (name, facts) => void store.recordLearnedFacts(name, facts),
       editions: async (name) => {
         if (beta13Flags(config).webKnowledge === "off") return null;
         const r = await getKnowledgeService().researchEditions(name, null);
@@ -5234,6 +5235,15 @@ app.whenReady().then(() => {
     return { removed: rows.length, ok: store.soldComps().removeBySource("manual_import") };
   });
   ipcMain.handle("products:aliases", () => Object.fromEntries(store.aliasesByProduct()));
+  // Phase 1.1: what real listings say a product line comes in, and the owner's "that one is not real".
+  ipcMain.handle("facts:learned", (_e, productId: string) => {
+    const p = store.getProductById(String(productId ?? ""));
+    return p ? store.listLearnedFacts(p.name) : [];
+  });
+  ipcMain.handle("facts:ignore", (_e, args: { productId: string; attribute: string; value: string; ignored: boolean }) => {
+    const p = store.getProductById(String(args?.productId ?? ""));
+    return { ok: p ? store.setLearnedFactIgnored(p.name, String(args.attribute), String(args.value), args.ignored === true) : false };
+  });
   ipcMain.handle("products:foldedNotice", (_e, productId: string) => store.foldedNoticeFor(String(productId ?? "")));
   ipcMain.handle("products:origin", (_e, productId: string) => store.getProductOrigin(String(productId ?? "")));
   // Review > "Move them to their own entry": backup first, then ONE undoable action (Recent changes), then the new game's own research.

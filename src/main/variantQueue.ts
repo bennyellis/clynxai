@@ -3,6 +3,7 @@
 //     into the persistent queue as "queued" ("found, not yet checked"). Same input, same list. Nothing is dropped by a cap.
 //  2. runQueueTick: take the next few queued names (a throttle, not a limit: the worker comes back every few minutes until the queue is empty), check each against sources, and decide:
 //     a version needs more than one voice to become a Database entry (decideVariant), otherwise it stays a SUGGESTION; an add-on found in a source ALWAYS becomes its own accessory entry.
+import { learnFromAspects, type LearnedFact } from "./factsLearner.js";
 import { addonCandidatesFromPages, decideVariant, findingsToCandidates, isMemoryOnly, memoryHints, mergeCandidates, specificsToCandidates, candidateKey, type AspectDistribution, type Candidate, type PageText } from "./variantDiscovery.js";
 import type { EditionFinding } from "./editionDiscovery.js";
 import type { StoredCandidate } from "./store.js";
@@ -26,6 +27,8 @@ export interface GatherDeps {
   memory(name: string): Promise<string[] | null>;
   /** Pages that name accessories for this product (maker, catalogue, specialist pages; never a marketplace listing). */
   addonPages(name: string): Promise<PageText[] | null>;
+  /** Keeps what the listings' item specifics say the product comes in (colours, capacities, editions) as model facts. */
+  learnFacts?(name: string, facts: LearnedFact[]): void;
   now?(): number;
   note?(message: string): void;
 }
@@ -49,6 +52,11 @@ export async function gatherCandidates(base: { id: string; name: string }, deps:
 
   const spec = await deps.ebaySpecifics(base.name).catch(() => null);
   if (spec) {
+    try {
+      deps.learnFacts?.(base.name, learnFromAspects(spec.aspects));
+    } catch {
+      /* learning is optional */
+    }
     fromSpecifics.push(...specificsToCandidates(base.name, spec.aspects, spec.total));
     sources.push(`eBay listings: ${fromSpecifics.length} version${fromSpecifics.length === 1 ? "" : "s"} used by real listings`);
   } else sources.push("eBay listings: no item specifics available (eBay not connected, or no category found)");
