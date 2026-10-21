@@ -1,3 +1,5 @@
+import { AttentionContext } from "./lib/AttentionContext";
+import { useAttention } from "./lib/useAttention";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Sidebar } from "./components/Sidebar.js";
 import { StarfieldBackground } from "./components/StarfieldBackground.js";
@@ -233,6 +235,7 @@ export default function App() {
   // list changes (a new match, or the user visiting Watch and clearing
   // config.watch.matchesLastViewedAt) — see index.ts's watch:hasUnseenMatches.
   const [hasUnseenWatchMatches, setHasUnseenWatchMatches] = useState(false);
+  const attention = useAttention();
   const refreshUnseenWatchMatches = useCallback(() => {
     api.hasUnseenWatchMatches().then(setHasUnseenWatchMatches);
   }, []);
@@ -576,6 +579,7 @@ export default function App() {
   // so the background stays consistent whether or not anyone's logged in
   // yet.
   return (
+    <AttentionContext.Provider value={attention.summary}>
     <div style={{ display: "flex", height: "100%", position: "relative" }}>
       <SpaceBackdrop />
       {particlesEnabled && <StarfieldBackground />}
@@ -615,6 +619,7 @@ export default function App() {
             watchSearching={watchSearching}
             databaseBusy={researchActive || photoBackfillActive}
             hasUnseenWatchMatches={hasUnseenWatchMatches}
+            databaseAttention={attention.summary.count}
           />
           <div ref={screensRef} style={{ flex: 1, minWidth: 0, padding: 28, overflow: "hidden", position: "relative", zIndex: 1 }}>
             {/* Every screen stays mounted all the time now, just hidden via
@@ -693,5 +698,6 @@ export default function App() {
         </>
       )}
     </div>
+    </AttentionContext.Provider>
   );
 }

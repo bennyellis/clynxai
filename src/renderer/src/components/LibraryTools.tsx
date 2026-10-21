@@ -1,4 +1,6 @@
-import React, { useCallback, useEffect, useState } from "react";
+import { AttentionContext } from "../lib/AttentionContext";
+import { attentionLabel } from "../lib/attention";
+import React, { useCallback, useContext, useEffect, useState } from "react";
 import { api } from "../lib/api.js";
 import type { ProductProfile } from "../lib/api.js";
 import type { LibraryOp, OpResult } from "../../../main/libraryOps.js";
@@ -202,6 +204,12 @@ function CleanupSection() {
 
 export function NeedsReviewPanel({ products, onClose }: { products: ProductProfile[]; onClose: () => void }) {
   const [rows, setRows] = useState<ReviewRow[] | null>(null);
+  const unseen = useContext(AttentionContext);
+  const isUnseen = (id: string) => unseen.items.some((i) => i.id === id);
+  // opening an item (a click or a focus inside it) is what clears ITS dot; nothing else does
+  const open = (id: string) => {
+    if (isUnseen(id)) void api.attentionAck(id);
+  };
   const load = useCallback(() => {
     api.libraryReview().then(setRows);
   }, []);
@@ -221,12 +229,21 @@ export function NeedsReviewPanel({ products, onClose }: { products: ProductProfi
       <p style={{ margin: 0, fontSize: 14, color: "var(--text-muted)", lineHeight: 1.5 }}>
         Clynx sets a photo aside when its own title or the photos around it disagree, and it never moves or deletes anything by a picture-only guess. You decide here; every choice can be undone.
       </p>
+      {unseen.count > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, color: "var(--text-muted)" }}>
+          <span style={{ flex: 1 }}>{attentionLabel(unseen.count)}.</span>
+          <button className="icon ghost" onClick={() => void api.attentionAckAll()}>
+            Mark all as seen
+          </button>
+        </div>
+      )}
       <CleanupSection />
       {rows === null && <div style={{ color: "var(--text-dim)" }}>Loading…</div>}
       {rows?.length === 0 && <div style={{ color: "var(--text-dim)" }}>Nothing needs your attention.</div>}
       <div style={{ display: "flex", flexDirection: "column", gap: 12, maxHeight: "60vh", overflowY: "auto" }}>
         {rows?.map((r) => (
-          <div key={r.id} className="card" style={{ display: "flex", gap: 12, padding: 12 }}>
+          <div key={r.id} className="card" style={{ display: "flex", gap: 12, padding: 12, position: "relative" }} onClick={() => open(r.id)} onFocus={() => open(r.id)}>
+            {isUnseen(r.id) && <span className="nav-item-pulse-dot attention-dot steady" role="img" aria-label="New: you have not opened this yet" />}
             {r.kind === "image" && r.image && <img src={r.image} alt="" style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 8, flexShrink: 0 }} />}
             <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
               {r.kind === "image" && (

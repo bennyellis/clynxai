@@ -1,3 +1,4 @@
+import { attentionLabel } from "../lib/attention";
 import React, { useEffect, useState } from "react";
 import clynxMarkSrc from "../assets/clynx/clynx-mark.png";
 import { getTier, isIdle } from "../lib/performance.js";
@@ -305,6 +306,7 @@ export function Sidebar({
   watchSearching,
   databaseBusy,
   hasUnseenWatchMatches,
+  databaseAttention,
 }: {
   active: Screen;
   onSelect: (s: Screen) => void;
@@ -344,6 +346,8 @@ export function Sidebar({
   // — see index.ts's watch:hasUnseenMatches) rather than Sidebar knowing
   // anything about Watch's own data model.
   hasUnseenWatchMatches: boolean;
+  // How many Database items wait for the person to open them (pulsing dot on the Database icon).
+  databaseAttention: number;
 }) {
   const running = runningCount > 0 || ebaySearching;
   // What the Dashboard and Activity ICONS follow: the scanner proper (see
@@ -462,6 +466,7 @@ export function Sidebar({
             <span style={{ width: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, position: "relative" }}>
               {item.icon}
               {item.id === "watch" && hasUnseenWatchMatches && <span className="nav-item-pulse-dot" />}
+              {item.id === "database" && databaseAttention > 0 && <span className="nav-item-pulse-dot" role="img" aria-label={attentionLabel(databaseAttention)} />}
             </span>
             {item.label}
           </button>

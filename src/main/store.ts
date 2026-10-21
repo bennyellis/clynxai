@@ -202,6 +202,11 @@ export class Store {
         PRIMARY KEY (product_id, alias_key)
       );
       CREATE INDEX IF NOT EXISTS idx_product_name_aliases_key ON product_name_aliases (alias_key);
+      -- Review items the person has already opened (the pulsing attention dots stay until the item itself is opened).
+      CREATE TABLE IF NOT EXISTS attention_ack (
+        item_id TEXT PRIMARY KEY,
+        at INTEGER NOT NULL
+      );
       -- Everything a duplicate clean-up merge moved or removed, so it can be undone exactly (Phase 2.4). One row per entry folded in; a batch is one run.
       CREATE TABLE IF NOT EXISTS merge_undo (
         id TEXT PRIMARY KEY,
@@ -1726,6 +1731,31 @@ export class Store {
     for (const w of watchRows) this.db.prepare("UPDATE watches SET terms_json = ? WHERE id = ?").run(w.terms_json.split(loser.id).join(winner.id), w.id);
 
   }
+
+  // ---- attention dots: open review items the person has not opened yet. Routine background work never lands here; only things a person has to look at.
+
+  attentionSummary(): { count: number; items: Array<{ id: string; kind: string; productIds: string[] }> } {
+    const acked = new Set((this.db.prepare("SELECT item_id FROM attention_ack").all() as Array<{ item_id: string }>).map((r) => r.item_id));
+    const items = this.listReviewItems("open")
+      .filter((i) => !acked.has(i.id))
+      .map((i) => {
+        const ev = i.evidence as { productId?: unknown; ids?: unknown };
+        const ids = i.kind === "merge" && Array.isArray(ev.ids) ? (ev.ids as unknown[]).map(String) : typeof ev.productId === "string" ? [ev.productId] : [];
+        return { id: i.id, kind: i.kind, productIds: ids };
+      });
+    return { count: items.length, items };
+  }
+
+  ackAttention(itemId: string, now: number = Date.now()): void {
+    this.db.prepare("INSERT OR IGNORE INTO attention_ack (item_id, at) VALUES (?, ?)").run(itemId, now);
+  }
+
+  ackAllAttention(now: number = Date.now()): number {
+    const { items } = this.attentionSummary();
+    for (const i of items) this.ackAttention(i.id, now);
+    return items.length;
+  }
+
 
   // ---- Phase 2.2 / 2.4: clean-up of existing duplicates, with an exact undo.
 

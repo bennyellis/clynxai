@@ -1339,6 +1339,26 @@ html[data-idle] .icon-info-glow {
   box-shadow: 0 0 8px currentColor;
   animation: liveDotPulse 1.6s ease-in-out infinite;
 }
+/* Attention dots inside Database (tiles, folders, the Needs review button): the same dot, placed inside the corner so a tile's overflow does not clip it. Beyond the first few they stay steady. */
+.attention-dot {
+  top: 6px;
+  right: 6px;
+  width: 10px;
+  height: 10px;
+  z-index: 3;
+}
+.attention-dot.steady {
+  animation: none;
+}
+.attention-dot.inline {
+  position: relative;
+  top: auto;
+  right: auto;
+  display: inline-block;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
 
 /* Activity's pulse-line icon — per explicit instruction, actually mimics a
    heart monitor: the line "draws" itself left to right via a classic

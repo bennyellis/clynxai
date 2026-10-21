@@ -75,6 +75,7 @@ import { runVariantFanout } from "./variantFanout.js";
 import { friendlyPriceCheckFailure, friendlyResearchFailure, friendlySoldFailure, softSoldLookup, SOLD_LOOKUP_DEADLINE_MS } from "./researchFailure.js";
 import { adoptOfficialName, planParentLinks } from "./variantLinking.js";
 import { idsToQueueOnReset } from "./cloudDeletes.js";
+import { gameFamilyPath, itemRole, MAX_GAMES_PER_LISTING } from "./mixedListing.js";
 import { addonKey, estimateAddonUplift, isNoiseAddon, type AddonRole, type AddonStatus } from "./addons.js";
 import { makeThumb, noteDecision } from "./aiDecisionLog.js";
 import { fileImage, setFilingRecorder, type FileImageEvidence } from "./fileImage.js";
@@ -2982,8 +2983,17 @@ function createEngineForAccount(accountId: string): ScrapeEngine {
     onAddonsSeen: (mainName, itemNames, listingId) => {
       const base = store.findMatchingProduct(mainName);
       if (!base) return;
+      let gamesMade = 0;
       for (const itemName of itemNames) {
         if (isNoiseAddon(itemName)) continue;
+        // a game in the lot is its OWN product: it gets an entry now (filed with the platform's games, linked to the console) instead of being treated as an accessory
+        if (itemRole(itemName, base.name, base.family) === "game") {
+          if (gamesMade < MAX_GAMES_PER_LISTING) {
+            gamesMade++;
+            void createLinkedGameEntry(base, itemName, listingId);
+          }
+          continue;
+        }
         store.noteAddonSeen(base.id, itemName, listingId);
         // a bundle listing that names it is a source: it is queued to get its own accessory entry too (the worker does it later, never inside the scan)
         const cand = addonFromListing(itemName, listingId, base.name);
@@ -3311,6 +3321,25 @@ async function sweepBlankProducts(): Promise<void> {
 // (see Store.mergeDuplicateProducts), and repoints the Search For items in config that were linked to a removed one.
 // Whether a Watch's check is running right now (the sidebar's Watch eye is awake while it is, asleep otherwise).
 let watchSearching = false;
+
+// Scanner parity S2: a game found in a listing that also holds its console becomes its own Database entry in the platform's Games folder, linked to the console. The same name never makes a second entry
+// (the creation rules return the existing one), and a game the person dismissed on this console never comes back.
+async function createLinkedGameEntry(base: ProductProfile, name: string, listingId: string): Promise<void> {
+  try {
+    if (store.listAddons(base.id).some((x) => x.status === "dismissed" && (addonKey(x.name) === addonKey(name) || sameAddonLoosely(x.name, name)))) return;
+    const candidateId = randomUUID();
+    const entryId = store.addProductStub(candidateId, name);
+    const created = entryId === candidateId;
+    store.linkResearchedAddon(base.id, name, entryId);
+    if (!created) return;
+    const fresh = store.getProductById(entryId);
+    if (fresh) sendToRenderer("products:updated", fresh);
+    discovery.note(base.id, "finding", `The listing also holds a game, "${name}": it has its own entry in ${gameFamilyPath(base.family) ?? "the Database"}, linked to ${base.name}.`);
+    await runProductLookup(entryId, name, { skipSiblingDiscovery: true, source: "related", forcedFamily: gameFamilyPath(base.family) ?? undefined });
+  } catch (err) {
+    console.error(`[mixed listing] "${name}" from ${listingId}: ${(err as Error).message}`);
+  }
+}
 
 // Beta 13: ONE operations service for the Library, shared by the screen (IPC library:op) and the chat tool. Follows the open Database when the user switches.
 let libraryOpsFor: { store: Store; ops: LibraryOps } | null = null;
@@ -5092,6 +5121,17 @@ app.whenReady().then(() => {
     return { ok: r.ok, summary: r.ok ? r.message : "", error: r.ok ? undefined : r.message };
   });
   ipcMain.handle("library:history", () => libraryOps().recent(30));
+  ipcMain.handle("attention:get", () => store.attentionSummary());
+  ipcMain.handle("attention:ack", (_e, args: { itemId: string }) => {
+    if (args?.itemId) store.ackAttention(String(args.itemId));
+    sendToRenderer("library:changed", { folders: false, review: true });
+    return store.attentionSummary();
+  });
+  ipcMain.handle("attention:ackAll", () => {
+    store.ackAllAttention();
+    sendToRenderer("library:changed", { folders: false, review: true });
+    return store.attentionSummary();
+  });
   // Phase 2.2 / 2.4: the duplicate clean-up. "plan" is a read-only dry run; "run" only does exactly the plan the person looked at (same fingerprint), after a verified backup, and is undoable for 30 days.
   ipcMain.handle("library:cleanupPlan", () => {
     const plan = store.planDuplicateCleanup();

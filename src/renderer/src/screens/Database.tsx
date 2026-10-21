@@ -1,4 +1,6 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { AttentionDot, AttentionContext } from "../lib/AttentionContext";
+import { attentionLabel } from "../lib/attention";
+import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { BlacklistedImage, BlacklistTerm, ChatAttachment, ChatChoice, ChatChoiceOption, ChatContext, ChatMessage, ProductImage, ProductProfile } from "../lib/api.js";
 import { AttachButton, AttachmentBar, ChatChoiceButtons, ChatStatusLine, useImageIntake } from "../components/ChatExtras.js";
 import { ClynxAvatar, YouLabel } from "../components/ChatAvatar.js";
@@ -583,6 +585,7 @@ export function Database({
   // Beta 13: the person's own folders, Needs review / Trash panels and the folder dialogs (see components/LibraryTools.tsx).
   const [folders, setFolders] = useState<LibraryFolder[]>([]);
   const [reviewCount, setReviewCount] = useState(0);
+  const attention = useContext(AttentionContext);
   const [trashCount, setTrashCount] = useState(0);
   const [showReview, setShowReview] = useState(false);
   const [showTrash, setShowTrash] = useState(false);
@@ -1072,6 +1075,7 @@ export function Database({
               </button>
               <button className="icon ghost" onClick={() => setShowReview(true)} title="Photos and names Clynx wants you to look at" style={reviewCount > 0 ? { color: "var(--warn)" } : undefined}>
                 🔎 Needs review{reviewCount > 0 ? ` (${reviewCount})` : ""}
+                {attention.count > 0 && <span className="nav-item-pulse-dot attention-dot inline" role="img" aria-label={attentionLabel(attention.count)} />}
               </button>
               <button className="icon ghost" onClick={() => setShowTrash(true)} title="Deleted items stay here for 30 days; recent changes can be undone">
                 🗑 Trash{trashCount > 0 ? ` (${trashCount})` : ""}
@@ -1780,6 +1784,7 @@ function FamilyTile({
       }}
       title={`Open ${shownName} (${items.length} item${items.length === 1 ? "" : "s"})${pictureNote(meta) ? ` - ${pictureNote(meta)}` : ""}`}
     >
+      <AttentionDot productIds={items.map((p) => p.id)} />
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
         <CollageImage images={previewImages} isLogo={!!logo} />
         {auto && (
@@ -2177,6 +2182,7 @@ function ProductTile({
       }}
       title="Click to view details"
     >
+      <AttentionDot productIds={[product.id]} />
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
         {product.imageUrl ? (
           // Per explicit instruction — the ONE deliberate exception (along
