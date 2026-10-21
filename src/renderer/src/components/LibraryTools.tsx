@@ -317,6 +317,37 @@ function SoldImportSection() {
   );
 }
 
+/** A console's gallery that holds photos of a game: move them to the game's own entry (backup first, undo in Recent changes), or leave them. */
+function SplitQuestion({ row, onDone }: { row: ReviewRow; onDone: () => void }) {
+  const ev = row.evidence as { productName?: string; name?: string; imageIds?: string[]; family?: string | null };
+  const n = ev.imageIds?.length ?? 0;
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const go = async () => {
+    setBusy(true);
+    try {
+      const r = await api.splitGallery(row.id);
+      setMessage(r.ok ? (r.summary ?? "Moved.") : (r.error ?? "It could not be moved."));
+      if (r.ok) onDone();
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <div style={{ fontSize: 14.5 }}>
+        <strong>Two products in one entry:</strong> {row.reasons.join(" ")} Move {n === 1 ? "it" : "them"} to their own entry <strong>{ev.name}</strong>{ev.family ? ` in ${ev.family}` : ""}, linked to {ev.productName}?
+      </div>
+      <div style={{ fontSize: 13, color: "var(--text-muted)" }}>A backup copy is made first, and you can undo this from Recent changes.</div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <button className="primary" disabled={busy} onClick={go}>Move {n === 1 ? "the photo" : `${n} photos`}</button>
+        <button className="icon" disabled={busy} onClick={() => void api.splitGalleryKeep(row.id).then(onDone)}>They belong here</button>
+      </div>
+      {message && <div style={{ fontSize: 13.5, color: "var(--text-muted)" }}>{message}</div>}
+    </>
+  );
+}
+
 export function NeedsReviewPanel({ products, onClose }: { products: ProductProfile[]; onClose: () => void }) {
   const [rows, setRows] = useState<ReviewRow[] | null>(null);
   const unseen = useContext(AttentionContext);
@@ -399,6 +430,7 @@ export function NeedsReviewPanel({ products, onClose }: { products: ProductProfi
                   </div>
                 </>
               )}
+              {r.kind === "split" && <SplitQuestion row={r} onDone={load} />}
               {r.kind === "price" && <PriceQuestion row={r} onDone={load} />}
               {r.kind === "merge" && (
                 <>

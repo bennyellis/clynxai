@@ -35,6 +35,8 @@ export type LibraryOp =
   | { op: "quarantineImage"; imageId: string }
   | { op: "resolveReview"; itemId: string; state: "accepted" | "rejected" | "snoozed" }
   | { op: "newEntryFromImage"; imageId: string; name: string }
+  // A console gallery that holds photos of a game: those photos move to the game's own entry (made if it does not exist), filed in `family`. One undoable action.
+  | { op: "splitGallery"; productId: string; imageIds: string[]; name: string; family?: string | null }
   | { op: "mergeProducts"; ids: string[] }
   // The AUTOMATIC folders (category + family path, see folderKeys.ts). `key` is the folder's full path "Category > Folder > Subfolder".
   | { op: "renameAutoFolder"; key: string; name: string }
@@ -179,6 +181,7 @@ export class LibraryOps {
       if (n > BULK_CONFIRM_ABOVE) return `Move ${n} products up one level and remove the folder?`;
     }
     if (o.op === "replaceImage") return "Replace this photo? The old one goes to the Trash.";
+    if (o.op === "splitGallery") return `Move ${o.imageIds.length} photo${o.imageIds.length === 1 ? "" : "s"} to their own entry "${o.name}"? You can undo it from Recent changes.`;
     if (o.op === "reassignImage") {
       const img = this.store.getProductImage(o.imageId);
       const to = this.store.getProductById(o.toProductId);
@@ -623,6 +626,34 @@ export class LibraryOps {
         touched.productIds.add(i.productId);
         touched.productIds.add(id);
         return `Made a new entry "${n.name}" with this photo.`;
+      }
+      case "splitGallery": {
+        const from = this.db.prepare("SELECT id, name, category, family FROM products WHERE id = ? AND deleted_at IS NULL").get(o.productId) as { id: string; name: string; category: string; family: string | null } | undefined;
+        if (!from) throw new Error("That product does not exist.");
+        const n = cleanName(o.name);
+        if (!n.ok) throw new Error(n.error);
+        const ids = [...new Set(o.imageIds)].slice(0, 60);
+        const imgs = ids.map((id) => this.image(id));
+        if (imgs.length === 0) throw new Error("There are no photos to move.");
+        if (imgs.some((i) => i.productId !== from.id)) throw new Error("Some of those photos are not in this entry any more.");
+        // the game may already have its own entry (found under another spelling): the photos go there, nothing is duplicated
+        const existingId = this.store.existingProductIdForName(n.name);
+        let targetId = existingId;
+        if (!targetId) {
+          targetId = randomUUID();
+          this.db.prepare("INSERT INTO products (id, name, category, family, loading, created_at, updated_at, name_locked) VALUES (?, ?, ?, ?, 0, ?, ?, 1)").run(targetId, n.name, from.category, o.family ?? from.family, now, now);
+          created.push({ table: "products", id: targetId });
+        }
+        imgs.forEach((i, idx) => {
+          this.snap("product_images", i.id, ["product_id", "status", "origin_product_id", "is_primary", "verdict_json"], snaps);
+          this.db.prepare("UPDATE product_images SET product_id = ?, status = 'user', origin_product_id = ?, is_primary = ?, verdict_json = ? WHERE id = ?").run(targetId, from.id, existingId ? 0 : idx === 0 ? 1 : 0, JSON.stringify({ outcome: "user", reasons: ["you split this game out of the console's gallery"], proposer: "user-split-gallery" }), i.id);
+          this.snap("products", from.id, ["thumbnail_image_id", "updated_at"], snaps);
+          this.db.prepare("UPDATE products SET thumbnail_image_id = NULL, updated_at = ? WHERE id = ? AND thumbnail_image_id = ?").run(now, from.id, i.id);
+          this.resolveOpenReview(i.id, "accepted", snaps, touched);
+        });
+        touched.productIds.add(from.id);
+        touched.productIds.add(targetId);
+        return `Moved ${imgs.length} photo${imgs.length === 1 ? "" : "s"} out of "${from.name}" into ${existingId ? "the existing" : "a new"} entry "${n.name}".`;
       }
       case "keepImage": {
         const i = this.image(o.imageId);

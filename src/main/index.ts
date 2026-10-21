@@ -3357,7 +3357,7 @@ function scheduleOwnerPriceQuestions(): void {
   if (priceQuestionTimer) return;
   const run = () => {
     try {
-      const added = store.queuePriceQuestions();
+      const added = store.queuePriceQuestions() + store.queueGallerySplits();
       if (added > 0) sendToRenderer("library:changed", { folders: false, review: true });
     } catch (err) {
       console.error(`[price questions] ${(err as Error).message}`);
@@ -5235,6 +5235,32 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("products:foldedNotice", (_e, productId: string) => store.foldedNoticeFor(String(productId ?? "")));
   ipcMain.handle("products:origin", (_e, productId: string) => store.getProductOrigin(String(productId ?? "")));
+  // Review > "Move them to their own entry": backup first, then ONE undoable action (Recent changes), then the new game's own research.
+  ipcMain.handle("library:splitGallery", async (_e, args: { itemId: string }) => {
+    const item = store.listReviewItems("open").find((i) => i.id === args?.itemId && i.kind === "split");
+    if (!item) return { ok: false, error: "That suggestion is no longer there." };
+    const ev = item.evidence as { productId: string; name: string; imageIds: string[]; family: string | null };
+    const backup = await runDatabaseBackup(true);
+    if (!backup?.ok) return { ok: false, error: "A backup copy could not be made first, so nothing was moved." };
+    const op = { op: "splitGallery" as const, productId: ev.productId, imageIds: ev.imageIds, name: ev.name, family: ev.family };
+    let result = libraryOps().run(op, { actor: "ui" });
+    if (result.needsConfirmation) result = libraryOps().run(op, { actor: "ui", confirm: result.needsConfirmation.token });
+    if (!result.ok) return { ok: false, error: result.error ?? "It could not be moved." };
+    store.resolveReviewItem(item.id, "accepted", "user");
+    const target = result.data?.productId ?? null;
+    const base = store.getProductById(ev.productId);
+    if (target && base) {
+      store.linkResearchedAddon(base.id, ev.name, target);
+      void runProductLookup(target, ev.name, { skipSiblingDiscovery: true, source: "related", forcedFamily: ev.family ?? undefined });
+    }
+    sendToRenderer("library:changed", { folders: true, review: true });
+    return { ok: true, summary: result.summary, opId: result.opId ?? null };
+  });
+  ipcMain.handle("library:splitGalleryKeep", (_e, args: { itemId: string }) => {
+    store.resolveReviewItem(String(args?.itemId ?? ""), "rejected", "user");
+    sendToRenderer("library:changed", { folders: false, review: true });
+    return { ok: true };
+  });
   ipcMain.handle("attention:get", () => store.attentionSummary());
   ipcMain.handle("attention:ack", (_e, args: { itemId: string }) => {
     if (args?.itemId) store.ackAttention(String(args.itemId));

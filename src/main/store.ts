@@ -16,6 +16,7 @@ import { nameKey } from "./modelFacts.js";
 import { measurePremium, splitByInclusion, type PremiumResult } from "./addonPremium.js";
 import { SoldCompsStore } from "./soldComps/store.js";
 import { cleanOwnerAnswer, ownerValueUsd, pickPricePrompts, type OwnerAnswerInput, type OwnerPrice, type PromptRecord, type PromptState } from "./ownerPrice.js";
+import { proposeSplits } from "./gallerySplit.js";
 import { planCleanup, type CleanupGroup, type CleanupPlan } from "./duplicateCleanup.js";
 import { addonEntryKey, candidateKey, type Candidate, type CandidateStatus } from "./variantDiscovery.js";
 
@@ -1855,6 +1856,26 @@ export class Store {
     return picks.length;
   }
 
+  /** Photos in console galleries that are really games (gallerySplit.ts), as Review items that light the attention dot. Nothing is moved until the owner approves. Returns how many were added. */
+  queueGallerySplits(): number {
+    const rows = this.db.prepare("SELECT pi.id id, pi.product_id pid, pi.source_title title FROM product_images pi JOIN products p ON p.id = pi.product_id WHERE p.deleted_at IS NULL AND pi.kind = 'normal' AND pi.source_title IS NOT NULL AND pi.status != 'quarantined'").all() as Array<{ id: string; pid: string; title: string }>;
+    const byProduct = new Map<string, Array<{ id: string; sourceTitle: string }>>();
+    for (const r of rows) byProduct.set(r.pid, [...(byProduct.get(r.pid) ?? []), { id: r.id, sourceTitle: r.title }]);
+    let added = 0;
+    for (const [pid, images] of byProduct) {
+      const p = this.db.prepare("SELECT name, family FROM products WHERE id = ?").get(pid) as { name: string; family: string | null };
+      for (const prop of proposeSplits({ id: pid, name: p.name, family: p.family, images })) {
+        const subject = `${pid}:${prop.name.toLowerCase()}`;
+        const before = this.db.prepare("SELECT id FROM review_items WHERE kind = 'split' AND subject_id = ? AND state = 'open'").get(subject);
+        // a proposal the owner already answered is not asked again
+        if (!before && this.db.prepare("SELECT 1 FROM review_items WHERE kind = 'split' AND subject_id = ?").get(subject)) continue;
+        this.addReviewItem({ kind: "split", subjectId: subject, reasons: [prop.why], evidence: { productId: pid, productName: prop.productName, name: prop.name, imageIds: prop.imageIds, family: prop.family } });
+        if (!before) added++;
+      }
+    }
+    return added;
+  }
+
   // ---- attention dots: open review items the person has not opened yet. Routine background work never lands here; only things a person has to look at.
 
   attentionSummary(): { count: number; items: Array<{ id: string; kind: string; productIds: string[] }> } {
@@ -2775,7 +2796,7 @@ export class Store {
   }
 
   // --- Review queue: things a person should look at (a picture whose evidence disagrees, a name made from a picture alone). Suggestions only; nothing here changes the Library.
-  addReviewItem(item: { kind: "image" | "product" | "merge" | "price"; subjectId: string; reasons: string[]; evidence: Record<string, unknown> }): string {
+  addReviewItem(item: { kind: "image" | "product" | "merge" | "price" | "split"; subjectId: string; reasons: string[]; evidence: Record<string, unknown> }): string {
     // one open item per (kind, subject): re-detecting the same problem updates it instead of piling up
     const open = this.db.prepare("SELECT id FROM review_items WHERE kind = ? AND subject_id = ? AND state = 'open'").get(item.kind, item.subjectId) as { id: string } | undefined;
     if (open) {
