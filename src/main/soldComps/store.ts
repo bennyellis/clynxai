@@ -104,6 +104,13 @@ export class SoldCompsStore {
   }
 
   /** Retention: remove rows past their expiry (and their matches). Returns how many comps went. */
+  /** Removes every row from one source (the owner clearing their imports) along with the matches that judged them. */
+  removeBySource(source: SoldSource): boolean {
+    this.db.prepare("DELETE FROM sold_comp_matches WHERE comp_id IN (SELECT id FROM sold_comps WHERE source = ?)").run(source);
+    this.db.prepare("DELETE FROM sold_comps WHERE source = ?").run(source);
+    return true;
+  }
+
   purgeExpired(now: number): number {
     const ids = (this.db.prepare("SELECT id FROM sold_comps WHERE expires_at IS NOT NULL AND expires_at <= ?").all(now) as Array<{ id: string }>).map((r) => r.id);
     for (const id of ids) {

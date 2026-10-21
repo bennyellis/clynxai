@@ -271,6 +271,52 @@ function PriceQuestion({ row, onDone }: { row: ReviewRow; onDone: () => void }) 
   );
 }
 
+/** Phase 4: the owner's own sold prices - paste a list, or load a Terapeak / Seller Hub export. They join every later sold-price search and go through the same identity checks. */
+function SoldImportSection() {
+  const [text, setText] = useState("");
+  const [total, setTotal] = useState<number | null>(null);
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    api.soldImportStatus().then((r) => setTotal(r.total)).catch(() => undefined);
+  }, []);
+  const run = async () => {
+    setBusy(true);
+    try {
+      const r = await api.soldImport(text);
+      setTotal(r.total);
+      setMessage(`Added ${r.added} sale${r.added === 1 ? "" : "s"}.${r.skipped.length ? ` Skipped ${r.skipped.length} line${r.skipped.length === 1 ? "" : "s"}: ${r.skipped.slice(0, 3).map((x) => `line ${x.line} (${x.reason})`).join("; ")}.` : ""}`);
+      if (r.added > 0) setText("");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const pick = (file: File | undefined) => {
+    if (!file) return;
+    void file.text().then(setText);
+  };
+  return (
+    <details className="card" style={{ padding: 12 }}>
+      <summary style={{ fontSize: 14.5, fontWeight: 600, cursor: "pointer" }}>Import sold prices{total ? ` (${total} kept)` : ""}</summary>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+        <div style={{ fontSize: 13.5, color: "var(--text-muted)" }}>
+          Paste lines like “Xbox Series X Galaxy Black 2TB $1,099.00”, or a CSV with a title and a price column (Terapeak and Seller Hub exports work). These are used as sold prices for matching products, after the same checks as everything else.
+        </div>
+        <textarea rows={5} value={text} onChange={(e) => setText(e.target.value)} placeholder="Paste sold prices here" aria-label="Sold prices to import" />
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <label className="icon" style={{ cursor: "pointer" }}>
+            Load a file…
+            <input type="file" accept=".csv,.tsv,.txt" style={{ display: "none" }} onChange={(e) => pick(e.target.files?.[0])} />
+          </label>
+          <button className="primary" disabled={busy || !text.trim()} onClick={run}>Import</button>
+          {total ? <button className="icon ghost" disabled={busy} onClick={() => void api.soldImportClear().then(() => { setTotal(0); setMessage("Removed your imported sales."); })}>Remove all my imports</button> : null}
+        </div>
+        {message && <div style={{ fontSize: 13.5, color: "var(--text-muted)" }}>{message}</div>}
+      </div>
+    </details>
+  );
+}
+
 export function NeedsReviewPanel({ products, onClose }: { products: ProductProfile[]; onClose: () => void }) {
   const [rows, setRows] = useState<ReviewRow[] | null>(null);
   const unseen = useContext(AttentionContext);
@@ -307,6 +353,7 @@ export function NeedsReviewPanel({ products, onClose }: { products: ProductProfi
         </div>
       )}
       <CleanupSection />
+      <SoldImportSection />
       {rows === null && <div style={{ color: "var(--text-dim)" }}>Loading…</div>}
       {rows?.length === 0 && <div style={{ color: "var(--text-dim)" }}>Nothing needs your attention.</div>}
       <div style={{ display: "flex", flexDirection: "column", gap: 12, maxHeight: "60vh", overflowY: "auto" }}>

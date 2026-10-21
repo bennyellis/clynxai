@@ -43,7 +43,8 @@ import { checkWatchBounds } from "./watchGeo.js";
 import { isConfidentMatch, verifyWatchProduct } from "./watchVerify.js";
 import { DEFAULT_WATCH_RADIUS_MILES as DEFAULT_WATCH_RADIUS_MILES_SHARED } from "./watchOptions.js";
 import { discoverLocation, discoverLocations as discoverLocationsViaBrowser, lookupTopCitiesInState, type LocationDiscoveryResult } from "./locationDiscovery.js";
-import { searchSoldComps, type EbayComp } from "./watchcount.js";
+import { searchSoldCompsWithState, type EbayComp } from "./watchcount.js";
+import type { SoldPageState } from "./soldComps/zeroWhy.js";
 import { listingStateMatches } from "./usStates.js";
 import { Store } from "./store.js";
 import { timed, timedSync, recordEvent, recordStage, setGauge } from "./metrics.js";
@@ -1074,11 +1075,16 @@ export class ScrapeEngine {
   // the scanner might currently be doing there, so unlike
   // discoverLocations/searchForItemNow, this needs no priorityRequested/
   // withPage coordination at all; it just needs the context to exist.
+  /** What the last WatchCount page was (results, security check, limit, empty): read right after fetchEbayComps to say WHY a zero is a zero. */
+  lastSoldPageState: SoldPageState | null = null;
+
   async fetchEbayComps(query: string): Promise<EbayComp[]> {
     const started = Date.now();
     const page = await this.openNewTab();
     try {
-      const comps = await searchSoldComps(page, query);
+      const found = await searchSoldCompsWithState(page, query);
+      const comps = found.comps;
+      this.lastSoldPageState = found.state;
       // Sold prices come from WatchCount (read in a browser tab), NOT from the eBay API: record it as its own provider. Zero results is a normal answer but is shown as such
       // (WatchCount's anonymous daily cap and an unreadable page both look like "0 results").
       apiActivity.record({ provider: "watchcount", kind: "sold_comps", outcome: "live_ok", route: "browser", ms: Date.now() - started, results: comps.length });

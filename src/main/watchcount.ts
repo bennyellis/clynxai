@@ -1,3 +1,4 @@
+import { classifySoldPage, type SoldPageState } from "./soldComps/zeroWhy.js";
 import { noteDecision } from "./aiDecisionLog.js";
 import type { Page } from "playwright";
 import type { PhotoCheck } from "./compPhotoCheck.js";
@@ -129,6 +130,11 @@ function parseCompCard(cardText: string): EbayComp | null {
 }
 
 export async function searchSoldComps(page: Page, query: string): Promise<EbayComp[]> {
+  return (await searchSoldCompsWithState(page, query)).comps;
+}
+
+/** The same search, and what the page turned out to be (results, a security check, the daily limit, an empty answer): a zero is never a silent zero. */
+export async function searchSoldCompsWithState(page: Page, query: string): Promise<{ comps: EbayComp[]; state: SoldPageState }> {
   await page.goto(buildSearchUrl(query), { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(1500);
   const cards = await page.evaluate(() =>
@@ -142,7 +148,16 @@ export async function searchSoldComps(page: Page, query: string): Promise<EbayCo
     const comp = parseCompCard(card.text);
     if (comp) comps.push({ ...comp, imageUrl: card.image && /^https?:/i.test(card.image) ? card.image : null });
   }
-  return comps;
+  let state: SoldPageState = comps.length > 0 ? "results" : "unknown";
+  if (comps.length === 0) {
+    try {
+      const body = await page.evaluate(() => (document.body?.innerText ?? "").slice(0, 4000));
+      state = classifySoldPage(page.url(), body, cards.length);
+    } catch {
+      state = "unknown";
+    }
+  }
+  return { comps, state };
 }
 
 // Per explicit instruction — reported live: the scanner once misidentified

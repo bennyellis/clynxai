@@ -1,3 +1,7 @@
+import { importedCompsForQuery } from "./soldComps/importedForResearch.js";
+import { parseSoldImport } from "./soldComps/manualImport.js";
+import { queryKeyOf, dayOf } from "./soldComps/store.js";
+import { explainZeroSold } from "./soldComps/zeroWhy.js";
 import { combineWows, compareWithSold, HOW_TO_CHECK_SOLD, soldSearchUrl } from "./ownerPrice.js";
 import "dotenv/config";
 import { parse as parseDotenv } from "dotenv";
@@ -1753,7 +1757,30 @@ async function researchEbayComps(
   const query = await deriveWatchCountQuery(fallbackName, sourceTitle, imageDataUri, sourceTitle ? store.credibleCodes(id, fallbackName, sourceTitle) : []);
   // The sold-price lookup can fail (a browser that will not start) or hang: it must not take the asking-price estimate down with it. Without sold prices the estimate comes from asking prices.
   const soldAttempt = await softSoldLookup(() => timed("ebay_lookup", () => getPrimaryEngine().fetchEbayComps(query)), SOLD_LOOKUP_DEADLINE_MS);
-  const comps = soldAttempt.comps;
+  // The owner's own imported sales join the search results and go through the same identity checks.
+  let comps = soldAttempt.comps;
+  let importedUsed = 0;
+  try {
+    const mine = await importedCompsForQuery(store.soldComps().listComps("manual_import"), query, comps);
+    if (mine.length > 0) {
+      importedUsed = mine.length;
+      comps = [...comps, ...mine];
+      discovery.note(id, "step", `I also tried ${plural(mine.length, "sale")} you imported yourself, with the same checks as the rest.`);
+    }
+  } catch (err) {
+    console.error(`[sold imports] ${(err as Error).message}`);
+  }
+  if (comps.length === 0 && !soldAttempt.failure) {
+    // a zero is never silent: say whether it was a limit page, a security check or a real "no sales", and remember it
+    const state = getPrimaryEngine().lastSoldPageState;
+    const why = explainZeroSold(state, importedUsed);
+    discovery.note(id, "warn", why);
+    try {
+      store.soldComps().recordLookup({ queryKey: queryKeyOf(query), day: dayOf(Date.now()), provider: "watchcount", outcomeKind: state === "security_check" || state === "limit" ? "blocked" : state === "empty" ? "none" : "unclear", detail: why, compIds: [], at: Date.now() });
+    } catch {
+      /* the note is the record that matters */
+    }
+  }
   if (soldAttempt.failure) {
     console.error(`[ebay-comps] sold lookup for "${fallbackName}" failed: ${soldAttempt.failure.slice(0, 300)}`);
     discovery.note(id, "warn", friendlySoldFailure(soldAttempt.failure));
@@ -5194,6 +5221,18 @@ app.whenReady().then(() => {
     return { ok: true };
   });
   ipcMain.handle("price:howTo", () => HOW_TO_CHECK_SOLD);
+  // Phase 4: the owner's own sold prices (a pasted list, or a Terapeak / Seller Hub export): parsed, kept in the Database, and offered to every later sold-price search.
+  ipcMain.handle("sold:import", (_e, args: { text: string }) => {
+    const text = String(args?.text ?? "").slice(0, 2_000_000);
+    const parsed = parseSoldImport(text);
+    if (parsed.comps.length > 0) store.soldComps().upsertComps(parsed.comps);
+    return { added: parsed.comps.length, skipped: parsed.skipped.slice(0, 20), total: store.soldComps().listComps("manual_import").length };
+  });
+  ipcMain.handle("sold:importStatus", () => ({ total: store.soldComps().listComps("manual_import").length }));
+  ipcMain.handle("sold:importClear", () => {
+    const rows = store.soldComps().listComps("manual_import");
+    return { removed: rows.length, ok: store.soldComps().removeBySource("manual_import") };
+  });
   ipcMain.handle("attention:get", () => store.attentionSummary());
   ipcMain.handle("attention:ack", (_e, args: { itemId: string }) => {
     if (args?.itemId) store.ackAttention(String(args.itemId));

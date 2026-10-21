@@ -244,6 +244,9 @@ const api = {
   priceAnswer: (a: { productId: string; lowUsd: number; highUsd?: number; condition?: string; includes?: string; recency?: string }): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("price:answer", a),
   priceDismiss: (productId: string, how: "later" | "never" | "notSure"): Promise<{ ok: boolean }> => ipcRenderer.invoke("price:dismiss", { productId, how }),
   priceOpenSold: (productId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("price:openSold", { productId }),
+  soldImport: (text: string): Promise<{ added: number; skipped: Array<{ line: number; text: string; reason: string }>; total: number }> => ipcRenderer.invoke("sold:import", { text }),
+  soldImportStatus: (): Promise<{ total: number }> => ipcRenderer.invoke("sold:importStatus"),
+  soldImportClear: (): Promise<{ removed: number; ok: boolean }> => ipcRenderer.invoke("sold:importClear"),
   priceHowTo: (): Promise<string[]> => ipcRenderer.invoke("price:howTo"),
   onToast: (cb: (t: { id: string; message: string; productId: string | null; tone: "good" | "info" }) => void): (() => void) => {
     const listener = (_e: unknown, t: { id: string; message: string; productId: string | null; tone: "good" | "info" }) => cb(t);

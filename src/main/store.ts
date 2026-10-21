@@ -13,6 +13,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { addonKey, type Addon, type AddonRole, type AddonStatus } from "./addons.js";
 import { nameKey } from "./modelFacts.js";
+import { SoldCompsStore } from "./soldComps/store.js";
 import { cleanOwnerAnswer, ownerValueUsd, pickPricePrompts, type OwnerAnswerInput, type OwnerPrice, type PromptRecord, type PromptState } from "./ownerPrice.js";
 import { planCleanup, type CleanupGroup, type CleanupPlan } from "./duplicateCleanup.js";
 import { addonEntryKey, candidateKey, type Candidate, type CandidateStatus } from "./variantDiscovery.js";
@@ -1750,6 +1751,12 @@ export class Store {
     const watchRows = this.db.prepare("SELECT id, terms_json FROM watches WHERE terms_json LIKE ?").all(`%${loser.id}%`) as Array<{ id: string; terms_json: string }>;
     for (const w of watchRows) this.db.prepare("UPDATE watches SET terms_json = ? WHERE id = ?").run(w.terms_json.split(loser.id).join(winner.id), w.id);
 
+  }
+
+  private soldCompsStore: SoldCompsStore | null = null;
+  /** The sold-comps tables (the owner's imports, lookups and matches) in this same Database. */
+  soldComps(): SoldCompsStore {
+    return (this.soldCompsStore ??= new SoldCompsStore(this.db));
   }
 
   // ---- Phase 4a: "Your price" and the questions that collect it.
