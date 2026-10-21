@@ -1,3 +1,4 @@
+import { stageOf } from "./scanPipeline.js";
 import { noteDecision } from "./aiDecisionLog.js";
 import { powerSaveBlocker } from "electron";
 import { isLowAiMode } from "./aiMode.js";
@@ -1308,6 +1309,7 @@ export class ScrapeEngine {
     if (cheapFilterStartedAt !== undefined) recordStage("cheap_filters", Date.now() - cheapFilterStartedAt, true);
     // Why it was skipped, in the same words as the saved reason: rules that skip a listing before it is opened never look at it,
     // so by default that is "not researched" (a rule decided), and a few say outright that they rejected it.
+    this.log("info", `stage ${stageOf(research?.code ?? "SKIPPED_BEFORE_OPENING") ?? "unmapped"}: ${research?.code ?? "SKIPPED_BEFORE_OPENING"}`, listing.url);
     const dispositionOfSkip = disposition(research?.status ?? "unresearched", research?.code ?? "SKIPPED_BEFORE_OPENING", reasoning.replace(/^Skipped without opening the listing\s*[—-]\s*/, ""));
     this.tally(dispositionOfSkip);
     this.opts.store.saveScored({
