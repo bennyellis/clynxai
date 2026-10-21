@@ -135,6 +135,71 @@ export function FolderDialog({
 
 type ReviewRow = Awaited<ReturnType<typeof api.libraryReview>>[number];
 
+/** Phase 2.2 / 2.4: the duplicate clean-up. First a read-only report ("N entries would become M"), then a merge of exactly that report, then Undo for 30 days. */
+function CleanupSection() {
+  const [view, setView] = useState<Awaited<ReturnType<typeof api.libraryCleanupPlan>> | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const look = async () => {
+    setBusy(true);
+    setMessage("");
+    try {
+      setView(await api.libraryCleanupPlan());
+    } finally {
+      setBusy(false);
+    }
+  };
+  const merge = async () => {
+    if (!view) return;
+    setBusy(true);
+    try {
+      const r = await api.libraryCleanupRun(view.plan.fingerprint);
+      setMessage(r.ok ? `Merged ${r.merged} entr${r.merged === 1 ? "y" : "ies"}. A backup copy was made first, and you can undo this below.` : (r.error ?? "Nothing was merged."));
+      setView(await api.libraryCleanupPlan());
+    } finally {
+      setBusy(false);
+    }
+  };
+  const undo = async (batchId: string) => {
+    setBusy(true);
+    try {
+      const r = await api.libraryCleanupUndo(batchId);
+      setMessage(r.ok ? `Put back ${r.restored} entr${r.restored === 1 ? "y" : "ies"}.` : "Nothing to put back.");
+      setView(await api.libraryCleanupPlan());
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="card" style={{ padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ fontSize: 14.5, fontWeight: 600 }}>Same product under different names</div>
+      <div style={{ fontSize: 13.5, color: "var(--text-muted)" }}>See which entries Clynx is sure are one product. Looking changes nothing.</div>
+      <div style={{ display: "flex", gap: 6 }}>
+        <button className="icon" disabled={busy} onClick={look}>
+          Show me what would merge
+        </button>
+        {view && view.plan.groups.length > 0 && (
+          <button className="primary" disabled={busy} onClick={merge}>
+            Merge these {view.plan.groups.length} group{view.plan.groups.length === 1 ? "" : "s"}
+          </button>
+        )}
+      </div>
+      {view && <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontSize: 13, fontFamily: "inherit" }}>{view.text}</pre>}
+      {view?.batches.filter((b) => !b.undone).map((b) => (
+        <div key={b.batchId} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13.5 }}>
+          <span style={{ flex: 1 }}>
+            {new Date(b.at).toLocaleString()} — folded {b.folded} into {b.keptNames.join(", ")}
+          </span>
+          <button className="icon" disabled={busy} onClick={() => undo(b.batchId)}>
+            Undo
+          </button>
+        </div>
+      ))}
+      {message && <div style={{ fontSize: 13.5, color: "var(--text-muted)" }}>{message}</div>}
+    </div>
+  );
+}
+
 export function NeedsReviewPanel({ products, onClose }: { products: ProductProfile[]; onClose: () => void }) {
   const [rows, setRows] = useState<ReviewRow[] | null>(null);
   const load = useCallback(() => {
@@ -156,6 +221,7 @@ export function NeedsReviewPanel({ products, onClose }: { products: ProductProfi
       <p style={{ margin: 0, fontSize: 14, color: "var(--text-muted)", lineHeight: 1.5 }}>
         Clynx sets a photo aside when its own title or the photos around it disagree, and it never moves or deletes anything by a picture-only guess. You decide here; every choice can be undone.
       </p>
+      <CleanupSection />
       {rows === null && <div style={{ color: "var(--text-dim)" }}>Loading…</div>}
       {rows?.length === 0 && <div style={{ color: "var(--text-dim)" }}>Nothing needs your attention.</div>}
       <div style={{ display: "flex", flexDirection: "column", gap: 12, maxHeight: "60vh", overflowY: "auto" }}>

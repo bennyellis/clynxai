@@ -28,6 +28,7 @@ import { describeSessionProblem } from "./facebookSession.js";
 import { sendSystemAlert, sendTestNotification } from "./notify.js";
 import { describeTopicStrength, generateNtfyTopic } from "./ntfySetup.js";
 import { openWithRecovery, quarantineDatabase, requestRecovery, runIntegrityCheckInBackground } from "./dbIntegrity.js";
+import { describePlan } from "./duplicateCleanup.js";
 import { applyPendingRestore, backupDirFor, createBackup, listBackups, requestRestore } from "./dbBackups.js";
 import { loadConfig, saveConfig, takeConfigLoadNotice, DEFAULT_CONFIG, DEFAULT_BROWSE_URLS, DEFAULT_COUNTRY_CITIES } from "./config.js";
 import {
@@ -5091,6 +5092,44 @@ app.whenReady().then(() => {
     return { ok: r.ok, summary: r.ok ? r.message : "", error: r.ok ? undefined : r.message };
   });
   ipcMain.handle("library:history", () => libraryOps().recent(30));
+  // Phase 2.2 / 2.4: the duplicate clean-up. "plan" is a read-only dry run; "run" only does exactly the plan the person looked at (same fingerprint), after a verified backup, and is undoable for 30 days.
+  ipcMain.handle("library:cleanupPlan", () => {
+    const plan = store.planDuplicateCleanup();
+    return { plan, text: describePlan(plan), batches: store.listMergeBatches() };
+  });
+  ipcMain.handle("library:cleanupRun", async (_e, args: { fingerprint: string }) => {
+    const plan = store.planDuplicateCleanup();
+    if (!args?.fingerprint || args.fingerprint !== plan.fingerprint) return { ok: false, error: "The Library changed since you looked at the plan. Look at the new plan first.", merged: 0 };
+    if (plan.groups.length === 0) return { ok: true, merged: 0, batchId: null };
+    const backup = await runDatabaseBackup(true);
+    if (!backup?.ok) return { ok: false, error: "A backup copy could not be made first, so nothing was merged.", merged: 0 };
+    const batchId = randomUUID();
+    let merged = 0;
+    const touched: string[] = [];
+    try {
+      for (const g of plan.groups) {
+        const m = store.mergeEntriesWithUndo(g, batchId);
+        merged += m.size;
+        touched.push(g.keep.id);
+      }
+    } catch (err) {
+      return { ok: false, error: `Stopped: ${(err as Error).message}. The groups before it were merged and can be undone.`, merged, batchId };
+    } finally {
+      store.invalidateFolders();
+      for (const id of touched) {
+        const p = store.getProductById(id);
+        if (p) sendToRenderer("products:updated", p);
+      }
+      sendToRenderer("library:changed", { folders: true, review: true });
+    }
+    return { ok: true, merged, batchId };
+  });
+  ipcMain.handle("library:cleanupUndo", (_e, args: { batchId: string }) => {
+    const restored = store.undoMergeBatch(String(args?.batchId ?? ""));
+    store.invalidateFolders();
+    sendToRenderer("library:changed", { folders: true, review: true });
+    return { ok: restored > 0, restored };
+  });
   ipcMain.handle("library:trash", () => store.listTrash());
   ipcMain.handle("library:review", async () => {
     // Needs review: pictures set aside, names made from a picture alone, entries that look like duplicates. Pictures are shrunk for the list.

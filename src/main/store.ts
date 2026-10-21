@@ -13,6 +13,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { addonKey, type Addon, type AddonRole, type AddonStatus } from "./addons.js";
 import { nameKey } from "./modelFacts.js";
+import { planCleanup, type CleanupGroup, type CleanupPlan } from "./duplicateCleanup.js";
 import { addonEntryKey, candidateKey, type Candidate, type CandidateStatus } from "./variantDiscovery.js";
 
 export interface StoredCandidate {
@@ -201,6 +202,17 @@ export class Store {
         PRIMARY KEY (product_id, alias_key)
       );
       CREATE INDEX IF NOT EXISTS idx_product_name_aliases_key ON product_name_aliases (alias_key);
+      -- Everything a duplicate clean-up merge moved or removed, so it can be undone exactly (Phase 2.4). One row per entry folded in; a batch is one run.
+      CREATE TABLE IF NOT EXISTS merge_undo (
+        id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        kept_id TEXT NOT NULL,
+        folded_id TEXT NOT NULL,
+        snapshot_json TEXT NOT NULL,
+        undone_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_merge_undo_batch ON merge_undo (batch_id);
       -- The owner's edits to the model facts (extra aliases, corrected attributes) on top of the built-in ones.
       CREATE TABLE IF NOT EXISTS model_fact_overrides (
         canonical_key TEXT PRIMARY KEY,
@@ -1649,6 +1661,178 @@ export class Store {
     return [...groups].filter(([, rows]) => rows.length > 1).map(([key, rows]) => ({ key, ids: rows.map((r) => r.id), names: rows.map((r) => r.name) }));
   }
 
+  /** Folds what a loser entry holds into the kept one (fills what the kept entry lacks, joins the notes, repoints photos, listings, children and Watches); the caller deletes the loser afterwards. */
+  private foldProductInto(winner: any, loser: any): void {
+    // Fill what the kept entry lacks from the one being folded in.
+    const fill: Array<[string, boolean]> = [
+      ["ai_summary", !winner.ai_summary],
+      ["ai_summary_generated_at", winner.ai_summary_generated_at == null],
+      ["image_url", !winner.image_url],
+      ["family", !winner.family],
+      ["resale_price_usd", winner.resale_price_usd == null],
+      ["resale_time_to_sell", winner.resale_time_to_sell == null],
+      ["desired_price_usd", winner.desired_price_usd == null],
+      ["ebay_avg_sold_price_usd", winner.ebay_avg_sold_price_usd == null],
+      ["ebay_avg_run_time_days", winner.ebay_avg_run_time_days == null],
+      ["ebay_avg_shipping_usd", winner.ebay_avg_shipping_usd == null],
+      ["ebay_comps_sample_size", winner.ebay_comps_sample_size == null],
+      ["ebay_comps_checked_at", winner.ebay_comps_checked_at == null],
+      ["ebay_active_median_usd", winner.ebay_active_median_usd == null],
+      ["ebay_active_sample_size", winner.ebay_active_sample_size == null],
+      ["ebay_est_value_usd", winner.ebay_est_value_usd == null],
+      ["ebay_est_basis", winner.ebay_est_basis == null],
+    ];
+    for (const [column, empty] of fill) {
+      if (empty && loser[column] != null && loser[column] !== "") {
+        this.db.prepare(`UPDATE products SET ${column} = ? WHERE id = ?`).run(loser[column], winner.id);
+        winner[column] = loser[column];
+      }
+    }
+    if ((!winner.category || winner.category === "Other") && loser.category && loser.category !== "Other") {
+      this.db.prepare("UPDATE products SET category = ? WHERE id = ?").run(loser.category, winner.id);
+    }
+    if (loser.prioritized && !winner.prioritized) this.db.prepare("UPDATE products SET prioritized = 1 WHERE id = ?").run(winner.id);
+    const notes = [...(winner.observed_notes ? String(winner.observed_notes).split("\n---\n") : []), ...(loser.observed_notes ? String(loser.observed_notes).split("\n---\n") : [])];
+    if (notes.length) {
+      winner.observed_notes = notes.slice(-15).join("\n---\n");
+      this.db.prepare("UPDATE products SET observed_notes = ? WHERE id = ?").run(winner.observed_notes, winner.id);
+    }
+    // Watch notes use the same "\n---\n" entry separator as observed notes; identical entries are kept once.
+    const lookouts = [...new Set([...String(winner.lookout_notes ?? "").split("\n---\n"), ...String(loser.lookout_notes ?? "").split("\n---\n")].map((l) => l.trim()).filter(Boolean))];
+    if (lookouts.length) {
+      winner.lookout_notes = lookouts.slice(-15).join("\n---\n");
+      this.db.prepare("UPDATE products SET lookout_notes = ? WHERE id = ?").run(winner.lookout_notes, winner.id);
+    }
+
+    this.db.prepare("UPDATE product_images SET product_id = ? WHERE product_id = ?").run(winner.id, loser.id);
+    this.db.prepare("UPDATE listings SET product_id = ? WHERE product_id = ?").run(winner.id, loser.id);
+    this.db.prepare("UPDATE products SET parent_product_id = ? WHERE parent_product_id = ?").run(winner.id, loser.id);
+    this.db.prepare("UPDATE watches SET linked_product_id = ? WHERE linked_product_id = ?").run(winner.id, loser.id);
+    // A Watch's search terms carry their own linked product ids inside a JSON column.
+    const watchRows = this.db.prepare("SELECT id, terms_json FROM watches WHERE terms_json LIKE ?").all(`%${loser.id}%`) as Array<{ id: string; terms_json: string }>;
+    for (const w of watchRows) this.db.prepare("UPDATE watches SET terms_json = ? WHERE id = ?").run(w.terms_json.split(loser.id).join(winner.id), w.id);
+
+  }
+
+  // ---- Phase 2.2 / 2.4: clean-up of existing duplicates, with an exact undo.
+
+  /** Read-only: which entries the naming rules say are the same product ("N entries become M"). Changes nothing. */
+  planDuplicateCleanup(): CleanupPlan {
+    const rows = this.db.prepare("SELECT id, name, category, created_at, parent_product_id FROM products WHERE deleted_at IS NULL").all() as Array<{ id: string; name: string; category: string | null; created_at: number; parent_product_id: string | null }>;
+    return planCleanup(rows.map((r) => ({ id: r.id, name: r.name, category: r.category, createdAt: r.created_at, parentProductId: r.parent_product_id })), namingFacts(this.listModelFactOverrides()));
+  }
+
+  private static readonly MERGE_LINK_TABLES: Array<{ table: string; col: string; pk: string[] }> = [
+    { table: "product_addons", col: "base_product_id", pk: ["id"] },
+    { table: "listing_addons", col: "base_product_id", pk: ["listing_id", "addon_id"] },
+    { table: "variant_candidates", col: "parent_id", pk: ["parent_id", "kind", "cand_key"] },
+  ];
+
+  /**
+   * Folds the entries in `group.fold` into `group.keep`, as ONE transaction, recording everything needed to undo it: the folded entries' rows, the kept entry's columns that changed, the ids of
+   * the photos / listings / children / Watches that moved (and each Watch's search terms as they were), the add-on and version rows, and the aliases. The folded names become aliases of the kept
+   * entry. Returns the folded id -> kept id map. Nothing is sent to the cloud here beyond the usual queued delete, which a successful local merge has already earned.
+   */
+  mergeEntriesWithUndo(group: Pick<CleanupGroup, "keep" | "fold">, batchId: string, now: number = Date.now()): Map<string, string> {
+    const merged = new Map<string, string>();
+    this.transaction(() => {
+      const winner = this.db.prepare("SELECT * FROM products WHERE id = ? AND deleted_at IS NULL").get(group.keep.id) as any;
+      if (!winner) throw new Error("the entry to keep is gone");
+      for (const f of group.fold) {
+        const loser = this.db.prepare("SELECT * FROM products WHERE id = ? AND deleted_at IS NULL").get(f.id) as any;
+        if (!loser || loser.id === winner.id) continue;
+        const ids = (sql: string, ...args: string[]) => (this.db.prepare(sql).all(...args) as Array<{ id: string }>).map((r) => r.id);
+        const winnerBefore = { ...winner };
+        const snap: any = {
+          loser: { ...loser },
+          images: ids("SELECT id FROM product_images WHERE product_id = ?", loser.id),
+          listings: ids("SELECT id FROM listings WHERE product_id = ?", loser.id),
+          children: ids("SELECT id FROM products WHERE parent_product_id = ?", loser.id),
+          watches: ids("SELECT id FROM watches WHERE linked_product_id = ?", loser.id),
+          watchTerms: (this.db.prepare("SELECT id, terms_json FROM watches WHERE terms_json LIKE ?").all(`%${loser.id}%`) as Array<{ id: string; terms_json: string }>),
+          links: Store.MERGE_LINK_TABLES.map((t) => ({ ...t, rows: this.db.prepare(`SELECT * FROM ${t.table} WHERE ${t.col} = ?`).all(loser.id) as any[] })),
+          aliases: this.db.prepare("SELECT * FROM product_name_aliases WHERE product_id = ?").all(loser.id) as any[],
+          aliasesAdded: [] as string[],
+        };
+        // links first (a row the kept entry already has stays where it is and is dropped with the folded entry)
+        for (const t of Store.MERGE_LINK_TABLES) this.db.prepare(`UPDATE OR IGNORE ${t.table} SET ${t.col} = ? WHERE ${t.col} = ?`).run(winner.id, loser.id);
+        // aliases: the folded entry's own name and its aliases now belong to the kept entry
+        for (const name of [loser.name, ...snap.aliases.map((a: any) => a.alias as string)]) {
+          const key = nameKey(name);
+          if (key && this.addProductAlias(winner.id, name, "merge", now)) snap.aliasesAdded.push(key);
+        }
+        this.foldProductInto(winner, loser);
+        this.deleteProductRows(loser.id);
+        const winnerAfter = this.db.prepare("SELECT * FROM products WHERE id = ?").get(winner.id) as any;
+        snap.winnerChanged = Object.fromEntries(Object.keys(winnerBefore).filter((c) => (winnerAfter?.[c] ?? null) !== (winnerBefore[c] ?? null)).map((c) => [c, winnerBefore[c] ?? null]));
+        this.db.prepare("INSERT INTO merge_undo (id, batch_id, at, kept_id, folded_id, snapshot_json) VALUES (?, ?, ?, ?, ?, ?)").run(randomUUID(), batchId, now, winner.id, loser.id, JSON.stringify(snap));
+        Object.assign(winner, winnerAfter);
+        merged.set(loser.id, winner.id);
+      }
+      this.touchProduct(winner.id);
+    });
+    // the local merge committed: only now does the folded entry's delete go out to the cloud
+    for (const id of merged.keys()) this.afterProductDeleted(id);
+    if (merged.size) this.ebayValueCache = null;
+    return merged;
+  }
+
+  /** The runs of the clean-up that can still be undone (30 days), newest first. */
+  listMergeBatches(now: number = Date.now()): Array<{ batchId: string; at: number; folded: number; keptNames: string[]; undone: boolean }> {
+    const rows = this.db.prepare("SELECT batch_id, MIN(at) at, COUNT(*) n, MAX(undone_at) undone, GROUP_CONCAT(kept_id) kept FROM merge_undo WHERE at >= ? GROUP BY batch_id ORDER BY at DESC").all(now - 30 * 86_400_000) as Array<{ batch_id: string; at: number; n: number; undone: number | null; kept: string }>;
+    return rows.map((r) => ({
+      batchId: r.batch_id,
+      at: r.at,
+      folded: Number(r.n),
+      keptNames: [...new Set(r.kept.split(","))].map((id) => (this.db.prepare("SELECT name FROM products WHERE id = ?").get(id) as { name: string } | undefined)?.name ?? "(removed)"),
+      undone: !!r.undone,
+    }));
+  }
+
+  /** Puts every entry of a clean-up run back exactly as it was (photos, listings, Watches, children, add-ons, notes and names). Returns how many entries came back. */
+  undoMergeBatch(batchId: string, now: number = Date.now()): number {
+    const rows = this.db.prepare("SELECT id, kept_id, folded_id, snapshot_json FROM merge_undo WHERE batch_id = ? AND undone_at IS NULL AND at >= ? ORDER BY rowid DESC").all(batchId, now - 30 * 86_400_000) as Array<{ id: string; kept_id: string; folded_id: string; snapshot_json: string }>;
+    let restored = 0;
+    this.transaction(() => {
+      for (const r of rows) {
+        const snap = JSON.parse(r.snapshot_json);
+        if (!this.db.prepare("SELECT 1 FROM products WHERE id = ?").get(r.kept_id)) continue; // the kept entry was deleted since: nothing to give back to
+        if (this.db.prepare("SELECT 1 FROM products WHERE id = ?").get(r.folded_id)) continue;
+        const cols = Object.keys(snap.loser);
+        this.db.prepare(`INSERT INTO products (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...cols.map((c) => snap.loser[c]));
+        for (const [c, v] of Object.entries(snap.winnerChanged as Record<string, unknown>)) this.db.prepare(`UPDATE products SET ${c} = ? WHERE id = ?`).run(v as never, r.kept_id);
+        const mark = (table: string, col: string, idsList: string[]) => { for (const id of idsList) this.db.prepare(`UPDATE ${table} SET ${col} = ? WHERE id = ?`).run(r.folded_id, id); };
+        mark("product_images", "product_id", snap.images);
+        mark("listings", "product_id", snap.listings);
+        mark("products", "parent_product_id", snap.children);
+        mark("watches", "linked_product_id", snap.watches);
+        for (const w of snap.watchTerms as Array<{ id: string; terms_json: string }>) this.db.prepare("UPDATE watches SET terms_json = ? WHERE id = ?").run(w.terms_json, w.id);
+        for (const t of snap.links as Array<{ table: string; col: string; pk: string[]; rows: any[] }>) {
+          for (const row of t.rows) {
+            const where = t.pk.map((k) => `${k} = ?`).join(" AND ");
+            const args = t.pk.map((k) => row[k]);
+            const there = this.db.prepare(`SELECT 1 FROM ${t.table} WHERE ${where}`).get(...args);
+            if (there) this.db.prepare(`UPDATE ${t.table} SET ${t.col} = ? WHERE ${where}`).run(r.folded_id, ...args);
+            else {
+              const c = Object.keys(row);
+              this.db.prepare(`INSERT INTO ${t.table} (${c.join(", ")}) VALUES (${c.map(() => "?").join(", ")})`).run(...c.map((k) => row[k]));
+            }
+          }
+        }
+        for (const key of snap.aliasesAdded as string[]) this.db.prepare("DELETE FROM product_name_aliases WHERE product_id = ? AND alias_key = ?").run(r.kept_id, key);
+        for (const a of snap.aliases as any[]) this.db.prepare("INSERT OR IGNORE INTO product_name_aliases (product_id, alias, alias_key, source, created_at) VALUES (?, ?, ?, ?, ?)").run(a.product_id, a.alias, a.alias_key, a.source, a.created_at);
+        this.db.prepare("DELETE FROM pending_cloud_deletes WHERE resource_type = 'product' AND local_id = ?").run(r.folded_id);
+        this.db.prepare("UPDATE merge_undo SET undone_at = ? WHERE id = ?").run(now, r.id);
+        restored++;
+      }
+    });
+    if (restored) {
+      this.safeguard.invalidate();
+      this.ebayValueCache = null;
+    }
+    return restored;
+  }
+
   // Beta 13: this is no longer called on its own (the Library only PROPOSES merges, see findDuplicateGroups); it runs for the groups a person approved: pass their ids.
   mergeDuplicateProducts(onlyIds?: string[]): Map<string, string> {
     const merged = new Map<string, string>();
@@ -1666,55 +1850,7 @@ export class Store {
       rows.sort((a, b) => score(b) - score(a) || a.created_at - b.created_at);
       const winner = rows[0];
       for (const loser of rows.slice(1)) {
-        // Fill what the kept entry lacks from the one being folded in.
-        const fill: Array<[string, boolean]> = [
-          ["ai_summary", !winner.ai_summary],
-          ["ai_summary_generated_at", winner.ai_summary_generated_at == null],
-          ["image_url", !winner.image_url],
-          ["family", !winner.family],
-          ["resale_price_usd", winner.resale_price_usd == null],
-          ["resale_time_to_sell", winner.resale_time_to_sell == null],
-          ["desired_price_usd", winner.desired_price_usd == null],
-          ["ebay_avg_sold_price_usd", winner.ebay_avg_sold_price_usd == null],
-          ["ebay_avg_run_time_days", winner.ebay_avg_run_time_days == null],
-          ["ebay_avg_shipping_usd", winner.ebay_avg_shipping_usd == null],
-          ["ebay_comps_sample_size", winner.ebay_comps_sample_size == null],
-          ["ebay_comps_checked_at", winner.ebay_comps_checked_at == null],
-          ["ebay_active_median_usd", winner.ebay_active_median_usd == null],
-          ["ebay_active_sample_size", winner.ebay_active_sample_size == null],
-          ["ebay_est_value_usd", winner.ebay_est_value_usd == null],
-          ["ebay_est_basis", winner.ebay_est_basis == null],
-        ];
-        for (const [column, empty] of fill) {
-          if (empty && loser[column] != null && loser[column] !== "") {
-            this.db.prepare(`UPDATE products SET ${column} = ? WHERE id = ?`).run(loser[column], winner.id);
-            winner[column] = loser[column];
-          }
-        }
-        if ((!winner.category || winner.category === "Other") && loser.category && loser.category !== "Other") {
-          this.db.prepare("UPDATE products SET category = ? WHERE id = ?").run(loser.category, winner.id);
-        }
-        if (loser.prioritized && !winner.prioritized) this.db.prepare("UPDATE products SET prioritized = 1 WHERE id = ?").run(winner.id);
-        const notes = [...(winner.observed_notes ? String(winner.observed_notes).split("\n---\n") : []), ...(loser.observed_notes ? String(loser.observed_notes).split("\n---\n") : [])];
-        if (notes.length) {
-          winner.observed_notes = notes.slice(-15).join("\n---\n");
-          this.db.prepare("UPDATE products SET observed_notes = ? WHERE id = ?").run(winner.observed_notes, winner.id);
-        }
-        // Watch notes use the same "\n---\n" entry separator as observed notes; identical entries are kept once.
-        const lookouts = [...new Set([...String(winner.lookout_notes ?? "").split("\n---\n"), ...String(loser.lookout_notes ?? "").split("\n---\n")].map((l) => l.trim()).filter(Boolean))];
-        if (lookouts.length) {
-          winner.lookout_notes = lookouts.slice(-15).join("\n---\n");
-          this.db.prepare("UPDATE products SET lookout_notes = ? WHERE id = ?").run(winner.lookout_notes, winner.id);
-        }
-
-        this.db.prepare("UPDATE product_images SET product_id = ? WHERE product_id = ?").run(winner.id, loser.id);
-        this.db.prepare("UPDATE listings SET product_id = ? WHERE product_id = ?").run(winner.id, loser.id);
-        this.db.prepare("UPDATE products SET parent_product_id = ? WHERE parent_product_id = ?").run(winner.id, loser.id);
-        this.db.prepare("UPDATE watches SET linked_product_id = ? WHERE linked_product_id = ?").run(winner.id, loser.id);
-        // A Watch's search terms carry their own linked product ids inside a JSON column.
-        const watchRows = this.db.prepare("SELECT id, terms_json FROM watches WHERE terms_json LIKE ?").all(`%${loser.id}%`) as Array<{ id: string; terms_json: string }>;
-        for (const w of watchRows) this.db.prepare("UPDATE watches SET terms_json = ? WHERE id = ?").run(w.terms_json.split(loser.id).join(winner.id), w.id);
-
+        this.foldProductInto(winner, loser);
         this.deleteProduct(loser.id);
         merged.set(loser.id, winner.id);
       }
@@ -2282,17 +2418,24 @@ export class Store {
   // Hard delete (internal: merges, tests, "Clear all"). The photos go FIRST: product_images.product_id references products(id) and the database enforces it, so deleting the
   // product row while it still had photos failed with "FOREIGN KEY constraint failed" (Beta 13 audit LB-02). Children and links are released in the same transaction.
   deleteProduct(id: string): void {
-    this.transaction(() => {
-      this.db.prepare("DELETE FROM product_images WHERE product_id = ?").run(id);
-      this.db.prepare("DELETE FROM listing_addons WHERE base_product_id = ?").run(id);
-      this.db.prepare("DELETE FROM product_addons WHERE base_product_id = ?").run(id);
-      this.db.prepare("DELETE FROM variant_candidates WHERE parent_id = ?").run(id);
-      this.db.prepare("DELETE FROM product_name_aliases WHERE product_id = ?").run(id);
-      this.db.prepare("UPDATE products SET parent_product_id = NULL WHERE parent_product_id = ?").run(id);
-      this.db.prepare("UPDATE listings SET product_id = NULL WHERE product_id = ?").run(id);
-      this.db.prepare("UPDATE watches SET linked_product_id = NULL WHERE linked_product_id = ?").run(id);
-      this.db.prepare("DELETE FROM products WHERE id = ?").run(id);
-    });
+    this.transaction(() => this.deleteProductRows(id));
+    this.afterProductDeleted(id);
+  }
+
+  /** The rows of a hard delete, for callers that are already inside a transaction (transaction() is not re-entrant); they call afterProductDeleted once it commits. */
+  private deleteProductRows(id: string): void {
+    this.db.prepare("DELETE FROM product_images WHERE product_id = ?").run(id);
+    this.db.prepare("DELETE FROM listing_addons WHERE base_product_id = ?").run(id);
+    this.db.prepare("DELETE FROM product_addons WHERE base_product_id = ?").run(id);
+    this.db.prepare("DELETE FROM variant_candidates WHERE parent_id = ?").run(id);
+    this.db.prepare("DELETE FROM product_name_aliases WHERE product_id = ?").run(id);
+    this.db.prepare("UPDATE products SET parent_product_id = NULL WHERE parent_product_id = ?").run(id);
+    this.db.prepare("UPDATE listings SET product_id = NULL WHERE product_id = ?").run(id);
+    this.db.prepare("UPDATE watches SET linked_product_id = NULL WHERE linked_product_id = ?").run(id);
+    this.db.prepare("DELETE FROM products WHERE id = ?").run(id);
+  }
+
+  private afterProductDeleted(id: string): void {
     this.safeguard.invalidate();
     this.identity?.forgetProduct(id);
     // Batch 2 Fix B — see deleteWatch's own comment above; same reasoning,
