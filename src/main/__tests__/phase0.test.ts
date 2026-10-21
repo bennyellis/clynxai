@@ -22,6 +22,9 @@ run(async () => {
   const asking = tilePrice({ ...base, ebayEstimatedValueUsd: 900, ebayEstimateBasis: "active", ebayActiveSampleSize: 22, ebayCompsSampleSize: 0 });
   check("a price built only from asking prices is marked 'asking, not sold' (not proof)", asking.tone === "asking" && asking.sub === "asking, not sold" && /not proof/.test(asking.title) && /22 sellers/.test(asking.title), asking);
   check("a blend says so", /blended with asking/.test(tilePrice({ ...base, ebayEstimatedValueUsd: 500, ebayEstimateBasis: "blend", ebayCompsSampleSize: 6, ebayActiveSampleSize: 8 }).title));
+  const asksNoEstimate = tilePrice({ ...base, ebayEstimatedValueUsd: null, ebayEstimateBasis: null, ebayActiveSampleSize: 22, ebayActiveMedianUsd: 1000, ebayCompsSampleSize: 1, ebayAvgSoldPriceUsd: null });
+  check("22 accepted asking listings and no stored estimate show the asking price, labelled, not 'No price yet'", asksNoEstimate.text === "$920" && asksNoEstimate.tone === "asking" && /asking/.test(asksNoEstimate.sub), asksNoEstimate);
+  check("a handful of asks is still not enough", tilePrice({ ...base, ebayEstimatedValueUsd: null, ebayActiveSampleSize: 2, ebayActiveMedianUsd: 1000 }).text === "No price yet");
   const none = tilePrice(base);
   check("no data at all says 'No price yet' instead of a number", none.text === "No price yet" && none.tone === "none" && none.sub === "");
   check("with no stored estimate it falls back to the average sold price plus shipping", tilePrice({ ...base, ebayAvgSoldPriceUsd: 100, ebayAvgShippingUsd: 15, ebayCompsSampleSize: 5 }).text === "$115");

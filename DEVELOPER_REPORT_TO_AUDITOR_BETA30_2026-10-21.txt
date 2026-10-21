@@ -19,3 +19,10 @@ NOT DONE / OPEN
 - A commit message ("Phase 6: settings saved with a byte-order mark...") lacks the attribution trailer.
 - Known behaviour to audit: "Xbox Series S" and "Xbox Series S 512GB" are now one entry (default model); bare "Xbox Series X" keeps its name and matches the Black model; aliases are used for matching only when unambiguous.
 Please audit especially: nameForInsert/findMatchingProduct (store.ts), mergeEntriesWithUndo + undoMergeBatch, scanIdentity/identityLadder wiring in scrapeEngine.identityUnconfirmedFor, dealGate identityVague, applyMeasuredPremiums, queueGallerySplits/splitGallery, and the new IPC handlers in index.ts.
+
+ADDENDUM (same day, after the owner answered that he cannot recall the three Phase 0 transcripts)
+- Fixed by reasoning + test: estimateMarketValue left a product with ONE disagreeing sold sale and 22 accepted asks at "no price"; it now estimates from the asks (basis "active", MANY_ASKS = 8), and the Library tile falls back to the asking median for entries with no stored estimate (tilePrice.ebayActiveMedianUsd). This is the most plausible cause of the Maverick X3 report, not proven to be his exact case.
+- Misspelling and poster: tool-level tests added (typedInputFlow); both are researched and the "I read X as Y" line leads the answer. If the CHAT MODEL answers without calling the tool, that is not caught by anything new. Not reproduced.
+- Q5 built: typedScope.ts (AsyncLocalStorage marker), openaiSearch typedLowAiPerHour (6/hour), reply note when the allowance is the limit.
+- Owner-editable other names on the product page (products:aliasAdd/Remove, refuses a name that belongs to another entry).
+- Still NOT done: stage-function regroup of evaluateListing; learned sizes/editions in names; facts from maker pages; the three items above that could not be reproduced.

@@ -1,3 +1,4 @@
+import { consumeTypedAllowanceNotice, runAsTypedName, SAVE_CREDITS_NOTE, TYPED_LOW_AI_PER_HOUR } from "./typedScope.js";
 import { importedCompsForQuery } from "./soldComps/importedForResearch.js";
 import { parseSoldImport } from "./soldComps/manualImport.js";
 import { queryKeyOf, dayOf } from "./soldComps/store.js";
@@ -1121,14 +1122,18 @@ async function executeChatTool(
   }
 
   if (call.name === "research_product") {
-    return await runResearchProductTool(call.args, call.userMessage, {
-      store,
-      verifyClaim,
-      startLookup: (id, name, opts) => void runProductLookup(id, name, opts),
-      notify: (id) => sendToRenderer("products:updated", store.getProductById(id)),
-      newId: () => randomUUID(),
-      progress: onSearchUpdate,
-    });
+    // a typed name builds its card even in Save-credits mode, on a small allowance; if that is used up the answer says Save-credits mode is the limit
+    const answer = await runAsTypedName(() =>
+      runResearchProductTool(call.args, call.userMessage, {
+        store,
+        verifyClaim,
+        startLookup: (id, name, opts) => void runProductLookup(id, name, opts),
+        notify: (id) => sendToRenderer("products:updated", store.getProductById(id)),
+        newId: () => randomUUID(),
+        progress: onSearchUpdate,
+      })
+    );
+    return isLowAiMode() && consumeTypedAllowanceNotice() ? `${answer}${SAVE_CREDITS_NOTE}` : answer;
   }
 
   if (call.name === "add_product_watch_note") {
@@ -2406,7 +2411,7 @@ function applyIdentitySafeguard(): void {
     openAiSearchConfigured = true;
     // read live: switching beta13.openaiSearch in config.json takes effect without a restart of this wiring
     configureFreeEngines(() => config.freeSearchEngines === true);
-    configureOpenAiSearch({ enabled: () => beta13Flags(config).openaiSearch && hasOpenAIAccess(), lowAi: () => isLowAiMode(), perHour: Math.max(1, config.openaiSearchPerHour ?? OPENAI_SEARCH_UNLIMITED) }, { perHour: Math.max(1, config.openaiLookupPerHour ?? OPENAI_SEARCH_UNLIMITED) });
+    configureOpenAiSearch({ enabled: () => beta13Flags(config).openaiSearch && hasOpenAIAccess(), lowAi: () => isLowAiMode(), typedLowAiPerHour: TYPED_LOW_AI_PER_HOUR, perHour: Math.max(1, config.openaiSearchPerHour ?? OPENAI_SEARCH_UNLIMITED) }, { perHour: Math.max(1, config.openaiLookupPerHour ?? OPENAI_SEARCH_UNLIMITED) });
   }
   getKnowledgeService().install();
   const mode = config.identitySafeguard?.mode === "shadow" || config.identitySafeguard?.mode === "enforce" ? config.identitySafeguard.mode : "off";
@@ -5296,6 +5301,18 @@ app.whenReady().then(() => {
     return { ok: p ? store.setLearnedFactIgnored(p.name, String(args.attribute), String(args.value), args.ignored === true) : false };
   });
   ipcMain.handle("products:soldStats", (_e, productId: string) => store.soldStatsFor(String(productId ?? "")));
+  // The owner edits an entry's other names (what else it is called): added names match it from then on, removed ones stop matching.
+  ipcMain.handle("products:aliasList", (_e, productId: string) => store.listProductAliases(String(productId ?? "")));
+  ipcMain.handle("products:aliasAdd", (_e, args: { productId: string; alias: string }) => {
+    const id = String(args?.productId ?? "");
+    const alias = String(args?.alias ?? "");
+    const owner = store.findProductIdByAlias(alias);
+    if (owner && owner !== id) return { ok: false, error: `“${alias.trim()}” already belongs to another entry.` };
+    const other = store.existingProductIdForName(alias);
+    if (other && other !== id) return { ok: false, error: `“${alias.trim()}” is already another entry's name.` };
+    return { ok: store.addProductAlias(id, alias, "owner") };
+  });
+  ipcMain.handle("products:aliasRemove", (_e, args: { productId: string; alias: string }) => ({ ok: store.removeProductAlias(String(args?.productId ?? ""), String(args?.alias ?? "")) }));
   ipcMain.handle("products:foldedNotice", (_e, productId: string) => store.foldedNoticeFor(String(productId ?? "")));
   ipcMain.handle("products:origin", (_e, productId: string) => store.getProductOrigin(String(productId ?? "")));
   // Review > "Move them to their own entry": backup first, then ONE undoable action (Recent changes), then the new game's own research.

@@ -60,4 +60,8 @@ run(async () => {
   check("the notes are plain and say what the research uses instead", [friendlySoldFailure(bad.failure!), friendlySoldFailure(hang.failure!), friendlySoldFailure("weird")].every((m) => /asking on eBay/.test(m) && m.length < 160 && !/chrome|--flag|Call log/.test(m)));
   const asksOnly = estimateMarketValue({ mean: null, n: 0 }, { median: 1000, n: 22 });
   check("with no sold prices, 22 accepted asking prices still give an estimate (from the asking side)", asksOnly.valueUsd !== null && asksOnly.basis === "active" && Math.abs((asksOnly.valueUsd ?? 0) - 920) < 1, asksOnly);
+  const oneSaleManyAsks = estimateMarketValue({ mean: 200, n: 1 }, { median: 1000, n: 22 });
+  check("ONE sale that wildly disagrees with 22 accepted asking prices no longer leaves 'no price yet': the estimate comes from the asking side", oneSaleManyAsks.valueUsd !== null && oneSaleManyAsks.basis === "active" && Math.abs((oneSaleManyAsks.valueUsd ?? 0) - 920) < 1, oneSaleManyAsks);
+  check("but one disagreeing sale with only a few asks still gives no number (not enough to tell which is right)", estimateMarketValue({ mean: 200, n: 1 }, { median: 1000, n: 4 }).valueUsd === null);
+  check("two sales that disagree still stand over the asks", estimateMarketValue({ mean: 200, n: 2 }, { median: 1000, n: 22 }).basis === "sold");
 });

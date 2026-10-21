@@ -37,6 +37,8 @@ export interface MarketEstimate {
 // Sellers list above what things sell for; this is how much of the asking price to believe.
 const ASK_TO_SELL = 0.92;
 const MIN_ACTIVE_SAMPLE = 3;
+// Enough accepted asking prices to stand in when ONE sold sale disagrees with them wildly.
+const MANY_ASKS = 8;
 // With this many sold comps, the sold figure stands on its own when the asking prices disagree wildly.
 const SOLID_SOLD_SAMPLE = 5;
 
@@ -55,7 +57,13 @@ export function estimateMarketValue(sold: { mean: number | null; n: number }, ac
   // Sold and asking prices that wildly disagree mean one of them is about a different thing (a "PS5" search full of $40 games next
   // to a $385 console sale). With a couple of sales those stand; with one sale there is no way to tell which is right, and a blended
   // number would be wrong either way (it used to come out at a $128 PS5), so there is no estimate until a better lookup settles it.
-  if (ratio < 0.6 || ratio > 1.6) return sold.n >= 2 ? { valueUsd: soldMean, basis: "sold" } : { valueUsd: null, basis: null };
+  if (ratio < 0.6 || ratio > 1.6) {
+    if (sold.n >= 2) return { valueUsd: soldMean, basis: "sold" };
+    // One sale against MANY accepted asking prices: a single sale is the weaker evidence (it may be a part-out, a broken unit or a typo), so with a real asking sample the estimate comes from the asking
+    // side, labelled as asking prices only. This used to leave a product with 22 accepted asks showing "no price yet".
+    if (active.n >= MANY_ASKS) return { valueUsd: askAdjusted, basis: "active" };
+    return { valueUsd: null, basis: null };
+  }
 
   // Sold comps count fully (up to 20); asking prices count a fraction as much each (up to 10 of them).
   const soldWeight = Math.min(sold.n, 20);

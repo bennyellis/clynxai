@@ -36,6 +36,10 @@ run(async () => {
   store.updateProductEbayComps(xm, { avgSoldPriceUsd: 300, avgRunTimeDays: 3, avgShippingUsd: 0, sampleSize: 9, activeMedianUsd: 310, activeSampleSize: 5, estimatedValueUsd: 300, estimateBasis: "sold", identity: "exact" });
   check("with sales it counts them together and does not invent a per-colour comparison", /All 9 sold sales/.test(store.foldedNoticeFor(xm)?.text ?? "") && /not split by colour/.test(store.foldedNoticeFor(xm)?.text ?? ""));
   check("an entry nothing was folded into has no note", store.foldedNoticeFor(store.addProductStub("plain", "Zorblax Deluxe 3000")) === null);
+  section("the owner edits an entry's other names");
+  const aa = store.addProductStub("al1", "Quuxatron 9000");
+  check("an added name finds the entry", store.addProductAlias(aa, "the quux", "owner") && store.findMatchingProduct("the quux")?.id === aa);
+  check("removing it stops that", store.removeProductAlias(aa, "The  Quux") && store.findProductIdByAlias("the quux") === null && !store.removeProductAlias(aa, "the quux"));
   try {
     fs.rmSync(dir, { recursive: true, force: true });
   } catch {

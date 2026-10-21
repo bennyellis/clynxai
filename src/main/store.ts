@@ -3130,6 +3130,11 @@ export class Store {
     return Number(res.changes) > 0;
   }
 
+  /** The owner removes one of an entry's other names (it stops matching the entry). */
+  removeProductAlias(productId: string, alias: string): boolean {
+    return Number(this.db.prepare("DELETE FROM product_name_aliases WHERE product_id = ? AND alias_key = ?").run(productId, nameKey(alias)).changes) > 0;
+  }
+
   listProductAliases(productId: string): Array<{ alias: string; source: string; createdAt: number }> {
     return (this.db.prepare("SELECT alias, source, created_at FROM product_name_aliases WHERE product_id = ? ORDER BY created_at, alias").all(productId) as Array<{ alias: string; source: string; created_at: number }>).map((r) => ({ alias: r.alias, source: r.source, createdAt: r.created_at }));
   }

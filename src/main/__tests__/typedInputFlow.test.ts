@@ -179,4 +179,12 @@ run(async () => {
   const outExact = await runResearchProductTool({ product: "xbox series x. find all variants and add-ons" }, "xbox series x. find all variants and add-ons", tExact.deps);
   check("the exact name with a request does not ask game-or-console", !/NEEDS THE USER'S CHOICE/.test(outExact) && /Their message also asked/.test(outExact), outExact);
   check("'find me a steam deck oled' researches 'steam deck oled'", stripCommand("find me a steam deck oled") === "steam deck oled" && stripCommand("look up for me a dyson v8") === "dyson v8", stripCommand("find me a steam deck oled"));
+
+  section("owner-reported: a poster and a misspelling both end with an entry and the 'I read' line");
+  const tPoster = fakeDeps([XBOX], null);
+  const outPoster = await runResearchProductTool({ product: "Will Smith Oscars poster" }, "Will Smith Oscars poster", tPoster.deps);
+  check("a poster is researched and gets its own entry (the card), not just a chat answer", tPoster.log.created.includes("Will Smith Oscars poster") && tPoster.log.lookups.some((l) => l.name === "Will Smith Oscars poster") && /Started researching/.test(outPoster), { log: tPoster.log, outPoster });
+  const tMiss = fakeDeps([XBOX], null);
+  const outMiss = await runResearchProductTool({ product: "xbox seris x galaxy edtion" }, "is xbox seris x galaxy edtion worth anything", tMiss.deps);
+  check("a misspelling is researched under the repaired name, and the answer starts with the 'I read X as Y' sentence", /^I read "[^"]+" as "[^"]+"/.test(outMiss) && tMiss.log.lookups.length + tMiss.log.claims.length > 0, outMiss);
 });

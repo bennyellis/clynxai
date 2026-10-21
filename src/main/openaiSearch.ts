@@ -3,6 +3,7 @@
 // limit, and never in Save-credits mode. Its answer is not trusted as a finished conclusion: it is turned into search RESULTS (the cited pages, each with the sentence it was cited
 // for), and Clynx then reads those pages and applies its own rules (two independent sources, or an official one) exactly as for any other engine.
 // The pure request/parse code mirrors cloud/src/ai/search.ts; the network call lives in openai.ts (own key: straight to OpenAI; otherwise Clynx Cloud's POST /ai/search).
+import { inTypedNameScope, noteTypedAllowanceUsed } from "./typedScope.js";
 import type { SearchBackend, SearchHit } from "./webEvidence.js";
 
 export interface SearchAnswer {
@@ -72,6 +73,8 @@ export interface OpenAiSearchPolicy {
   /** Save-credits mode. */
   lowAi(): boolean;
   perHour: number;
+  /** Searches an hour that Save-credits mode still allows for a name the person typed (see typedScope.ts); 0/absent = none. */
+  typedLowAiPerHour?: number;
   /** The call itself (openai.ts), injected so this file stays testable. */
   search(query: string, signal?: AbortSignal): Promise<SearchAnswer | null>;
   now?: () => number;
@@ -95,6 +98,7 @@ export function openAiWebBackend(p: OpenAiSearchPolicy): SearchBackend {
   const now = p.now ?? (() => Date.now());
   const sleep = p.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   let stamps: number[] = [];
+  let typedStamps: number[] = [];
   const cache = new Map<string, { at: number; hits: SearchHit[] }>();
   const inFlight = new Map<string, Promise<SearchHit[]>>();
   let lastCallAt = 0;
@@ -113,7 +117,15 @@ export function openAiWebBackend(p: OpenAiSearchPolicy): SearchBackend {
     name: "openai-web",
     skip: () => {
       if (!p.enabled()) return "OpenAI web search is switched off";
-      if (p.lowAi()) return "Save OpenAI credits mode is on";
+      if (p.lowAi()) {
+        // a name the person typed gets a small allowance even here
+        typedStamps = typedStamps.filter((t) => now() - t < 3600_000);
+        if (!inTypedNameScope() || !p.typedLowAiPerHour) return "Save OpenAI credits mode is on";
+        if (typedStamps.length >= p.typedLowAiPerHour) {
+          noteTypedAllowanceUsed(now());
+          return `Save OpenAI credits mode is on and the ${p.typedLowAiPerHour} searches an hour allowed for typed names are used`;
+        }
+      }
       stamps = stamps.filter((t) => now() - t < 3600_000);
       if (stamps.length >= p.perHour) return `the hourly limit of ${p.perHour} OpenAI searches is used`;
       return null;
@@ -133,6 +145,7 @@ export function openAiWebBackend(p: OpenAiSearchPolicy): SearchBackend {
           }
           lastCallAt = now();
           stamps.push(now());
+          if (p.lowAi() && inTypedNameScope()) typedStamps.push(now());
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 45_000);
           try {

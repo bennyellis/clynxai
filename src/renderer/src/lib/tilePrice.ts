@@ -10,6 +10,8 @@ export interface TilePriceInput {
   ebayAvgShippingUsd: number | null;
   ebayCompsSampleSize: number | null;
   ebayActiveSampleSize: number | null;
+  /** The middle asking price, when asking listings were accepted; stands in when no estimate was stored. */
+  ebayActiveMedianUsd?: number | null;
 }
 
 export type TilePriceTone = "sold" | "few" | "asking" | "none";
@@ -29,7 +31,11 @@ const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
 export function tilePrice(p: TilePriceInput): TilePrice {
   const sold = p.ebayAvgSoldPriceUsd !== null && (p.ebayCompsSampleSize ?? 0) > 0 ? p.ebayAvgSoldPriceUsd + Math.max(0, p.ebayAvgShippingUsd ?? 0) : null;
-  const value = p.ebayEstimatedValueUsd !== null && p.ebayEstimatedValueUsd > 0 ? p.ebayEstimatedValueUsd : sold;
+  // An entry with accepted asking listings but no stored estimate (older entries) still shows what sellers ask, labelled as asking prices, instead of "No price yet".
+  const askFallback = (p.ebayActiveSampleSize ?? 0) >= 3 && p.ebayActiveMedianUsd != null && p.ebayActiveMedianUsd > 0 ? p.ebayActiveMedianUsd * 0.92 : null;
+  const stored = p.ebayEstimatedValueUsd !== null && p.ebayEstimatedValueUsd > 0 ? p.ebayEstimatedValueUsd : sold;
+  const value = stored ?? askFallback;
+  if (stored === null && askFallback !== null) p = { ...p, ebayEstimateBasis: "active", ebayCompsSampleSize: 0 };
   if (value === null || !(value > 0)) {
     return { text: "No price yet", sub: "", tone: "none", title: "Clynx has no eBay sales or asking prices it trusts for this one yet." };
   }
