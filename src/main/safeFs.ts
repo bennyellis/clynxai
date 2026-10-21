@@ -105,7 +105,8 @@ export function readJsonFileSafe<T = unknown>(filePath: string): JsonReadResult<
   const bak = `${filePath}.bak`;
   const tryParse = (p: string): { ok: true; value: T } | { ok: false } => {
     try {
-      const text = readFileSync(p, "utf-8");
+      // a byte-order mark (Notepad and PowerShell add one when a file is saved "as UTF-8") is not part of the JSON; without this the file was treated as damaged and the settings were reset
+      const text = readFileSync(p, "utf-8").replace(/^\uFEFF/, "");
       if (!text.trim()) return { ok: false };
       return { ok: true, value: JSON.parse(text) as T };
     } catch {

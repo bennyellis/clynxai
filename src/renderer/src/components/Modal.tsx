@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
 // Generic themed dialog, replacing native window.confirm/prompt popups
@@ -18,6 +18,8 @@ import { createPortal } from "react-dom";
 // one of those cards would end up positioned/clipped relative to the
 // card's own box instead of the viewport if it weren't portaled out from
 // under that ancestor.
+const openModals: object[] = [];
+
 export function Modal({
   title,
   onClose,
@@ -37,6 +39,23 @@ export function Modal({
   // panel) shows in front of it instead of behind it.
   aboveLightbox?: boolean;
 }) {
+  // Escape closes the dialog (only the top one when several are open)
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const token = {};
+    openModals.push(token);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || openModals[openModals.length - 1] !== token) return;
+      e.stopPropagation();
+      closeRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      openModals.splice(openModals.indexOf(token), 1);
+    };
+  }, []);
   return createPortal(
     <div className={`modal-backdrop${aboveLightbox ? " modal-backdrop-top" : ""}`} onClick={onClose}>
       <div className="modal-card" style={width ? { width } : undefined} onClick={(e) => e.stopPropagation()}>

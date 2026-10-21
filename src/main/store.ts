@@ -205,6 +205,13 @@ export class Store {
         PRIMARY KEY (product_id, alias_key)
       );
       CREATE INDEX IF NOT EXISTS idx_product_name_aliases_key ON product_name_aliases (alias_key);
+      -- Why an entry was created (the scanner found it in a listing, the chat asked for it, a version / add-on / game of another entry...), so "where did this come from" always has an answer.
+      CREATE TABLE IF NOT EXISTS product_origins (
+        product_id TEXT PRIMARY KEY,
+        reason TEXT NOT NULL,
+        detail TEXT,
+        at INTEGER NOT NULL
+      );
       -- What the owner knows an item sells for ("Your price"), with where it came from; real sold prices lead once they arrive and mark it replaced.
       CREATE TABLE IF NOT EXISTS owner_prices (
         product_id TEXT PRIMARY KEY,
@@ -1622,7 +1629,7 @@ export class Store {
   // EXISTING entry's id is returned, so callers carry on with that one. (Two scans, accounts or lookups finding the same
   // new product at nearly the same moment used to each make their own: two "Xbox Series X" entries.) The check and
   // the insert are one synchronous step, so they can't interleave.
-  addProductStub(id: string, name: string): string {
+  addProductStub(id: string, name: string, why?: { reason: string; detail?: string | null }): string {
     const named = this.nameForInsert(name);
     if (named.existingId) return named.existingId;
     const now = Date.now();
@@ -1630,8 +1637,15 @@ export class Store {
       .prepare("INSERT INTO products (id, name, loading, created_at, updated_at) VALUES (?, ?, 1, ?, ?)")
       .run(id, named.name, now, now);
     if (named.alias) this.addProductAlias(id, named.alias, "typed", now);
+    this.db.prepare("INSERT OR REPLACE INTO product_origins (product_id, reason, detail, at) VALUES (?, ?, ?, ?)").run(id, why?.reason ?? "unspecified", why?.detail ?? null, now);
     this.safeguard.invalidate();
     return id;
+  }
+
+  /** Why an entry exists: the reason and the detail recorded when it was created (null for entries made before this was kept). */
+  getProductOrigin(id: string): { reason: string; detail: string | null; at: number } | null {
+    const r = this.db.prepare("SELECT reason, detail, at FROM product_origins WHERE product_id = ?").get(id) as { reason: string; detail: string | null; at: number } | undefined;
+    return r ?? null;
   }
 
   /**
@@ -2001,6 +2015,7 @@ export class Store {
       .prepare("INSERT INTO products (id, name, category, image_url, keep_thumbnail, loading, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)")
       .run(id, named.name, category, imageUrl, imageUrl ? 1 : 0, now, now);
     if (named.alias) this.addProductAlias(id, named.alias, "typed", now);
+    this.db.prepare("INSERT OR REPLACE INTO product_origins (product_id, reason, detail, at) VALUES (?, 'added by you', NULL, ?)").run(id, now);
     this.safeguard.invalidate();
     return id;
   }
@@ -2557,6 +2572,7 @@ export class Store {
     this.db.prepare("DELETE FROM product_addons WHERE base_product_id = ?").run(id);
     this.db.prepare("DELETE FROM variant_candidates WHERE parent_id = ?").run(id);
     this.db.prepare("DELETE FROM product_name_aliases WHERE product_id = ?").run(id);
+    this.db.prepare("DELETE FROM product_origins WHERE product_id = ?").run(id);
     this.db.prepare("UPDATE products SET parent_product_id = NULL WHERE parent_product_id = ?").run(id);
     this.db.prepare("UPDATE listings SET product_id = NULL WHERE product_id = ?").run(id);
     this.db.prepare("UPDATE watches SET linked_product_id = NULL WHERE linked_product_id = ?").run(id);

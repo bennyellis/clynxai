@@ -1937,7 +1937,7 @@ async function runMarketCheck(name: string, listingTitle: string, existingId: st
   let created = false;
   if (!id) {
     const before = store.getProductByName(name);
-    id = store.addProductStub(randomUUID(), name);
+    id = store.addProductStub(randomUUID(), name, { reason: "market check", detail: listingTitle });
     created = !before && store.getProductById(id)?.name === name;
     const known = store.getProductById(id);
     if (!created && known?.ebayCompsCheckedAt && Date.now() - known.ebayCompsCheckedAt < MARKET_RECENT_MS) {
@@ -2087,7 +2087,7 @@ async function ensureBrokenVariant(itemName: string, listingTitle: string): Prom
     let variant = store.getProductByName(variantName);
     let created = false;
     if (!variant) {
-      const variantId = store.addProductStub(randomUUID(), variantName);
+      const variantId = store.addProductStub(randomUUID(), variantName, { reason: "for-parts version", detail: parent.name });
       store.setProductParent(variantId, parent.id);
       variant = store.getProductById(variantId);
       created = true;
@@ -2826,7 +2826,7 @@ async function discoverAndCreateSiblingProducts(brand: string, generation: strin
     // how that'd get corrected instead.
     if (store.findMatchingProduct(title)) return;
     const candidateId = randomUUID();
-    const id = store.addProductStub(candidateId, title);
+    const id = store.addProductStub(candidateId, title, { reason: "game in a family", detail: null });
     if (id !== candidateId) return; // already in the Database under this name
     sendToRenderer("products:updated", store.getProductById(id));
     await runProductLookup(id, title, { skipSiblingDiscovery: true, forcedFamily: familyPath, source: "related" });
@@ -2908,7 +2908,7 @@ async function runVariantQueueTick(familyHint: string | null = null): Promise<vo
       verify: (name, parent) => verifyClaim(name, parent, []),
       createVariant: async (name, parent, verdict) => {
         const candidateId = randomUUID();
-        const id = store.addProductStub(candidateId, name);
+        const id = store.addProductStub(candidateId, name, { reason: "version of another entry", detail: parent.name });
         if (id !== candidateId) return null; // already in the Database under this name
         store.setProductParent(id, parent.id);
         store.setProductVariantEvidence(id, verdict);
@@ -2932,7 +2932,7 @@ async function runVariantQueueTick(familyHint: string | null = null): Promise<vo
         let created = false;
         if (!entryId) {
           const candidateId = randomUUID();
-          entryId = store.addProductStub(candidateId, name);
+          entryId = store.addProductStub(candidateId, name, { reason: "add-on of another entry", detail: parent.name });
           created = entryId === candidateId;
           if (created) sendToRenderer("products:updated", store.getProductById(entryId));
         }
@@ -3164,7 +3164,7 @@ function fileUserPhoto(productId: string, imageData: string) {
 // A product the scanner found that nothing in the Database matches: its own entry, with the listing's photo as a
 // placeholder (the background lookup replaces it with a clean one), researched in the background.
 function createPlainProduct(name: string, imageDataUri: string | null, sourceTitle: string): ProductProfile {
-  const id = store.addProductStub(randomUUID(), name);
+  const id = store.addProductStub(randomUUID(), name, { reason: "found in a listing", detail: sourceTitle });
   if (imageDataUri) {
     store.editProductProfile(id, { imageUrl: imageDataUri });
     fileListingPhoto(id, imageDataUri, sourceTitle, "scanner-new-entry");
@@ -3195,7 +3195,7 @@ function createSpecificModel(
     return { product: twin, created: false };
   }
   const familyFrom = store.getProductById(relation.familyFromId);
-  const id = store.addProductStub(randomUUID(), name);
+  const id = store.addProductStub(randomUUID(), name, { reason: "specific model found in a listing", detail: sourceTitle });
   if (relation.parentId) store.setProductParent(id, relation.parentId);
   if (imageDataUri) {
     store.editProductProfile(id, { imageUrl: imageDataUri });
@@ -3399,7 +3399,7 @@ async function createLinkedGameEntry(base: ProductProfile, name: string, listing
   try {
     if (store.listAddons(base.id).some((x) => x.status === "dismissed" && (addonKey(x.name) === addonKey(name) || sameAddonLoosely(x.name, name)))) return;
     const candidateId = randomUUID();
-    const entryId = store.addProductStub(candidateId, name);
+    const entryId = store.addProductStub(candidateId, name, { reason: "game in a bundle listing", detail: listingId });
     const created = entryId === candidateId;
     store.linkResearchedAddon(base.id, name, entryId);
     if (!created) return;
@@ -5022,7 +5022,7 @@ app.whenReady().then(() => {
         }
       }
 
-      const id = store.addProductStub(randomUUID(), productName);
+      const id = store.addProductStub(randomUUID(), productName, { reason: "you marked a listing interesting", detail: listing.title });
       const parentForNew = relationForNew?.parentId ? store.getProductById(relationForNew.parentId) : null;
       const familyFromNew = relationForNew ? store.getProductById(relationForNew.familyFromId) : null;
       if (parentForNew) store.setProductParent(id, parentForNew.id);

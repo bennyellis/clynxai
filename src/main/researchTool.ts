@@ -129,7 +129,7 @@ async function researchDecided(product: string, userUrls: string[], deps: Resear
     // under when it names every word of the claim and is a clean, short title: it is the name sellers and sold listings use.
     const official = cleanOfficialName(decision.verdict.officialName, product);
     if (official) product = official;
-    const id = store.addProductStub(candidateId, product);
+    const id = store.addProductStub(candidateId, product, { reason: "asked in chat", detail: product });
     if (id !== candidateId) {
       // Already in the Database under this name: refresh that one, with the evidence.
       store.setProductLoading(id, true);
@@ -156,7 +156,7 @@ async function researchDecided(product: string, userUrls: string[], deps: Resear
     }
   }
 
-  const id = store.addProductStub(deps.newId(), product);
+  const id = store.addProductStub(deps.newId(), product, { reason: "asked in chat", detail: product });
   deps.notify(id);
   deps.startLookup(id, product, { source: "you" });
   return `Started researching "${product}" and added it to the Database as a new entry. It is saved when the research finishes (the Discovery tab shows progress), so don't say it is saved yet.${NO_STALL}`;
