@@ -253,6 +253,7 @@ const api = {
     ipcRenderer.on("toast:show", listener);
     return () => ipcRenderer.removeListener("toast:show", listener);
   },
+  productAliases: (): Promise<Record<string, string[]>> => ipcRenderer.invoke("products:aliases"),
   productFoldedNotice: (productId: string): Promise<{ colours: string[]; names: string[]; text: string } | null> => ipcRenderer.invoke("products:foldedNotice", productId),
   productOrigin: (productId: string): Promise<{ reason: string; detail: string | null; at: number } | null> => ipcRenderer.invoke("products:origin", productId),
   splitGallery: (itemId: string): Promise<{ ok: boolean; error?: string; summary?: string; opId?: string | null }> => ipcRenderer.invoke("library:splitGallery", { itemId }),
@@ -262,7 +263,7 @@ const api = {
   attentionAckAll: (): Promise<{ count: number; items: Array<{ id: string; kind: string; productIds: string[] }> }> => ipcRenderer.invoke("attention:ackAll"),
   libraryHistory: (): Promise<Array<{ id: string; at: number; actor: string; op: string; undone: boolean }>> => ipcRenderer.invoke("library:history"),
   libraryTrash: (): Promise<{ products: Array<{ id: string; name: string; deletedAt: number }>; images: Array<{ id: string; productId: string; productName: string; sourceTitle: string | null; deletedAt: number }>; folders: Array<{ id: string; name: string; deletedAt: number }> }> => ipcRenderer.invoke("library:trash"),
-  libraryReview: (): Promise<Array<{ id: string; kind: string; subjectId: string; reasons: string[]; evidence: Record<string, unknown>; createdAt: number; image: string | null; productName: string | null; suggestedName: string | null }>> => ipcRenderer.invoke("library:review"),
+  libraryReview: (): Promise<Array<{ id: string; kind: string; subjectId: string; reasons: string[]; evidence: Record<string, unknown>; createdAt: number; image: string | null; productName: string | null; suggestedName: string | null; details: Array<{ id: string; name: string; added: number; photos: number; valueUsd: number | null; folder: string | null }> | null }>> => ipcRenderer.invoke("library:review"),
   onLibraryChanged: (cb: (what: { folders: boolean; review: boolean }) => void) => {
     const listener = (_e: unknown, what: { folders: boolean; review: boolean }) => cb(what);
     ipcRenderer.on("library:changed", listener);

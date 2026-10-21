@@ -1,3 +1,4 @@
+import { matchesLibrarySearch } from "../lib/librarySearch";
 import { ProductNotes } from "../components/ProductNotes";
 import { AttentionDot, AttentionContext } from "../lib/AttentionContext";
 import { attentionLabel } from "../lib/attention";
@@ -554,6 +555,16 @@ export function Database({
   // scroll past every other category to find it.
   const [activeCategory, setActiveCategory] = useState<string | null>(savedNav.activeCategory);
   const [searchQuery, setSearchQuery] = useState(savedNav.searchQuery);
+  // other names of each entry, so a search finds it by an old or official name too
+  const [aliasMap, setAliasMap] = useState<Record<string, string[]>>({});
+  useEffect(() => {
+    const load = () => void api.productAliases().then(setAliasMap).catch(() => undefined);
+    load();
+    const off = api.onLibraryChanged(() => load());
+    return () => {
+      off();
+    };
+  }, []);
   // Set the instant a product tile is clicked — swaps the whole screen to a
   // dedicated detail page for that one product (see ProductDetailPage
   // below), per explicit instruction, rather than expanding inline.
@@ -872,12 +883,12 @@ export function Database({
   // with zero matches are dropped entirely rather than shown as empty
   // headers.
   const searchedGroups = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
+    const q = searchQuery.trim();
     if (!q) return visibleGroups;
     return visibleGroups
-      .map((g) => ({ category: g.category, items: g.items.filter((p) => p.name.toLowerCase().includes(q)) }))
+      .map((g) => ({ category: g.category, items: g.items.filter((p) => matchesLibrarySearch(q, { name: p.name, family: p.family, aliases: aliasMap[p.id] })) }))
       .filter((g) => g.items.length > 0);
-  }, [visibleGroups, searchQuery]);
+  }, [visibleGroups, searchQuery, aliasMap]);
 
   const selectedProduct = selectedProductId ? products.find((p) => p.id === selectedProductId) ?? null : null;
 
@@ -2806,6 +2817,15 @@ function ProductDetailPage({
   // the app (a fresh listing might be the one that just crossed the
   // multiple-sightings threshold for THIS product), rather than needing a
   // "Research now" click.
+  // A product page opens at its top: whatever the page before it was scrolled to (the library grid, another product) must not carry over to this one.
+  const detailTopRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    let el: HTMLElement | null = detailTopRef.current;
+    while (el) {
+      if (el.scrollTop > 0) el.scrollTop = 0;
+      el = el.parentElement;
+    }
+  }, [product.id]);
   const [fbPriceStats, setFbPriceStats] = useState<{ avgPriceUsd: number; sampleSize: number } | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -2914,7 +2934,7 @@ function ProductDetailPage({
   );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
+    <div ref={detailTopRef} style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
       <button className="icon ghost" onClick={onBack} style={{ alignSelf: "flex-start" }}>
         ← Back to Database
       </button>
@@ -3285,7 +3305,7 @@ function ProductDetailPage({
           onRemoveAttachment={(i) => setAttachments((a) => a.filter((_, j) => j !== i))}
           intake={intake}
           busy={busy}
-          placeholder={`Ask Clynx about this one: 'what should I check before buying?', 'be on the lookout for games', 'refresh the research'`}
+          placeholder="Ask Clynx about this one…"
         />
       </div>
       {photosModalOpen && (
@@ -3357,7 +3377,13 @@ function useDatabaseChat(opts: { context: ChatContext; productId?: string }) {
     };
   }, []);
 
+  // Follow the conversation as it grows, but not when an earlier conversation is just loaded in (or on opening the page): then the product page stays at its top.
+  const lastChatLength = useRef(0);
   useEffect(() => {
+    const before = lastChatLength.current;
+    lastChatLength.current = chat.length;
+    if (before === 0 && chat.length > 1) return;
+    if (chat.length === 0) return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [chat.length]);
 
@@ -3400,7 +3426,7 @@ function ChatComposer({
   setDraft,
   onSend,
   textareaRef,
-  placeholder = "e.g. 'what's a PS5 Slim usually worth?' or 'learn about the Steam Deck OLED'",
+  placeholder = "Ask Clynx about a product",
   attachments,
   onRemoveAttachment,
   intake,
@@ -3424,7 +3450,8 @@ function ChatComposer({
       }}
       onDrop={intake?.onDrop}
       onDragOver={(e) => intake && e.preventDefault()}
-      style={{ display: "flex", flexDirection: "column", gap: 4, padding: 12, borderTop: "1px solid var(--border)" }}
+      // the floating assistant button sits in the bottom-right corner of every screen: keep Send clear of it
+      style={{ display: "flex", flexDirection: "column", gap: 4, padding: 12, paddingRight: 84, borderTop: "1px solid var(--border)" }}
     >
       {intake && attachments && onRemoveAttachment && <AttachmentBar attachments={attachments} problems={intake.problems} onRemove={onRemoveAttachment} />}
       <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
@@ -3435,6 +3462,8 @@ function ChatComposer({
         rows={1}
         style={{ flex: 1, resize: "none", maxHeight: 120, overflowY: "auto", lineHeight: 1.4, padding: "8px 11px" }}
         placeholder={placeholder}
+        aria-label={placeholder}
+        title={placeholder}
         value={draft}
         onChange={(e) => {
           setDraft(e.target.value);

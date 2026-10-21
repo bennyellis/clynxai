@@ -5233,6 +5233,7 @@ app.whenReady().then(() => {
     const rows = store.soldComps().listComps("manual_import");
     return { removed: rows.length, ok: store.soldComps().removeBySource("manual_import") };
   });
+  ipcMain.handle("products:aliases", () => Object.fromEntries(store.aliasesByProduct()));
   ipcMain.handle("products:foldedNotice", (_e, productId: string) => store.foldedNoticeFor(String(productId ?? "")));
   ipcMain.handle("products:origin", (_e, productId: string) => store.getProductOrigin(String(productId ?? "")));
   // Review > "Move them to their own entry": backup first, then ONE undoable action (Recent changes), then the new game's own research.
@@ -5333,7 +5334,16 @@ app.whenReady().then(() => {
         productName = prod.name;
         image = prod.imageUrl ? await makeThumb(prod.imageUrl, 320) : null;
       }
-      out.push({ ...item, image, productName, suggestedName });
+      let details: Array<{ id: string; name: string; added: number; photos: number; valueUsd: number | null; folder: string | null }> | null = null;
+      if (item.kind === "merge") {
+        // entries with the same words look identical in a list: say how they differ (when added, photos, value, folder)
+        const ids = Array.isArray((item.evidence as { ids?: unknown }).ids) ? ((item.evidence as { ids: unknown[] }).ids.map(String)) : [];
+        details = ids.flatMap((pid) => {
+          const p = store.getProductById(pid);
+          return p ? [{ id: p.id, name: p.name, added: p.createdAt, photos: store.listProductImages(pid).filter((i) => i.kind === "normal").length, valueUsd: p.ebayEstimatedValueUsd ?? p.ebayAvgSoldPriceUsd ?? null, folder: p.family }] : [];
+        });
+      }
+      out.push({ ...item, image, productName, suggestedName, details });
     }
     return out;
   });

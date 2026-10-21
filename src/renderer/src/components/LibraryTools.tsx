@@ -435,6 +435,16 @@ export function NeedsReviewPanel({ products, onClose }: { products: ProductProfi
               {r.kind === "merge" && (
                 <>
                   <div style={{ fontSize: 14.5 }}>{r.reasons.join(" ")}</div>
+                  {r.details && r.details.length > 0 && (
+                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "var(--text-muted)" }}>
+                      {r.details.map((d) => (
+                        <li key={d.id}>
+                          “{d.name}”: added {new Date(d.added).toLocaleDateString()}, {d.photos} photo{d.photos === 1 ? "" : "s"}, {d.valueUsd !== null ? `worth about $${Math.round(d.valueUsd)}` : "no price yet"}
+                          {d.folder ? `, in ${d.folder}` : ""}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                   <div style={{ display: "flex", gap: 6 }}>
                     <button className="icon" onClick={() => act({ op: "mergeProducts", ids: (r.evidence.ids as string[]) ?? [] }).then(() => api.libraryOp({ op: "resolveReview", itemId: r.id, state: "accepted" }).then(load))}>
                       Merge them
