@@ -612,6 +612,8 @@ export class LibraryOps {
         if (!n.ok) throw new Error(n.error);
         const clash = this.db.prepare("SELECT id FROM products WHERE LOWER(name) = LOWER(?) AND deleted_at IS NULL").get(n.name) as { id: string } | undefined;
         if (clash) throw new Error(`"${n.name}" already exists. Move the photo to it instead.`);
+        const sameModel = this.store.existingProductIdForName(n.name);
+        if (sameModel) throw new Error(`"${n.name}" is another name for "${(this.db.prepare("SELECT name FROM products WHERE id = ?").get(sameModel) as { name: string }).name}", which already exists. Move the photo to it instead.`);
         const id = randomUUID();
         this.db.prepare("INSERT INTO products (id, name, category, family, loading, created_at, updated_at, name_locked) VALUES (?, ?, ?, ?, 0, ?, ?, 1)").run(id, n.name, from.category, from.family, now, now);
         created.push({ table: "products", id });

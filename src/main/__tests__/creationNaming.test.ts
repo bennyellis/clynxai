@@ -35,6 +35,13 @@ run(async () => {
   check("and by a name only the facts know", store.findMatchingProduct("Xbox Series X Digital 1TB")?.id === a);
   check("aliases come back grouped by product for searches", (store.aliasesByProduct().get(a) ?? []).length >= 2);
 
+  section("the other creation paths");
+  check("existingProductIdForName answers without changing anything (used by 'new entry from a photo')", store.existingProductIdForName("Xbox Series X Robot White") === a && store.existingProductIdForName("Nothing Like It 9000") === null && store.listProducts().length === store.listProducts().length);
+  const pulled = store.upsertProductFromCloud({ ...(store.getProductById(a) as never), id: "cloud-1", name: "Xbox Series X Digital 1TB" } as never);
+  check("a product pulled from the cloud keeps its name and id (a rename would travel back to the cloud)", pulled.id === "cloud-1" && pulled.name === "Xbox Series X Digital 1TB");
+  const plan = store.planDuplicateCleanup();
+  check("the clean-up dry run finds it, so the reviewed merge (backup, undo, cloud delete only after success) is what folds it in", plan.groups.some((g) => [g.keep.id, ...g.fold.map((f) => f.id)].includes("cloud-1") && [g.keep.id, ...g.fold.map((f) => f.id)].includes(a)), plan.groups);
+
   section("deleted entries do not capture a new name");
   store.deleteProduct(z);
   check("the name makes a fresh entry", store.addProductStub("z2", "Zorblax Deluxe 3000") === "z2");

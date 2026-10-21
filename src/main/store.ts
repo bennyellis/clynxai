@@ -1612,7 +1612,12 @@ export class Store {
    * existing entry's name resolves to the same canonical model), else the one simple name the new entry should get, plus the typed name to keep as its alias. When an existing entry is found the
    * typed name is kept as that entry's alias, so the next lookup by it is exact.
    */
-  private nameForInsert(typed: string): { name: string; alias: string | null; existingId: string | null } {
+  /** The live entry a typed name already belongs to (by duplicate key, canonical name, kept alias, or because the entry's own name resolves to the same known model), without changing anything. */
+  existingProductIdForName(typed: string): string | null {
+    return this.lookUpExistingByName(typed).existing?.id ?? null;
+  }
+
+  private lookUpExistingByName(typed: string): { r: ReturnType<typeof resolveName>; canonical: string; existing: { id: string; name: string } | undefined } {
     const trimmed = typed.replace(/\s+/g, " ").trim();
     const facts = namingFacts(this.listModelFactOverrides());
     const r = resolveName(trimmed, facts);
@@ -1632,6 +1637,14 @@ export class Store {
         return o.how !== "unchanged" && nameKey(o.canonical) === nameKey(canonical);
       });
     }
+    return { r, canonical, existing };
+  }
+
+  private nameForInsert(typed: string): { name: string; alias: string | null; existingId: string | null } {
+    const found = this.lookUpExistingByName(typed);
+    const { r, canonical } = found;
+    const trimmed = typed.replace(/\s+/g, " ").trim();
+    const existing = found.existing;
     if (existing) {
       if (nameKey(trimmed) !== nameKey(existing.name)) this.addProductAlias(existing.id, trimmed, "typed");
       return { name: existing.name, alias: null, existingId: existing.id };
